@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from textual import events
+from textual.message import Message
 from textual.widgets import Label
 from textual.containers import Horizontal
 from textual.reactive import reactive
@@ -10,7 +12,32 @@ from textual.reactive import reactive
 class StatusBar(Horizontal):
     """Bottom status bar showing services, tokens, skills, and caido status."""
 
-    DEFAULT_CSS = ""  # Defer to styles.tcss
+    DEFAULT_CSS = """
+    StatusBar {
+        height: 1;
+        background: $primary-darken-2;
+        color: $text;
+    }
+    
+    #status-skills {
+        padding-left: 2;
+        padding-right: 2;
+    }
+    
+    #status-skills:hover {
+        text-style: underline;
+        background: $primary-darken-1;
+        color: $text;
+    }
+    
+    #status-caido-exec {
+        padding-left: 2;
+    }
+    """
+
+    class SkillsClicked(Message):
+        """Emitted when the skills segment of the status bar is clicked."""
+        pass
 
     ollama_status = reactive("offline")
     docker_status = reactive("offline")
@@ -19,69 +46,77 @@ class StatusBar(Horizontal):
     token_limit = reactive(65536)
     exec_used = reactive(0)
     subagents_spawned = reactive(0)
-    skills_used = reactive("")  # CSV of current skills being used
+    skills_used: reactive[list[str]] = reactive(list)  # List of current skills
     caido_active = reactive(False)
     caido_findings = reactive(0)
 
     def compose(self):
-        yield Label(id="status-text")
+        yield Label(id="status-metrics")
+        yield Label(id="status-skills")
+        yield Label(id="status-caido-exec")
 
     def on_mount(self) -> None:
         self._update_display()
 
-    def _get_status_text(self) -> str:
-        # Service indicators
-        ollama_dot = "●" if self.ollama_status == "online" else "○"
-        ollama_color = "#00d4aa" if self.ollama_status == "online" else "#ef4444"
+    def on_click(self, event: events.Click) -> None:
+        """Handle clicks on the status bar components."""
+        # Find which widget was clicked
+        widget, _ = self.screen.get_widget_at(*event.screen_offset)
+        if widget and widget.id == "status-skills":
+            self.post_message(self.SkillsClicked())
 
-        docker_dot = "●" if self.docker_status == "online" else "○"
-        docker_color = "#00d4aa" if self.docker_status == "online" else "#ef4444"
+    def _update_display(self) -> None:
+        try:
+            # 1. Metrics part (Ollama, Docker, Model, Tokens)
+            ollama_dot = "●" if self.ollama_status == "online" else "○"
+            ollama_color = "#00d4aa" if self.ollama_status == "online" else "#ef4444"
 
-        # Token usage: format as thousands (e.g., 12.450k)
-        token_thousands = self.token_count / 1000.0
-        
-        # Color based on token usage (not ratio): green < 20k, orange 20-50k, red > 50k
-        if self.token_count < 20000:
-            token_color = "#00d4aa"  # Green: safe
-        elif self.token_count < 50000:
-            token_color = "#f59e0b"  # Orange: caution
-        else:
-            token_color = "#ef4444"  # Red: critical
-        
-        # Display tokens in thousands format
-        token_part = f"  │ [#8b949e]Token:[/] [{token_color}]{token_thousands:.3f}k[/]"
+            docker_dot = "●" if self.docker_status == "online" else "○"
+            docker_color = "#00d4aa" if self.docker_status == "online" else "#ef4444"
 
-        # Skills used
-        skills_part = ""
-        if self.skills_used:
-            # Truncate long skill list
-            skills_display = self.skills_used[:40]
-            if len(self.skills_used) > 40:
-                skills_display += "…"
-            skills_part = f"  │ [#8b949e]Skills:[/] [#818cf8]{skills_display}[/]"
+            token_thousands = self.token_count / 1000.0
+            if self.token_count < 20000:
+                token_color = "#00d4aa"
+            elif self.token_count < 50000:
+                token_color = "#f59e0b"
+            else:
+                token_color = "#ef4444"
 
-        # Caido status
-        caido_part = ""
-        if self.caido_active:
-            caido_part = f"  │ [#ec4899]🔴 Caido[/] [#f87171]{self.caido_findings}[/] findings"
+            metrics_text = (
+                f" [{ollama_color}]{ollama_dot}[/] Ollama  "
+                f"[{docker_color}]{docker_dot}[/] Docker  "
+                f"│ [#8b949e]Model:[/] [#00d4aa]{self.model_name}[/]"
+                f"  │ [#8b949e]Token:[/] [{token_color}]{token_thousands:.3f}k[/]"
+            )
+            self.query_one("#status-metrics", Label).update(metrics_text)
 
-        # Agents/Exec stats
-        subagent_part = (
-            f"  │ [#8b949e]Agents:[/] [#a78bfa]{self.subagents_spawned}[/]"
-            if self.subagents_spawned > 0 else ""
-        )
+            # 2. Skills part
+            skills_text = ""
+            if self.skills_used:
+                latest_skill = self.skills_used[-1]
+                skills_text = f"│ [#8b949e]Skills:[/] [#818cf8]{latest_skill} <[/]"
+            self.query_one("#status-skills", Label).update(skills_text)
 
-        return (
-            f" [{ollama_color}]{ollama_dot}[/] Ollama  "
-            f"[{docker_color}]{docker_dot}[/] Docker  "
-            f"│ [#8b949e]Model:[/] [#00d4aa]{self.model_name}[/]"
-            f"{token_part}"
-            f"{skills_part}"
-            f"{caido_part}"
-            f"  │ [#8b949e]Exec:[/] [#f59e0b]{self.exec_used}[/]"
-            f"{subagent_part}  "
-            f"│ [#484f58]Ctrl+C quit · Ctrl+L clear[/]"
-        )
+            # 3. Caido / Exec / Shortcuts part
+            caido_part = ""
+            if self.caido_active:
+                caido_part = f"│ [#ec4899]🔴 Caido[/] [#f87171]{self.caido_findings}[/] findings  "
+
+            subagent_part = (
+                f"  │ [#8b949e]Agents:[/] [#a78bfa]{self.subagents_spawned}[/]"
+                if self.subagents_spawned > 0 else ""
+            )
+
+            caido_exec_text = (
+                f"{caido_part}"
+                f"│ [#8b949e]Exec:[/] [#f59e0b]{self.exec_used}[/]"
+                f"{subagent_part}  "
+                f"│ [#484f58]Ctrl+C quit · Ctrl+L clear[/]"
+            )
+            self.query_one("#status-caido-exec", Label).update(caido_exec_text)
+
+        except Exception:
+            pass
 
     def watch_ollama_status(self, _) -> None: self._update_display()
     def watch_docker_status(self, _) -> None: self._update_display()
@@ -94,15 +129,6 @@ class StatusBar(Horizontal):
     def watch_caido_active(self, _) -> None: self._update_display()
     def watch_caido_findings(self, _) -> None: self._update_display()
 
-    def _update_display(self) -> None:
-        try:
-            self.query_one(
-                "#status-text",
-                Label).update(
-                self._get_status_text())
-        except Exception:
-            pass
-
     def set_status(
         self,
         ollama: str | None = None,
@@ -113,25 +139,10 @@ class StatusBar(Horizontal):
         tools: int | None = None,
         exec_used: int | None = None,
         subagents: int | None = None,
-        skills: str | None = None,
+        skills: list[str] | None = None,
         caido_active: bool | None = None,
         caido_findings: int | None = None,
     ) -> None:
-        """Update status bar with new information.
-        
-        Args:
-            ollama: Status "online"/"offline"
-            docker: Status "online"/"offline"
-            model: Model name (e.g., "qwen:122b")
-            tokens: Current token count used
-            token_limit: Max token limit
-            tools: Deprecated (kept for compatibility)
-            exec_used: Number of execute() calls made
-            subagents: Number of spawned subagents
-            skills: Comma-separated skill names being used
-            caido_active: Whether Caido is currently active
-            caido_findings: Number of findings from Caido
-        """
         if ollama is not None:
             self.ollama_status = ollama
         if docker is not None:

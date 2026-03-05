@@ -60,8 +60,10 @@ async def test_status_bar_updates():
         status_bar.set_status(ollama="online", docker="offline", exec_used=5)
         await pilot.pause()
         
-        # In Textual, reactive updates map to `_get_status_text` internally
-        render_content = status_bar._get_status_text()
-        assert "online" in render_content or "●" in render_content
-        assert "offline" in render_content or "○" in render_content
-        assert "5" in render_content
+        # Assert against the new separated labels
+        metrics_content = str(status_bar.query_one("#status-metrics").render())
+        assert "online" in metrics_content or "●" in metrics_content
+        assert "offline" in metrics_content or "○" in metrics_content
+        
+        exec_content = str(status_bar.query_one("#status-caido-exec").render())
+        assert "5" in exec_content

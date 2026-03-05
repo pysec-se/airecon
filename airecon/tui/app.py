@@ -21,6 +21,7 @@ from .widgets.workspace import WorkspacePanel, WorkspaceTree
 from .widgets.file_preview import FilePreviewScreen
 from .widgets.input import CommandInput
 from .widgets.status import StatusBar
+from .widgets.skills_modal import SkillsModal
 from airecon.proxy.config import get_workspace_root
 
 logger = logging.getLogger("airecon.tui")
@@ -54,6 +55,12 @@ class AIReconApp(App):
     def action_scroll_chat_down(self) -> None:
         """Scroll chat down."""
         self.query_one("#chat-panel", ChatPanel).scroll_down()
+
+    def on_status_bar_skills_clicked(self, event: StatusBar.SkillsClicked) -> None:
+        """Show the modal listing all loaded skills."""
+        status_bar = self.query_one(StatusBar)
+        if status_bar.skills_used:
+            self.push_screen(SkillsModal(status_bar.skills_used))
 
     def __init__(self, proxy_url: str = "http://127.0.0.1:3000",
                  **kwargs) -> None:
@@ -314,7 +321,6 @@ class AIReconApp(App):
                     tokens_used = token_info.get("used", 0)
                     tokens_limit = token_info.get("limit", 65536)
                     skills_info = agent_stats.get("skills_used", [])
-                    skills_str = ", ".join(skills_info[:3]) if skills_info else ""
 
                     proxy_reachable = True
                     status_bar.set_status(
@@ -325,7 +331,7 @@ class AIReconApp(App):
                         token_limit=tokens_limit,
                         exec_used=exec_used,
                         subagents=subagents,
-                        skills=skills_str,
+                        skills=skills_info,
                     )
 
                     if ollama_ok and docker_ok:
@@ -409,7 +415,6 @@ class AIReconApp(App):
                     tokens_used = token_info.get("used", 0)
                     tokens_limit = token_info.get("limit", 65536)
                     skills_info = data.get("agent", {}).get("skills_used", [])
-                    skills_str = ", ".join(skills_info[:3]) if skills_info else ""
                     caido_data = data.get("agent", {}).get("caido", {})
                     caido_active = caido_data.get("active", False)
                     caido_findings = caido_data.get("findings_count", 0)
@@ -422,7 +427,7 @@ class AIReconApp(App):
                         token_limit=tokens_limit,
                         exec_used=exec_used,
                         subagents=subagents,
-                        skills=skills_str,
+                        skills=skills_info,
                         caido_active=caido_active,
                         caido_findings=caido_findings,
                     )
@@ -824,8 +829,7 @@ class AIReconApp(App):
                                     status_update_kwargs["token_limit"] = _ti.get("limit", 65536)
                                 
                                 if _sk:
-                                    skills_str = ", ".join(_sk[:3]) if _sk else ""
-                                    status_update_kwargs["skills"] = skills_str
+                                    status_update_kwargs["skills"] = _sk
                                 
                                 if _cd:
                                     status_update_kwargs["caido_active"] = _cd.get("active", False)

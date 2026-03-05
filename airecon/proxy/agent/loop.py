@@ -1024,11 +1024,6 @@ class AgentLoop(_ValidatorMixin, _FormatterMixin,
                 )
 
                 # --- AUTO-LOAD SKILLS FROM LLM OUTPUT (not just user message) ---
-                # When the LLM detects a vulnerability type in its reasoning or text,
-                # we inject the relevant skill file immediately — without pre-spoiling
-                # the approach in the system prompt (no clues upfront).
-                # This fires for IDOR, SQLi, XSS, etc. as soon as LLM mentions
-                # them.
                 _llm_output_for_skills = (
                     content_acc + " " + thinking_acc).strip()
                 if _llm_output_for_skills:
