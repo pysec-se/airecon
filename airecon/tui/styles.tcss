@@ -447,6 +447,48 @@ StatusBar Label {
 
 
 /* ═══════════════════════════════════════════
+   Skills Modal
+   ═══════════════════════════════════════════ */
+
+SkillsModal {
+    align: center middle;
+}
+
+#skills-dialog {
+    width: 60;
+    height: auto;
+    max-height: 80%;
+    background: #161b22;
+    border: thick #00d4aa;
+    padding: 1 2;
+    border-title-color: #00d4aa;
+}
+
+#skills-title {
+    text-align: center;
+    width: 100%;
+    text-style: bold;
+    color: #00d4aa;
+    margin-bottom: 1;
+}
+
+#skills-content {
+    height: auto;
+    max-height: 60%;
+    overflow-y: auto;
+    margin-bottom: 1;
+    padding: 1;
+    background: #0a0e17;
+    border: solid #21262d;
+}
+
+#skills-close-container {
+    align: center bottom;
+    width: 100%;
+}
+
+
+/* ═══════════════════════════════════════════
    File Preview Modal
    ═══════════════════════════════════════════ */
 

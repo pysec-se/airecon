@@ -20,8 +20,7 @@ from .widgets.chat import ChatPanel, ToolMessageSelected
 from .widgets.workspace import WorkspacePanel, WorkspaceTree
 from .widgets.file_preview import FilePreviewScreen
 from .widgets.input import CommandInput
-from .widgets.status import StatusBar
-from .widgets.skills_modal import SkillsModal
+from .widgets.status import StatusBar, SkillsModal
 from airecon.proxy.config import get_workspace_root
 
 logger = logging.getLogger("airecon.tui")
