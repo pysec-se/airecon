@@ -60,6 +60,7 @@ class DockerEngine:
         self._current_proc: asyncio.subprocess.Process | None = (
             None  # track running exec
         )
+        self._proc_lock = asyncio.Lock()  # Protect _current_proc access
 
     # ── Public properties ──
 
@@ -199,15 +200,16 @@ class DockerEngine:
 
     async def _stop_existing(self) -> None:
         """Stop any existing container with our name."""
-        proc = await asyncio.create_subprocess_exec(
-            "docker",
-            "rm",
-            "-f",
-            self._container_name,
-            stdout=asyncio.subprocess.DEVNULL,
-            stderr=asyncio.subprocess.DEVNULL,
-        )
-        await proc.wait()
+        if self._container_name:
+            proc = await asyncio.create_subprocess_exec(
+                "docker",
+                "rm",
+                "-f",
+                self._container_name,
+                stdout=asyncio.subprocess.DEVNULL,
+                stderr=asyncio.subprocess.DEVNULL,
+            )
+            await proc.wait()
 
     # ── Command Execution ──
 
@@ -298,7 +300,9 @@ class DockerEngine:
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
             )
-            self._current_proc = proc  # track for force_stop()
+            # Use lock to safely set _current_proc
+            async with self._proc_lock:
+                self._current_proc = proc  # track for force_stop()
 
             stdout_chunks = []
             stderr_chunks = []
@@ -329,7 +333,9 @@ class DockerEngine:
                     timeout=timeout,
                 )
             finally:
-                self._current_proc = None  # clear after done
+                # Clear _current_proc after done (with lock)
+                async with self._proc_lock:
+                    self._current_proc = None
 
             stdout_str = "".join(stdout_chunks)
             stderr_str = "".join(stderr_chunks)
@@ -347,10 +353,11 @@ class DockerEngine:
         except asyncio.CancelledError:
             # force_stop() cancelled us — clean up proc
             try:
-                if self._current_proc:
-                    self._current_proc.kill()
-                    await self._current_proc.wait()
-                    self._current_proc = None
+                async with self._proc_lock:
+                    if self._current_proc:
+                        self._current_proc.kill()
+                        await self._current_proc.wait()
+                        self._current_proc = None
             except Exception:
                 pass
             return {
@@ -449,10 +456,11 @@ class DockerEngine:
     async def force_stop(self) -> None:
         """Force stop all running commands in the container and the local proc."""
         # 1. Kill the Python-side asyncio subprocess immediately
-        # Use a local variable to avoid TOCTOU race with execute() clearing
-        # _current_proc
-        proc = self._current_proc
-        self._current_proc = None
+        # Use lock to safely read _current_proc (avoids TOCTOU race with execute())
+        async with self._proc_lock:
+            proc = self._current_proc
+            self._current_proc = None
+        
         if proc:
             try:
                 proc.kill()

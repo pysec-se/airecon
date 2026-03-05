@@ -80,13 +80,15 @@ class OllamaClient:
         self._supports_native_tools = cfg.ollama_supports_native_tools
 
         # If config has auto-detect (True by default), try to detect
-        if self._supports_thinking or self._supports_native_tools:
+        # Only override if config explicitly enables auto-detection
+        if cfg.ollama_supports_thinking is True:
             detected_think, detected_tools = _detect_model_capabilities(
                 self.model)
-            if cfg.ollama_supports_thinking:
-                self._supports_thinking = detected_think
-            if cfg.ollama_supports_native_tools:
-                self._supports_native_tools = detected_tools
+            self._supports_thinking = detected_think
+        if cfg.ollama_supports_native_tools is True:
+            detected_think, detected_tools = _detect_model_capabilities(
+                self.model)
+            self._supports_native_tools = detected_tools
 
         logger.info(
             f"Initializing Ollama SDK client for host: {host}, model: {
