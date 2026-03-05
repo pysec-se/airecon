@@ -307,7 +307,8 @@ class BrowserInstance:
         with self._execution_lock:
             if self.context is not None:
                 raise ValueError("Browser is already launched")
-            self._loop, self._browser = _get_browser()
+            self._browser = _get_browser()
+            self._loop = _state.event_loop
             return self._run_async(self._create_context(url))
 
     def goto(self, url: str, tab_id: str | None = None) -> dict[str, Any]:
