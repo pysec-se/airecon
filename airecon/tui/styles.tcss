@@ -445,8 +445,8 @@ StatusBar Label {
 }
 
 #status-caido-exec {
-    width: 1fr;
-    content-align: right middle;
+    width: auto;
+    content-align: left middle;
 }
 
 /* Recon progress indicator — between chat and command input */
