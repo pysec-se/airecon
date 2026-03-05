@@ -8,7 +8,7 @@
     <img src="https://img.shields.io/badge/language-python-green.svg">
   </a>
   <a href="https://github.com/pikpikcu/airecon">
-    <img src="https://img.shields.io/badge/version-v0.1.5-green.svg">
+    <img src="https://img.shields.io/badge/version-v0.1.5-beta-green.svg">
   </a>
   <a href="https://github.com/pikpikcu/airecon/blob/master/LICENSE">
    <img src="https://img.shields.io/badge/LICENSE-red.svg">
