@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import re
 import time
 from typing import Any
 from pathlib import Path
@@ -163,6 +164,27 @@ async def _ddg_search(query: str, max_results: int) -> dict[str, Any]:
     return {"success": True, "result": "\n\n".join(lines)}
 
 
+def _is_target_specific_query(query: str) -> bool:
+    """Return True if the query contains target-specific identifiers.
+
+    Target-specific queries (domain, IP, site: dork) should never be cached
+    because the target's attack surface changes over time and fresh intel is
+    required for accurate results.
+    Generic queries (CVE lookups, tool docs, payloads) are safe to cache.
+    """
+    q = query.lower()
+    # Google dork operators that pin the query to a specific target
+    if re.search(r"\bsite:\S+\b", q):
+        return True
+    # Bare domain patterns: something.tld or sub.something.tld
+    if re.search(r"\b[a-z0-9\-]+\.[a-z]{2,}\b", q):
+        return True
+    # IPv4 address
+    if re.search(r"\b\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}\b", q):
+        return True
+    return False
+
+
 async def web_search(query: str, max_results: int = 10, use_cache: bool = True) -> dict[str, Any]:
     """Search the web. Uses SearXNG if configured, otherwise DuckDuckGo.
 
@@ -176,16 +198,23 @@ async def web_search(query: str, max_results: int = 10, use_cache: bool = True) 
                      Use 30-50 for comprehensive dorking sessions.
         use_cache: Whether to use cached results if available (default True).
                   Set to False to force fresh results.
+                  Note: target-specific queries (domain, IP, site: dork) are
+                  never cached regardless of this flag — fresh intel is always
+                  required for accurate results.
 
     Returns:
         dict with 'success' bool and 'result' string (formatted results).
     """
+    # Never cache target-specific queries — fresh intel only.
+    effective_cache = use_cache and not _is_target_specific_query(query)
+
     # Check cache first
-    if use_cache:
+    if effective_cache:
         cached = _get_cached_results(query, max_results)
         if cached:
             cached["from_cache"] = True
             return cached
+
     try:
         from .config import get_config
         cfg = get_config()
@@ -199,6 +228,9 @@ async def web_search(query: str, max_results: int = 10, use_cache: bool = True) 
 
     if searxng_url:
         result = await _searxng_search(query, max_results, searxng_url, engines)
+        # Cache generic SearXNG results too (previously uncached)
+        if result.get("success") and effective_cache:
+            _cache_results(query, max_results, result)
         # If SearXNG is unreachable, fall back to DDG with a warning
         if not result.get(
                 "success") and "Cannot connect" in result.get("error", ""):
@@ -210,13 +242,15 @@ async def web_search(query: str, max_results: int = 10, use_cache: bool = True) 
                 "[SearXNG unavailable — using DuckDuckGo fallback]\n\n"
                 + ddg_result.get("result", "")
             )
+            if ddg_result.get("success") and effective_cache:
+                _cache_results(query, max_results, ddg_result)
             return ddg_result
         return result
 
     result = await _ddg_search(query, max_results)
 
     # Cache successful results
-    if result.get("success") and use_cache:
+    if result.get("success") and effective_cache:
         _cache_results(query, max_results, result)
 
     return result

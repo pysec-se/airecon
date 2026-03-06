@@ -55,22 +55,18 @@ def run_correlation(session: SessionData) -> list[dict]:
     """Run full correlation analysis on session data."""
     results = []
 
-    # Port-based correlations
-    # session.open_ports can be:
-    #   dict[str, list[int]] — {host: [80, 443, 22]} (set by update_from_parsed_output)
-    #   dict[str, str]       — {port_str: service} (legacy/manual format)
+    # Port-based correlations.
+    # session.open_ports is always dict[str, list[int]] — {host: [80, 443, 22]}
+    # as produced by update_from_parsed_output() in session.py.
     for port, info in PORT_CORRELATIONS.items():
         port_str = str(port)
-        for host, ports in session.open_ports.items():
-            # Case 1: ports is a list (list[int] from session parser)
-            if isinstance(ports, list):
-                matched = port in ports or port_str in [str(p) for p in ports]
-            # Case 2: ports is a string (service name, old dict format
-            # {port_str: service})
-            elif isinstance(ports, str):
-                matched = host == port_str  # host is the port key in this format
+        for host, host_ports in session.open_ports.items():
+            if not isinstance(host_ports, list):
+                continue
+            if port in host_ports or port_str in [str(p) for p in host_ports]:
+                matched = True
             else:
-                matched = port_str in str(ports)
+                matched = False
             if matched:
                 results.append(
                     {
