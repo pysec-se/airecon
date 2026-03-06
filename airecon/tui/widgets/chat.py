@@ -279,7 +279,7 @@ class ToolMessage(Vertical):
         try:
             for child in list(self.children):
                 child.remove()
-        except Exception:
+        except Exception:  # nosec B110 - widget cleanup is best-effort
             pass
         self.mount(Static(self._summary_text, classes="tool-summary"))
 
@@ -290,7 +290,7 @@ class ToolMessage(Vertical):
             for child in list(self.children):
                 if isinstance(child, LoadingIndicator):
                     child.remove()
-        except Exception:
+        except Exception:  # nosec B110 - widget cleanup is best-effort
             pass
 
         # Show error output
@@ -368,8 +368,7 @@ class StreamingMessage(Static):
             try:
                 self._text_widget.update(self.content_text)
                 self._last_flush_len = len(self.content_text)
-            except Exception:
-                # Fallback: silently drop update on markup error to prevent crash
+            except Exception:  # nosec B110 - fallback: drop update on markup error
                 pass
 
     def finalize(self) -> None:
@@ -377,12 +376,11 @@ class StreamingMessage(Static):
         if self._text_widget and len(self.content_text) > self._last_flush_len:
             try:
                 self._text_widget.update(self.content_text)
-            except Exception:
-                # Silently handle markup parsing errors to prevent crash
+            except Exception:  # nosec B110 - silently handle markup errors
                 pass
         try:
             self.query_one(".streaming-indicator", Static).remove()
-        except Exception:
+        except Exception:  # nosec B110 - indicator may already be gone
             pass
 
 

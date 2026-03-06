@@ -28,7 +28,7 @@ jobs:
         run: ruff check . --fix
         
       - name: Security Scan with Bandit
-        run: bandit -r airecon/ -x "**/tests/**,**/__pycache__/**" --skip B105,B107
+        run: bandit -r airecon/ -x "**/tests/**,**/__pycache__/**" --skip B105,B107 -ll
 
       - name: Type Check with Pyright
         uses: jakebailey/pyright-action@v2

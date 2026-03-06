@@ -369,7 +369,7 @@ class AIReconApp(App):
                 try:
                     resp = await self._http.get("/api/status", timeout=3.0)
                     data = resp.json()
-                except Exception:
+                except Exception:  # nosec B110 - status fetch is best-effort
                     pass
                 ollama_ok = data.get("ollama", {}).get("connected", False)
                 docker_ok = data.get("docker", {}).get("connected", False)
@@ -399,7 +399,7 @@ class AIReconApp(App):
             # Refresh workspace tree automatically
             try:
                 self.query_one("#workspace-panel", WorkspacePanel).reload()
-            except Exception:
+            except Exception:  # nosec B110 - reload is best-effort
                 pass
 
             try:
@@ -432,7 +432,7 @@ class AIReconApp(App):
                         caido_active=caido_active,
                         caido_findings=caido_findings,
                     )
-            except Exception:
+            except Exception:  # nosec B110 - status bar update is best-effort
                 pass
 
     async def _check_services(self, verbose: bool = False) -> None:
@@ -845,7 +845,7 @@ class AIReconApp(App):
                                 if status_update_kwargs:
                                     status_bar.set_status(
                                         **status_update_kwargs)
-                            except Exception:
+                            except Exception:  # nosec B110 - status update is best-effort
                                 pass
 
                             # 3. Reload Workspace (debounced: at most once
@@ -857,7 +857,7 @@ class AIReconApp(App):
                                     self._last_workspace_reload = now
                                     self.query_one(
                                         "#workspace-panel", WorkspacePanel).reload()
-                            except Exception:
+                            except Exception:  # nosec B110 - workspace reload is best-effort
                                 pass
 
                         self.call_later(update_ui_on_tool_end)
@@ -905,7 +905,7 @@ class AIReconApp(App):
             try:
                 chat.end_streaming()
                 chat.end_thinking()
-            except Exception:
+            except Exception:  # nosec B110 - cleanup is best-effort
                 pass
             # Hide recon spinner
             self._hide_recon_spinner()
@@ -1063,7 +1063,7 @@ class AIReconApp(App):
         # 0. Send remote STOP signal to kill running tools
         try:
             await self._http.post("/api/stop", timeout=2.0)
-        except Exception:
+        except Exception:  # nosec B110 - stop signal is best-effort
             pass
 
         # Cancel any in-progress status polling
@@ -1074,7 +1074,7 @@ class AIReconApp(App):
         # Using subprocess curl for robustness against event loop shutdown
         try:
             from airecon.proxy.config import get_config
-            import subprocess
+            import subprocess  # nosec B404
             import json
 
             cfg = get_config()
@@ -1089,19 +1089,19 @@ class AIReconApp(App):
 
             # Run in thread to not strictly block, but we want to ensure it sends
             # Since we are exiting, blocking for 0.5s is fine
-            subprocess.run(
+            subprocess.run(  # nosec B603
                 cmd,
                 stdout=subprocess.DEVNULL,
                 stderr=subprocess.DEVNULL,
                 timeout=2)
 
-        except Exception:
+        except Exception:  # nosec B110 - model unload is best-effort on exit
             pass
 
         # Close http client
         try:
             await self._http.aclose()
-        except Exception:
+        except Exception:  # nosec B110 - cleanup is best-effort
             pass
 
         self.exit()

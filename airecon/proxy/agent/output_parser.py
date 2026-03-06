@@ -10,7 +10,7 @@ import json
 import logging
 import re
 import defusedxml.ElementTree as ET
-from xml.etree.ElementTree import ParseError as XMLParseError
+from xml.etree.ElementTree import ParseError as XMLParseError  # nosec B405 - only importing exception class, not a parser
 from dataclasses import dataclass, field
 
 

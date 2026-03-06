@@ -105,7 +105,7 @@ class FilePreviewScreen(ModalScreen):
         """Update the preview content Static widget as plain text (no markup parsing)."""
         try:
             self.query_one("#preview-content", Static).update(Text(text))
-        except Exception:
+        except Exception:  # nosec B110 - widget may not be ready yet
             pass
 
     def on_button_pressed(self, event: Button.Pressed) -> None:
