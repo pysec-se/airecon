@@ -259,6 +259,10 @@ _SKILL_KEYWORDS: dict[str, str] = _load_skill_keywords()
 def auto_load_skills_for_message(user_message: str) -> tuple[str, list[str]]:
     """Auto-detect relevant skills from user message and return their content.
 
+    Skills are ranked by keyword match count so the most relevant ones are
+    always loaded first. Ties are broken alphabetically for stable ordering.
+    Limit is 4 to avoid context explosion — always the top-4 most relevant.
+
     Returns a tuple of (skill_context_string, list_of_loaded_skill_names).
     """
     skills_dir = Path(__file__).resolve().parent / "skills"
@@ -266,20 +270,27 @@ def auto_load_skills_for_message(user_message: str) -> tuple[str, list[str]]:
         return "", []
 
     msg_lower = user_message.lower()
-    matched_skills: set[str] = set()
 
+    # Count how many keywords from the message map to each skill path.
+    # More keyword hits = more relevant to this specific query.
+    skill_scores: dict[str, int] = {}
     for keyword, skill_path in _SKILL_KEYWORDS.items():
         if keyword in msg_lower:
-            matched_skills.add(skill_path)
+            skill_scores[skill_path] = skill_scores.get(skill_path, 0) + 1
 
-    if not matched_skills:
+    if not skill_scores:
         return "", []
 
-    # Limit to 4 skills to avoid context explosion but allow more relevant
-    # loading
+    # Sort by score descending, then alphabetically for stable tie-breaking.
+    # This ensures the most relevant skills are always loaded — not random.
+    sorted_skills = sorted(
+        skill_scores.keys(),
+        key=lambda s: (-skill_scores[s], s),
+    )
+
     parts: list[str] = []
     loaded_names: list[str] = []
-    for skill_rel in list(matched_skills)[:4]:
+    for skill_rel in sorted_skills[:4]:
         skill_file = skills_dir / skill_rel
         if skill_file.exists():
             try:

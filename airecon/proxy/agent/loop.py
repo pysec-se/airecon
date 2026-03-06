@@ -1690,19 +1690,19 @@ class AgentLoop(_ValidatorMixin, _FormatterMixin,
         except json.JSONDecodeError:
             pass
 
-        # Attempt 4: balance brackets
-        open_count = cleaned.count("{")
-        close_count = cleaned.count("}")
-        if open_count > close_count:
-            cleaned += "}" * (open_count - close_count)
-        elif close_count > open_count:
-            cleaned = "{" * (close_count - open_count) + cleaned
-        try:
-            result = json.loads(cleaned)
-            if isinstance(result, dict):
-                return result
-        except json.JSONDecodeError:
-            pass
+        # Attempt 4: repair truncated JSON by appending closing braces.
+        # Naive bracket counting (str.count) is wrong when string values
+        # contain literal { or } — e.g. "args": "-T4 {verbose}". Instead,
+        # try appending 1–5 closing braces incrementally and stop as soon as
+        # json.loads succeeds. This handles truncated LLM output without
+        # mis-counting embedded braces.
+        for _extra in range(1, 6):
+            try:
+                result = json.loads(cleaned + "}" * _extra)
+                if isinstance(result, dict):
+                    return result
+            except json.JSONDecodeError:
+                pass
 
         # Attempt 5: replace single quotes with double quotes
         cleaned = cleaned.replace("'", '"')
