@@ -9,7 +9,8 @@ from __future__ import annotations
 import json
 import logging
 import re
-import xml.etree.ElementTree as ET
+import defusedxml.ElementTree as ET
+from xml.etree.ElementTree import ParseError as XMLParseError  # nosec B405 - only importing exception class, not a parser
 from dataclasses import dataclass, field
 
 
@@ -67,7 +68,7 @@ def detect_tool(command: str) -> str | None:
     # Get the first token (the binary name)
     first_token = cmd.split()[0] if cmd.split() else ""
     # Also check for sudo prefix
-    if first_token == "sudo" and len(cmd.split()) > 1:
+    if first_token == "sudo" and len(cmd.split()) > 1:  # nosec B105 - not a password
         first_token = cmd.split()[1]
 
     for pattern, tool_name in _TOOL_PATTERNS:
@@ -102,11 +103,11 @@ def parse_tool_output(command: str, stdout: str) -> ParsedOutput | None:
         "dig": _parse_line_list,
     }
 
-    parser_fn = parsers.get(tool)
+    parser_fn = parsers.get(tool) if tool else None
     if parser_fn:
         try:
             result = parser_fn(stdout)
-            result.tool = tool
+            result.tool = tool or ""
             return result
         except Exception as e:
             logger.warning(f"Parser failed for {tool}: {e}")
@@ -204,7 +205,7 @@ def _parse_nmap_xml(stdout: str) -> ParsedOutput:
 
     try:
         root = ET.fromstring(xml_content)
-    except ET.ParseError:
+    except XMLParseError:
         # Try to find just the nmap text output
         return ParsedOutput(
             tool="nmap",

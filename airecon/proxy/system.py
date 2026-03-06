@@ -297,7 +297,7 @@ def auto_load_skills_for_message(user_message: str) -> tuple[str, list[str]]:
                     )
                 parts.append(f"[AUTO-LOADED SKILL: {skill_rel}]\n{content}")
                 loaded_names.append(skill_file.stem)
-            except Exception:
+            except Exception:  # nosec B110 - skill loading is best-effort
                 pass
 
     if not parts:

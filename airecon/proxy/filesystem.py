@@ -229,7 +229,7 @@ def _walk_dir(
                 try:
                     lc = sum(1 for _ in entry.open("r", errors="ignore"))
                     line_info = f", {lc} lines"
-                except Exception:
+                except Exception:  # nosec B110 - line count is optional
                     pass
             output.append(
                 f"{prefix}{connector}{

@@ -161,7 +161,7 @@ class Fuzzer:
             return self._baseline[param]
         try:
             async with httpx.AsyncClient(
-                timeout=self.timeout, verify=False, follow_redirects=True
+                timeout=self.timeout, verify=False, follow_redirects=True  # nosec B501 - security testing tool
             ) as client:
                 t0 = time.monotonic()
                 if self.method == "GET":
@@ -228,7 +228,7 @@ class Fuzzer:
             })
             try:
                 async with httpx.AsyncClient(
-                    timeout=self.timeout, verify=False, follow_redirects=True
+                    timeout=self.timeout, verify=False, follow_redirects=True  # nosec B501 - security testing tool
                 ) as client:
                     t0 = time.monotonic()
                     if self.method == "GET":
@@ -1100,7 +1100,7 @@ class InteractiveRealTimeTester:
                         if self.on_finding:
                             try:
                                 self.on_finding(result)
-                            except Exception:
+                            except Exception:  # nosec B110 - callback is optional
                                 pass
                         yield RealTimeEvent(
                             event_type="finding",

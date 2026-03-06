@@ -26,7 +26,7 @@ class FilePreviewScreen(ModalScreen):
             self.user_prompt = user_prompt
             super().__init__()
 
-    def __init__(self, path: str, content: str = None) -> None:
+    def __init__(self, path: str, content: str | None = None) -> None:
         self.file_path = path
         self.content = content
         super().__init__()
@@ -105,7 +105,7 @@ class FilePreviewScreen(ModalScreen):
         """Update the preview content Static widget as plain text (no markup parsing)."""
         try:
             self.query_one("#preview-content", Static).update(Text(text))
-        except Exception:
+        except Exception:  # nosec B110 - widget may not be ready yet
             pass
 
     def on_button_pressed(self, event: Button.Pressed) -> None:

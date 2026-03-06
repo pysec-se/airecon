@@ -117,7 +117,7 @@ class StatusBar(Horizontal):
             )
             self.query_one("#status-caido-exec", Label).update(caido_exec_text)
 
-        except Exception:
+        except Exception:  # nosec B110 - status bar update is best-effort
             pass
 
     def watch_ollama_status(self, _) -> None: self._update_display()

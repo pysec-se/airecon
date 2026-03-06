@@ -293,6 +293,7 @@ class DockerEngine:
             command,
         ]
 
+        proc: asyncio.subprocess.Process | None = None
         try:
             proc = await asyncio.create_subprocess_exec(
                 *cmd,
@@ -324,6 +325,8 @@ class DockerEngine:
                         on_output(text)
 
             try:
+                assert proc.stdout is not None
+                assert proc.stderr is not None
                 await asyncio.wait_for(
                     asyncio.gather(
                         _read_stream(proc.stdout, False),
@@ -358,8 +361,8 @@ class DockerEngine:
                         self._current_proc.kill()
                         await self._current_proc.wait()
                         self._current_proc = None
-            except Exception:
-                pass
+            except Exception as _e:
+                logger.debug("Could not cancel process: %s", _e)
             return {
                 "success": False,
                 "error": "Command cancelled by user (ESC)",
@@ -371,10 +374,11 @@ class DockerEngine:
         except asyncio.TimeoutError:
             # Kill the Python-side process
             try:
-                proc.kill()
-                await proc.wait()
-            except Exception:
-                pass
+                if proc is not None:
+                    proc.kill()
+                    await proc.wait()
+            except Exception as _e:
+                logger.debug("Could not kill timed-out process: %s", _e)
             # Also kill container-side processes to prevent zombies
             try:
                 kill_proc = await asyncio.create_subprocess_exec(
@@ -388,8 +392,8 @@ class DockerEngine:
                     stderr=asyncio.subprocess.DEVNULL,
                 )
                 await asyncio.wait_for(kill_proc.wait(), timeout=3.0)
-            except Exception:
-                pass
+            except Exception as _e:
+                logger.debug("Could not kill container-side processes: %s", _e)
             return {
                 "success": False,
                 "error": f"Command timed out after {timeout}s: {command[:100]}",
@@ -465,8 +469,8 @@ class DockerEngine:
             try:
                 proc.kill()
                 await asyncio.wait_for(proc.wait(), timeout=2.0)
-            except Exception:
-                pass
+            except Exception as _e:
+                logger.debug("Could not kill cancelled process: %s", _e)
 
         # 2. Kill ALL user processes inside the container (SIGTERM then
         # SIGKILL)

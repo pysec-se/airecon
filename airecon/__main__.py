@@ -235,7 +235,7 @@ def _run_tui(args) -> None:
                 sys.exit(1)
 
             try:
-                req = urllib.request.urlopen(
+                req = urllib.request.urlopen(  # nosec B310 - localhost proxy only
                     f"{proxy_url}/api/status", timeout=2)
                 import json
                 data = json.loads(req.read())
@@ -342,7 +342,7 @@ def _run_status(args) -> None:
                 models = resp.json().get("models", [])
                 model_names = [m["name"] for m in models]
                 ollama_status = ON
-        except Exception:
+        except Exception:  # nosec B110 - status check, best-effort
             pass
 
         print(f"  {C}║{X}")
@@ -368,9 +368,11 @@ def _run_status(args) -> None:
         docker_status = OFF
         docker_detail = ""
         try:
-            import subprocess as sp
-            result = sp.run(
-                ["docker",
+            import shutil
+            import subprocess as sp  # nosec B404
+            _docker = shutil.which("docker") or "docker"
+            result = sp.run(  # nosec B603
+                [_docker,
                  "ps",
                  "--filter",
                  "name=airecon-sandbox-active",
@@ -397,9 +399,11 @@ def _run_status(args) -> None:
         searxng_status = OFF
         searxng_detail = ""
         try:
-            import subprocess as sp
-            result = sp.run(
-                ["docker", "ps", "--filter", "name=airecon-searxng",
+            import shutil
+            import subprocess as sp  # nosec B404
+            _docker = shutil.which("docker") or "docker"
+            result = sp.run(  # nosec B603
+                [_docker, "ps", "--filter", "name=airecon-searxng",
                     "--filter", "status=running", "--format", "{{.Status}}"],
                 capture_output=True, text=True, timeout=3,
             )
@@ -427,7 +431,7 @@ def _run_status(args) -> None:
                 resp = await client.get(f"{proxy_url}/api/status")
                 if resp.status_code == 200:
                     proxy_status = ON
-        except Exception:
+        except Exception:  # nosec B110 - status check, best-effort
             pass
 
         print(f"  {C}║{X}  {B}Proxy{X}         {proxy_status}")
@@ -465,7 +469,8 @@ def _unload_model_safely():
     """Attempt to unload model safely on exit using curl (most robust)."""
     try:
         from airecon.proxy.config import get_config
-        import subprocess
+        import shutil
+        import subprocess  # nosec B404
         import json
 
         # Try to get loaded config, or load default
@@ -475,17 +480,16 @@ def _unload_model_safely():
             # Fallback if config completely fails
             return
 
+        _docker = shutil.which("docker") or "docker"
         url = cfg.ollama_url.rstrip("/")
         model = cfg.ollama_model
 
         print("\n[AIRecon] Cleaning up Docker Sandbox...", end="", flush=True)
-        subprocess.run(["docker",
-                        "rm",
-                        "-f",
-                        "airecon-sandbox-active"],
-                       stdout=subprocess.DEVNULL,
-                       stderr=subprocess.DEVNULL,
-                       timeout=5)
+        subprocess.run(  # nosec B603
+            [_docker, "rm", "-f", "airecon-sandbox-active"],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            timeout=5)
         print("Done.")
 
         # Remove SearXNG container on exit (image is kept, so next start is
@@ -495,11 +499,11 @@ def _unload_model_safely():
             _cfg = _gc()
             if not _cfg.searxng_url or "localhost" in _cfg.searxng_url or "127.0.0.1" in _cfg.searxng_url:
                 from airecon.proxy.searxng import CONTAINER_NAME as _SX_NAME
-                subprocess.run(
-                    ["docker", "rm", "-f", _SX_NAME],
+                subprocess.run(  # nosec B603
+                    [_docker, "rm", "-f", _SX_NAME],
                     stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=10,
                 )
-        except Exception:
+        except Exception:  # nosec B110
             pass
 
         print(
@@ -515,8 +519,8 @@ def _unload_model_safely():
             "-d", json.dumps({"model": model, "keep_alive": 0})
         ]
 
-        # Run with timeout
-        subprocess.run(
+        # Run with timeout — cmd is hardcoded with no user input
+        subprocess.run(  # nosec B603
             cmd,
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
@@ -532,14 +536,14 @@ def _unload_model_safely():
                 "\n[AIRecon] Cleaning up Docker Sandbox...",
                 end="",
                 flush=True)
-            import subprocess
-            subprocess.run(["docker",
-                            "rm",
-                            "-f",
-                            "airecon-sandbox-active"],
-                           stdout=subprocess.DEVNULL,
-                           stderr=subprocess.DEVNULL,
-                           timeout=5)
+            import shutil as _shutil
+            import subprocess  # nosec B404
+            _docker2 = _shutil.which("docker") or "docker"
+            subprocess.run(  # nosec B603
+                [_docker2, "rm", "-f", "airecon-sandbox-active"],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                timeout=5)
             print("Done.")
 
             print(
@@ -557,7 +561,7 @@ def _unload_model_safely():
                 {"model": model, "keep_alive": 0}).encode("utf-8")
             req = urllib.request.Request(
                 f"{url}/api/generate", data=data, method="POST")
-            urllib.request.urlopen(req, timeout=2)
+            urllib.request.urlopen(req, timeout=2)  # nosec B310 - localhost only
             print("Done (via urllib).")
         except Exception:
             print("Failed.")
@@ -565,7 +569,7 @@ def _unload_model_safely():
 
 def _run_clean(args) -> None:
     """Clean Docker build cache, orphan containers, and unused volumes."""
-    import subprocess
+    import subprocess  # nosec B404
     import shutil
 
     CYAN = "\033[96m"
@@ -584,7 +588,7 @@ def _run_clean(args) -> None:
 
     def run(cmd: list[str],
             capture: bool = False) -> subprocess.CompletedProcess:
-        return subprocess.run(
+        return subprocess.run(  # nosec B603
             cmd,
             stdout=subprocess.PIPE if capture else subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
@@ -619,7 +623,7 @@ def _run_clean(args) -> None:
                         totals["volumes"] = reclaimable
                     elif "Cache" in t or "Build" in t:
                         totals["cache"] = reclaimable
-                except Exception:
+                except Exception:  # nosec B110 - best-effort JSON parsing
                     pass
         return totals
 

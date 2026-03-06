@@ -130,10 +130,11 @@ class AgentLoop(_ValidatorMixin, _FormatterMixin,
             canonical = str(args)
 
         raw = f"{tool_name}:{canonical}"
-        cmd_hash = hashlib.md5(
+        cmd_hash = hashlib.md5(  # nosec B324 - non-security dedup hash
             raw.encode(
                 "utf-8",
-                errors="replace")).hexdigest()
+                errors="replace"),
+            usedforsecurity=False).hexdigest()
 
         if cmd_hash in self._executed_cmd_hashes:
             msg = (

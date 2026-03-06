@@ -51,7 +51,7 @@ class AgentState:
         tool_calls: list[dict[str, Any]] | None = None,
         thinking: str | None = None,
     ) -> None:
-        msg = {"role": role, "content": content}
+        msg: dict[str, Any] = {"role": role, "content": content}
         if tool_calls:
             msg["tool_calls"] = tool_calls
         if thinking:

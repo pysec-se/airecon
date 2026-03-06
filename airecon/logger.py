@@ -14,7 +14,7 @@ def setup_logging(log_file: str = "log/log.txt",
     log_path.parent.mkdir(parents=True, exist_ok=True)
 
     # Handlers
-    handlers = [
+    handlers: list[logging.Handler] = [
         logging.FileHandler(log_path, mode='a', encoding='utf-8'),
     ]
 

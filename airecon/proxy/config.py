@@ -223,8 +223,8 @@ def get_config(config_path: str | None = None) -> Config:
                     f"Config file changed — reloading from {_config_path}")
                 _config = Config.load(_config_path)
                 _config_mtime = current_mtime
-        except Exception:
-            pass  # Keep existing config if stat fails
+        except Exception:  # nosec B110 - keep existing config if stat fails
+            pass
 
     if _config is None:
         _config = Config.load(config_path)

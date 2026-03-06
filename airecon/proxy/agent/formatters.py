@@ -312,6 +312,8 @@ class _FormatterMixin:
             _help_cache[tool_binary] = ""
             return None
 
+        if result is None:
+            return None
         stdout = result.get("stdout", "") or result.get("result", "") or ""
         if not stdout.strip() or len(stdout) < 20:
             _help_cache[tool_binary] = ""

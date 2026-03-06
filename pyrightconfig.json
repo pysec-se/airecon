@@ -1,0 +1,7 @@
+{
+    "pythonVersion": "3.12",
+    "typeCheckingMode": "basic",
+    "reportMissingModuleSource": "none",
+    "reportAttributeAccessIssue": "none",
+    "reportGeneralTypeIssues": "none"
+}

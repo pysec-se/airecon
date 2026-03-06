@@ -243,8 +243,8 @@ class PipelineEngine:
                         for f in os.listdir(output_dir)
                         if os.path.getsize(output_dir / f) > 0
                     )
-            except Exception:
-                pass
+            except Exception as _e:
+                logger.debug("Could not check workspace artifacts: %s", _e)
             # Fallback to scan_count if workspace not accessible
             if _has_output_files or getattr(session, "scan_count", 0) >= 3:
                 met.append("recon_artifacts_saved")

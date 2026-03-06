@@ -78,16 +78,22 @@ class WorkspacePanel(Vertical):
         if not all_targets:
             return None, None
 
+        def _has_vuln_files(vp: "Path") -> bool:
+            try:
+                return vp.exists() and any(vp.iterdir())
+            except OSError:
+                return False
+
         # Prefer current target if it already has vuln files
         if self._current_target_path and self._current_target_path in all_targets:
             vp = self._current_target_path / "vulnerabilities"
-            if vp.exists() and any(vp.iterdir()):
+            if _has_vuln_files(vp):
                 return self._current_target_path, vp
 
         # Find any target that has vuln files
         for t in all_targets:
             vp = t / "vulnerabilities"
-            if vp.exists() and any(vp.iterdir()):
+            if _has_vuln_files(vp):
                 return t, vp
 
         # Fall back to most-recently-modified target (no vuln files yet)
@@ -122,14 +128,14 @@ class WorkspacePanel(Vertical):
             p = self.query_one("#vuln-placeholder", Static)
             p.update(msg)
             p.display = True
-        except Exception:
+        except Exception:  # nosec B110 - widget may not exist yet
             pass
 
     def _remove_vuln_tree(self) -> None:
         try:
             self.query_one("#vuln-tree", WorkspaceTree).remove()
             self._vuln_tree_path = None
-        except Exception:
+        except Exception:  # nosec B110 - tree may not be mounted
             pass
 
     def _show_vuln_tree(self, vuln_path: Path) -> None:
@@ -151,7 +157,7 @@ class WorkspacePanel(Vertical):
         # Hide placeholder
         try:
             self.query_one("#vuln-placeholder", Static).display = False
-        except Exception:
+        except Exception:  # nosec B110 - widget may not exist yet
             pass
 
     def _mount_vuln_tree(self, vuln_path: Path) -> None:
@@ -160,7 +166,7 @@ class WorkspacePanel(Vertical):
             new_tree = WorkspaceTree(vuln_path, id="vuln-tree")
             section.mount(new_tree)
             self._vuln_tree_path = vuln_path
-        except Exception:
+        except Exception:  # nosec B110 - mount is best-effort
             pass
 
     # ------------------------------------------------------------------
@@ -181,10 +187,10 @@ class WorkspacePanel(Vertical):
         """Reload workspace tree and auto-refresh vuln panel."""
         try:
             self.query_one("#workspace-tree", WorkspaceTree).reload()
-        except Exception:
+        except Exception:  # nosec B110 - reload is best-effort
             pass
         # Always auto-scan — no dependency on _current_target_path being set
         try:
             self._refresh_vuln_panel()
-        except Exception:
+        except Exception:  # nosec B110 - refresh is best-effort
             pass

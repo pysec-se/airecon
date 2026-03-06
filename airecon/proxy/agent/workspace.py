@@ -55,7 +55,7 @@ class _WorkspaceMixin:
                         try:
                             with open(path, "r", errors="ignore") as fh:
                                 lines = sum(1 for _ in fh)
-                        except Exception:
+                        except Exception:  # nosec B110 - line count is optional
                             pass
                     info = f"- /workspace/{target}/output/{f} ({size} bytes"
                     if lines:

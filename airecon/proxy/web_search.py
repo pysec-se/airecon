@@ -210,7 +210,8 @@ async def web_search(query: str, max_results: int = 10, use_cache: bool = True) 
 
 def _get_cache_key(query: str, max_results: int) -> str:
     """Generate a unique cache key for the search parameters."""
-    return hashlib.md5(f"{query}:{max_results}".encode()).hexdigest()
+    return hashlib.md5(  # nosec B324 - non-security cache key
+        f"{query}:{max_results}".encode(), usedforsecurity=False).hexdigest()
 
 
 def _get_cached_results(query: str, max_results: int) -> dict[str, Any] | None:

@@ -230,8 +230,8 @@ class _ExecutorMixin:
             try:
                 # type: ignore[attr-defined]
                 self._save_tool_output(tool_name, arguments, result)
-            except Exception:
-                pass
+            except Exception as _e:
+                logger.debug("Could not save tool output: %s", _e)
         except Exception as e:
             success = False
             result = {"success": False, "error": str(e)}
@@ -321,8 +321,8 @@ class _ExecutorMixin:
             try:
                 # type: ignore[attr-defined]
                 self._save_tool_output(tool_name, arguments, result)
-            except Exception:
-                pass
+            except Exception as _e:
+                logger.debug("Could not save tool output: %s", _e)
         except Exception as e:
             success = False
             result = {"success": False, "error": str(e)}
@@ -433,8 +433,8 @@ class _ExecutorMixin:
             try:
                 # type: ignore[attr-defined]
                 self._save_tool_output(tool_name, arguments, result)
-            except Exception:
-                pass
+            except Exception as _e:
+                logger.debug("Could not save tool output: %s", _e)
 
             # Mark matching vulnerability as reported so REPORT phase can
             # transition
@@ -525,8 +525,8 @@ class _ExecutorMixin:
             try:
                 # type: ignore[attr-defined]
                 self._save_tool_output(tool_name, arguments, res_dict)
-            except Exception:
-                pass
+            except Exception as _e:
+                logger.debug("Could not save tool output: %s", _e)
             success = True
         except Exception as e:
             logger.error(f"Fuzzer error: {e}")
@@ -583,8 +583,8 @@ class _ExecutorMixin:
             try:
                 # type: ignore[attr-defined]
                 self._save_tool_output(tool_name, arguments, res_dict)
-            except Exception:
-                pass
+            except Exception as _e:
+                logger.debug("Could not save tool output: %s", _e)
             success = True
         except Exception as e:
             logger.error(f"quick_fuzz error: {e}")
@@ -641,8 +641,8 @@ class _ExecutorMixin:
             try:
                 # type: ignore[attr-defined]
                 self._save_tool_output(tool_name, arguments, res_dict)
-            except Exception:
-                pass
+            except Exception as _e:
+                logger.debug("Could not save tool output: %s", _e)
             success = True
         except Exception as e:
             logger.error(f"deep_fuzz error: {e}")
@@ -701,8 +701,8 @@ class _ExecutorMixin:
             try:
                 # type: ignore[attr-defined]
                 self._save_tool_output(tool_name, arguments, res_dict)
-            except Exception:
-                pass
+            except Exception as _e:
+                logger.debug("Could not save tool output: %s", _e)
             success = True
         except Exception as e:
             logger.error(f"generate_wordlist error: {e}")
@@ -749,8 +749,8 @@ class _ExecutorMixin:
             try:
                 # type: ignore[attr-defined]
                 self._save_tool_output(tool_name, arguments, res_dict)
-            except Exception:
-                pass
+            except Exception as _e:
+                logger.debug("Could not save tool output: %s", _e)
             success = True
         except Exception as e:
             logger.error(f"Subagent runner error: {e}")
@@ -1209,8 +1209,8 @@ class _ExecutorMixin:
             try:
                 # type: ignore[attr-defined]
                 self._save_tool_output(tool_name, arguments, res_dict)
-            except Exception:
-                pass
+            except Exception as _e:
+                logger.debug("Could not save tool output: %s", _e)
             success = True
         except Exception as e:
             logger.error(f"code_analysis error: {e}")
@@ -1301,8 +1301,8 @@ class _ExecutorMixin:
             try:
                 # type: ignore[attr-defined]
                 self._save_tool_output(tool_name, arguments, res_dict)
-            except Exception:
-                pass
+            except Exception as _e:
+                logger.debug("Could not save tool output: %s", _e)
         except Exception as e:
             logger.error(f"schemathesis_fuzz error: {e}")
             res_dict = {"success": False, "error": str(e)}
@@ -1537,14 +1537,14 @@ class _ExecutorMixin:
                 host_workspace = get_workspace_root() / self.state.active_target
                 try:
                     host_workspace.mkdir(parents=True, exist_ok=True)
-                except Exception:
-                    pass
+                except Exception as _e:
+                    logger.debug("Could not create workspace dir: %s", _e)
                 for subdir in ["output", "command",
                                "tools", "vulnerabilities"]:
                     try:
                         (host_workspace / subdir).mkdir(parents=True, exist_ok=True)
-                    except Exception:
-                        pass
+                    except Exception as _e:
+                        logger.debug("Could not create subdir %s: %s", subdir, _e)
                 # Do NOT strip workspace paths from the command — absolute paths
                 # inside the container are valid and stripping them breaks
                 # multi-path commands.
@@ -1561,8 +1561,8 @@ class _ExecutorMixin:
             try:
                 # type: ignore[attr-defined]
                 self._save_tool_output(tool_name, arguments, result)
-            except Exception:
-                pass
+            except Exception as _e:
+                logger.debug("Could not save tool output: %s", _e)
         except Exception as e:
             success = False
             result = {"success": False, "error": str(e)}

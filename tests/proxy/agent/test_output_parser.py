@@ -25,6 +25,7 @@ PORT    STATE SERVICE  VERSION
 443/tcp open  https    nginx 1.18.0
     """
     parsed = parse_tool_output("nmap localhost", output)
+    assert parsed is not None
     assert parsed.tool == "nmap"
     assert parsed.total_count == 2
     assert "80/tcp open http" in parsed.items[0]
@@ -39,6 +40,7 @@ def test_parse_ffuf_jsonl():
     ]})
 
     parsed = parse_tool_output("ffuf", ffuf_out)
+    assert parsed is not None
     assert parsed.tool == "ffuf"
     assert parsed.total_count == 2
     assert "http://example.com/admin" in parsed.items[0]
@@ -54,6 +56,7 @@ def test_parse_httpx_jsonl_with_tech():
     }) + "\n"
 
     parsed = parse_tool_output("httpx", httpx_out)
+    assert parsed is not None
     assert parsed.tool == "httpx"
     assert parsed.total_count == 1
 
@@ -70,6 +73,7 @@ http://example.com/dashboard
     """
     parsed = parse_tool_output("katana", output)
     # The detect_tool identifies katana as using generic list
+    assert parsed is not None
     assert parsed.tool == "url_list"
     assert parsed.total_count == 3
     assert parsed.items[0] == "http://example.com/api"
@@ -84,6 +88,7 @@ def test_generic_smart_parser_fallback():
     """
     # Force generic parser explicitly by giving a command with no known tool
     parsed = parse_tool_output("someunknowntool", output)
+    assert parsed is not None
     assert parsed.tool == "someunknowntool"
     # The Generic Tagged parser retains non-tagged lines (like the header)
     assert parsed.total_count == 4
