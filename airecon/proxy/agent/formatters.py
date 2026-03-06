@@ -4,9 +4,12 @@ import asyncio
 import json
 import logging
 import re
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from .output_parser import parse_tool_output
+
+if TYPE_CHECKING:
+    from .models import AgentState
 
 logger = logging.getLogger("airecon.agent")
 
@@ -15,6 +18,9 @@ _help_cache: dict[str, str] = {}
 
 
 class _FormatterMixin:
+    # Attributes provided by AgentLoop — declared here for type checkers only.
+    if TYPE_CHECKING:
+        state: AgentState
     def _smart_format_tool_result(
         self,
         tool_name: str,
@@ -184,7 +190,6 @@ class _FormatterMixin:
         return content
 
     def _build_recent_history_context(self, last_n: int = 10) -> str:
-        # type: ignore[attr-defined]
         recent = self.state.tool_history[-last_n:
                                          ] if self.state.tool_history else []
         if not recent:

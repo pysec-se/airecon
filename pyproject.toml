@@ -44,6 +44,28 @@ testpaths = ["tests"]
 pythonpath = ["."]
 asyncio_mode = "auto"
 
+[tool.coverage.run]
+source = ["airecon"]
+# Exclude integration-heavy files that require Docker/Ollama/Playwright at runtime
+omit = [
+    "airecon/__main__.py",
+    "airecon/logger.py",
+    "airecon/proxy/server.py",
+    "airecon/proxy/searxng.py",
+    "airecon/proxy/agent_graph.py",
+    "airecon/proxy/subagent.py",
+    "airecon/proxy/browser.py",
+    "airecon/proxy/ollama.py",
+    "airecon/tui/*",
+]
+
+[tool.coverage.report]
+exclude_lines = [
+    "pragma: no cover",
+    "if TYPE_CHECKING:",
+    "raise NotImplementedError",
+]
+
 [build-system]
 requires = ["poetry-core"]
 build-backend = "poetry.core.masonry.api"

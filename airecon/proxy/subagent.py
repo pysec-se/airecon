@@ -124,6 +124,9 @@ class ParallelAgentRunner:
 
     Uses a semaphore to bound concurrency. Each target gets its own
     SubagentCoordinator (scout + exploit pair).
+
+    A shared cancellation event ensures that when one agent fails,
+    all sibling agents are gracefully stopped via coordinator.stop().
     """
 
     def __init__(self, max_concurrent: int = 3, engine: Any = None):
@@ -131,27 +134,51 @@ class ParallelAgentRunner:
         self.engine = engine
         self._active_tasks: list[asyncio.Task] = []
         self._results: dict[str, SessionData] = {}
+        self._cancel_event: asyncio.Event = asyncio.Event()
+
+    def cancel_all(self) -> None:
+        """Cancel all running agent tasks immediately."""
+        self._cancel_event.set()
+        for task in self._active_tasks:
+            task.cancel()
+        logger.info(f"Cancelled {len(self._active_tasks)} active agent tasks")
 
     async def run_parallel(
         self,
         targets: list[str],
         prompt_template: str,
     ) -> dict[str, SessionData]:
-        """Run subagent coordinator on all targets, bounded by semaphore."""
+        """Run subagent coordinator on all targets, bounded by semaphore.
 
-        async def run_single(target: str) -> tuple[str, SessionData]:
-            session = SessionData(target=target)
-            coordinator = SubagentCoordinator(
-                engine=self.engine, session=session)
-            async for _ in coordinator.start_recon(target, prompt_template):
-                pass
-            return target, coordinator.session
-
+        If any agent raises an unhandled exception, the shared cancel_event
+        is set so that all sibling coordinators stop at their next iteration.
+        """
+        self._cancel_event.clear()
         semaphore = asyncio.Semaphore(self.max_concurrent)
 
+        async def run_single(
+            target: str,
+            coordinator: SubagentCoordinator,
+        ) -> tuple[str, SessionData]:
+            async for _ in coordinator.start_recon(target, prompt_template):
+                if self._cancel_event.is_set():
+                    coordinator.stop()
+                    break
+            return target, coordinator.session
+
         async def bounded_run(target: str) -> tuple[str, SessionData]:
+            session = SessionData(target=target)
+            coordinator = SubagentCoordinator(engine=self.engine, session=session)
             async with semaphore:
-                return await run_single(target)
+                try:
+                    return await run_single(target, coordinator)
+                except Exception as exc:
+                    logger.error(
+                        "Agent for %s failed: %s — setting cancel event for siblings",
+                        target, exc,
+                    )
+                    self._cancel_event.set()
+                    raise
 
         tasks = [asyncio.create_task(bounded_run(t)) for t in targets]
         self._active_tasks = tasks

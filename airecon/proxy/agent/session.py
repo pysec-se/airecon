@@ -53,7 +53,7 @@ def _normalize_url(url: str) -> str:
         return urlunparse((
             p.scheme.lower(),
             p.netloc.lower(),
-            p.path.rstrip("/") or "/",
+            p.path.rstrip("/"),
             p.params,
             query,
             "",  # strip fragment

@@ -7,7 +7,7 @@ import os
 import re
 import time
 from datetime import datetime
-from typing import Any, Callable
+from typing import TYPE_CHECKING, Any, Callable
 from urllib.parse import urlparse
 
 from ..browser import browser_action
@@ -18,17 +18,31 @@ from ..web_search import web_search
 from .models import ToolExecution
 from .session import _is_duplicate_vulnerability
 
+if TYPE_CHECKING:
+    from ..docker import DockerEngine
+    from .models import AgentState
+    from .session import SessionData
+
 logger = logging.getLogger("airecon.agent")
 
 
 class _ExecutorMixin:
+    # Attributes provided by AgentLoop — declared here for type checkers only.
+    # Only include attrs that come from AgentLoop.__init__, not methods defined
+    # in this class or sibling mixins (_WorkspaceMixin._save_tool_output, etc.).
+    if TYPE_CHECKING:
+        engine: DockerEngine
+        state: AgentState
+        _session: SessionData | None
+        _last_output_file: str | None
+        _executed_tool_counts: dict[tuple[str, str], int]
 
     async def _execute_local_browser_tool(
         self,
         tool_name: str,
         arguments: dict[str, Any],
     ) -> tuple[bool, float, dict[str, Any], str | None]:
-        self._last_output_file = None  # type: ignore[attr-defined]
+        self._last_output_file = None
 
         args_key = self._normalize_args_for_dedup(tool_name, arguments)
         allow_repeat = arguments.get("action") in [
@@ -38,7 +52,7 @@ class _ExecutorMixin:
 
         if not allow_repeat:
             count = self._executed_tool_counts.get(
-                args_key, 0)  # type: ignore[attr-defined]
+                args_key, 0)
             limit = get_config().agent_repeat_tool_call_limit
             if count >= limit:
                 return False, 0.0, {
@@ -88,7 +102,6 @@ class _ExecutorMixin:
 
             # Auto-save view_source / get_console_logs / get_network_logs to
             # workspace
-            # type: ignore[attr-defined]
             if success and self.state.active_target:
                 action = arguments.get("action")
                 if action in ("view_source", "get_console_logs",
@@ -103,7 +116,6 @@ class _ExecutorMixin:
                         domain = netloc or "unknown"
                         host_output = (
                             get_workspace_root()
-                            # type: ignore[attr-defined]
                             / self.state.active_target
                             / "output"
                         )
@@ -150,7 +162,6 @@ class _ExecutorMixin:
                                 " Analyze JS files for API endpoints, secrets, and vulnerabilities.]"
                             )
                             result = {"success": True, "result": inner}
-                            # type: ignore[attr-defined]
                             self._last_output_file = saved_path
 
                         elif action == "get_console_logs":
@@ -174,7 +185,6 @@ class _ExecutorMixin:
                                 " Check for errors, debug info, and leaked sensitive data.]"
                             )
                             result = {"success": True, "result": inner}
-                            # type: ignore[attr-defined]
                             self._last_output_file = saved_path
 
                         elif action == "get_network_logs":
@@ -229,7 +239,6 @@ class _ExecutorMixin:
                                 " Review for API endpoints, auth tokens, and sensitive data in responses.]"
                             )
                             result = {"success": True, "result": inner}
-                            # type: ignore[attr-defined]
                             self._last_output_file = saved_path
 
                     except Exception as _e:
@@ -237,7 +246,6 @@ class _ExecutorMixin:
                             f"Failed to auto-save browser result: {_e}")
 
             try:
-                # type: ignore[attr-defined]
                 self._save_tool_output(tool_name, arguments, result)
             except Exception as _e:
                 logger.debug("Could not save tool output: %s", _e)
@@ -250,29 +258,26 @@ class _ExecutorMixin:
 
         history_result = result
         if success and self._last_output_file and len(
-                str(result)) > 10000:  # type: ignore[attr-defined]
+                str(result)) > 10000:
             history_result = {
                 "success": True,
-                # type: ignore[attr-defined]
                 "result": f"<Result truncated. Full output in {self._last_output_file}>",
                 "truncated": True,
             }
 
-        self.state.tool_history.append(  # type: ignore[attr-defined]
+        self.state.tool_history.append(
             ToolExecution(
                 tool_name=tool_name, arguments=arguments,
                 result=history_result, duration=duration,
                 status="success" if success else "error",
             )
         )
-        self.state.tool_counts["exec"] += 1  # type: ignore[attr-defined]
-        self.state.tool_counts["total"] += 1  # type: ignore[attr-defined]
+        self.state.tool_counts["exec"] += 1
+        self.state.tool_counts["total"] += 1
 
         if success:
             self._executed_tool_counts[args_key] = self._executed_tool_counts.get(
-                args_key, 0) + 1  # type: ignore[attr-defined]
-
-        # type: ignore[attr-defined]
+                args_key, 0) + 1
         return success, duration, result, self._last_output_file
 
     async def _execute_filesystem_tool(
@@ -280,7 +285,7 @@ class _ExecutorMixin:
         tool_name: str,
         arguments: dict[str, Any],
     ) -> tuple[bool, float, dict[str, Any], str | None]:
-        self._last_output_file = None  # type: ignore[attr-defined]
+        self._last_output_file = None
         start_time = time.time()
 
         try:
@@ -290,12 +295,12 @@ class _ExecutorMixin:
             elif path_arg.startswith("/workspace/"):
                 path_arg = path_arg[11:]
 
-            if self.state.active_target:  # type: ignore[attr-defined]
+            if self.state.active_target:
                 if not path_arg.startswith(self.state.active_target) and not os.path.isabs(
-                        path_arg):  # type: ignore[attr-defined]
+                        path_arg):
                     path_arg = os.path.join(
                         self.state.active_target,
-                        path_arg)  # type: ignore[attr-defined]
+                        path_arg)
 
             # Path traversal protection: resolve and verify path is within workspace
             workspace_root = get_workspace_root()
@@ -315,9 +320,7 @@ class _ExecutorMixin:
                 if "skills/" in path_arg_clean and path_arg_clean.endswith(".md"):
                     skill_name = os.path.basename(
                         path_arg_clean).replace(".md", "")
-                    # type: ignore[attr-defined]
                     if skill_name not in self.state.skills_used:
-                        # type: ignore[attr-defined]
                         self.state.skills_used.append(skill_name)
                 result = await asyncio.to_thread(
                     read_file,
@@ -337,7 +340,6 @@ class _ExecutorMixin:
 
             success = result.get("success", False)
             try:
-                # type: ignore[attr-defined]
                 self._save_tool_output(tool_name, arguments, result)
             except Exception as _e:
                 logger.debug("Could not save tool output: %s", _e)
@@ -358,17 +360,15 @@ class _ExecutorMixin:
                     "truncated": True,
                 }
 
-        self.state.tool_history.append(  # type: ignore[attr-defined]
+        self.state.tool_history.append(
             ToolExecution(
                 tool_name=tool_name, arguments=arguments,
                 result=history_result, duration=duration,
                 status="success" if success else "error",
             )
         )
-        self.state.tool_counts["exec"] += 1  # type: ignore[attr-defined]
-        self.state.tool_counts["total"] += 1  # type: ignore[attr-defined]
-
-        # type: ignore[attr-defined]
+        self.state.tool_counts["exec"] += 1
+        self.state.tool_counts["total"] += 1
         return success, duration, result, self._last_output_file
 
     async def _execute_web_search_tool(
@@ -392,11 +392,11 @@ class _ExecutorMixin:
         # Auto-save results to output/dork_results.txt so Phase 1 evidence
         # is persisted even if the model forgets to call create_file.
         saved_path: str | None = None
-        if success and self.state.active_target:  # type: ignore[attr-defined]
+        if success and self.state.active_target:
             try:
                 host_output = (
                     get_workspace_root()
-                    / self.state.active_target  # type: ignore[attr-defined]
+                    / self.state.active_target
                     / "output"
                 )
                 host_output.mkdir(parents=True, exist_ok=True)
@@ -421,15 +421,15 @@ class _ExecutorMixin:
             except Exception as e:
                 logger.warning(f"Failed to auto-save dork results: {e}")
 
-        self.state.tool_history.append(  # type: ignore[attr-defined]
+        self.state.tool_history.append(
             ToolExecution(
                 tool_name="web_search", arguments=arguments,
                 result=result, duration=duration,
                 status="success" if success else "error",
             )
         )
-        self.state.tool_counts["exec"] += 1  # type: ignore[attr-defined]
-        self.state.tool_counts["total"] += 1  # type: ignore[attr-defined]
+        self.state.tool_counts["exec"] += 1
+        self.state.tool_counts["total"] += 1
         return success, duration, result, saved_path
 
     async def _execute_report_tool(
@@ -437,30 +437,27 @@ class _ExecutorMixin:
         tool_name: str,
         arguments: dict[str, Any],
     ) -> tuple[bool, float, dict[str, Any], str | None]:
-        self._last_output_file = None  # type: ignore[attr-defined]
+        self._last_output_file = None
         start_time = time.time()
 
         try:
             result = await asyncio.to_thread(
                 create_vulnerability_report,
                 **arguments,
-                # type: ignore[attr-defined]
                 _active_target=self.state.active_target,
             )
             success = result.get("success", False)
             try:
-                # type: ignore[attr-defined]
                 self._save_tool_output(tool_name, arguments, result)
             except Exception as _e:
                 logger.debug("Could not save tool output: %s", _e)
 
             # Mark matching vulnerability as reported so REPORT phase can
             # transition
-            if success and self._session:  # type: ignore[attr-defined]
+            if success and self._session:
                 report_title = arguments.get("title", "")
                 flag = arguments.get("flag", "")
                 matched = False
-                # type: ignore[attr-defined]
                 for vuln in self._session.vulnerabilities:
                     v_title = vuln.get("title", vuln.get("finding", ""))
                     if report_title and v_title and v_title.lower() in report_title.lower():
@@ -469,7 +466,7 @@ class _ExecutorMixin:
                             vuln["flag"] = flag
                         matched = True
                 if not matched and report_title:
-                    self._session.vulnerabilities.append({  # type: ignore[attr-defined]
+                    self._session.vulnerabilities.append({
                         "title": report_title,
                         "finding": report_title,
                         "report_generated": True,
@@ -483,17 +480,15 @@ class _ExecutorMixin:
             logger.error(f"Reporting tool exec error: {e}")
 
         duration = time.time() - start_time
-        self.state.tool_history.append(  # type: ignore[attr-defined]
+        self.state.tool_history.append(
             ToolExecution(
                 tool_name=tool_name, arguments=arguments,
                 result=result, duration=duration,
                 status="success" if success else "error",
             )
         )
-        self.state.tool_counts["exec"] += 1  # type: ignore[attr-defined]
-        self.state.tool_counts["total"] += 1  # type: ignore[attr-defined]
-
-        # type: ignore[attr-defined]
+        self.state.tool_counts["exec"] += 1
+        self.state.tool_counts["total"] += 1
         return success, duration, result, self._last_output_file
 
     async def _execute_advanced_fuzz_tool(
@@ -502,7 +497,7 @@ class _ExecutorMixin:
         arguments: dict[str, Any],
     ) -> tuple[bool, float, dict[str, Any], str | None]:
         from ..fuzzer import Fuzzer
-        self._last_output_file = None  # type: ignore[attr-defined]
+        self._last_output_file = None
         start_time = time.time()
 
         target = arguments.get("target", "")
@@ -541,7 +536,6 @@ class _ExecutorMixin:
                 res_dict = {"success": True, "findings": findings_list}
 
             try:
-                # type: ignore[attr-defined]
                 self._save_tool_output(tool_name, arguments, res_dict)
             except Exception as _e:
                 logger.debug("Could not save tool output: %s", _e)
@@ -553,14 +547,14 @@ class _ExecutorMixin:
 
         duration = time.time() - start_time
 
-        self.state.tool_history.append(  # type: ignore[attr-defined]
+        self.state.tool_history.append(
             ToolExecution(
                 tool_name=tool_name, arguments=arguments,
                 result=res_dict, duration=duration,
                 status="success" if success else "error",
             )
         )
-        self.state.tool_counts["total"] += 1  # type: ignore[attr-defined]
+        self.state.tool_counts["total"] += 1
 
         return success, duration, res_dict, None
 
@@ -570,7 +564,7 @@ class _ExecutorMixin:
         arguments: dict[str, Any],
     ) -> tuple[bool, float, dict[str, Any], str | None]:
         from ..fuzzer import quick_fuzz_url
-        self._last_output_file = None  # type: ignore[attr-defined]
+        self._last_output_file = None
         start_time = time.time()
 
         target = arguments.get("target", "")
@@ -599,7 +593,6 @@ class _ExecutorMixin:
                     "total": len(findings_list)}
 
             try:
-                # type: ignore[attr-defined]
                 self._save_tool_output(tool_name, arguments, res_dict)
             except Exception as _e:
                 logger.debug("Could not save tool output: %s", _e)
@@ -610,14 +603,14 @@ class _ExecutorMixin:
             success = False
 
         duration = time.time() - start_time
-        self.state.tool_history.append(  # type: ignore[attr-defined]
+        self.state.tool_history.append(
             ToolExecution(
                 tool_name=tool_name, arguments=arguments,
                 result=res_dict, duration=duration,
                 status="success" if success else "error",
             )
         )
-        self.state.tool_counts["total"] += 1  # type: ignore[attr-defined]
+        self.state.tool_counts["total"] += 1
         return success, duration, res_dict, None
 
     async def _execute_deep_fuzz_tool(
@@ -625,7 +618,7 @@ class _ExecutorMixin:
         tool_name: str,
         arguments: dict[str, Any],
     ) -> tuple[bool, float, dict[str, Any], str | None]:
-        self._last_output_file = None  # type: ignore[attr-defined]
+        self._last_output_file = None
         start_time = time.time()
 
         target = arguments.get("target", "")
@@ -657,7 +650,6 @@ class _ExecutorMixin:
             }
 
             try:
-                # type: ignore[attr-defined]
                 self._save_tool_output(tool_name, arguments, res_dict)
             except Exception as _e:
                 logger.debug("Could not save tool output: %s", _e)
@@ -668,14 +660,14 @@ class _ExecutorMixin:
             success = False
 
         duration = time.time() - start_time
-        self.state.tool_history.append(  # type: ignore[attr-defined]
+        self.state.tool_history.append(
             ToolExecution(
                 tool_name=tool_name, arguments=arguments,
                 result=res_dict, duration=duration,
                 status="success" if success else "error",
             )
         )
-        self.state.tool_counts["total"] += 1  # type: ignore[attr-defined]
+        self.state.tool_counts["total"] += 1
         return success, duration, res_dict, None
 
     async def _execute_generate_wordlist_tool(
@@ -684,7 +676,7 @@ class _ExecutorMixin:
         arguments: dict[str, Any],
     ) -> tuple[bool, float, dict[str, Any], str | None]:
         from ..fuzzer import generate_fuzz_wordlist
-        self._last_output_file = None  # type: ignore[attr-defined]
+        self._last_output_file = None
         start_time = time.time()
 
         output_file = arguments.get("output_file", "wordlist.txt")
@@ -699,7 +691,6 @@ class _ExecutorMixin:
             )
 
             # Save to workspace output/
-            # type: ignore[attr-defined]
             target = self.state.active_target or "unknown"
             host_output = get_workspace_root() / target / "output"
             host_output.mkdir(parents=True, exist_ok=True)
@@ -714,10 +705,9 @@ class _ExecutorMixin:
                 "saved_to": saved_path,
                 "total_entries": len(wordlist),
             }
-            self._last_output_file = saved_path  # type: ignore[attr-defined]
+            self._last_output_file = saved_path
 
             try:
-                # type: ignore[attr-defined]
                 self._save_tool_output(tool_name, arguments, res_dict)
             except Exception as _e:
                 logger.debug("Could not save tool output: %s", _e)
@@ -728,15 +718,14 @@ class _ExecutorMixin:
             success = False
 
         duration = time.time() - start_time
-        self.state.tool_history.append(  # type: ignore[attr-defined]
+        self.state.tool_history.append(
             ToolExecution(
                 tool_name=tool_name, arguments=arguments,
                 result=res_dict, duration=duration,
                 status="success" if success else "error",
             )
         )
-        self.state.tool_counts["total"] += 1  # type: ignore[attr-defined]
-        # type: ignore[attr-defined]
+        self.state.tool_counts["total"] += 1
         return success, duration, res_dict, self._last_output_file
 
     async def _execute_run_parallel_agents_tool(
@@ -745,7 +734,7 @@ class _ExecutorMixin:
         arguments: dict[str, Any],
     ) -> tuple[bool, float, dict[str, Any], str | None]:
         from ..subagent import ParallelAgentRunner
-        self._last_output_file = None  # type: ignore[attr-defined]
+        self._last_output_file = None
         start_time = time.time()
 
         targets = arguments.get("targets", [])
@@ -753,7 +742,7 @@ class _ExecutorMixin:
 
         try:
             runner = ParallelAgentRunner(
-                engine=self.engine)  # type: ignore[attr-defined]
+                engine=self.engine)
             results = await runner.run_parallel(targets, prompt)
 
             # Summarize the vulnerabilities found per target
@@ -765,7 +754,6 @@ class _ExecutorMixin:
                     s in results.items()}}
 
             try:
-                # type: ignore[attr-defined]
                 self._save_tool_output(tool_name, arguments, res_dict)
             except Exception as _e:
                 logger.debug("Could not save tool output: %s", _e)
@@ -777,14 +765,14 @@ class _ExecutorMixin:
 
         duration = time.time() - start_time
 
-        self.state.tool_history.append(  # type: ignore[attr-defined]
+        self.state.tool_history.append(
             ToolExecution(
                 tool_name=tool_name, arguments=arguments,
                 result=res_dict, duration=duration,
                 status="success" if success else "error",
             )
         )
-        self.state.tool_counts["total"] += 1  # type: ignore[attr-defined]
+        self.state.tool_counts["total"] += 1
 
         return success, duration, res_dict, None
 
@@ -798,7 +786,7 @@ class _ExecutorMixin:
         arguments: dict[str, Any],
     ) -> tuple[bool, float, dict[str, Any], str | None]:
         from ..caido_client import CaidoClient
-        self._last_output_file = None  # type: ignore[attr-defined]
+        self._last_output_file = None
         start_time = time.time()
 
         httpql = arguments.get("filter", "")
@@ -857,12 +845,12 @@ class _ExecutorMixin:
             success = False
 
         duration = time.time() - start_time
-        self.state.tool_history.append(  # type: ignore[attr-defined]
+        self.state.tool_history.append(
             ToolExecution(tool_name=tool_name, arguments=arguments,
                           result=res_dict, duration=duration,
                           status="success" if success else "error")
         )
-        self.state.tool_counts["total"] += 1  # type: ignore[attr-defined]
+        self.state.tool_counts["total"] += 1
         return success, duration, res_dict, None
 
     async def _execute_caido_send_request_tool(
@@ -871,7 +859,7 @@ class _ExecutorMixin:
         arguments: dict[str, Any],
     ) -> tuple[bool, float, dict[str, Any], str | None]:
         from ..caido_client import CaidoClient
-        self._last_output_file = None  # type: ignore[attr-defined]
+        self._last_output_file = None
         start_time = time.time()
 
         request_id = arguments.get("request_id", "")
@@ -937,12 +925,12 @@ class _ExecutorMixin:
             success = False
 
         duration = time.time() - start_time
-        self.state.tool_history.append(  # type: ignore[attr-defined]
+        self.state.tool_history.append(
             ToolExecution(tool_name=tool_name, arguments=arguments,
                           result=res_dict, duration=duration,
                           status="success" if success else "error")
         )
-        self.state.tool_counts["total"] += 1  # type: ignore[attr-defined]
+        self.state.tool_counts["total"] += 1
         return success, duration, res_dict, None
 
     async def _execute_caido_automate_tool(
@@ -951,7 +939,7 @@ class _ExecutorMixin:
         arguments: dict[str, Any],
     ) -> tuple[bool, float, dict[str, Any], str | None]:
         from ..caido_client import CaidoClient
-        self._last_output_file = None  # type: ignore[attr-defined]
+        self._last_output_file = None
         start_time = time.time()
 
         raw_http = arguments.get("raw_http", "")
@@ -1036,12 +1024,12 @@ class _ExecutorMixin:
             success = False
 
         duration = time.time() - start_time
-        self.state.tool_history.append(  # type: ignore[attr-defined]
+        self.state.tool_history.append(
             ToolExecution(tool_name=tool_name, arguments=arguments,
                           result=res_dict, duration=duration,
                           status="success" if success else "error")
         )
-        self.state.tool_counts["total"] += 1  # type: ignore[attr-defined]
+        self.state.tool_counts["total"] += 1
         return success, duration, res_dict, None
 
     async def _execute_caido_get_findings_tool(
@@ -1050,7 +1038,7 @@ class _ExecutorMixin:
         arguments: dict[str, Any],
     ) -> tuple[bool, float, dict[str, Any], str | None]:
         from ..caido_client import CaidoClient
-        self._last_output_file = None  # type: ignore[attr-defined]
+        self._last_output_file = None
         start_time = time.time()
 
         limit = min(int(arguments.get("limit", 50)), 200)
@@ -1115,12 +1103,12 @@ class _ExecutorMixin:
             success = False
 
         duration = time.time() - start_time
-        self.state.tool_history.append(  # type: ignore[attr-defined]
+        self.state.tool_history.append(
             ToolExecution(tool_name=tool_name, arguments=arguments,
                           result=res_dict, duration=duration,
                           status="success" if success else "error")
         )
-        self.state.tool_counts["total"] += 1  # type: ignore[attr-defined]
+        self.state.tool_counts["total"] += 1
         return success, duration, res_dict, None
 
     async def _execute_caido_set_scope_tool(
@@ -1129,7 +1117,7 @@ class _ExecutorMixin:
         arguments: dict[str, Any],
     ) -> tuple[bool, float, dict[str, Any], str | None]:
         from ..caido_client import CaidoClient
-        self._last_output_file = None  # type: ignore[attr-defined]
+        self._last_output_file = None
         start_time = time.time()
 
         allowlist = arguments.get("allowlist", [])
@@ -1143,7 +1131,7 @@ class _ExecutorMixin:
         }
         """
         scope_name = f"airecon-{
-            self.state.active_target or 'scope'}"  # type: ignore[attr-defined]
+            self.state.active_target or 'scope'}"
         variables = {
             "input": {
                 "name": scope_name,
@@ -1175,12 +1163,12 @@ class _ExecutorMixin:
             success = False
 
         duration = time.time() - start_time
-        self.state.tool_history.append(  # type: ignore[attr-defined]
+        self.state.tool_history.append(
             ToolExecution(tool_name=tool_name, arguments=arguments,
                           result=res_dict, duration=duration,
                           status="success" if success else "error")
         )
-        self.state.tool_counts["total"] += 1  # type: ignore[attr-defined]
+        self.state.tool_counts["total"] += 1
         return success, duration, res_dict, None
 
     # ------------------------------------------------------------------
@@ -1193,7 +1181,7 @@ class _ExecutorMixin:
         arguments: dict[str, Any],
     ) -> tuple[bool, float, dict[str, Any], str | None]:
         from ..semgrep import run_code_analysis
-        self._last_output_file = None  # type: ignore[attr-defined]
+        self._last_output_file = None
         start_time = time.time()
 
         target_path = arguments.get("target_path", ".")
@@ -1201,14 +1189,13 @@ class _ExecutorMixin:
         languages = arguments.get("languages") or None
 
         # Resolve path relative to target workspace
-        # type: ignore[attr-defined]
         active_target = self.state.active_target or "unknown"
         if not target_path.startswith("/"):
             target_path = f"/workspace/{active_target}/{target_path}"
 
         try:
             result = await run_code_analysis(
-                engine=self.engine,  # type: ignore[attr-defined]
+                engine=self.engine,
                 target_path=target_path,
                 rules=rules,
                 languages=languages,
@@ -1225,7 +1212,6 @@ class _ExecutorMixin:
 
             # Save output
             try:
-                # type: ignore[attr-defined]
                 self._save_tool_output(tool_name, arguments, res_dict)
             except Exception as _e:
                 logger.debug("Could not save tool output: %s", _e)
@@ -1236,14 +1222,14 @@ class _ExecutorMixin:
             success = False
 
         duration = time.time() - start_time
-        self.state.tool_history.append(  # type: ignore[attr-defined]
+        self.state.tool_history.append(
             ToolExecution(
                 tool_name=tool_name, arguments=arguments,
                 result=res_dict, duration=duration,
                 status="success" if success else "error",
             )
         )
-        self.state.tool_counts["total"] += 1  # type: ignore[attr-defined]
+        self.state.tool_counts["total"] += 1
         return success, duration, res_dict, None
 
     # ------------------------------------------------------------------
@@ -1256,7 +1242,7 @@ class _ExecutorMixin:
         arguments: dict[str, Any],
     ) -> tuple[bool, float, dict[str, Any], str | None]:
         """Run Schemathesis API schema fuzzing inside the Docker sandbox."""
-        self._last_output_file = None  # type: ignore[attr-defined]
+        self._last_output_file = None
         start_time = time.time()
 
         schema_url = arguments.get("schema_url", "").strip()
@@ -1286,8 +1272,6 @@ class _ExecutorMixin:
         cmd_parts.append("--request-timeout 15")
         cmd_parts.append("--output-truncate false")
         cmd_parts.append("--code-sample-style python")
-
-        # type: ignore[attr-defined]
         active_target = self.state.active_target or "unknown"
         workspace_dir = f"/workspace/{active_target}"
         output_file = f"{workspace_dir}/output/schemathesis_results.txt"
@@ -1295,7 +1279,7 @@ class _ExecutorMixin:
             ' '.join(cmd_parts)} 2>&1 | tee {output_file}"
 
         try:
-            exec_result = await self.engine.execute_tool(  # type: ignore[attr-defined]
+            exec_result = await self.engine.execute_tool(
                 "execute",
                 {"command": full_cmd, "timeout": 300},
             )
@@ -1317,7 +1301,6 @@ class _ExecutorMixin:
                 "raw_output": stdout[:3000],
             }
             try:
-                # type: ignore[attr-defined]
                 self._save_tool_output(tool_name, arguments, res_dict)
             except Exception as _e:
                 logger.debug("Could not save tool output: %s", _e)
@@ -1327,15 +1310,14 @@ class _ExecutorMixin:
             success = False
 
         duration = time.time() - start_time
-        self.state.tool_history.append(  # type: ignore[attr-defined]
+        self.state.tool_history.append(
             ToolExecution(
                 tool_name=tool_name, arguments=arguments,
                 result=res_dict, duration=duration,
                 status="success" if success else "error",
             )
         )
-        self.state.tool_counts["total"] += 1  # type: ignore[attr-defined]
-        # type: ignore[attr-defined]
+        self.state.tool_counts["total"] += 1
         return success, duration, res_dict, self._last_output_file
 
     # ------------------------------------------------------------------
@@ -1347,11 +1329,10 @@ class _ExecutorMixin:
         tool_name: str,
         arguments: dict[str, Any],
     ) -> tuple[bool, float, dict[str, Any], str | None]:
-        self._last_output_file = None  # type: ignore[attr-defined]
+        self._last_output_file = None
         start_time = time.time()
 
         task = arguments.get("task", "")
-        # type: ignore[attr-defined]
         target = arguments.get("target", self.state.active_target or "")
         # Validate and sanitize specialist — only allow known role names
         _RAW_SPECIALIST = str(arguments.get("specialist", "exploit"))
@@ -1421,7 +1402,6 @@ class _ExecutorMixin:
             cfg = get_config()
             ollama = OllamaClient(model=cfg.ollama_model)
             # Subagent uses same engine as parent
-            # type: ignore[attr-defined]
             agent = AgentLoop(ollama=ollama, engine=self.engine)
             # Limit subagent iterations — focused task, not full recon
             # process_message respects this over config
@@ -1460,14 +1440,14 @@ class _ExecutorMixin:
             success = False
 
         duration = time.time() - start_time
-        self.state.tool_history.append(  # type: ignore[attr-defined]
+        self.state.tool_history.append(
             ToolExecution(tool_name=tool_name, arguments=arguments,
                           result=res_dict, duration=duration,
                           status="success" if success else "error")
         )
-        self.state.tool_counts["total"] += 1  # type: ignore[attr-defined]
+        self.state.tool_counts["total"] += 1
         self.state.tool_counts["subagents"] = self.state.tool_counts.get(
-            "subagents", 0) + 1  # type: ignore[attr-defined]
+            "subagents", 0) + 1
         return success, duration, res_dict, None
 
     def _normalize_args_for_dedup(
@@ -1496,11 +1476,11 @@ class _ExecutorMixin:
         arguments: dict[str, Any],
         on_output: Callable[[str], None] | None = None,
     ) -> tuple[bool, float, dict[str, Any], str | None]:
-        self._last_output_file = None  # type: ignore[attr-defined]
+        self._last_output_file = None
 
         args_key = self._normalize_args_for_dedup(tool_name, arguments)
         count = self._executed_tool_counts.get(
-            args_key, 0)  # type: ignore[attr-defined]
+            args_key, 0)
         limit = get_config().agent_repeat_tool_call_limit
         if count >= limit:
             return False, 0.0, {
@@ -1548,10 +1528,8 @@ class _ExecutorMixin:
         if tool_name == "execute":
             cmd = arguments.get("command", "")
             if self.state.active_target and cmd and not cmd.strip(
-            ).startswith("cd "):  # type: ignore[attr-defined]
-                # type: ignore[attr-defined]
+            ).startswith("cd "):
                 workspace_dir = f"/workspace/{self.state.active_target}"
-                # type: ignore[attr-defined]
                 host_workspace = get_workspace_root() / self.state.active_target
                 try:
                     host_workspace.mkdir(parents=True, exist_ok=True)
@@ -1573,11 +1551,9 @@ class _ExecutorMixin:
 
         start_time = time.time()
         try:
-            # type: ignore[attr-defined]
             result = await self.engine.execute_tool(tool_name, arguments)
             success = result.get("success", False)
             try:
-                # type: ignore[attr-defined]
                 self._save_tool_output(tool_name, arguments, result)
             except Exception as _e:
                 logger.debug("Could not save tool output: %s", _e)
@@ -1606,27 +1582,24 @@ class _ExecutorMixin:
 
         history_result = result
         if success and self._last_output_file and len(
-                str(result)) > 10000:  # type: ignore[attr-defined]
+                str(result)) > 10000:
             history_result = {
                 "success": True,
-                # type: ignore[attr-defined]
                 "result": f"<Result truncated. Full output in {self._last_output_file}>",
                 "truncated": True,
             }
 
-        self.state.tool_history.append(  # type: ignore[attr-defined]
+        self.state.tool_history.append(
             ToolExecution(
                 tool_name=tool_name, arguments=arguments,
                 result=history_result, duration=duration,
                 status="success" if success else "error",
             )
         )
-        self.state.tool_counts["exec"] += 1  # type: ignore[attr-defined]
-        self.state.tool_counts["total"] += 1  # type: ignore[attr-defined]
+        self.state.tool_counts["exec"] += 1
+        self.state.tool_counts["total"] += 1
 
         if success:
             self._executed_tool_counts[args_key] = self._executed_tool_counts.get(
-                args_key, 0) + 1  # type: ignore[attr-defined]
-
-        # type: ignore[attr-defined]
+                args_key, 0) + 1
         return success, duration, result, self._last_output_file
