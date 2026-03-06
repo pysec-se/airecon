@@ -26,6 +26,7 @@ ollama = "^0.6.1"
 cvss = "^3.6"
 duckduckgo-search = "^8.1.0"
 aiohttp = "^3.9.0"
+defusedxml = "^0.7.1"
 
 [tool.poetry.group.dev.dependencies]
 pytest = "^8.0.0"
