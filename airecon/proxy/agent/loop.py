@@ -564,10 +564,10 @@ class AgentLoop(_ValidatorMixin, _FormatterMixin,
                                         pattern = corr.get("pattern", "?")
                                         desc = corr.get("description", "?")
                                         vectors = corr.get("test_vectors", [])
-                                        vec_str = f" | try: {vectors[0]}" if vectors else ""
+                                        vec_lines = [f"  >> {v}" for v in vectors[:2]]
+                                        vec_str = ("\n" + "\n".join(vec_lines)) if vec_lines else ""
                                         corr_lines.append(
-                                            f"- [{severity}] ZERO-DAY INDICATOR "
-                                            f"({pattern}): {desc}{vec_str}"
+                                            f"- [{severity}] ZERO-DAY ({pattern}): {desc}{vec_str}"
                                         )
 
                                     elif vuln_type == "business_logic":

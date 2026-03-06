@@ -178,7 +178,7 @@ def run_correlation(session: SessionData) -> list[dict]:
                     "pattern": pattern_name,
                     "description": pattern_info.get("description"),
                     "test_vectors": pattern_info.get("test_vectors", []),
-                    "severity": "HIGH",
+                    "severity": pattern_info.get("severity", "HIGH"),
                 }
             )
 
