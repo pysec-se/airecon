@@ -47,7 +47,7 @@ AIRecon is an autonomous penetration testing and bug bounty agent that combines 
 
 ## Why AIRecon?
 
-Commercial API-based agents (Shannon, Strix cloud) require API keys and send your targets, payloads, and findings to third-party servers. For professional security engagements, this is unacceptable.
+Commercial API-based models (OpenAI GPT-4, Claude, Gemini) become prohibitively expensive for recursive, autonomous recon workflows that can require thousands of LLM calls per session.
 
 **AIRecon is built 100% for local, private operation.**
 

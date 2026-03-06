@@ -4,4 +4,4 @@ __pycache__/
 workspace/
 TODO.md
 .pytest_cache/
-
+.claude/
