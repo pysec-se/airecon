@@ -1,14 +1,7 @@
 {
   "price_manipulation": {
     "description": "Price/amount parameter tampering — alter transaction values to pay less or gain unauthorized discounts",
-    "indicators": [
-      "price",
-      "cost",
-      "total",
-      "amount",
-      "cart",
-      "checkout"
-    ],
+    "indicators": ["price", "cost", "total", "amount", "cart", "checkout"],
     "suggested_actions": [
       "Send negative price: POST /checkout with price=-100.00 to trigger credit instead of charge",
       "Intercept payment POST and change amount=0.01 before server-side confirmation",
@@ -18,14 +11,7 @@
   },
   "quantity_manipulation": {
     "description": "Quantity/inventory tampering — negative or overflow values to gain product without payment",
-    "indicators": [
-      "quantity",
-      "qty",
-      "stock",
-      "inventory",
-      "units",
-      "count"
-    ],
+    "indicators": ["quantity", "qty", "stock", "inventory", "units", "count"],
     "suggested_actions": [
       "Send quantity=-1 in add-to-cart POST — may trigger refund credit without actual purchase",
       "Integer overflow: quantity=9999999999 — wraps to 0 or negative if backend uses INT32",
@@ -35,14 +21,7 @@
   },
   "currency_manipulation": {
     "description": "Currency parameter tampering — switch currency to exploit exchange rate discrepancy",
-    "indicators": [
-      "currency",
-      "exchange",
-      "rate",
-      "forex",
-      "convert",
-      "locale"
-    ],
+    "indicators": ["currency", "exchange", "rate", "forex", "convert", "locale"],
     "suggested_actions": [
       "Change currency=USD to currency=IRR or currency=VND — check if price converts correctly at checkout",
       "Send currency=INVALID or currency=XBT and observe fallback behavior or unhandled exception",
@@ -52,14 +31,7 @@
   },
   "coupon_abuse": {
     "description": "Coupon/voucher abuse — reuse codes, stack discounts, or enumerate valid promo codes",
-    "indicators": [
-      "coupon",
-      "discount",
-      "promo",
-      "voucher",
-      "referral",
-      "code"
-    ],
+    "indicators": ["coupon", "discount", "promo", "voucher", "referral", "code"],
     "suggested_actions": [
       "Race condition: send 50 simultaneous POST /redeem with same coupon_code — check if credit applied multiple times",
       "Apply coupon then remove/re-add items — verify discount persists without re-validation",
@@ -69,16 +41,7 @@
   },
   "privilege_escalation": {
     "description": "Privilege escalation via business flow — elevate role/plan without proper authorization",
-    "indicators": [
-      "role",
-      "admin",
-      "permission",
-      "privilege",
-      "plan",
-      "tier",
-      "grant",
-      "scope"
-    ],
+    "indicators": ["role", "admin", "permission", "privilege", "plan", "tier", "grant", "scope"],
     "suggested_actions": [
       "Add is_admin=true or role=admin to registration/profile-update POST body",
       "Intercept subscription upgrade — change plan=basic to plan=enterprise before payment confirmation",
@@ -88,14 +51,7 @@
   },
   "race_condition_transaction": {
     "description": "Race condition in financial transactions — parallel requests exploit TOCTOU for double-spend",
-    "indicators": [
-      "payment",
-      "transfer",
-      "withdraw",
-      "refund",
-      "redeem",
-      "balance"
-    ],
+    "indicators": ["payment", "transfer", "withdraw", "refund", "redeem", "balance"],
     "suggested_actions": [
       "Send 50 simultaneous POST /transfer with same idempotency key using asyncio/threading",
       "Turbo Intruder gate technique: prepare 100 /redeem requests, release all simultaneously",
@@ -105,14 +61,7 @@
   },
   "bypass_rate_limit": {
     "description": "Rate limit bypass — evade throttling via IP rotation headers or distributed requests",
-    "indicators": [
-      "rate",
-      "limit",
-      "throttle",
-      "retry",
-      "quota",
-      "ratelimit"
-    ],
+    "indicators": ["rate", "limit", "throttle", "retry", "quota", "ratelimit"],
     "suggested_actions": [
       "Rotate X-Forwarded-For: 1.2.3.X values — many rate limiters key on IP from this header",
       "Try X-Real-IP, X-Originating-IP, X-Remote-Addr, CF-Connecting-IP with fresh IPs per request",
@@ -122,20 +71,112 @@
   },
   "infinite_credits": {
     "description": "Credit/points/wallet manipulation — negative values or race conditions to gain unlimited credits",
-    "indicators": [
-      "credit",
-      "points",
-      "wallet",
-      "reward",
-      "loyalty",
-      "cashback",
-      "coins"
-    ],
+    "indicators": ["credit", "points", "wallet", "reward", "loyalty", "cashback", "coins"],
     "suggested_actions": [
       "POST /transfer with negative amount: {\"amount\":-100} — may move credits from other accounts to yours",
       "Race condition on credit-earning endpoint: trigger 50 simultaneous requests for same qualifying action",
       "Integer overflow: credits=2147483648 — INT32 wraps to large negative value which may display as positive"
     ],
     "severity": "HIGH"
+  },
+  "subscription_bypass": {
+    "description": "Subscription/plan abuse — access premium features after downgrade, cancel, or expiry",
+    "indicators": ["subscription", "upgrade", "downgrade", "expire", "trial", "premium", "enterprise"],
+    "suggested_actions": [
+      "Upgrade to premium → downgrade to free → check if premium API endpoints/features remain accessible",
+      "Cancel subscription mid-cycle — test if server checks active status on each request or only at login",
+      "Manipulate subscription expiry date field in JWT/cookie if stored client-side — extend trial indefinitely"
+    ],
+    "severity": "HIGH"
+  },
+  "free_trial_abuse": {
+    "description": "Free trial account abuse — create unlimited trials without payment by cycling emails/accounts",
+    "indicators": ["trial", "free", "signup", "register", "demo", "onboard"],
+    "suggested_actions": [
+      "Create multiple accounts using email+alias trick: user+1@gmail.com, user+2@gmail.com — same inbox",
+      "Test if trial extends by changing plan back: free→trial→free repeatedly to reset timer",
+      "Check if trial flag is stored in user object — attempt to set trial_expires=9999999999 via mass assignment"
+    ],
+    "severity": "MEDIUM"
+  },
+  "referral_self_referral": {
+    "description": "Referral program abuse — self-referral to earn bonus or circular referral chains",
+    "indicators": ["referral", "invite", "affiliate", "bonus", "refer", "friend"],
+    "suggested_actions": [
+      "Register new account with your own referral code — check if server validates referred vs referrer",
+      "Circular referral: A refers B, B refers A — check if both earn bonus without any new actual user",
+      "Race: send 50 simultaneous referral completions with same code — check if each awards a bonus"
+    ],
+    "severity": "MEDIUM"
+  },
+  "workflow_step_skip": {
+    "description": "Multi-step workflow manipulation — skip mandatory steps, repeat steps, or reverse flow order",
+    "indicators": ["step", "wizard", "onboard", "verification", "confirm", "kyc", "verify"],
+    "suggested_actions": [
+      "Access step 3 URL directly without completing steps 1 and 2 — check server-side state enforcement",
+      "Complete checkout without visiting payment step — jump from /cart directly to /order/confirm",
+      "Skip email/KYC verification: intercept step-complete request and replay it with different step_id"
+    ],
+    "severity": "HIGH"
+  },
+  "inventory_hoarding": {
+    "description": "Inventory reservation abuse — reserve stock without payment to block competitors or cause DoS",
+    "indicators": ["reserve", "hold", "stock", "availability", "lock", "allocate"],
+    "suggested_actions": [
+      "Add items to cart without checkout — test how long reservation persists and if released on timeout",
+      "Create 1000 carts with item reserved — check if actual inventory decrements causing out-of-stock",
+      "Race: simultaneous reserve requests for last 1 unit — check if both succeed (negative inventory)"
+    ],
+    "severity": "MEDIUM"
+  },
+  "price_locking_expired": {
+    "description": "Expired promotional price locking — checkout with old cached/manipulated price from expired promotion",
+    "indicators": ["sale", "flash", "limited", "offer", "promotion", "deal", "expire"],
+    "suggested_actions": [
+      "Add item to cart during sale → wait for sale to end → complete checkout — check if original price enforced",
+      "Intercept add-to-cart response with sale price → replay add-to-cart POST after sale ends",
+      "Modify price in cart session cookie or localStorage if stored client-side — submit checkout with old price"
+    ],
+    "severity": "HIGH"
+  },
+  "gift_card_manipulation": {
+    "description": "Gift card/voucher value manipulation — alter stored value or enumerate valid card numbers",
+    "indicators": ["gift", "giftcard", "voucher", "redeem", "card", "pin"],
+    "suggested_actions": [
+      "Enumerate gift card numbers: sequential or pattern-based (GC-2024-XXXX) — brute force valid codes",
+      "Check balance endpoint: GET /api/giftcard?code=GC123 — test IDOR to view other cards' balances",
+      "Race condition on redeem: send same gift card code 50x simultaneously — check if credited multiple times"
+    ],
+    "severity": "HIGH"
+  },
+  "multi_tenant_data_isolation": {
+    "description": "Multi-tenant SaaS — insufficient tenant isolation allows cross-tenant data access",
+    "indicators": ["tenant", "organization", "workspace", "company", "team", "account"],
+    "suggested_actions": [
+      "Change tenant_id or org_id in API requests to another organization's ID — test data isolation",
+      "Capture resource IDs from tenant A, access them from tenant B's authenticated session",
+      "Test /api/admin/tenants endpoint — common IDOR allows viewing all tenant data without authorization"
+    ],
+    "severity": "CRITICAL"
+  },
+  "account_enumeration": {
+    "description": "Account/username enumeration via differential response — timing, content, or status code differences",
+    "indicators": ["register", "forgot", "reset", "email", "username", "exist"],
+    "suggested_actions": [
+      "Timing attack: measure response time for valid vs invalid username in login — significant diff = vulnerable",
+      "Password reset: 'Email sent' vs 'User not found' — different messages confirm account existence",
+      "Registration: 'Email already taken' on duplicate = enumerates valid accounts; check for timing too"
+    ],
+    "severity": "MEDIUM"
+  },
+  "shipping_address_fraud": {
+    "description": "Shipping/delivery address manipulation after payment — change delivery after charges applied",
+    "indicators": ["shipping", "delivery", "address", "fulfillment", "dispatch", "tracking"],
+    "suggested_actions": [
+      "Complete payment → immediately PUT /api/order/{id}/shipping with new address before fulfillment",
+      "Test if order address is checked at dispatch or only at checkout — window for IDOR address change",
+      "Intercept fulfillment notification and inject different address if order ID is predictable"
+    ],
+    "severity": "MEDIUM"
   }
 }

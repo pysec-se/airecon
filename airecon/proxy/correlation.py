@@ -3,11 +3,11 @@
 Correlation rules are stored as JSON files in data/ and loaded at import time:
   - data/port_correlations.json        (40+ port rules)
   - data/tech_correlations.json        (86+ technology rules)
-  - data/cve_correlations.json         (20+ CVE rules)
-  - data/attack_chains.json            (10+ attack chain patterns)
-  - data/business_logic_patterns.json  (8+ business logic patterns)
-  - data/expert_testing_patterns.json  (4+ expert testing patterns)
-  - data/zeroday_patterns.json         (3+ zero-day discovery patterns)
+  - data/cve_correlations.json         (50+ CVE rules)
+  - data/attack_chains.json            (32+ attack chain patterns)
+  - data/business_logic_patterns.json  (18+ business logic patterns)
+  - data/patterns.json                 (17+ expert testing patterns)
+  - data/zeroday_patterns.json         (17+ zero-day discovery patterns)
 """
 
 from __future__ import annotations
@@ -47,7 +47,7 @@ ATTACK_CHAINS: list[dict] = _load("attack_chains.json", default=[])
 BUSINESS_LOGIC_PATTERNS: dict[str, dict] = _load(
     "business_logic_patterns.json")
 EXPERT_TESTING_PATTERNS: dict[str, dict] = _load(
-    "expert_testing_patterns.json")
+    "patterns.json")
 ZERODAY_PATTERNS: dict[str, dict] = _load("zeroday_patterns.json")
 
 # Dynamic URL path → technology map built from tech_correlations paths.
