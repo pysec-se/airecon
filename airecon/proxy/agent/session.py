@@ -88,16 +88,12 @@ def _is_duplicate_vulnerability(
         existing_finding = existing.get("finding", "")
         existing_target = existing.get("target", "")
 
-        # If both findings specify a non-empty target and they differ, they are
-        # findings on different endpoints and must NOT be merged regardless of
-        # how similar the description text is.
-        if new_target and existing_target and new_target != existing_target:
-            continue
-
-        # Check finding similarity
+        # Check finding similarity — _calculate_similarity already returns 0.0
+        # when the two findings mention different URL parameters, preventing
+        # false deduplication of findings on different parameters.
         finding_sim = _calculate_similarity(new_finding, existing_finding)
 
-        # Target similarity only applies when one side has no target
+        # Check target similarity (if both have targets)
         target_sim = 1.0 if new_target == existing_target else 0.0
 
         # Combined similarity
