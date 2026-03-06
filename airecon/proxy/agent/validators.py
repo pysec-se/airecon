@@ -1,6 +1,159 @@
+"""Validation helpers for AIRecon.
+
+Two layers of validation live here:
+
+1. **Command/path validation** (module-level functions):
+   - `validate_target_path` — prevent path traversal out of /workspace
+   - `has_dangerous_patterns` — detect rm -rf /, fork bombs, etc.
+   - `validate_for_execution` — combined pre-execution check
+
+2. **Tool-argument validation** (_ValidatorMixin):
+   - `_validate_tool_args` — validate per-tool arguments before dispatch
+"""
+
 from __future__ import annotations
 
+import ast
+import logging
+import re
+from pathlib import Path
 from typing import Any
+
+logger = logging.getLogger("airecon.validation")
+
+
+# ── Path / command validation ─────────────────────────────────────────────────
+
+def validate_target_path(
+    target: str, base_dir: str | Path = "/workspace"
+) -> tuple[bool, str | Path]:
+    """Validate that target path stays within base_dir.
+
+    Returns: (is_valid, resolved_path_or_error_message)
+
+    Prevents:
+    - Path traversal attacks (../../../etc/passwd)
+    - Symlink attacks (links to parent directories)
+    - Shell metacharacters in paths
+    """
+    try:
+        base_path = Path(base_dir).resolve()
+        target_path = (base_path / target).resolve()
+
+        try:
+            target_path.relative_to(base_path)
+        except ValueError:
+            return False, f"Path traversal detected: {target} escapes {base_dir}"
+
+        dangerous_chars = [";", "|", "$", "`", "(", ")", "&", "<", ">", "\n", "\r"]
+        if any(char in target for char in dangerous_chars):
+            return False, f"Invalid characters in path: {target}"
+
+        return True, target_path
+
+    except Exception as e:
+        return False, f"Path validation error: {str(e)}"
+
+
+def extract_paths_from_command(command: str) -> list[str]:
+    """Extract file paths referenced by known output flags in a bash command.
+
+    Note: only inspects known flag patterns (-o, >, -t, --targets).
+    Positional arguments are NOT inspected — this is a deliberate design
+    choice to avoid false positives on host/URL arguments.
+    """
+    patterns = [
+        r"-o\s+(\S+)",        # -o /path/to/output
+        r"-output\s+(\S+)",   # -output /path
+        r">\s*(\S+)",         # > /path (redirect)
+        r">>\s*(\S+)",        # >> /path (append)
+        r"-t\s+(\S+)",        # -t /path/to/targets
+        r"--targets\s+(\S+)", # --targets /path
+    ]
+    paths: list[str] = []
+    for pattern in patterns:
+        paths.extend(re.findall(pattern, command))
+    return paths
+
+
+def validate_command_paths(
+    command: str, base_dir: str | Path = "/workspace"
+) -> tuple[bool, str]:
+    """Validate all flag-referenced paths in a command stay within base_dir.
+
+    Returns: (is_valid, error_message or empty string)
+    """
+    for path in extract_paths_from_command(command):
+        is_valid, error = validate_target_path(path, base_dir)
+        if not is_valid:
+            return False, str(error)
+    return True, ""
+
+
+def validate_paths_in_semgrep_args(
+    target_path: str, base_dir: str | Path = "/workspace"
+) -> tuple[bool, str]:
+    """Validate semgrep target path."""
+    return validate_target_path(target_path, base_dir)  # type: ignore[return-value]
+
+
+def validate_paths_in_filesystem_args(
+    file_path: str, base_dir: str | Path = "/workspace"
+) -> tuple[bool, str]:
+    """Validate filesystem operation paths (cat, grep, find, etc)."""
+    return validate_target_path(file_path, base_dir)  # type: ignore[return-value]
+
+
+# Precompiled dangerous patterns for faster checking
+DANGEROUS_PATTERNS: list[tuple[str, str]] = [
+    (r"rm\s+-rf\s+/", "Dangerous: rm -rf / detected"),
+    (r"dd\s+if=.*of=/dev", "Dangerous: writing to /dev"),
+    # Fork bomb: matches compact :(){:|:&};: and spaced variants
+    (r":\s*\(\s*\)\s*\{.*:\s*\|.*:\s*&", "Dangerous: fork bomb detected"),
+    (r">\s*/dev/sd[a-z]", "Dangerous: writing to disk device"),
+    (r"pkill\s+-9", "Dangerous: killing critical processes"),
+]
+
+
+def has_dangerous_patterns(command: str) -> tuple[bool, str]:
+    """Check if command contains dangerous patterns.
+
+    Returns: (has_dangerous, pattern_description or empty string)
+    """
+    for pattern, description in DANGEROUS_PATTERNS:
+        if re.search(pattern, command, re.IGNORECASE):
+            return True, description
+    return False, ""
+
+
+def validate_for_execution(
+    command: str, base_dir: str | Path = "/workspace"
+) -> tuple[bool, str]:
+    """Complete validation before command execution.
+
+    Checks dangerous patterns first (fast), then path validity.
+    Returns: (is_valid, error_message or empty string)
+    """
+    has_danger, danger_msg = has_dangerous_patterns(command)
+    if has_danger:
+        return False, danger_msg
+    return validate_command_paths(command, base_dir)
+
+
+# ── Tool-argument validation (mixin for AgentLoop) ────────────────────────────
+
+# Compiled once at import time — used in _validate_tool_args for reports
+_HTTP_EVIDENCE_RE = re.compile(
+    r"(http\s+[2345]\d{2}|status[:\s]+[2345]\d{2}|code\s+[2345]\d{2}|"
+    r"\b[2345]\d{2}\s+(ok|found|forbidden|redirect|not found|created|"
+    r"accepted|no content|moved|unauthorized|bad request|internal server error|"
+    r"forbidden|unauthorized|forbidden)\b|"
+    r"response[:\s]+[2345]\d{2}|→\s*[2345]\d{2}|"
+    r"\[[2345]\d{2}\]|\([2345]\d{2}\)|\{[2345]\d{2}\}|"
+    r"returned\s+[2345]\d{2}|returns\s+[2345]\d{2}|got\s+[2345]\d{2}|"
+    r"observed[:\s]+[2345]\d{2}|status\s*[2345]\d{2})",
+    re.IGNORECASE,
+)
 
 
 class _ValidatorMixin:
@@ -95,11 +248,6 @@ class _ValidatorMixin:
             technical = arguments.get("technical_analysis", "").strip()
             is_ctf = bool(arguments.get("flag", "").strip())
 
-            POC_CODE_INDICATORS = (
-                "import ", "requests.", "curl ", "http", "def ", "response",
-                "payload", "exploit", "fetch(", "<?php", "<script", "burp",
-                "#!/", "python", "urllib",
-            )
             if not poc_code:
                 return False, (
                     "REPORT REJECTED: 'poc_script_code' is empty. "
@@ -111,11 +259,40 @@ class _ValidatorMixin:
                         len(poc_code)} chars). "
                     "Provide a real exploit: Python script, curl command, or HTTP request."
                 )
-            if not any(ind in poc_code.lower() for ind in POC_CODE_INDICATORS):
-                return False, (
-                    "REPORT REJECTED: 'poc_script_code' does not look like code. "
-                    "It must contain executable commands (curl, Python requests, HTTP request, etc.)."
+
+            # Determine PoC type and validate structure accordingly
+            poc_lower = poc_code.lower()
+            _is_python = any(sig in poc_lower for sig in (
+                "import ", "def ", "#!/usr/bin/env python", "#!/usr/bin/python",
+                "requests.", "urllib", "http.client",
+            ))
+            _is_curl = poc_lower.lstrip().startswith("curl ")
+            _is_php = "<?php" in poc_lower
+            _is_js = any(sig in poc_lower for sig in ("fetch(", "xmlhttprequest", "require("))
+            _is_bash = "#!/bin/bash" in poc_lower or "#!/bin/sh" in poc_lower
+
+            if _is_python:
+                # Validate Python syntax with ast.parse()
+                try:
+                    ast.parse(poc_code)
+                except SyntaxError as syn_err:
+                    return False, (
+                        f"REPORT REJECTED: 'poc_script_code' is not valid Python — "
+                        f"SyntaxError at line {syn_err.lineno}: {syn_err.msg}. "
+                        "Fix the syntax or provide a curl command instead."
+                    )
+            elif not (_is_curl or _is_php or _is_js or _is_bash):
+                # Fallback: must contain at least one concrete code indicator
+                NON_PYTHON_INDICATORS = (
+                    "curl ", "http", "payload", "exploit", "fetch(",
+                    "<?php", "<script", "burp", "#!/", "request",
                 )
+                if not any(ind in poc_lower for ind in NON_PYTHON_INDICATORS):
+                    return False, (
+                        "REPORT REJECTED: 'poc_script_code' does not look like code. "
+                        "It must be a Python script (with valid syntax), a curl command, "
+                        "PHP/JS snippet, or an HTTP request."
+                    )
             if not poc_desc or len(poc_desc) < 80:
                 return False, (
                     f"REPORT REJECTED: 'poc_description' is too short ({
@@ -139,8 +316,6 @@ class _ValidatorMixin:
                     f"REPORT REJECTED: Title '{title}' is too vague. "
                     "Use a specific title like 'SQL Injection in /api/login username parameter'."
                 )
-            # Reject unverified/speculative findings — all reports must be
-            # confirmed
             UNVERIFIED_PHRASES = (
                 "further verification needed", "needs verification", "needs to be verified",
                 "may be vulnerable", "could be vulnerable", "appears to be vulnerable",
@@ -156,30 +331,13 @@ class _ValidatorMixin:
                         "Only submit findings you have CONFIRMED by observing actual exploitation impact. "
                         "Do not submit speculative or unverified findings."
                     )
-            # poc_script_code must reference a real URL (not a generic
-            # template)
             if "http" not in poc_code.lower() and "curl" not in poc_code.lower():
                 return False, (
                     "REPORT REJECTED: 'poc_script_code' must include the actual target URL. "
                     "Show the real HTTP request that demonstrates the vulnerability."
                 )
-            # HTTP evidence check only for full reports, not CTF
             if not is_ctf:
-                # poc_description must contain observed HTTP response evidence
-                # (a status code like 200, 301, 403 proves the request was actually made)
-                import re as _re
-                _HTTP_EVIDENCE = _re.compile(
-                    r"(http\s+[2345]\d{2}|status[:\s]+[2345]\d{2}|code\s+[2345]\d{2}|"
-                    r"\b[2345]\d{2}\s+(ok|found|forbidden|redirect|not found|created|"
-                    r"accepted|no content|moved|unauthorized|bad request|internal server error|"
-                    r"forbidden|unauthorized|forbidden)\b|"
-                    r"response[:\s]+[2345]\d{2}|→\s*[2345]\d{2}|"
-                    r"\[[2345]\d{2}\]|\([2345]\d{2}\)|\{[2345]\d{2}\}|"
-                    r"returned\s+[2345]\d{2}|returns\s+[2345]\d{2}|got\s+[2345]\d{2}|"
-                    r"observed[:\s]+[2345]\d{2}|status\s*[2345]\d{2})",
-                    _re.IGNORECASE,
-                )
-                if not _HTTP_EVIDENCE.search(poc_desc):
+                if not _HTTP_EVIDENCE_RE.search(poc_desc):
                     return False, (
                         "REPORT REJECTED: 'poc_description' must include actual HTTP response evidence. "
                         "Show the real status code and response data you observed, e.g.: "

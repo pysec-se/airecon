@@ -132,22 +132,53 @@ class OllamaClient:
         except Exception:
             return False
 
-    async def complete(self, messages: list[dict[str, Any]]) -> str:
+    async def complete(self, messages: list[dict[str, Any]], max_retries: int = 3) -> str:
         """Non-streaming single completion for internal use (e.g. memory compression).
 
         Returns the assistant message content as a plain string.
+        Retries up to max_retries times with exponential backoff on transient errors.
         """
-        response = await self._client.chat(
-            model=self.model,
-            messages=messages,
-            stream=False,
-            keep_alive=get_config().ollama_keep_alive,
+        import asyncio
+
+        last_err: Exception | None = None
+        for attempt in range(max_retries + 1):
+            try:
+                response = await self._client.chat(
+                    model=self.model,
+                    messages=messages,
+                    stream=False,
+                    keep_alive=get_config().ollama_keep_alive,
+                )
+                if hasattr(response, "message"):
+                    return response.message.content or ""
+                if isinstance(response, dict):
+                    return response.get("message", {}).get("content", "")
+                return ""
+
+            except Exception as e:
+                err_str = str(e).lower()
+                is_transient = any(
+                    k in err_str
+                    for k in (
+                        "connection reset", "connection refused", "eof",
+                        "broken pipe", "timeout", "timed out",
+                        "network", "connection error",
+                    )
+                )
+                if is_transient and attempt < max_retries:
+                    wait = 2 ** (attempt + 1)  # 2s, 4s, 8s
+                    logger.warning(
+                        f"Transient Ollama error in complete() (attempt "
+                        f"{attempt + 1}/{max_retries + 1}), retrying in {wait}s: {e}"
+                    )
+                    last_err = e
+                    await asyncio.sleep(wait)
+                    continue
+                raise
+
+        raise RuntimeError(
+            f"Ollama complete() failed after {max_retries + 1} attempts: {last_err}"
         )
-        if hasattr(response, "message"):
-            return response.message.content or ""
-        if isinstance(response, dict):
-            return response.get("message", {}).get("content", "")
-        return ""
 
     async def chat_stream(
         self,
@@ -155,7 +186,7 @@ class OllamaClient:
         tools: list[dict[str, Any]] | None = None,
         options: dict[str, Any] | None = None,
         think: bool = False,
-        max_retries: int = 2,
+        max_retries: int = 3,
     ) -> AsyncIterator[Any]:
         """
         Streaming chat completion using SDK.
@@ -199,12 +230,12 @@ class OllamaClient:
                     )
                 # Other ResponseErrors (model loading, transient) → retry
                 if attempt < max_retries:
-                    wait = 1.5 * (attempt + 1)
+                    wait = 2 ** (attempt + 1)  # 2s, 4s, 8s
                     logger.warning(
                         f"Ollama ResponseError (attempt {
                             attempt + 1}/{
                             max_retries + 1}), "
-                        f"retrying in {wait:.1f}s: {e.error}"
+                        f"retrying in {wait}s: {e.error}"
                     )
                     last_err = e
                     await asyncio.sleep(wait)
@@ -232,12 +263,12 @@ class OllamaClient:
                     )
                 )
                 if is_transient and attempt < max_retries:
-                    wait = 1.5 * (attempt + 1)
+                    wait = 2 ** (attempt + 1)  # 2s, 4s, 8s
                     logger.warning(
                         f"Transient Ollama error (attempt {
                             attempt + 1}/{
                             max_retries + 1}), "
-                        f"retrying in {wait:.1f}s: {e}"
+                        f"retrying in {wait}s: {e}"
                     )
                     last_err = e
                     await asyncio.sleep(wait)
