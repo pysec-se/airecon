@@ -235,7 +235,7 @@ def _load_local_skills(ctf_mode: bool = False) -> str:
 
 def _load_skill_keywords() -> dict[str, str]:
     """Load skill keywords from data/skills.json.
-    
+
     Returns a mapping of keyword → skill file path.
     Falls back to empty dict if file not found.
     """

@@ -274,7 +274,8 @@ class PipelineEngine:
 
         # Validate current phase has met minimum criteria
         if not self._evaluate_criteria(current):
-            logger.warning(f"Attempted transition from {current.value} without meeting criteria")
+            logger.warning(
+                f"Attempted transition from {current.value} without meeting criteria")
             return current
 
         # Mark current phase as completed

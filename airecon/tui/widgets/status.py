@@ -177,13 +177,14 @@ class SkillsModal(ModalScreen):
     def compose(self) -> ComposeResult:
         with Container(id="skills-dialog"):
             yield Label(f"Loaded Skills ({len(self.skills)})", id="skills-title")
-            
+
             # Format skills as a markdown list for better readability
-            skills_md = "\n".join(f"- `{skill}`" for skill in self.skills) if self.skills else "*No skills loaded yet*"
-            
+            skills_md = "\n".join(
+                f"- `{skill}`" for skill in self.skills) if self.skills else "*No skills loaded yet*"
+
             with Vertical(id="skills-content"):
                 yield Markdown(skills_md)
-                
+
             with Container(id="skills-close-container"):
                 yield Button("Close", variant="primary", id="skills-close-btn")
 

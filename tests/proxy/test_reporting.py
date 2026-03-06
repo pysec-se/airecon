@@ -22,7 +22,7 @@ def test_reporting_validation_fails_missing_required():
         poc_description="poc",
         poc_script_code="code"
     )
-    
+
     assert result["success"] is False
     assert "Title cannot be empty" in result["errors"]
 
@@ -36,14 +36,14 @@ def test_reporting_validation_fails_invalid_cve():
         poc_script_code="code",
         cve="INVALID-CVE-FORMAT"
     )
-    
+
     assert result["success"] is False
     assert "Invalid CVE format" in result["message"]
 
 
 def test_reporting_success_and_file_creation(tmp_path):
     workspace = str(tmp_path)
-    
+
     result = create_vulnerability_report(
         title="SQL Injection in Login",
         description="A classic SQLi.",
@@ -61,13 +61,13 @@ def test_reporting_success_and_file_creation(tmp_path):
         availability="H",
         _workspace_root=workspace
     )
-    
+
     assert result["success"] is True
     assert result["severity"] == "critical"
-    
+
     filepath = result["report_path"]
     assert os.path.exists(filepath)
-    
+
     with open(filepath, "r") as f:
         content = f.read()
         assert "# SQL Injection in Login" in content
@@ -78,7 +78,7 @@ def test_reporting_success_and_file_creation(tmp_path):
 
 def test_reporting_duplicate_collision(tmp_path):
     workspace = str(tmp_path)
-    
+
     # Create first time
     create_vulnerability_report(
         title="Identical Finding",
@@ -88,7 +88,7 @@ def test_reporting_duplicate_collision(tmp_path):
         poc_script_code="code",
         _workspace_root=workspace
     )
-    
+
     # Try again
     result2 = create_vulnerability_report(
         title="Identical Finding",
@@ -98,7 +98,7 @@ def test_reporting_duplicate_collision(tmp_path):
         poc_script_code="code",
         _workspace_root=workspace
     )
-    
+
     assert result2["success"] is False
     assert "already exists" in result2["message"]
     assert result2["duplicate_of"] == "identical_finding"

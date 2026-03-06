@@ -355,7 +355,8 @@ class StreamingMessage(Static):
             yield Static("◆ AIRecon", classes="role-label role-label-assistant")
             self._initial_label_yielded = True
         # Disable markup to prevent parsing errors on special characters (e.g., =alert(1)>)
-        self._text_widget = Static("", classes="streaming-content", markup=False)
+        self._text_widget = Static(
+            "", classes="streaming-content", markup=False)
         yield self._text_widget
         yield Static("●", classes="streaming-indicator")
 

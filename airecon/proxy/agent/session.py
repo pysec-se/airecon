@@ -45,10 +45,11 @@ def _calculate_similarity(v1: str, v2: str) -> float:
         return 1.0
 
     # Extract parameter context to avoid false dedup of diff params
-    param_re = re.compile(r"(?:[?&]([a-z0-9_\[\]\-]+)=|parameter\s+['\"]?([a-z0-9_\[\]\-]+)['\"]?)")
+    param_re = re.compile(
+        r"(?:[?&]([a-z0-9_\[\]\-]+)=|parameter\s+['\"]?([a-z0-9_\[\]\-]+)['\"]?)")
     m1 = param_re.search(v1_lower)
     m2 = param_re.search(v2_lower)
-    
+
     if m1 and m2:
         p1 = m1.group(1) or m1.group(2)
         p2 = m2.group(1) or m2.group(2)

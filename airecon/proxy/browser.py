@@ -65,6 +65,7 @@ _state = _BrowserState()
 
 _event_loop_ready = threading.Event()
 
+
 def _ensure_event_loop() -> None:
     if _state.event_loop is not None:
         return
@@ -250,15 +251,16 @@ class BrowserInstance:
             viewport={"width": 1280, "height": 720},
             user_agent="Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36",
         )
-        
+
         # Restore authentication cookies if provided (from resumed session)
         if auth_cookies:
             try:
                 await self.context.add_cookies(auth_cookies)
-                logger.info(f"Restored {len(auth_cookies)} auth cookies from session")
+                logger.info(
+                    f"Restored {len(auth_cookies)} auth cookies from session")
             except Exception as e:
                 logger.warning(f"Failed to restore auth cookies: {e}")
-        
+
         page = await self.context.new_page()
         tab_id = f"tab_{self._next_tab_id}"
         self._next_tab_id += 1
@@ -458,12 +460,12 @@ class BrowserInstance:
         with self._execution_lock:
             return self._run_async(self._execute_js(js_code, tab_id))
 
-    async def _execute_js(self, js_code: str, tab_id: str | None = None, 
-                         parallel: bool = False) -> dict[str, Any]:
+    async def _execute_js(self, js_code: str, tab_id: str | None = None,
+                          parallel: bool = False) -> dict[str, Any]:
         """Execute JavaScript code in a tab, optionally in parallel across all tabs."""
         if not js_code:
             raise ValueError("js_code is required for execute_js action")
-            
+
         if not parallel:
             tab_id = self._resolve_tab_id(tab_id)
             page = self.pages[tab_id]
@@ -483,7 +485,8 @@ class BrowserInstance:
             results = await asyncio.gather(*tasks, return_exceptions=True)
             result = {
                 "parallel_results": {
-                    tid: res if not isinstance(res, Exception) else {"error": str(res)}
+                    tid: res if not isinstance(res, Exception) else {
+                        "error": str(res)}
                     for tid, res in zip(self.pages.keys(), results)
                 }
             }
@@ -494,9 +497,9 @@ class BrowserInstance:
         state = await self._get_page_state(tab_id)
         state["js_result"] = result
         return state
-        
-    async def _execute_js_single(self, page: Any, js_code: str, 
-                                tab_id: str) -> dict[str, Any]:
+
+    async def _execute_js_single(self, page: Any, js_code: str,
+                                 tab_id: str) -> dict[str, Any]:
         """Execute JS in a single tab - helper for parallel execution."""
         try:
             result = await page.evaluate(js_code)

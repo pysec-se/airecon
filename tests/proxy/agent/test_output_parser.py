@@ -6,7 +6,8 @@ from airecon.proxy.agent.output_parser import parse_tool_output, ParsedOutput, d
 def test_detect_tool():
     assert detect_tool("nmap -sV -p- 10.0.0.1") == "nmap"
     assert detect_tool("sudo      nmap -v example.com") == "nmap"
-    assert detect_tool("ffuf -w wordlist.txt -u http://example.com/FUZZ") == "ffuf"
+    assert detect_tool(
+        "ffuf -w wordlist.txt -u http://example.com/FUZZ") == "ffuf"
     assert detect_tool("unknowncommand arg1 arg2") is None
 
 
@@ -33,10 +34,11 @@ PORT    STATE SERVICE  VERSION
 
 def test_parse_ffuf_jsonl():
     ffuf_out = json.dumps({"results": [
-        {"url": "http://example.com/admin", "status": 200, "length": 421, "words": 15},
+        {"url": "http://example.com/admin",
+            "status": 200, "length": 421, "words": 15},
         {"url": "http://example.com/login", "status": 403, "length": 190, "words": 5}
     ]})
-    
+
     parsed = parse_tool_output("ffuf", ffuf_out)
     assert parsed.tool == "ffuf"
     assert parsed.total_count == 2
@@ -51,11 +53,11 @@ def test_parse_httpx_jsonl_with_tech():
         "title": "Welcome",
         "tech": ["nginx/1.24", "PHP/8.1", "React"]
     }) + "\n"
-    
+
     parsed = parse_tool_output("httpx", httpx_out)
     assert parsed.tool == "httpx"
     assert parsed.total_count == 1
-    
+
     # Ensures technology parsing logic extracts pairs properly
     assert parsed.technologies.get("nginx") == "1.24"
     assert parsed.technologies.get("React") == ""
@@ -83,7 +85,7 @@ def test_generic_smart_parser_fallback():
     """
     # Force generic parser explicitly by giving a command with no known tool
     parsed = parse_tool_output("someunknowntool", output)
-    assert parsed.tool == "someunknowntool" 
+    assert parsed.tool == "someunknowntool"
     # The Generic Tagged parser retains non-tagged lines (like the header)
     assert parsed.total_count == 4
     assert "[+]" in parsed.items[1]

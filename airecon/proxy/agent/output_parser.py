@@ -601,7 +601,8 @@ def _parse_generic_smart(stdout: str) -> ParsedOutput:
     Handles: JSON lines, CSV-like tables, URL lists, key:value pairs,
     bracket-tagged lines [TAG] content, and generic text.
     """
-    lines = [line.strip() for line in stdout.strip().split("\n") if line.strip()]
+    lines = [line.strip()
+             for line in stdout.strip().split("\n") if line.strip()]
     total = len(lines)
 
     if total == 0:

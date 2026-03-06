@@ -248,7 +248,8 @@ class _FormatterMixin:
 
             lines = [line for line in stdout.split("\n") if line.strip()]
             count = len(lines)
-            is_list = all(len(line) < 100 for line in lines[:5]) if lines else False
+            is_list = all(
+                len(line) < 100 for line in lines[:5]) if lines else False
             if count > 10:
                 if is_list:
                     preview = "\n".join(f"  {line}" for line in lines[:8])

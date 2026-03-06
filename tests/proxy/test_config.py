@@ -22,11 +22,11 @@ def test_config_file_loading(tmp_path):
         json.dump(custom_settings, f)
 
     cfg = Config.load(config_file)
-    
+
     # Custom values should be present
     assert cfg.ollama_model == "test-model:latest"
     assert cfg.proxy_port == 8080
-    
+
     # Missing values should fall back to default
     assert cfg.docker_image == DEFAULT_CONFIG["docker_image"]
     assert cfg.ollama_timeout == DEFAULT_CONFIG["ollama_timeout"]
@@ -46,7 +46,7 @@ def test_config_env_overrides(tmp_path, monkeypatch):
 
 def test_config_invalid_env_types_ignored(tmp_path, monkeypatch):
     monkeypatch.setenv("AIRECON_PROXY_PORT", "not-a-number")
-    
+
     cfg = Config.load(tmp_path / "missing_config.json")
     # Should ignore the invalid int conversion and keep default
     assert cfg.proxy_port == DEFAULT_CONFIG["proxy_port"]

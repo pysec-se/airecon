@@ -417,7 +417,7 @@ class AIReconApp(App):
                     caido_data = data.get("agent", {}).get("caido", {})
                     caido_active = caido_data.get("active", False)
                     caido_findings = caido_data.get("findings_count", 0)
-                    
+
                     self.query_one("#status-bar", StatusBar).set_status(
                         ollama="online" if ollama_ok else "offline",
                         docker="online" if docker_ok else "offline",
@@ -818,24 +818,31 @@ class AIReconApp(App):
                                 status_bar = self.query_one(
                                     "#status-bar", StatusBar)
                                 status_update_kwargs = {}
-                                
+
                                 if _tc:
-                                    status_update_kwargs["exec_used"] = _tc.get("exec", 0)
-                                    status_update_kwargs["subagents"] = _tc.get("subagents", 0)
-                                
+                                    status_update_kwargs["exec_used"] = _tc.get(
+                                        "exec", 0)
+                                    status_update_kwargs["subagents"] = _tc.get(
+                                        "subagents", 0)
+
                                 if _ti:
-                                    status_update_kwargs["tokens"] = _ti.get("used", 0)
-                                    status_update_kwargs["token_limit"] = _ti.get("limit", 65536)
-                                
+                                    status_update_kwargs["tokens"] = _ti.get(
+                                        "used", 0)
+                                    status_update_kwargs["token_limit"] = _ti.get(
+                                        "limit", 65536)
+
                                 if _sk:
                                     status_update_kwargs["skills"] = _sk
-                                
+
                                 if _cd:
-                                    status_update_kwargs["caido_active"] = _cd.get("active", False)
-                                    status_update_kwargs["caido_findings"] = _cd.get("findings_count", 0)
-                                
+                                    status_update_kwargs["caido_active"] = _cd.get(
+                                        "active", False)
+                                    status_update_kwargs["caido_findings"] = _cd.get(
+                                        "findings_count", 0)
+
                                 if status_update_kwargs:
-                                    status_bar.set_status(**status_update_kwargs)
+                                    status_bar.set_status(
+                                        **status_update_kwargs)
                             except Exception:
                                 pass
 

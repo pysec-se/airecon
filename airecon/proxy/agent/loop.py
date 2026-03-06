@@ -162,9 +162,8 @@ class AgentLoop(_ValidatorMixin, _FormatterMixin,
             if self._override_max_iterations is None:
                 self._override_max_iterations = self._CTF_MAX_ITERATIONS
             logger.info(
-                f"CTF mode activated for target={
-                    target!r} — max iterations capped at "
-                f"{self._CTF_MAX_ITERATIONS}"
+                f"CTF mode activated for target={target!r} "
+                f"— max iterations capped at {self._CTF_MAX_ITERATIONS}"
             )
         engine_tools = await self.engine.discover_tools()
         self._tools_ollama = self.engine.tools_to_ollama_format(engine_tools)
@@ -349,7 +348,8 @@ class AgentLoop(_ValidatorMixin, _FormatterMixin,
                 {"role": "user", "content": user_message})
 
             # Auto-load relevant skills based on user message keywords
-            skill_context, loaded_skills = auto_load_skills_for_message(user_message)
+            skill_context, loaded_skills = auto_load_skills_for_message(
+                user_message)
             if loaded_skills:
                 for s in loaded_skills:
                     if s not in self.state.skills_used:
@@ -824,17 +824,20 @@ class AgentLoop(_ValidatorMixin, _FormatterMixin,
                             content_acc += _carry
                             yield AgentEvent(type="text", data={"content": _carry})
                             _carry = ""
-                        
+
                         # Extract token usage from last chunk
                         if _last_chunk_data:
                             # Ollama returns eval_count (tokens generated) and prompt_eval_count (tokens in prompt)
-                            eval_count = _last_chunk_data.get("eval_count", 0)  # tokens generated
-                            prompt_eval_count = _last_chunk_data.get("prompt_eval_count", 0)  # tokens in prompt
+                            eval_count = _last_chunk_data.get(
+                                "eval_count", 0)  # tokens generated
+                            prompt_eval_count = _last_chunk_data.get(
+                                "prompt_eval_count", 0)  # tokens in prompt
                             total_tokens = eval_count + prompt_eval_count
                             if total_tokens > 0:
                                 self.state.token_usage["used"] = total_tokens
-                                logger.debug(f"Token usage: prompt={prompt_eval_count}, generated={eval_count}, total={total_tokens}")
-                        
+                                logger.debug(
+                                    f"Token usage: prompt={prompt_eval_count}, generated={eval_count}, total={total_tokens}")
+
                         break  # stream completed — exit retry loop
                     except Exception as stream_err:
                         err_str = str(stream_err)
@@ -924,10 +927,13 @@ class AgentLoop(_ValidatorMixin, _FormatterMixin,
 
                 # Enhanced hallucination check: stricter in EXPLOIT phase or after vulnerability found
                 has_prior_tool_runs = last_iteration_had_tools
-                is_exploit_phase = self.pipeline and self.pipeline.get_current_phase() == PipelinePhase.EXPLOIT
-                has_vulns = self._session and len(self._session.vulnerabilities) > 0
-                is_post_vuln_context = has_vulns and (is_exploit_phase or self.state.iteration > 15)
-                
+                is_exploit_phase = self.pipeline and self.pipeline.get_current_phase(
+                ) == PipelinePhase.EXPLOIT
+                has_vulns = self._session and len(
+                    self._session.vulnerabilities) > 0
+                is_post_vuln_context = has_vulns and (
+                    is_exploit_phase or self.state.iteration > 15)
+
                 if has_hallucination_risk and not tool_calls_acc and not has_prior_tool_runs:
                     if is_post_vuln_context:
                         # STRICT MODE: After vulnerability found, tool calls are MANDATORY
@@ -981,7 +987,8 @@ class AgentLoop(_ValidatorMixin, _FormatterMixin,
                 # --- TEXT-ONLY RESPONSE DETECTION IN EXPLOIT PHASE ---
                 # If we're in EXPLOIT phase and got text-only response (no tools),
                 # detect if it's analysis-only hallucination
-                is_exploit_phase = self.pipeline and self.pipeline.get_current_phase() == PipelinePhase.EXPLOIT
+                is_exploit_phase = self.pipeline and self.pipeline.get_current_phase(
+                ) == PipelinePhase.EXPLOIT
                 if is_exploit_phase and not tool_calls_acc and content_acc.strip():
                     # Check if response is analysis-only (claims without verification)
                     analysis_keywords = [
@@ -992,8 +999,9 @@ class AgentLoop(_ValidatorMixin, _FormatterMixin,
                     is_analysis_text = any(
                         keyword in content_acc.lower() for keyword in analysis_keywords
                     )
-                    
-                    if is_analysis_text and len(content_acc) < 500:  # Short text = likely plan/analysis
+
+                    # Short text = likely plan/analysis
+                    if is_analysis_text and len(content_acc) < 500:
                         logger.warning(
                             "Text-only analysis response in EXPLOIT phase detected. "
                             "Forcing tool execution."
@@ -1029,7 +1037,7 @@ class AgentLoop(_ValidatorMixin, _FormatterMixin,
                 if _llm_output_for_skills:
                     _new_skill_ctx, _new_loaded_skills = auto_load_skills_for_message(
                         _llm_output_for_skills)
-                    
+
                     if _new_loaded_skills:
                         for s in _new_loaded_skills:
                             if s not in self.state.skills_used:

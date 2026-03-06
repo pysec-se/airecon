@@ -49,7 +49,7 @@ class _ExecutorMixin:
         start_time = time.time()
         try:
             result = await asyncio.to_thread(browser_action, **arguments)
-            
+
             # Auto-inject session cookies immediately after launch
             if arguments.get("action") == "launch" and hasattr(self, "_session"):
                 cookies = getattr(self._session, "auth_cookies", [])
@@ -68,7 +68,8 @@ class _ExecutorMixin:
                                 url=arguments["url"]
                             )
                     except Exception as e:
-                        logger.warning(f"Failed to auto-inject session cookies: {e}")
+                        logger.warning(
+                            f"Failed to auto-inject session cookies: {e}")
 
             success = not (isinstance(result, dict) and "error" in result)
             if not success and isinstance(result, dict) and "error" in result:
@@ -294,9 +295,12 @@ class _ExecutorMixin:
             elif tool_name == "read_file":
                 path_arg_clean = arguments.get("path", "")
                 if "skills/" in path_arg_clean and path_arg_clean.endswith(".md"):
-                    skill_name = os.path.basename(path_arg_clean).replace(".md", "")
-                    if skill_name not in self.state.skills_used:  # type: ignore[attr-defined]
-                        self.state.skills_used.append(skill_name)  # type: ignore[attr-defined]
+                    skill_name = os.path.basename(
+                        path_arg_clean).replace(".md", "")
+                    # type: ignore[attr-defined]
+                    if skill_name not in self.state.skills_used:
+                        # type: ignore[attr-defined]
+                        self.state.skills_used.append(skill_name)
                 result = await asyncio.to_thread(
                     read_file,
                     path=path_arg_clean,

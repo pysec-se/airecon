@@ -200,16 +200,18 @@ async def web_search(query: str, max_results: int = 10, use_cache: bool = True) 
         return result
 
     result = await _ddg_search(query, max_results)
-    
+
     # Cache successful results
     if result.get("success") and use_cache:
         _cache_results(query, max_results, result)
-    
+
     return result
+
 
 def _get_cache_key(query: str, max_results: int) -> str:
     """Generate a unique cache key for the search parameters."""
     return hashlib.md5(f"{query}:{max_results}".encode()).hexdigest()
+
 
 def _get_cached_results(query: str, max_results: int) -> dict[str, Any] | None:
     """Get cached results if they exist and are fresh."""
@@ -217,19 +219,20 @@ def _get_cached_results(query: str, max_results: int) -> dict[str, Any] | None:
         cache_key = _get_cache_key(query, max_results)
         import gzip
         cache_file = _CACHE_DIR / f"{cache_key}.json.gz"
-        
+
         if not cache_file.exists():
             return None
-            
+
         # Check if cache is still fresh
         if time.time() - cache_file.stat().st_mtime > _CACHE_TTL:
             return None
-            
+
         with gzip.open(cache_file, "rt") as f:
             return json.load(f)
     except Exception as e:
         logger.debug(f"Cache read failed: {e}")
         return None
+
 
 def _cache_results(query: str, max_results: int, results: dict[str, Any]) -> None:
     """Cache search results to disk."""
@@ -238,7 +241,7 @@ def _cache_results(query: str, max_results: int, results: dict[str, Any]) -> Non
         _CACHE_DIR.mkdir(parents=True, exist_ok=True)
         cache_key = _get_cache_key(query, max_results)
         cache_file = _CACHE_DIR / f"{cache_key}.json.gz"
-        
+
         with gzip.open(cache_file, "wt") as f:
             json.dump(results, f)
     except Exception as e:

@@ -31,13 +31,16 @@ def test_is_duplicate_vulnerability():
         {"finding": "Reflected XSS in parameter 'q'", "target": "example.com"}
     ]
 
-    new_dup = {"finding": "Reflected XSS in parameter 'q'", "target": "example.com"}
-    new_diff_param = {"finding": "Reflected XSS in parameter 'search'", "target": "example.com"}
-    new_diff_target = {"finding": "Reflected XSS in parameter 'q'", "target": "api.example.com"}
+    new_dup = {"finding": "Reflected XSS in parameter 'q'",
+               "target": "example.com"}
+    new_diff_param = {
+        "finding": "Reflected XSS in parameter 'search'", "target": "example.com"}
+    new_diff_target = {
+        "finding": "Reflected XSS in parameter 'q'", "target": "api.example.com"}
 
     assert _is_duplicate_vulnerability(new_dup, existing) is True
     assert _is_duplicate_vulnerability(new_diff_param, existing) is False
-    # Combined sim: finding sim is 1.0. 1.0 * 0.8 + 0 * 0.2 = 0.8 which is >= 0.7 
+    # Combined sim: finding sim is 1.0. 1.0 * 0.8 + 0 * 0.2 = 0.8 which is >= 0.7
     # which means different target but exact same finding string IS considered a duplicate under this logic.
     assert _is_duplicate_vulnerability(new_diff_target, existing) is True
 
@@ -85,18 +88,18 @@ def test_update_from_parsed_output_classifies_items(mock_session):
 
     assert len(mock_session.vulnerabilities) == 1
     assert "SQL" in mock_session.vulnerabilities[0]["finding"]
-    
+
     # live_hosts gets the URL with status code
     assert "https://test.example.com" in mock_session.live_hosts
-    
+
     # urls gets the bare URL
     assert "http://other.example.com" in mock_session.urls
-    
+
     # open_ports gets the host:port format
     assert 8080 in mock_session.open_ports["10.0.0.1"]
-    
+
     # open_ports under target gets the port/proto string
     assert 443 in mock_session.open_ports[mock_session.target]
-    
+
     # subdomains gets the bare domain string
     assert "internal-subdomain.example.com" in mock_session.subdomains

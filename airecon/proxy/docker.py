@@ -460,7 +460,7 @@ class DockerEngine:
         async with self._proc_lock:
             proc = self._current_proc
             self._current_proc = None
-        
+
         if proc:
             try:
                 proc.kill()
