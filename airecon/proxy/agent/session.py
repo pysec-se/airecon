@@ -108,17 +108,19 @@ def _extract_injection_points(url: str) -> list[dict[str, Any]]:
                 "type_hint": _guess_injection_type(param, value),
             })
 
-        # Path segments that look like IDs (numeric or UUID)
+        # Path segments that look like IDs (numeric or UUID).
+        # Use the full URL so the LLM knows the complete endpoint context
+        # (e.g. /api/users/123/orders — the ID belongs to 'users', and
+        # /orders shows what sub-resource is being accessed).
         path_parts = [x for x in p.path.strip("/").split("/") if x]
         for i, seg in enumerate(path_parts):
             if re.match(r"^\d{1,10}$", seg) or _UUID_RE.match(seg):
-                path_base = (
-                    f"{p.scheme}://{p.netloc}/"
-                    + "/".join(path_parts[: i + 1])
-                )
+                # Label: parent-resource/ID so the LLM knows which resource owns this ID
+                parent = path_parts[i - 1] if i > 0 else ""
+                param_label = f"path/{parent}/{seg}" if parent else f"path/{seg}"
                 points.append({
-                    "url": path_base,
-                    "parameter": f"path_segment[{i}]",
+                    "url": base,  # full URL preserves sub-resource context
+                    "parameter": param_label,
                     "method": "GET",
                     "value_sample": seg,
                     "type_hint": "IDOR",

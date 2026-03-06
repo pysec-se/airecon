@@ -30,7 +30,10 @@ class ParsedOutput:
     technologies: dict[str, str] = field(default_factory=dict)
 
 
-# Maximum items to include in parsed output for LLM context
+# Maximum items to include in parsed output for LLM context.
+# Raised from 25 → 100 to give the LLM broader coverage of large scans
+# (e.g. 80+ open ports from nmap, 100+ endpoints from ffuf).
+# Monitor prompt size if slow responses or context-limit errors appear.
 MAX_ITEMS = 100
 MAX_RAW_FALLBACK = 3000
 

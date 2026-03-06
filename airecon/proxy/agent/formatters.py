@@ -88,11 +88,20 @@ _PORT_OPEN_RE = re.compile(
     r"|\[(\d{2,5})\]",                       # httpx: [80]
 )
 
+# Short tech names (< 5 chars: "go", "php", "lua", "java") need non-alphanumeric
+# boundaries to avoid false positives — e.g. "go" matching "google" or "django".
+# Longer names are specific enough for plain substring matching.
+_TECH_HINT_RE: dict[str, re.Pattern[str]] = {
+    tech: re.compile(rf"(?<![a-z0-9]){re.escape(tech)}(?![a-z0-9])")
+    for tech in _TECH_HINTS
+    if len(tech) < 5
+}
+
 
 def _extract_security_hints(output: str) -> list[str]:
     """Scan tool output for open ports and tech stack, return actionable hints."""
     hints: list[str] = []
-    seen: set[Any] = set()
+    seen: set[int | str] = set()
     out_lower = output.lower()
 
     # Port-based hints
@@ -105,9 +114,13 @@ def _extract_security_hints(output: str) -> list[str]:
             hints.append(f"  PORT {port}: {_PORT_HINTS[port]}")
             seen.add(port)
 
-    # Technology-based hints
+    # Technology-based hints — use word-boundary regex for short names
     for tech, hint in _TECH_HINTS.items():
-        if tech in out_lower and tech not in seen:
+        if tech in seen:
+            continue
+        pattern = _TECH_HINT_RE.get(tech)
+        found = bool(pattern.search(out_lower)) if pattern else (tech in out_lower)
+        if found:
             hints.append(f"  TECH {tech.upper()}: {hint}")
             seen.add(tech)
 

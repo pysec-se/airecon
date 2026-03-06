@@ -255,7 +255,18 @@ class PipelineEngine:
                 met.append("urls_collected")
             if getattr(session, "technologies", {}):
                 met.append("technologies_identified")
-            if getattr(session, "injection_points", []):
+            # Require at least 3 distinct injection points OR at least one
+            # point with a security-relevant type (not just tracking params
+            # like utm_source that inflate the count without adding value).
+            _MEANINGFUL_TYPES = frozenset({
+                "IDOR", "SSRF", "PATH_TRAVERSAL", "SQLi",
+                "XSS", "AUTH", "BUSINESS_LOGIC", "RCE",
+            })
+            _ips = getattr(session, "injection_points", [])
+            _has_meaningful = any(
+                p.get("type_hint") in _MEANINGFUL_TYPES for p in _ips
+            )
+            if len(_ips) >= 3 or _has_meaningful:
                 met.append("injection_points_found")
 
         elif phase == PipelinePhase.EXPLOIT:
