@@ -16,6 +16,7 @@ logger = logging.getLogger("airecon.agent")
 
 # Cache for --help output per tool binary (avoids re-running)
 _help_cache: dict[str, str] = {}
+_help_lookup_inflight: set[str] = set()
 
 # ---------------------------------------------------------------------------
 # Inline security hints injected into tool output
@@ -389,11 +390,8 @@ class _FormatterMixin:
     def _auto_help_lookup(self, tool_binary: str) -> str | None:
         """Run <tool> --help inside Docker and extract valid flags.
 
-        NOTE: This method is synchronous and BLOCKS the calling thread.
-        When called from within a running asyncio event loop it skips the
-        blocking network call and returns only cached results to avoid
-        freezing the loop. The cache is populated on the first call made
-        from a non-async context (e.g. test harnesses or CLI mode).
+        In async runtime, this method warms the cache in the background and
+        returns cached results when available.
 
         Returns compact help text or None if lookup fails.
         Caches results to avoid re-running for the same tool.
@@ -406,82 +404,95 @@ class _FormatterMixin:
         if not engine:
             return None
 
-        # If we are running inside a live asyncio event loop, blocking here
-        # would freeze the loop for up to 15 seconds.  Return None and rely
-        # on the cache being populated the next time this is called from a
-        # non-async context (or skip entirely — help text is a nice-to-have).
-        try:
-            asyncio.get_running_loop()
-            return None  # inside event loop — cannot block safely
-        except RuntimeError:
-            pass  # no running loop — safe to proceed with blocking call
+        def _blocking_lookup() -> str | None:
+            # Use thread pool to avoid asyncio event loop issues
+            import concurrent.futures
 
-        # Use thread pool to avoid asyncio event loop issues
-        import concurrent.futures
-
-        try:
-
-            def _run_help():
-                try:
-                    loop = asyncio.new_event_loop()
-                    asyncio.set_event_loop(loop)
+            try:
+                def _run_help():
                     try:
-                        return loop.run_until_complete(
-                            engine.execute_tool(
-                                "execute",
-                                {"command": f"{tool_binary} --help 2>&1 | head -60"},
+                        loop = asyncio.new_event_loop()
+                        asyncio.set_event_loop(loop)
+                        try:
+                            return loop.run_until_complete(
+                                engine.execute_tool(
+                                    "execute",
+                                    {"command": f"{tool_binary} --help 2>&1 | head -60"},
+                                )
                             )
-                        )
-                    finally:
-                        loop.close()
-                except Exception:
-                    return None
+                        finally:
+                            loop.close()
+                    except Exception:
+                        return None
 
-            with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
-                future = pool.submit(_run_help)
-                result = future.result(timeout=15)
-        except Exception:
-            _help_cache[tool_binary] = ""
-            return None
+                with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
+                    future = pool.submit(_run_help)
+                    result = future.result(timeout=15)
+            except Exception:
+                return None
 
-        if result is None:
-            return None
-        stdout = result.get("stdout", "") or result.get("result", "") or ""
-        if not stdout.strip() or len(stdout) < 20:
-            _help_cache[tool_binary] = ""
-            return None
+            if result is None:
+                return None
+            stdout = result.get("stdout", "") or result.get("result", "") or ""
+            if not stdout.strip() or len(stdout) < 20:
+                return None
 
-        # Extract flag lines (lines starting with -, or containing --)
-        lines = stdout.strip().split("\n")
-        flag_lines = []
-        usage_lines = []
-        for line in lines:
-            stripped = line.strip()
-            if stripped.startswith("-") or "  -" in line:
-                flag_lines.append(stripped)
-            elif stripped.lower().startswith("usage:") or stripped.lower().startswith(
-                "synopsis"
-            ):
-                usage_lines.append(stripped)
+            # Extract flag lines (lines starting with -, or containing --)
+            lines = stdout.strip().split("\n")
+            flag_lines: list[str] = []
+            usage_lines: list[str] = []
+            for line in lines:
+                stripped = line.strip()
+                if stripped.startswith("-") or "  -" in line:
+                    flag_lines.append(stripped)
+                elif stripped.lower().startswith("usage:") or stripped.lower().startswith(
+                    "synopsis"
+                ):
+                    usage_lines.append(stripped)
 
-        if not flag_lines and not usage_lines:
-            # No flags found — return first 30 lines as-is
-            compact = "\n".join(lines[:30])
-            _help_cache[tool_binary] = compact
+            if not flag_lines and not usage_lines:
+                # No flags found — return first 30 lines as-is
+                return "\n".join(lines[:30])
+
+            parts: list[str] = []
+            if usage_lines:
+                parts.append("USAGE: " + usage_lines[0])
+            if flag_lines:
+                parts.append("VALID FLAGS:")
+                for flag in flag_lines[:25]:  # Cap at 25 flags
+                    parts.append(f"  {flag}")
+
+            compact = "\n".join(parts)
+            logger.info(
+                "Auto-help lookup for '%s': %d flags found",
+                tool_binary,
+                len(flag_lines),
+            )
             return compact
 
-        parts = []
-        if usage_lines:
-            parts.append("USAGE: " + usage_lines[0])
-        if flag_lines:
-            parts.append("VALID FLAGS:")
-            for f in flag_lines[:25]:  # Cap at 25 flags
-                parts.append(f"  {f}")
+        try:
+            running_loop = asyncio.get_running_loop()
+        except RuntimeError:
+            running_loop = None
 
-        compact = "\n".join(parts)
-        _help_cache[tool_binary] = compact
-        logger.info(
-            f"Auto-help lookup for '{tool_binary}': {
-                len(flag_lines)} flags found"
-        )
+        # Async runtime: warm cache in background without blocking the loop.
+        if running_loop is not None:
+            if tool_binary not in _help_lookup_inflight:
+                _help_lookup_inflight.add(tool_binary)
+
+                async def _populate_cache() -> None:
+                    try:
+                        compact = await asyncio.to_thread(_blocking_lookup)
+                        _help_cache[tool_binary] = compact or ""
+                    except Exception:
+                        _help_cache[tool_binary] = ""
+                    finally:
+                        _help_lookup_inflight.discard(tool_binary)
+
+                running_loop.create_task(_populate_cache())
+            return None
+
+        # Sync runtime: resolve immediately.
+        compact = _blocking_lookup()
+        _help_cache[tool_binary] = compact or ""
         return compact

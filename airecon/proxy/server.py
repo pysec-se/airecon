@@ -320,17 +320,31 @@ async def _stream_file_agent_events(
 
     # Sanitize file_path before embedding in prompt (strip newlines, limit length)
     safe_file_path = request.file_path.replace("\n", " ").replace("\r", " ")[:500]
+    file_context_message = (
+        "You are a security file analyzer. Your sole task is to analyze "
+        "the provided file and answer the user question. Be concise and "
+        "focus on security-relevant findings.\n\n"
+        f"Target file: {safe_file_path}\n"
+        f"File content:\n```\n{file_snippet}\n```{truncation_note}"
+    )
 
-    mini_agent.state.conversation = [{
-        "role": "system",
-        "content": (
-            "You are a security file analyzer. Your sole task is to analyze "
-            "the provided file and answer the user question. Be concise and "
-            "focus on security-relevant findings.\n\n"
-            f"Target file: {safe_file_path}\n"
-            f"File content:\n```\n{file_snippet}\n```{truncation_note}"
-        ),
-    }]
+    try:
+        await mini_agent.initialize(target=_target, user_message=request.task)
+    except Exception as e:
+        yield {
+            "event": "error",
+            "data": json.dumps(
+                {"type": "error", "message": f"Mini-agent initialization failed: {e}"}
+            ),
+        }
+        return
+
+    if _target:
+        mini_agent.state.active_target = _target
+
+    mini_agent.state.conversation.append(
+        {"role": "system", "content": file_context_message}
+    )
 
     async for event in mini_agent.process_message(request.task):
         event_data = event.data if isinstance(event.data, dict) else {}

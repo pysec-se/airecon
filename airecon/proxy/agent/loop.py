@@ -395,9 +395,18 @@ class AgentLoop(_ValidatorMixin, _FormatterMixin,
 
             # Resolve @/path file references (parsed earlier, before autostart)
             if _file_refs:
-                _workspace_dir = get_workspace_root() / (
-                    self.state.active_target or "uploads"
-                )
+                _workspace_root = get_workspace_root().resolve()
+                _workspace_dir = (
+                    _workspace_root / (self.state.active_target or "uploads")
+                ).resolve()
+                try:
+                    _workspace_dir.relative_to(_workspace_root)
+                except ValueError:
+                    logger.warning(
+                        "Blocked unsafe workspace target %r for file refs; using fallback uploads/",
+                        self.state.active_target,
+                    )
+                    _workspace_dir = _workspace_root / "uploads"
                 _resolved = await asyncio.to_thread(
                     lambda: [resolve_ref(r, _workspace_dir) for r in _file_refs]
                 )

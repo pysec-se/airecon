@@ -54,6 +54,14 @@ _MAX_DIR_FILE_SIZE = 50_000     # 50KB per file when scanning a dir
 _MAX_TOTAL_DIR_CONTENT = 200_000  # 200KB total directory content
 
 
+def _sanitize_workspace_name(name: str) -> str:
+    """Return a safe workspace subdirectory name."""
+    safe = re.sub(r"[^a-zA-Z0-9_-]+", "_", name).strip("._-")
+    if not safe or safe in {".", ".."}:
+        return "workspace"
+    return safe
+
+
 @dataclass
 class FileRef:
     """A parsed @/path reference from the user message."""
@@ -361,7 +369,7 @@ def _copy_file_to_uploads(src: Path, workspace_dir: Path) -> Path:
     """Copy a single file into workspace uploads/ and return destination path."""
     uploads_dir = workspace_dir / "uploads"
     uploads_dir.mkdir(parents=True, exist_ok=True)
-    dest = uploads_dir / src.name
+    dest = _unique_file_path(uploads_dir, src.name)
     shutil.copy2(src, dest)
     return dest
 
@@ -371,9 +379,7 @@ def _copy_directory_to_uploads(src_dir: Path, workspace_dir: Path) -> tuple[Path
     uploads_dir = workspace_dir / "uploads"
     uploads_dir.mkdir(parents=True, exist_ok=True)
     dest_name = src_dir.name or "directory"
-    dest_dir = uploads_dir / dest_name
-    if dest_dir.exists():
-        shutil.rmtree(dest_dir)
+    dest_dir = _unique_directory_path(uploads_dir, dest_name)
     dest_dir.mkdir(parents=True, exist_ok=True)
 
     copied_files = 0
@@ -432,7 +438,8 @@ def _ext_to_lang(ext: str) -> str:
 def _is_binary_file(path: Path) -> bool:
     """Heuristic check: read first 1024 bytes, count null bytes."""
     try:
-        chunk = path.read_bytes()[:1024]
+        with path.open("rb") as f:
+            chunk = f.read(1024)
         return b"\x00" in chunk
     except OSError:
         return False
@@ -440,13 +447,23 @@ def _is_binary_file(path: Path) -> bool:
 
 def _read_partial(path: Path, max_bytes: int) -> str:
     try:
-        raw = path.read_bytes()
-        head = raw[:max_bytes // 2].decode("utf-8", errors="replace")
-        tail = raw[-(max_bytes // 4):].decode("utf-8", errors="replace")
+        size = path.stat().st_size
+        head_bytes = max(1, max_bytes // 2)
+        tail_bytes = max(1, max_bytes // 4)
+
+        with path.open("rb") as f:
+            head_raw = f.read(head_bytes)
+
+        with path.open("rb") as f:
+            f.seek(max(size - tail_bytes, 0))
+            tail_raw = f.read(tail_bytes)
+
+        head = head_raw.decode("utf-8", errors="replace")
+        tail = tail_raw.decode("utf-8", errors="replace")
         lang = _ext_to_lang(path.suffix.lower())
-        total_lines = raw.count(b"\n")
+        size_kb = max(1, size // 1024)
         return (
-            f"### {path.name}  ({total_lines} lines — truncated, file too large)\n"
+            f"### {path.name}  ({size_kb} KB — truncated, file too large)\n"
             f"```{lang}\n"
             f"--- HEAD ---\n{head}\n"
             f"...\n"
@@ -468,10 +485,41 @@ def workspace_name_for_ref(ref: FileRef) -> str:
     path = ref.path
     # Directory: use the directory name directly
     if path.is_dir():
-        return path.name or "workspace"
+        return _sanitize_workspace_name(path.name or "workspace")
     # File: stem (name without extension) is cleaner as a workspace folder name
     stem = path.stem
-    return stem if stem else (path.name or "workspace")
+    return _sanitize_workspace_name(stem if stem else (path.name or "workspace"))
+
+
+def _unique_file_path(parent_dir: Path, filename: str) -> Path:
+    """Return a non-colliding file path under parent_dir."""
+    base = Path(filename)
+    stem = base.stem
+    suffix = base.suffix
+    candidate = parent_dir / filename
+    if not candidate.exists():
+        return candidate
+
+    idx = 1
+    while True:
+        candidate = parent_dir / f"{stem}_{idx}{suffix}"
+        if not candidate.exists():
+            return candidate
+        idx += 1
+
+
+def _unique_directory_path(parent_dir: Path, dirname: str) -> Path:
+    """Return a non-colliding directory path under parent_dir."""
+    candidate = parent_dir / dirname
+    if not candidate.exists():
+        return candidate
+
+    idx = 1
+    while True:
+        candidate = parent_dir / f"{dirname}_{idx}"
+        if not candidate.exists():
+            return candidate
+        idx += 1
 
 
 def build_injection_message(resolved: list[ResolvedRef]) -> str | None:

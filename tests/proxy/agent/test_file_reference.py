@@ -195,6 +195,28 @@ class TestResolveTextFile:
         assert "HEAD" in resolved.context_block
         assert "TAIL" in resolved.context_block
 
+    def test_same_basename_files_do_not_overwrite_each_other(self):
+        src_a_dir = self.tmpdir / "a"
+        src_b_dir = self.tmpdir / "b"
+        src_a_dir.mkdir()
+        src_b_dir.mkdir()
+        src_a = src_a_dir / "config.json"
+        src_b = src_b_dir / "config.json"
+        src_a.write_text('{"source":"a"}', encoding="utf-8")
+        src_b.write_text('{"source":"b"}', encoding="utf-8")
+
+        workspace = self.tmpdir / "workspace"
+        workspace.mkdir()
+
+        res_a = resolve_ref(FileRef(raw=f"@{src_a}", path=src_a), workspace)
+        res_b = resolve_ref(FileRef(raw=f"@{src_b}", path=src_b), workspace)
+
+        assert res_a.workspace_dest is not None
+        assert res_b.workspace_dest is not None
+        assert res_a.workspace_dest != res_b.workspace_dest
+        assert res_a.workspace_dest.read_text(encoding="utf-8") == '{"source":"a"}'
+        assert res_b.workspace_dest.read_text(encoding="utf-8") == '{"source":"b"}'
+
 
 # ─────────────────────────────────────────────────────────────────────────────
 # resolve_ref — binary files
@@ -393,6 +415,23 @@ class TestResolveDirectory:
         # but its content (ELF magic) should NOT be in file contents
         assert "ELF" not in resolved.context_block
 
+    def test_same_dirname_does_not_overwrite_previous_copy(self):
+        left = self.tmpdir / "left" / "project"
+        right = self.tmpdir / "right" / "project"
+        left.mkdir(parents=True)
+        right.mkdir(parents=True)
+        (left / "a.txt").write_text("left", encoding="utf-8")
+        (right / "b.txt").write_text("right", encoding="utf-8")
+
+        res_left = resolve_ref(FileRef(raw=f"@{left}", path=left), self.workspace)
+        res_right = resolve_ref(FileRef(raw=f"@{right}", path=right), self.workspace)
+
+        assert res_left.workspace_dest is not None
+        assert res_right.workspace_dest is not None
+        assert res_left.workspace_dest != res_right.workspace_dest
+        assert (res_left.workspace_dest / "a.txt").exists()
+        assert (res_right.workspace_dest / "b.txt").exists()
+
 
 # ─────────────────────────────────────────────────────────────────────────────
 # workspace_name_for_ref
@@ -462,6 +501,10 @@ class TestWorkspaceNameForRef:
         resolved = resolve_ref(ref, wdir)
         assert resolved.kind == "directory"
         assert "index.php" in resolved.context_block
+
+    def test_workspace_name_sanitizes_dotdot(self):
+        ref = FileRef(raw="@/tmp/..", path=Path("/tmp/.."))
+        assert workspace_name_for_ref(ref) == "workspace"
 
 
 # ─────────────────────────────────────────────────────────────────────────────
