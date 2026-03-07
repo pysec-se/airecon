@@ -95,6 +95,16 @@ Port scanning without a stated purpose is reconnaissance noise, not intelligence
   UDP scan for specific services (requires strong justification):
     sudo nmap -sU -p 53,161,123,69 <host> -oN output/nmap_udp_<host>.txt
 
+  nrich — passive IP enrichment (no API key, uses Shodan InternetDB):
+    # After collecting IPs, enrich with known ports/CVEs/tags from Shodan InternetDB:
+    cat output/live_ips.txt | nrich -           # Enrich all IPs
+    echo "1.2.3.4" | nrich -                    # Single IP
+    cat output/live_ips.txt | nrich - -json > output/nrich_results.json
+
+    # nrich returns per-IP: open_ports, cves, cpes, tags (no active scan — purely passive lookup)
+    # Perfect complement to nmap: use nrich BEFORE active scan to pre-check known exposure
+    # Install: go install github.com/projectdiscovery/nrich/cmd/nrich@latest
+
   NEVER use these patterns:
     nmap -iL output/live_hosts.txt -A           (aggressive scan on unknown list, no purpose stated)
     nmap <IP> -sV --script=vuln                 (vuln script category = automated spray, banned)

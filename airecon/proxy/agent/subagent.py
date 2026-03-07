@@ -154,6 +154,7 @@ class ParallelAgentRunner:
         is set so that all sibling coordinators stop at their next iteration.
         """
         self._cancel_event.clear()
+        self._results = {}  # Reset results so previous run data is not leaked
         semaphore = asyncio.Semaphore(self.max_concurrent)
 
         async def run_single(
@@ -172,6 +173,8 @@ class ParallelAgentRunner:
             async with semaphore:
                 try:
                     return await run_single(target, coordinator)
+                except asyncio.CancelledError:
+                    raise  # Never swallow task cancellation
                 except Exception as exc:
                     logger.error(
                         "Agent for %s failed: %s — setting cancel event for siblings",
@@ -191,4 +194,4 @@ class ParallelAgentRunner:
                 target, session = result
                 self._results[target] = session
 
-        return self._results
+        return dict(self._results)  # return a copy so callers cannot mutate internal state

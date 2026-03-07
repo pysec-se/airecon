@@ -13,6 +13,7 @@ Correlation rules are stored as JSON files in data/ and loaded at import time:
 from __future__ import annotations
 
 import json
+import re
 from pathlib import Path
 from typing import Any
 import logging
@@ -108,7 +109,7 @@ def run_correlation(session: SessionData) -> list[dict]:
         # set of technology names
         tech_str = " ".join(str(t) for t in techs).lower()
     for tech, info in TECH_CORRELATIONS.items():
-        if tech.lower() in tech_str:
+        if re.search(r"\b" + re.escape(tech.lower()) + r"\b", tech_str):
             results.append(
                 {
                     "type": "technology",
@@ -124,7 +125,7 @@ def run_correlation(session: SessionData) -> list[dict]:
     for cve_id, cve_info in CVE_CORRELATIONS.items():
         targets = cve_info.get("targets", [])
         for target in targets:
-            if target.lower() in tech_str:
+            if re.search(r"\b" + re.escape(target.lower()) + r"\b", tech_str):
                 results.append(
                     {
                         "type": "technology_cve",

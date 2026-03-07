@@ -88,13 +88,12 @@ _PORT_OPEN_RE = re.compile(
     r"|\[(\d{2,5})\]",                       # httpx: [80]
 )
 
-# Short tech names (< 5 chars: "go", "php", "lua", "java") need non-alphanumeric
-# boundaries to avoid false positives — e.g. "go" matching "google" or "django".
-# Longer names are specific enough for plain substring matching.
+# All tech names use non-alphanumeric boundary matching to avoid false positives.
+# e.g. "go" must not match "google", "flask" must not match "flasked",
+# "django" must not match "djangorestframework".
 _TECH_HINT_RE: dict[str, re.Pattern[str]] = {
     tech: re.compile(rf"(?<![a-z0-9]){re.escape(tech)}(?![a-z0-9])")
     for tech in _TECH_HINTS
-    if len(tech) < 5
 }
 
 
@@ -114,13 +113,12 @@ def _extract_security_hints(output: str) -> list[str]:
             hints.append(f"  PORT {port}: {_PORT_HINTS[port]}")
             seen.add(port)
 
-    # Technology-based hints — use word-boundary regex for short names
+    # Technology-based hints — all use word-boundary regex to prevent false matches
     for tech, hint in _TECH_HINTS.items():
         if tech in seen:
             continue
-        pattern = _TECH_HINT_RE.get(tech)
-        found = bool(pattern.search(out_lower)) if pattern else (tech in out_lower)
-        if found:
+        pattern = _TECH_HINT_RE[tech]
+        if pattern.search(out_lower):
             hints.append(f"  TECH {tech.upper()}: {hint}")
             seen.add(tech)
 
@@ -178,9 +176,7 @@ class _FormatterMixin:
                 "sudo"
             ):
                 parts.append(
-                    f"TIP: Retry with elevated privileges: sudo {
-                        command.strip()[
-                            :80]}"
+                    f"TIP: Retry with elevated privileges: sudo {command.strip()[:80]}"
                 )
             elif "connection refused" in combined or "connection timed out" in combined:
                 parts.append(
@@ -252,12 +248,10 @@ class _FormatterMixin:
                         parts.append(f"  {item}")
                     if parsed.total_count > len(parsed.items):
                         parts.append(
-                            f"  ... and {parsed.total_count -
-                                         len(parsed.items)} more"
+                            f"  ... and {parsed.total_count - len(parsed.items)} more"
                         )
                 parts.append(
-                    f"\nTOTAL: {
-                        parsed.total_count} items. Full output saved to file."
+                    f"\nTOTAL: {parsed.total_count} items. Full output saved to file."
                 )
                 body = "\n".join(parts)
                 if len(body) > MAX_TOTAL:
@@ -326,19 +320,13 @@ class _FormatterMixin:
                     cmd).strip()
                 detail = f": {cmd[:100]}"
             elif rec.tool_name == "browser_action":
-                detail = f" action={
-                    rec.arguments.get(
-                        'action',
-                        '?')} url={
-                    rec.arguments.get(
-                        'url',
-                        '')}"
+                action = rec.arguments.get("action", "?")
+                url = rec.arguments.get("url", "")
+                detail = f" action={action} url={url}"
             elif rec.tool_name == "web_search":
                 detail = f": {rec.arguments.get('query', '')[:60]}"
             lines.append(
-                f"  {i}. [{status}] {
-                    rec.tool_name}{detail} ({
-                    rec.duration:.1f}s)"
+                f"  {i}. [{status}] {rec.tool_name}{detail} ({rec.duration:.1f}s)"
             )
 
         return "\n".join(lines)
@@ -401,6 +389,12 @@ class _FormatterMixin:
     def _auto_help_lookup(self, tool_binary: str) -> str | None:
         """Run <tool> --help inside Docker and extract valid flags.
 
+        NOTE: This method is synchronous and BLOCKS the calling thread.
+        When called from within a running asyncio event loop it skips the
+        blocking network call and returns only cached results to avoid
+        freezing the loop. The cache is populated on the first call made
+        from a non-async context (e.g. test harnesses or CLI mode).
+
         Returns compact help text or None if lookup fails.
         Caches results to avoid re-running for the same tool.
         """
@@ -411,6 +405,16 @@ class _FormatterMixin:
         engine = getattr(self, "engine", None)
         if not engine:
             return None
+
+        # If we are running inside a live asyncio event loop, blocking here
+        # would freeze the loop for up to 15 seconds.  Return None and rely
+        # on the cache being populated the next time this is called from a
+        # non-async context (or skip entirely — help text is a nice-to-have).
+        try:
+            asyncio.get_running_loop()
+            return None  # inside event loop — cannot block safely
+        except RuntimeError:
+            pass  # no running loop — safe to proceed with blocking call
 
         # Use thread pool to avoid asyncio event loop issues
         import concurrent.futures

@@ -175,37 +175,62 @@ class Fuzzer:
         self._semaphore = asyncio.Semaphore(threads)
 
     async def _fetch_baseline(self, param: str) -> dict[str, Any]:
-        """Fetch baseline response for a parameter with a benign value."""
+        """Fetch baseline response for a parameter with a benign value.
+
+        Sends 2 baseline requests to measure natural response variation
+        (dynamic CSRF tokens, timestamps, session IDs). The observed
+        length_variance is stored so differential analysis can ignore
+        fluctuations within the natural noise floor.
+        """
         if param in self._baseline:
             return self._baseline[param]
         try:
+            samples: list[dict[str, Any]] = []
             async with httpx.AsyncClient(
                 timeout=self.timeout, verify=False, follow_redirects=True  # nosec B501 - security testing tool
             ) as client:
-                t0 = time.monotonic()
-                if self.method == "GET":
-                    parsed = urlparse(self.target)
-                    params = parse_qs(parsed.query)
-                    params[param] = ["test"]
-                    url = urlunparse(
-                        parsed._replace(
-                            query=urlencode(
-                                params, doseq=True)))
-                    resp = await client.get(url)
-                else:
-                    resp = await client.post(self.target, data={param: "test"})
-                elapsed = (time.monotonic() - t0) * 1000
-                baseline = {
-                    "body": resp.text,
-                    "status": resp.status_code,
-                    "time_ms": elapsed,
-                    "length": len(resp.text),
-                }
-                self._baseline[param] = baseline
-                return baseline
+                for _ in range(2):
+                    t0 = time.monotonic()
+                    if self.method == "GET":
+                        parsed = urlparse(self.target)
+                        params = parse_qs(parsed.query)
+                        params[param] = ["test"]
+                        url = urlunparse(
+                            parsed._replace(
+                                query=urlencode(
+                                    params, doseq=True)))
+                        resp = await client.get(url)
+                    else:
+                        resp = await client.post(self.target, data={param: "test"})
+                    elapsed = (time.monotonic() - t0) * 1000
+                    samples.append({
+                        "body": resp.text,
+                        "status": resp.status_code,
+                        "time_ms": elapsed,
+                        "length": len(resp.text),
+                    })
+
+            # Use first sample as canonical baseline body; compute length
+            # variance across both samples as the natural noise floor.
+            length_variance = abs(samples[1]["length"] - samples[0]["length"])
+            baseline = {
+                "body": samples[0]["body"],
+                "status": samples[0]["status"],
+                "time_ms": (samples[0]["time_ms"] + samples[1]["time_ms"]) / 2,
+                "length": samples[0]["length"],
+                "length_variance": length_variance,
+            }
+            if length_variance > 50:
+                logger.debug(
+                    "Param '%s' baseline length varies by %d bytes between requests "
+                    "(dynamic content detected — noise floor raised)",
+                    param, length_variance,
+                )
+            self._baseline[param] = baseline
+            return baseline
         except Exception as exc:
             logger.debug(f"Baseline fetch failed for param={param}: {exc}")
-            return {"body": "", "status": 200, "time_ms": 0.0, "length": 0}
+            return {"body": "", "status": 200, "time_ms": 0.0, "length": 0, "length_variance": 0}
 
     async def fuzz_parameters(
         self,
@@ -283,7 +308,7 @@ class Fuzzer:
         """Fuzz a single parameter with a single payload."""
         async with self._semaphore:
             baseline = self._baseline.get(param, {
-                "body": "", "status": 200, "time_ms": 100.0, "length": 0
+                "body": "", "status": 200, "time_ms": 100.0, "length": 0, "length_variance": 0
             })
             try:
                 async with httpx.AsyncClient(
@@ -312,6 +337,7 @@ class Fuzzer:
                     fuzz_time_ms=elapsed,
                     payload=payload,
                     vuln_type=vuln_type,
+                    baseline_length_variance=baseline.get("length_variance", 0),
                 )
 
                 if analysis["vuln_confirmed"] or analysis["confidence"] > 0.5:
@@ -345,8 +371,8 @@ class Fuzzer:
                     )
             except Exception as exc:
                 logger.debug(
-                    f"Fuzz request error param={param} payload={
-                        payload!r}: {exc}")
+                    f"Fuzz request error param={param} payload={payload!r}: {exc}"
+                )
         return None
 
     def get_high_priority_targets(self) -> list[str]:
@@ -594,11 +620,17 @@ class ExpertHeuristics:
         fuzz_time_ms: float,
         payload: str,
         vuln_type: str,
+        baseline_length_variance: int = 0,
     ) -> dict[str, Any]:
         """Differential response analysis — compare fuzz vs baseline.
 
         Much lower false-positive rate than single-response analysis because
         differences relative to a clean baseline are the signal.
+
+        baseline_length_variance: natural byte fluctuation observed between
+        two baseline requests (dynamic CSRF/timestamp fields). Used to raise
+        the noise floor for content-length anomaly detection so dynamic pages
+        don't trigger false positives.
         """
         result: dict[str, Any] = {
             "vuln_confirmed": False,
@@ -629,9 +661,7 @@ class ExpertHeuristics:
         ):
             confidence += 0.65
             evidence.append(
-                f"Time anomaly: baseline={
-                    baseline_time_ms:.0f}ms fuzz={
-                    fuzz_time_ms:.0f}ms"
+                f"Time anomaly: baseline={baseline_time_ms:.0f}ms fuzz={fuzz_time_ms:.0f}ms"
             )
             result["vuln_type"] = f"time_based_{vuln_type}"
 
@@ -651,15 +681,19 @@ class ExpertHeuristics:
                 result["vuln_type"] = "open_redirect"
 
         # 4. Content length anomaly
+        # Raise the noise floor using the observed baseline variance so that
+        # pages with dynamic content (CSRF tokens, timestamps, session IDs)
+        # don't generate false positives on normal fluctuation.
         baseline_len = len(baseline_body)
         fuzz_len = len(fuzz_body)
         if baseline_len > 0:
             delta_ratio = (fuzz_len - baseline_len) / baseline_len
-            if delta_ratio > 0.5 and fuzz_len > baseline_len + 200:
+            noise_floor = max(200, baseline_length_variance * 3)
+            if delta_ratio > 0.5 and fuzz_len > baseline_len + noise_floor:
                 confidence += 0.25
                 evidence.append(
                     f"Response significantly larger (+{fuzz_len - baseline_len}B) — possible data leak")
-            elif delta_ratio < -0.5 and baseline_len > 200:
+            elif delta_ratio < -0.5 and baseline_len > noise_floor:
                 confidence += 0.15
                 evidence.append(
                     "Response significantly smaller — possible truncation/filter")
@@ -671,8 +705,8 @@ class ExpertHeuristics:
             if pattern in fuzz_lower and pattern not in baseline_lower:
                 confidence += 0.5
                 evidence.append(
-                    f"SQL error in fuzz response (not in baseline): {
-                        pattern!r}")
+                    f"SQL error in fuzz response (not in baseline): {pattern!r}"
+                )
                 result["vuln_type"] = "sql_injection"
                 break
 
@@ -681,8 +715,8 @@ class ExpertHeuristics:
             if pattern in fuzz_lower and pattern not in baseline_lower:
                 confidence += 0.45
                 evidence.append(
-                    f"Code execution indicator (new in fuzz): {
-                        pattern!r}")
+                    f"Code execution indicator (new in fuzz): {pattern!r}"
+                )
                 result["vuln_type"] = "rce"
                 break
 
@@ -998,11 +1032,9 @@ class ExploitChainEngine:
         all_steps = [trigger_link] + steps
         severity = self._compute_chain_severity(all_steps)
         total_conf = _geometric_mean([s.confidence for s in all_steps])
+        chain_steps = " → ".join(s.vuln_type for s in steps)
         return ExploitChain(
-            name=f"{
-                trigger.vuln_type} → {
-                ' → '.join(
-                    s.vuln_type for s in steps)}",
+            name=f"{trigger.vuln_type} → {chain_steps}",
             trigger_vuln=trigger.vuln_type,
             steps=all_steps,
             total_confidence=total_conf,
@@ -1035,8 +1067,7 @@ class ExploitChainEngine:
     ) -> str:
         lines = [f"Exploit Chain — Target: {target}", "=" * 60]
         for i, step in enumerate(steps, 1):
-            prereq = f" (requires: {
-                step.prerequisite})" if step.prerequisite else ""
+            prereq = f" (requires: {step.prerequisite})" if step.prerequisite else ""
             lines.append(
                 f"Step {i}: [{step.vuln_type.upper()}]{prereq}\n"
                 f"  Parameter : {step.parameter}\n"
@@ -1196,9 +1227,8 @@ class InteractiveRealTimeTester:
                 event_type="progress",
                 data={
                     "phase": "chaining",
-                    "message": f"Discovering exploit chains from {
-                        len(
-                            self._findings)} findings..."},
+                    "message": f"Discovering exploit chains from {len(self._findings)} findings...",
+                },
             )
             self._chains = await self.chain_engine.discover_chains(self._findings)
             for chain in self._chains:

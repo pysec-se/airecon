@@ -22,8 +22,9 @@ async def test_fuzzer_baseline_and_run(base_fuzzer, mocker):
     mock_response_fuzz.text = '{"error": "mysql_fetch array expected"}'
     mock_response_fuzz.status_code = 500
 
-    # We assign them in sequence to our side_effect
-    mock_get.side_effect = [mock_response_baseline, mock_response_fuzz]
+    # _fetch_baseline now sends 2 requests to measure length variance;
+    # then 1 request for the actual fuzz probe.
+    mock_get.side_effect = [mock_response_baseline, mock_response_baseline, mock_response_fuzz]
 
     mock_client = mocker.MagicMock()
     mock_client.__aenter__.return_value.get = mock_get

@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 import os
 from pathlib import Path
 from typing import Any
@@ -19,8 +21,16 @@ _LINE_COUNT_EXTENSIONS = {
 _MAX_DEPTH = 3
 
 
+_MAX_CREATE_FILE_BYTES = 50 * 1024 * 1024  # 50 MB
+
+
 def create_file(path: str, content: str) -> dict[str, Any]:
     try:
+        if len(content.encode("utf-8")) > _MAX_CREATE_FILE_BYTES:
+            return {
+                "success": False,
+                "error": "Content too large: maximum file size is 50 MB",
+            }
         workspace_root = get_workspace_root().resolve()
 
         # Normalize path: strip leading slashes and "workspace/" prefix
@@ -63,8 +73,8 @@ def read_file(path: str, offset: int = 0, limit: int = 500) -> dict[str, Any]:
             workspace_root = get_workspace_root().resolve()
             project_root = Path(__file__).parent.parent.resolve()
 
-            is_in_workspace = str(abs_path).startswith(str(workspace_root))
-            is_in_project = str(abs_path).startswith(str(project_root))
+            is_in_workspace = abs_path.is_relative_to(workspace_root)
+            is_in_project = abs_path.is_relative_to(project_root)
 
             if not (is_in_workspace or is_in_project):
                 return {
@@ -87,8 +97,15 @@ def read_file(path: str, offset: int = 0, limit: int = 500) -> dict[str, Any]:
                     "error": "Access denied: Cannot read files outside workspace."}
 
         if not file_path.exists():
-            return {"success": False,
-                    "error": f"File not found in workspace: {path}. Resolved path: {file_path}"}
+            return {
+                "success": False,
+                "error": (
+                    f"File not found in workspace: {path}. "
+                    f"Resolved path: {file_path}. "
+                    "Tip: relative paths are resolved against the workspace directory. "
+                    "To read a file outside the workspace, use its absolute path."
+                ),
+            }
 
         return _read_with_pagination(file_path, offset, limit)
 
@@ -204,7 +221,9 @@ def _walk_dir(
     except PermissionError:
         return
 
-    dirs = [e for e in entries if e.is_dir()]
+    # Skip symlinks that point to directories to prevent following
+    # symlink loops (e.g. output/ → .) which would recurse up to MAX_DEPTH.
+    dirs = [e for e in entries if e.is_dir() and not e.is_symlink()]
     files = [e for e in entries if e.is_file()]
     all_entries = dirs + files
 
@@ -219,8 +238,8 @@ def _walk_dir(
             except Exception:
                 child_count = 0
             output.append(
-                f"{prefix}{connector}{
-                    entry.name}/ ({child_count} items)")
+                f"{prefix}{connector}{entry.name}/ ({child_count} items)"
+            )
             _walk_dir(entry, workspace_root, output, depth + 1, child_prefix)
         else:
             size = _fmt_size(entry.stat().st_size)
@@ -232,8 +251,8 @@ def _walk_dir(
                 except Exception:  # nosec B110 - line count is optional
                     pass
             output.append(
-                f"{prefix}{connector}{
-                    entry.name} ({size}{line_info})")
+                f"{prefix}{connector}{entry.name} ({size}{line_info})"
+            )
 
 
 def _fmt_size(size_bytes: int) -> str:

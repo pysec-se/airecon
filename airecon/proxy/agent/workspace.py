@@ -164,7 +164,8 @@ class _WorkspaceMixin:
 
     def _save_tool_output(
         self, tool_name: str, args: dict[str, Any], result: dict[str, Any]
-    ) -> None:
+    ) -> str | None:
+        """Save tool output to workspace. Returns the saved file path or None."""
         try:
             # type: ignore[attr-defined]
             target = self.state.active_target or "unknown"
@@ -195,9 +196,8 @@ class _WorkspaceMixin:
                 )
 
             if not succeeded:
-                # type: ignore[attr-defined]
-                self._last_output_file = json_filepath
-                return
+                self._last_output_file = json_filepath  # type: ignore[attr-defined]
+                return json_filepath
 
             # These tools do not produce meaningful recon data for output/.
             # The JSON record in command/ already contains everything needed.
@@ -223,9 +223,8 @@ class _WorkspaceMixin:
                 "spawn_agent",           # findings embedded in JSON, merged into session
             }
             if tool_name in _SKIP_OUTPUT_TXT:
-                # type: ignore[attr-defined]
-                self._last_output_file = json_filepath
-                return
+                self._last_output_file = json_filepath  # type: ignore[attr-defined]
+                return json_filepath
 
             # For non-execute tools (browser_action, web_search, etc.):
             # save meaningful output to output/
@@ -242,11 +241,12 @@ class _WorkspaceMixin:
                 txt_filepath = os.path.join(output_dir, txt_filename)
                 with open(txt_filepath, "w") as f:
                     f.write(str(txt_content))
-                # type: ignore[attr-defined]
-                self._last_output_file = txt_filepath
+                self._last_output_file = txt_filepath  # type: ignore[attr-defined]
+                return txt_filepath
             else:
-                # type: ignore[attr-defined]
-                self._last_output_file = json_filepath
+                self._last_output_file = json_filepath  # type: ignore[attr-defined]
+                return json_filepath
 
         except Exception as e:
             logger.error(f"Error saving tool output: {e}")
+        return None

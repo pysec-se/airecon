@@ -68,16 +68,30 @@ class AgentGraph:
             self.nodes[target_id].depends_on.append(source_id)
 
     def execution_order(self) -> list[AgentNode]:
-        """Return a topological sort of nodes determining execution order."""
-        visited = set()
-        order = []
+        """Return a topological sort of nodes determining execution order.
+
+        Raises ValueError if a cycle is detected in the graph.
+        """
+        visited: set[str] = set()
+        in_stack: set[str] = set()  # nodes in current DFS path (cycle detection)
+        order: list[AgentNode] = []
 
         def dfs(node_id: str) -> None:
+            if node_id in in_stack:
+                raise ValueError(
+                    f"Cycle detected in agent graph involving node: {node_id!r}"
+                )
             if node_id in visited:
                 return
-            visited.add(node_id)
+            in_stack.add(node_id)
             for dep in self.nodes[node_id].depends_on:
+                if dep not in self.nodes:
+                    raise ValueError(
+                        f"Node {node_id!r} depends on unknown node {dep!r}"
+                    )
                 dfs(dep)
+            in_stack.discard(node_id)
+            visited.add(node_id)
             order.append(self.nodes[node_id])
 
         for n_id in self.nodes:
@@ -92,9 +106,8 @@ class AgentGraph:
 
         for node in order:
             logger.info(
-                f"Graph orchestrator starting Node: {
-                    node.id} ({
-                    node.role.value})")
+                f"Graph orchestrator starting Node: {node.id} ({node.role.value})"
+            )
             yield AgentEvent(type="agent_state", data={"status": f"Starting {node.id}..."})
 
             # Setup specialized agent loop

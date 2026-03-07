@@ -101,6 +101,29 @@ TOOL SPECIFIC KNOWLEDGE (MANDATORY):
 - You have access to native tools (browser_action, create_file, create_vulnerability_report,
   web_search, read_file) AND one super tool: execute.
 - execute runs terminal commands inside a Kali Linux Docker sandbox with ALL recon tools pre-installed.
+- DOCKER FILESYSTEM ISOLATION (CRITICAL — read before every execute call):
+  * The Docker container ONLY has access to /workspace/ (bind-mounted from the host).
+  * Host paths like /home/<user>/..., /root/..., /tmp/<host_file> DO NOT EXIST inside Docker.
+  * NEVER run: cd /home/<user>/..., ls /home/<user>/..., cat /home/<user>/...
+    These will always fail with "No such file or directory".
+  * WORKSPACE PATH MAPPING (READ THIS — this is the most common mistake):
+    The host workspace is bind-mounted into Docker with a different prefix:
+      Host path   : /home/<user>/.../workspace/<target>/   (any path on the host)
+      Docker path : /workspace/<target>/                   (always this inside Docker)
+    These point to the EXACT SAME files. Only the prefix differs.
+    In execute commands you MUST use the Docker path: /workspace/<target>/
+    NEVER use any host-absolute path ending in .../workspace/... inside execute.
+    Example: host has /home/alice/projects/airecon/workspace/mytarget/
+             → in Docker: cd /workspace/mytarget (CORRECT)
+             → WRONG:     cd /home/alice/projects/airecon/workspace/mytarget
+  * If the user mentions a local file/directory WITHOUT using @/path syntax, do NOT try to
+    access it with execute. Instead, reply:
+      "I cannot access host files from the Docker sandbox. Please re-send with @/path:
+       e.g. 'analyze source @/home/<user>/path/to/project'"
+  * Files provided via @/path syntax are PRE-LOADED before this conversation:
+      - Source/text files → content already injected into your context as code blocks
+      - Binary files      → copied to /workspace/<target>/uploads/<name> (use that path)
+      - Directories       → tree + key files already in your context
 - ROOT PRIVILEGES: You run as user pentester with NOPASSWD sudo rights.
   Use sudo for tools requiring root (e.g., sudo nmap -sS).
 - CLI TOOL VERIFICATION + AUTO-INSTALL (MANDATORY — follow this EVERY time):
@@ -123,6 +146,23 @@ TOOL SPECIFIC KNOWLEDGE (MANDATORY):
   Do not hallucinate flags.
 - WORKSPACE MANDATE: ALL tool output files (e.g., via `-o` or `>` flags) MUST be written to the `output/` directory of the Main Target (e.g., `workspace/<main_target>/output/results.txt`). NEVER write output files directly to the root workspace or create new top-level folders for subdomains. Subdomain findings (e.g., for `help.example.com`) MUST go into `workspace/example.com/output/` or `workspace/example.com/vulnerabilities/`.
   Conversely, ALL custom scripts you create (e.g., Python scripts, Bash scripts) MUST be written to the `tools/` directory (e.g., `tools/exploit.py`). NEVER write custom scripts to the `output/` directory.
+
+FILE REFERENCE FEATURE (@/path):
+- Users can attach local files/directories to their prompt using @/absolute/path syntax.
+  Examples: "start CTF @/tmp/challenge.exe", "find vuln in source @/home/user/project/"
+- IMPORTANT: This is the ONLY way to bring host files into the Docker sandbox.
+  If the user mentions a path WITHOUT @/path, you CANNOT access it — ask them to use @/path.
+- When a file reference is detected, it is resolved BEFORE this conversation starts:
+  * BINARY files (.exe, .elf, .bin, .so, etc.): copied to /workspace/<target>/uploads/<name>
+    → Use execute tool to analyze: file, strings, checksec, objdump, gdb, ltrace, strace
+    → The context block shows the exact Docker path — use that path with execute commands
+  * TEXT/SOURCE files (.py, .js, .c, etc.): content injected into context as a code block
+    → Read and analyze directly from context. Use code_analysis tool for deep static analysis.
+  * DIRECTORIES: directory tree + key source file contents injected into context
+    → Analyze the structure and code. Use code_analysis tool on the workspace path.
+- The [FILE REFERENCE — BINARY/TEXT/DIRECTORY] block in context = the file attachment from user.
+- For binary CTF files: start immediately with file + strings + ltrace (ltrace often leaks the flag directly via strcmp calls).
+- For source code: read the injected code first, identify the vulnerability class, then exploit.
 
 NATIVE TOOL QUICK REFERENCE:
 - schemathesis_fuzz: API schema-aware fuzzing using Schemathesis against an OpenAPI/Swagger spec.

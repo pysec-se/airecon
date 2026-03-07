@@ -68,9 +68,16 @@ class _ExecutorMixin:
                     timeout=120.0,
                 )
             except asyncio.TimeoutError:
+                # The underlying sync Playwright thread cannot be force-killed
+                # from asyncio. Schedule a best-effort close to release the
+                # browser process before we return the error.
+                asyncio.get_event_loop().run_in_executor(
+                    None,
+                    lambda: browser_action(action="close"),
+                )
                 return False, 120.0, {
                     "success": False,
-                    "error": "Browser action timed out after 120s. The page may be hanging.",
+                    "error": "Browser action timed out after 120s. Browser close requested.",
                 }, None
 
             # Auto-inject session cookies immediately after launch
@@ -128,9 +135,7 @@ class _ExecutorMixin:
                                 "full_page_source") or inner.get("page_source", "")
                             source_file = host_output / f"source_{domain}.txt"
                             with open(source_file, "w", encoding="utf-8") as f:
-                                f.write(
-                                    f"URL: {page_url}\n{
-                                        '=' * 60}\n{source_full}")
+                                f.write(f"URL: {page_url}\n{'=' * 60}\n{source_full}")
                             saved_path = f"output/source_{domain}.txt"
                             # Extract JS file URLs from full HTML source
                             js_src = re.findall(
@@ -143,22 +148,17 @@ class _ExecutorMixin:
                                 js_file = host_output / "js_files.txt"
                                 with open(js_file, "a", encoding="utf-8") as f:
                                     f.write(
-                                        f"\n{
-                                            '=' *
-                                            60}\nSOURCE: {page_url}\n{
-                                            '=' *
-                                            60}\n")
+                                        f"\n{'=' * 60}\nSOURCE: {page_url}\n{'=' * 60}\n"
+                                    )
                                     for js_url in all_js:
                                         f.write(js_url + "\n")
-                                js_note = f" {
-                                    len(all_js)} JS files extracted to output/js_files.txt."
+                                js_note = f" {len(all_js)} JS files extracted to output/js_files.txt."
                             inner = dict(inner)
                             # strip from LLM context
                             inner.pop("full_page_source", None)
                             inner["auto_saved"] = saved_path
                             inner["note"] = (
-                                f"[Auto-saved full page source ({
-                                    len(source_full)} chars) to {saved_path}.{js_note}"
+                                f"[Auto-saved full page source ({len(source_full)} chars) to {saved_path}.{js_note}"
                                 " Analyze JS files for API endpoints, secrets, and vulnerabilities.]"
                             )
                             result = {"success": True, "result": inner}
@@ -170,9 +170,8 @@ class _ExecutorMixin:
                                 f"console_{domain}.txt"
                             with open(console_file, "w", encoding="utf-8") as f:
                                 f.write(
-                                    f"URL: {page_url}\nLogs captured: {
-                                        len(logs)}\n{
-                                        '=' * 60}\n")
+                                    f"URL: {page_url}\nLogs captured: {len(logs)}\n{'=' * 60}\n"
+                                )
                                 for log in logs:
                                     f.write(
                                         f"[{log.get('type', 'log')}] {log.get('text', '')}\n")
@@ -180,8 +179,7 @@ class _ExecutorMixin:
                             inner = dict(inner)
                             inner["auto_saved"] = saved_path
                             inner["note"] = (
-                                f"[Auto-saved {
-                                    len(logs)} console logs to {saved_path}."
+                                f"[Auto-saved {len(logs)} console logs to {saved_path}."
                                 " Check for errors, debug info, and leaked sensitive data.]"
                             )
                             result = {"success": True, "result": inner}
@@ -192,38 +190,27 @@ class _ExecutorMixin:
                             net_file = host_output / f"network_{domain}.txt"
                             with open(net_file, "w", encoding="utf-8") as f:
                                 f.write(
-                                    f"URL: {page_url}\nTotal entries: {
-                                        len(reqs)}\n{
-                                        '=' * 60}\n\n")
+                                    f"URL: {page_url}\nTotal entries: {len(reqs)}\n{'=' * 60}\n\n"
+                                )
                                 for entry in reqs:
                                     etype = entry.get("type", "?")
                                     url = entry.get("url", "")
                                     if etype == "request":
+                                        method = entry.get("method", "GET")
+                                        resource_type = entry.get("resource_type", "")
                                         f.write(
-                                            f">> {
-                                                entry.get(
-                                                    'method',
-                                                    'GET')} [{
-                                                entry.get(
-                                                    'resource_type',
-                                                    '')}] {url}\n")
+                                            f">> {method} [{resource_type}] {url}\n"
+                                        )
                                         if entry.get("post_data"):
-                                            f.write(
-                                                f"   BODY: {
-                                                    entry['post_data']}\n")
+                                            f.write(f"   BODY: {entry['post_data']}\n")
                                     elif etype == "response":
+                                        status = entry.get("status", "")
+                                        content_type = entry.get("content_type", "")
                                         f.write(
-                                            f"<< {
-                                                entry.get(
-                                                    'status',
-                                                    '')} {url}  [{
-                                                entry.get(
-                                                    'content_type',
-                                                    '')}]\n")
+                                            f"<< {status} {url}  [{content_type}]\n"
+                                        )
                                         if entry.get("body"):
-                                            f.write(
-                                                f"   RESPONSE: {
-                                                    entry['body']}\n")
+                                            f.write(f"   RESPONSE: {entry['body']}\n")
                                     f.write("\n")
                             saved_path = f"output/network_{domain}.txt"
                             summary = inner.get("network_summary", {})
@@ -233,8 +220,7 @@ class _ExecutorMixin:
                             inner.pop("network_requests", None)
                             inner["auto_saved"] = saved_path
                             inner["note"] = (
-                                f"[Auto-saved {
-                                    len(reqs)} network entries to {saved_path}."
+                                f"[Auto-saved {len(reqs)} network entries to {saved_path}."
                                 f" {len(api_calls)} XHR/Fetch API calls detected."
                                 " Review for API endpoints, auth tokens, and sensitive data in responses.]"
                             )
@@ -305,7 +291,9 @@ class _ExecutorMixin:
             # Path traversal protection: resolve and verify path is within workspace
             workspace_root = get_workspace_root()
             resolved = (workspace_root / path_arg).resolve()
-            if not str(resolved).startswith(str(workspace_root.resolve())):
+            try:
+                resolved.relative_to(workspace_root.resolve())
+            except ValueError:
                 return False, 0.0, {
                     "success": False,
                     "error": f"Path traversal attempt blocked: '{path_arg}' resolves outside workspace.",
@@ -527,12 +515,10 @@ class _ExecutorMixin:
                 findings_list = []
                 for r in results:
                     findings_list.append(
-                        f"Param: {
-                            r.parameter} | Vuln: {
-                            r.vuln_type} | Severity: {
-                            r.severity} | Conf: {
-                            r.confidence:.2f} | Evidence: {
-                            r.evidence}")
+                        f"Param: {r.parameter} | Vuln: {r.vuln_type} | "
+                        f"Severity: {r.severity} | Conf: {r.confidence:.2f} | "
+                        f"Evidence: {r.evidence}"
+                    )
                 res_dict = {"success": True, "findings": findings_list}
 
             try:
@@ -579,12 +565,9 @@ class _ExecutorMixin:
                     "result": "No vulnerabilities found with confidence > 0.60."}
             else:
                 findings_list = [
-                    f"Param: {
-                        r.parameter} | Vuln: {
-                        r.vuln_type} | Severity: {
-                        r.severity} | Conf: {
-                        r.confidence:.2f} | Evidence: {
-                        r.evidence}"
+                    f"Param: {r.parameter} | Vuln: {r.vuln_type} | "
+                    f"Severity: {r.severity} | Conf: {r.confidence:.2f} | "
+                    f"Evidence: {r.evidence}"
                     for r in results
                 ]
                 res_dict = {
@@ -635,12 +618,9 @@ class _ExecutorMixin:
             findings_list = []
             for f in getattr(tester, "_findings", []):
                 findings_list.append(
-                    f"Param: {
-                        f.parameter} | Vuln: {
-                        f.vuln_type} | Severity: {
-                        f.severity} | Conf: {
-                        f.confidence:.2f} | Evidence: {
-                        f.evidence}"
+                    f"Param: {f.parameter} | Vuln: {f.vuln_type} | "
+                    f"Severity: {f.severity} | Conf: {f.confidence:.2f} | "
+                    f"Evidence: {f.evidence}"
                 )
 
             res_dict = {
@@ -956,6 +936,30 @@ class _ExecutorMixin:
         clean_http = raw_http.replace("§FUZZ§", "")
         encoded_raw = CaidoClient.encode_raw_http(clean_http)
 
+        # Track created session so we can clean up on failure before recording task_id
+        auto_id: str | None = None
+        task_id: str | None = None
+
+        async def _cleanup_orphan_session() -> None:
+            """Best-effort delete of a Caido session that was created but never tracked."""
+            if not auto_id:
+                return
+            try:
+                delete_q = """
+                mutation DeleteSession($id: ID!) {
+                    deleteAutomateSession(id: $id) { deletedId }
+                }
+                """
+                await asyncio.wait_for(
+                    CaidoClient.gql(delete_q, {"id": auto_id}), timeout=5.0
+                )
+                logger.info("Cleaned up orphaned Caido automate session %s", auto_id)
+            except Exception as cleanup_err:
+                logger.debug(
+                    "Could not clean up Caido session %s (manual cleanup may be needed): %s",
+                    auto_id, cleanup_err,
+                )
+
         try:
             async with asyncio.timeout(90):
                 # Step 1: Create automate session
@@ -1014,12 +1018,18 @@ class _ExecutorMixin:
             success = True
         except asyncio.TimeoutError:
             logger.error("caido_automate timeout (90s)")
+            # task_id was never captured — session may be orphaned in Caido
+            if task_id is None:
+                await _cleanup_orphan_session()
             res_dict = {
                 "success": False,
                 "error": "Caido did not respond within 90 seconds"}
             success = False
         except Exception as e:
             logger.error(f"caido_automate error: {e}")
+            # Clean up session if task was never started
+            if task_id is None:
+                await _cleanup_orphan_session()
             res_dict = {"success": False, "error": str(e)}
             success = False
 
@@ -1130,8 +1140,7 @@ class _ExecutorMixin:
             }
         }
         """
-        scope_name = f"airecon-{
-            self.state.active_target or 'scope'}"
+        scope_name = f"airecon-{self.state.active_target or 'scope'}"
         variables = {
             "input": {
                 "name": scope_name,
@@ -1255,28 +1264,31 @@ class _ExecutorMixin:
             return False, 0.0, {"success": False,
                                 "error": "'schema_url' is required."}, None
 
-        # Build schemathesis CLI command
+        # Build schemathesis CLI command — all user-supplied values shell-quoted
+        import shlex
         cmd_parts = [
             "python3 -m schemathesis run",
-            f'"{schema_url}"',
+            shlex.quote(schema_url),
         ]
         if base_url:
-            cmd_parts.append(f'--base-url "{base_url}"')
+            cmd_parts.extend(["--base-url", shlex.quote(base_url)])
         if auth_header:
-            import shlex
-            cmd_parts.append(
-                f"--header {shlex.quote(f'Authorization: {auth_header}')}")
+            cmd_parts.extend(
+                ["--header", shlex.quote(f"Authorization: {auth_header}")])
         if checks:
-            cmd_parts.append(f'--checks {",".join(checks)}')
-        cmd_parts.append(f"--hypothesis-max-examples {max_examples}")
+            cmd_parts.extend(["--checks", shlex.quote(",".join(checks))])
+        cmd_parts.append(f"--hypothesis-max-examples {int(max_examples)}")
         cmd_parts.append("--request-timeout 15")
         cmd_parts.append("--output-truncate false")
         cmd_parts.append("--code-sample-style python")
         active_target = self.state.active_target or "unknown"
-        workspace_dir = f"/workspace/{active_target}"
-        output_file = f"{workspace_dir}/output/schemathesis_results.txt"
-        full_cmd = f"cd {workspace_dir} && pip install -q schemathesis 2>/dev/null; {
-            ' '.join(cmd_parts)} 2>&1 | tee {output_file}"
+        workspace_dir = shlex.quote(f"/workspace/{active_target}")
+        output_file = shlex.quote(f"/workspace/{active_target}/output/schemathesis_results.txt")
+        joined_cmd = " ".join(cmd_parts)
+        full_cmd = (
+            f"cd {workspace_dir} && pip install -q schemathesis 2>/dev/null; "
+            f"{joined_cmd} 2>&1 | tee {output_file}"
+        )
 
         try:
             exec_result = await self.engine.execute_tool(
@@ -1546,15 +1558,18 @@ class _ExecutorMixin:
                 # multi-path commands.
                 arguments["command"] = f"cd {workspace_dir} && {cmd}"
                 logger.info(
-                    f"Enforced workspace context: {
-                        arguments['command']}")
+                    f"Enforced workspace context: {arguments['command']}"
+                )
 
         start_time = time.time()
+        output_file: str | None = None
         try:
             result = await self.engine.execute_tool(tool_name, arguments)
             success = result.get("success", False)
             try:
-                self._save_tool_output(tool_name, arguments, result)
+                # Capture returned path as local variable to avoid race
+                # condition when multiple tools run concurrently via gather().
+                output_file = self._save_tool_output(tool_name, arguments, result)
             except Exception as _e:
                 logger.debug("Could not save tool output: %s", _e)
         except Exception as e:
@@ -1581,11 +1596,10 @@ class _ExecutorMixin:
         duration = time.time() - start_time
 
         history_result = result
-        if success and self._last_output_file and len(
-                str(result)) > 10000:
+        if success and output_file and len(str(result)) > 10000:
             history_result = {
                 "success": True,
-                "result": f"<Result truncated. Full output in {self._last_output_file}>",
+                "result": f"<Result truncated. Full output in {output_file}>",
                 "truncated": True,
             }
 
@@ -1602,4 +1616,4 @@ class _ExecutorMixin:
         if success:
             self._executed_tool_counts[args_key] = self._executed_tool_counts.get(
                 args_key, 0) + 1
-        return success, duration, result, self._last_output_file
+        return success, duration, result, output_file

@@ -145,8 +145,8 @@ class PipelineEngine:
                     self._phase_prompts[phase] = self._default_prompt(phase)
             except Exception as e:
                 logger.warning(
-                    f"Failed to load phase prompt for {
-                        phase.value}: {e}")
+                    f"Failed to load phase prompt for {phase.value}: {e}"
+                )
                 self._phase_prompts[phase] = self._default_prompt(phase)
 
     def _default_prompt(self, phase: PipelinePhase) -> str:
@@ -246,8 +246,9 @@ class PipelineEngine:
                     )
             except Exception as _e:
                 logger.debug("Could not check workspace artifacts: %s", _e)
-            # Fallback to scan_count if workspace not accessible
-            if _has_output_files or getattr(session, "scan_count", 0) >= 3:
+            # Fallback: require at least 5 tool executions (not just 3) to avoid
+            # trivially satisfying RECON completion via failed calls alone.
+            if _has_output_files or getattr(session, "scan_count", 0) >= 5:
                 met.append("recon_artifacts_saved")
 
         elif phase == PipelinePhase.ANALYSIS:
@@ -373,9 +374,7 @@ class PipelineEngine:
             total = len(config.transition_criteria) if config else 0
             return (
                 f"[PHASE GUIDANCE] Tool '{tool_name}' is optimised for the EXPLOIT phase. "
-                f"Current phase: {
-                    current.value} ({
-                    len(criteria_met)}/{total} transition criteria met). "
+                f"Current phase: {current.value} ({len(criteria_met)}/{total} transition criteria met). "
                 "Proceed only if you have specific evidence justifying early exploitation. "
                 "Otherwise, complete the current phase objectives first."
             )
@@ -392,6 +391,5 @@ class PipelineEngine:
             f"\n[PIPELINE TRANSITION → {new_phase.value}]\n"
             f"Phase objective: {config.objective}\n"
             f"Recommended tools for this phase: {tools}\n"
-            f"You are now in the {
-                new_phase.value} phase. Focus on the objective above.\n"
+            f"You are now in the {new_phase.value} phase. Focus on the objective above.\n"
         )

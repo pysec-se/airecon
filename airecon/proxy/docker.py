@@ -165,9 +165,8 @@ class DockerEngine:
         self._container_id = stdout.decode().strip()[:12]
         self._connected = True
         logger.info(
-            f"Container started: {
-                self._container_name} ({
-                self._container_id})")
+            f"Container started: {self._container_name} ({self._container_id})"
+        )
 
         # If we have a target, create workspace dir
         if target:
@@ -450,8 +449,8 @@ class DockerEngine:
             timeout = max(float(explicit_timeout), cfg.command_timeout)
             if timeout != float(explicit_timeout):
                 logger.warning(
-                    f"Model set timeout={explicit_timeout}s, enforcing minimum {
-                        cfg.command_timeout}s")
+                    f"Model set timeout={explicit_timeout}s, enforcing minimum {cfg.command_timeout}s"
+                )
         else:
             timeout = cfg.command_timeout
 

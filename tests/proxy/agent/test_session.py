@@ -102,3 +102,13 @@ def test_update_from_parsed_output_classifies_items(mock_session):
 
     # subdomains gets the bare domain string
     assert "internal-subdomain.example.com" in mock_session.subdomains
+
+
+def test_update_from_parsed_output_extracts_embedded_url(mock_session):
+    parsed = ParsedOutput(
+        tool="katana",
+        summary="URLs",
+        items=["[javascript] https://embedded.example.com/app.js"],
+    )
+    update_from_parsed_output(mock_session, parsed)
+    assert "https://embedded.example.com/app.js" in mock_session.urls

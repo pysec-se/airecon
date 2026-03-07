@@ -12,7 +12,7 @@ from typing import Any, AsyncIterator
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from sse_starlette.sse import EventSourceResponse
 
 from .agent import AgentLoop
@@ -46,9 +46,7 @@ async def lifespan(app: FastAPI):
 
     # Check Ollama connectivity
     ollama_ok = await ollama_client.health_check()
-    logger.info(
-        f"  Ollama status: {
-            '✓ connected' if ollama_ok else '✗ unavailable'}")
+    logger.info(f"  Ollama status: {'✓ connected' if ollama_ok else '✗ unavailable'}")
 
     # Ensure Docker image exists (auto-build if needed)
     if cfg.docker_auto_build:
@@ -97,15 +95,15 @@ app.add_middleware(
 # ─── Request/Response Models ─────────────────────────────────────────
 
 class ChatRequest(BaseModel):
-    message: str
+    message: str = Field(..., max_length=100_000)
     stream: bool = True
 
 
 class FileAnalyzeRequest(BaseModel):
-    file_path: str
-    file_content: str
-    task: str
-    max_iterations: int = 30
+    file_path: str = Field(..., max_length=500)
+    file_content: str = Field(..., max_length=10_000_000)  # 10 MB
+    task: str = Field(..., max_length=10_000)
+    max_iterations: int = Field(30, ge=1, le=500)
 
 
 class StatusResponse(BaseModel):
@@ -320,13 +318,16 @@ async def _stream_file_agent_events(
         if len(request.file_content) > _MAX_EMBED else ""
     )
 
+    # Sanitize file_path before embedding in prompt (strip newlines, limit length)
+    safe_file_path = request.file_path.replace("\n", " ").replace("\r", " ")[:500]
+
     mini_agent.state.conversation = [{
         "role": "system",
         "content": (
             "You are a security file analyzer. Your sole task is to analyze "
             "the provided file and answer the user question. Be concise and "
             "focus on security-relevant findings.\n\n"
-            f"Target file: {request.file_path}\n"
+            f"Target file: {safe_file_path}\n"
             f"File content:\n```\n{file_snippet}\n```{truncation_note}"
         ),
     }]

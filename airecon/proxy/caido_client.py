@@ -57,6 +57,14 @@ class CaidoClient:
         try:
             async with httpx.AsyncClient(timeout=30.0) as c:
                 resp = await c.post(cls.BASE_URL, json=payload, headers=headers)
+                # Re-authenticate on token expiry and retry once
+                if resp.status_code in (401, 403):
+                    logger.debug("Caido token rejected (%d) — re-authenticating", resp.status_code)
+                    cls._token = None
+                    fresh_token = await cls._get_token()
+                    if fresh_token:
+                        headers["Authorization"] = f"Bearer {fresh_token}"
+                    resp = await c.post(cls.BASE_URL, json=payload, headers=headers)
                 return resp.json()
         except httpx.TimeoutException as e:
             logger.error(f"Caido GQL request timed out: {e}")

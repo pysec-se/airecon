@@ -95,11 +95,8 @@ _BUGBOUNTY_INDICATORS_MSG = (
     "hackerone",
     "bugcrowd",
     "intigriti",
-    "scope",
-    "program",
     "public domain",
     "external assessment",
-    "recon",
 )
 _PUBLIC_DOMAIN_RE = re.compile(
     r"\b([a-z0-9]([a-z0-9\-]{0,61}[a-z0-9])?\.)+"
@@ -175,22 +172,24 @@ def _is_pentest_target(target: str | None = None,
 # ------------------------------------------------------------------
 # Heavy skills embedded in the full prompt context.
 # NOT used in CTF mode to save ~85-100K tokens.
+# Keys are relative paths from the skills/ directory (subdir/filename.md)
+# so same-named files in different subdirectories don't collide.
 _FULL_EMBED_SKILLS = {
-    "install.md",
-    "scripting.md",
-    "tool_catalog.md",
-    "full_recon.md",
-    "browser_automation.md",
-    "nuclei.md",
-    "sqlmap.md",
-    "dalfox.md",
-    "nmap.md",
-    "semgrep.md",
+    "tools/install.md",
+    "tools/scripting.md",
+    "tools/tool_catalog.md",
+    "reconnaissance/full_recon.md",
+    "tools/browser_automation.md",
+    "tools/nuclei.md",
+    "tools/sqlmap.md",
+    "tools/dalfox.md",
+    "tools/nmap.md",
+    "tools/semgrep.md",
 }
 
 # Minimal set embedded for CTF mode (only what's needed for local exploitation)
 _CTF_EMBED_SKILLS = {
-    "install.md",
+    "tools/install.md",
 }
 
 
@@ -212,7 +211,8 @@ def _load_local_skills(ctf_mode: bool = False) -> str:
     reference_parts: list[str] = []
 
     for path in sorted(skills_dir.rglob("*.md")):
-        if path.name in embed_set:
+        rel = path.relative_to(skills_dir).as_posix()
+        if rel in embed_set:
             try:
                 content = path.read_text(encoding="utf-8", errors="replace")
                 embedded_parts.append(
@@ -317,8 +317,7 @@ def auto_load_skills_for_message(user_message: str) -> tuple[str, list[str]]:
                 if len(content) > limit:
                     content = (
                         content[:limit]
-                        + f"\n... (truncated at {limit} chars, use read_file for full content: {
-                            skill_file.absolute().as_posix()})"
+                        + f"\n... (truncated at {limit} chars, use read_file for full content: {skill_file.absolute().as_posix()})"
                     )
                 parts.append(f"[AUTO-LOADED SKILL: {skill_rel}]\n{content}")
                 loaded_names.append(skill_file.stem)
