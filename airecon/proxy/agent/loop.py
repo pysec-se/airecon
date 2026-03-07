@@ -400,7 +400,6 @@ class AgentLoop(_ValidatorMixin, _FormatterMixin,
             # NOTE: Do NOT clear _executed_tool_counts here — dedup must persist
             # across messages within the same session. It is only cleared in
             # reset().
-            last_iteration_had_tools = False
 
             while self.state.iteration < self.state.max_iterations:
                 if self._stop_requested:
@@ -1224,7 +1223,6 @@ class AgentLoop(_ValidatorMixin, _FormatterMixin,
                         deduped_tool_calls.append(tc)
                 tool_calls_acc = deduped_tool_calls
 
-                last_iteration_had_tools = bool(tool_calls_acc)
                 if tool_calls_acc:
                     self._no_tool_iterations = 0
                 else:
