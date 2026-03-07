@@ -686,3 +686,48 @@ FilePreviewScreen .btn-copy {
 FilePreviewScreen .btn-copy:hover {
     background: #3d444d;
 }
+
+/* ═══════════════════════════════════════════
+   @/path Autocomplete (PathCompleter)
+   ═══════════════════════════════════════════ */
+
+PathCompleter {
+    height: auto;
+    max-height: 12;
+    background: #161b22;
+    border-top: solid #30363d;
+    border-bottom: solid #30363d;
+}
+
+PathCompleter ListView {
+    height: auto;
+    max-height: 12;
+    background: transparent;
+    border: none;
+    padding: 0;
+}
+
+PathCompleter ListItem {
+    height: 1;
+    padding: 0 1;
+    background: transparent;
+    color: #c9d1d9;
+}
+
+PathCompleter ListItem.--highlight {
+    background: #1c2333;
+    color: #00d4aa;
+}
+
+PathCompleter ListItem:hover {
+    background: #1c2333;
+}
+
+PathCompleter ListItem > Label {
+    width: 100%;
+    color: #c9d1d9;
+}
+
+PathCompleter ListItem.--highlight > Label {
+    color: #00d4aa;
+}

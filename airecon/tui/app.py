@@ -21,6 +21,7 @@ from .widgets.chat import ChatPanel, ToolMessageSelected
 from .widgets.workspace import WorkspacePanel, WorkspaceTree
 from .widgets.file_preview import FilePreviewScreen
 from .widgets.input import CommandInput
+from .widgets.path_completer import PathCompleter
 from .widgets.status import StatusBar, SkillsModal
 from airecon.proxy.config import get_workspace_root
 
@@ -92,6 +93,7 @@ class AIReconApp(App):
         with Container(id="chat-area"):
             yield ChatPanel(id="chat-panel")
             yield Static("", id="recon-bar")
+            yield PathCompleter(id="path-completer")
             yield CommandInput(id="command-input")
 
         yield StatusBar(id="status-bar")
@@ -146,8 +148,8 @@ class AIReconApp(App):
         try:
             bar = self.query_one("#recon-bar", Static)
             bar.update(
-                f"[bold #3b82f6]{
-                    self._SPINNER_CHARS[0]}[/]  [#8b949e]esc  interrupt[/]")
+                f"[bold #3b82f6]{self._SPINNER_CHARS[0]}[/]  [#8b949e]esc  interrupt[/]"
+            )
             bar.styles.height = 1
         except Exception:  # nosec B110 - spinner update is best-effort
             pass
@@ -159,7 +161,7 @@ class AIReconApp(App):
         except Exception:  # nosec B110 - spinner update is best-effort
             pass
 
-    def on_workspace_tree_file_selected(
+    async def on_workspace_tree_file_selected(
             self, event: WorkspaceTree.FileSelected) -> None:
         """Handle file selection to show preview and set as active context."""
         chat = self.query_one(ChatPanel)
@@ -203,25 +205,27 @@ class AIReconApp(App):
             except Exception:  # nosec B110 - vulnerability view update is best-effort
                 pass
 
-            # Limit context reading to avoid hangs
-            try:
-                if file_path.stat().st_size > 50_000:
-                    with open(file_path, "r", encoding="utf-8", errors="replace") as f:
-                        content = f.read(50_000) + \
-                            "\n... [TRUNCATED CONTEXT] ..."
-                else:
-                    content = file_path.read_text(
-                        encoding="utf-8", errors="replace")
-            except Exception as e:
-                content = f"Error reading file: {e}"
+            # Limit context reading — offload to thread to avoid blocking TUI
+            def _read_file_sync() -> str:
+                try:
+                    if file_path.stat().st_size > 50_000:
+                        with open(file_path, "r", encoding="utf-8", errors="replace") as f:
+                            return f.read(50_000) + "\n... [TRUNCATED CONTEXT] ..."
+                    return file_path.read_text(encoding="utf-8", errors="replace")
+                except Exception as exc:
+                    return f"Error reading file: {exc}"
+
+            import asyncio
+            content = await asyncio.to_thread(_read_file_sync)
 
             # Set active file context
             self.active_file_path = file_path
             self.active_file_content = content
 
             chat.add_system_message(
-                f"File context loaded: [bold green]{
-                    file_path.name}[/bold green]. Use 'this file' or 'the loaded file' in your next prompt.")
+                f"File context loaded: [bold green]{file_path.name}[/bold green]. "
+                "Use 'this file' or 'the loaded file' in your next prompt."
+            )
 
             # Preview using optimized screen
             self._open_file_preview(str(file_path))
@@ -469,8 +473,8 @@ class AIReconApp(App):
                 status_bar.set_status(ollama="offline", docker="offline")
                 if verbose:
                     chat.add_error_message(
-                        f"Status check failed: HTTP {
-                            resp.status_code}")
+                        f"Status check failed: HTTP {resp.status_code}"
+                    )
         except Exception as e:
             status_bar.set_status(ollama="offline", docker="offline")
             if verbose:
@@ -558,12 +562,79 @@ class AIReconApp(App):
         self.active_file_path = None
         self.active_file_content = None
 
+    # ── @/path Autocomplete Handlers ────────────────────────────────────────
+
+    def on_command_input_at_path_changed(
+            self, event: CommandInput.AtPathChanged) -> None:
+        """Show or update the path completer when user types @/..."""
+        try:
+            completer = self.query_one("#path-completer", PathCompleter)
+            if event.fragment is None:
+                completer.hide()
+            else:
+                completer.show_for(event.fragment)
+        except Exception:  # nosec B110
+            pass
+
+    def on_command_input_tab_pressed(
+            self, event: CommandInput.TabPressed) -> None:
+        """Complete with the first/highlighted path entry on Tab."""
+        try:
+            completer = self.query_one("#path-completer", PathCompleter)
+            if not completer.display:
+                return
+            path = completer.get_first_path()
+            if not path:
+                return
+            cmd_input = self.query_one("#command-input", CommandInput)
+            cmd_input.do_completion(path)
+            if path.endswith("/"):
+                # Directory selected — refresh list for the new path
+                completer.show_for(path)
+            else:
+                completer.hide()
+        except Exception:  # nosec B110
+            pass
+
+    def on_command_input_escape_completion(
+            self, event: CommandInput.EscapeCompletion) -> None:
+        """Dismiss the path completer on Escape."""
+        try:
+            completer = self.query_one("#path-completer", PathCompleter)
+            if completer.display:
+                completer.hide()
+        except Exception:  # nosec B110
+            pass
+
+    def on_path_completer_completed(
+            self, event: PathCompleter.Completed) -> None:
+        """User clicked/selected an entry from the path completer."""
+        try:
+            cmd_input = self.query_one("#command-input", CommandInput)
+            cmd_input.do_completion(event.path)
+            completer = self.query_one("#path-completer", PathCompleter)
+            if event.path.endswith("/"):
+                completer.show_for(event.path)
+            else:
+                completer.hide()
+            cmd_input.focus()
+        except Exception:  # nosec B110
+            pass
+
+    # ────────────────────────────────────────────────────────────────────────
+
     async def on_command_input_submitted(
             self, message: CommandInput.Submitted) -> None:
         """Handle user input submission."""
         user_input = message.value.strip()
         if not user_input:
             return
+
+        # Dismiss path completer on submit
+        try:
+            self.query_one("#path-completer", PathCompleter).hide()
+        except Exception:  # nosec B110
+            pass
 
         # Handle slash commands (always allowed even during processing)
         if user_input.startswith("/"):
@@ -584,8 +655,7 @@ class AIReconApp(App):
         # Inject context if available
         prompt = user_input
         if self.current_context_path:
-            prompt = f"[CONTEXT: Focus on {
-                self.current_context_path}]\n{user_input}"
+            prompt = f"[CONTEXT: Focus on {self.current_context_path}]\n{user_input}"
 
         # Add user message
         chat.add_user_message(user_input)
@@ -641,9 +711,9 @@ class AIReconApp(App):
                             else:
                                 # Generic JSON result
                                 file_context_message_parts.append(
-                                    f"User loaded file: {file_path_str} (JSON Result). Content snippet: {
-                                        str(parsed_content)[
-                                            :500]}...")
+                                    f"User loaded file: {file_path_str} (JSON Result). "
+                                    f"Content snippet: {str(parsed_content)[:500]}..."
+                                )
                         else:
                             # Generic JSON
                             file_context_message_parts.append(
@@ -677,16 +747,16 @@ class AIReconApp(App):
                 # Use "message" key with concatenated string
                 json={"message": prompt_with_context, "stream": True},
                 headers={"Accept": "text/event-stream"},
-                timeout=None  # Disable timeout for long-running streams
+                # connect+write timeout 30s; read=None so long-running streams
+                # don't time out between chunks, but a dead proxy is detected
+                # at the connection stage rather than hanging forever.
+                timeout=httpx.Timeout(30.0, read=None),
             ) as resp:
                 logger.debug(f"Proxy response status: {resp.status_code}")
 
                 if resp.status_code != 200:
                     body = await resp.aread()
-                    error_msg = f"Proxy error ({
-                        resp.status_code}): {
-                        body.decode()[
-                            :500]}"
+                    error_msg = f"Proxy error ({resp.status_code}): {body.decode()[:500]}"
                     logger.error(error_msg)
                     chat.add_error_message(error_msg)
                     return
@@ -1028,8 +1098,7 @@ class AIReconApp(App):
                     data = resp.json()
                     skills = data.get("skills", [])
 
-                    skills_md = f"AI Skills & Capabilities ({
-                        len(skills)} skills)\n\n"
+                    skills_md = f"AI Skills & Capabilities ({len(skills)} skills)\n\n"
                     current_category = None
                     for s in skills:
                         name = s.get("name", "Unknown")

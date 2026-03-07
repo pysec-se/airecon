@@ -15,6 +15,10 @@ from .models import AgentEvent, AgentState, MAX_TOOL_ITERATIONS
 from .formatters import _FormatterMixin
 from .executors import _ExecutorMixin
 from ..system import auto_load_skills_for_message
+from .file_reference import (
+    parse_refs, strip_refs, resolve_ref,
+    build_injection_message, workspace_name_for_ref,
+)
 from ..ollama import OllamaClient
 from ..docker import DockerEngine
 from ..config import get_config, get_workspace_root
@@ -219,8 +223,8 @@ class AgentLoop(_ValidatorMixin, _FormatterMixin,
                 session_id=_session_id, target=""
             )
             logger.info(
-                f"Loaded session {_session_id} (target={
-                    self._session.target})")
+                f"Loaded session {_session_id} (target={self._session.target})"
+            )
         else:
             self._session = SessionData(target="")
             logger.info(f"Created new session {self._session.session_id}")
@@ -242,6 +246,16 @@ class AgentLoop(_ValidatorMixin, _FormatterMixin,
     async def process_message(
             self, user_message: str) -> AsyncIterator[AgentEvent]:
         try:
+            # ── Strip @/path refs BEFORE target extraction ────────────────
+            # Prevents filenames like @/tmp/app.com or @/tmp/evil.com from
+            # being mistakenly detected as domain/IP targets by the regex.
+            # workspace/<target>/ ← IP/domain (from clean message)
+            # workspace/<stem>/   ← file stem (fallback when no target)
+            # workspace/<dir>/    ← dir name (fallback when no target)
+            _file_refs = parse_refs(user_message)
+            if _file_refs:
+                user_message = strip_refs(user_message, _file_refs)
+
             all_targets = self._extract_targets_from_text(user_message)
             extracted_target = all_targets[0] if all_targets else None
 
@@ -287,6 +301,15 @@ class AgentLoop(_ValidatorMixin, _FormatterMixin,
                     self.state.active_target = extracted_target
 
             cfg = get_config()
+
+            # Set workspace from file ref if no IP/domain was detected.
+            # workspace/challenge/  ← @/tmp/challenge.exe (stem)
+            # workspace/project1/   ← @/path/project1/   (dir name)
+            # workspace/192.168.1.1/ kept when IP/domain target already set.
+            if _file_refs and not self.state.active_target:
+                self.state.active_target = workspace_name_for_ref(
+                    _file_refs[0]
+                )
 
             _COMPLEX_SIGNALS = (
                 "how", "what", "why", "explain", "show me", "list", "help",
@@ -370,6 +393,20 @@ class AgentLoop(_ValidatorMixin, _FormatterMixin,
                         }
                     )
 
+            # Resolve @/path file references (parsed earlier, before autostart)
+            if _file_refs:
+                _workspace_dir = get_workspace_root() / (
+                    self.state.active_target or "uploads"
+                )
+                _resolved = await asyncio.to_thread(
+                    lambda: [resolve_ref(r, _workspace_dir) for r in _file_refs]
+                )
+                _injection = build_injection_message(_resolved)
+                if _injection:
+                    self.state.conversation.append(
+                        {"role": "system", "content": _injection}
+                    )
+
             self.state.conversation.append(
                 {"role": "user", "content": user_message})
 
@@ -447,8 +484,7 @@ class AgentLoop(_ValidatorMixin, _FormatterMixin,
                         {
                             "role": "system",
                             "content": (
-                                f"[SYSTEM: MANDATORY PLAN REVISION — iteration {
-                                    self.state.iteration}]{session_info}\n"
+                                f"[SYSTEM: MANDATORY PLAN REVISION — iteration {self.state.iteration}]{session_info}\n"
                                 "Your original plan may be stale. REVISED PLANNING REQUIRED:\n"
                                 "1. Compare original plan vs actual findings\n"
                                 "2. What has WORKED? What has FAILED?\n"
@@ -493,8 +529,7 @@ class AgentLoop(_ValidatorMixin, _FormatterMixin,
                         {
                             "role": "system",
                             "content": (
-                                f"[SYSTEM: EXECUTION CHECKPOINT — Itr {
-                                    self.state.iteration}]"
+                                f"[SYSTEM: EXECUTION CHECKPOINT — Itr {self.state.iteration}]"
                                 f"{session_info}\n\n"
                                 f"{pipeline_prompt}"
                                 "MANDATORY ACTION: Do not just plan. Pick the absolute best next tool and execute it. If done, output [TASK_COMPLETE]."
@@ -629,9 +664,7 @@ class AgentLoop(_ValidatorMixin, _FormatterMixin,
                             ]
                             vuln_chaining_prompt = (
                                 f"\n\n[VULNERABILITY CHAINING ANALYSIS]\n"
-                                f"You have {
-                                    len(
-                                        s.vulnerabilities)} vulnerabilities. Consider chaining:\n"
+                                f"You have {len(s.vulnerabilities)} vulnerabilities. Consider chaining:\n"
                                 f"Current vulns: {'; '.join(vuln_titles)}\n"
                                 f"Analyze if combining these can lead to greater impact:\n"
                                 f"- Can XSS be combined with CSRF for session hijacking?\n"
@@ -694,8 +727,7 @@ class AgentLoop(_ValidatorMixin, _FormatterMixin,
                             {
                                 "role": "system",
                                 "content": (
-                                    f"[SYSTEM: ANALYSIS — Itr {
-                                        self.state.iteration}]"
+                                    f"[SYSTEM: ANALYSIS — Itr {self.state.iteration}]"
                                     f"{correlation_prompt}"
                                     f"{vuln_chaining_prompt}"
                                     f"{expert_testing_prompt}\n"
@@ -809,6 +841,10 @@ class AgentLoop(_ValidatorMixin, _FormatterMixin,
                                 chunk_data = dict(chunk)
 
                             _last_chunk_data = chunk_data  # Keep track of last chunk for token info
+
+                            # Honour stop() mid-stream so the agent exits promptly
+                            if self._stop_requested:
+                                break
 
                             message = chunk_data.get("message", {})
                             chunk_thinking = message.get("thinking")
@@ -925,8 +961,7 @@ class AgentLoop(_ValidatorMixin, _FormatterMixin,
                                     "content": (
                                         "\n[AUTO-RECOVERY] Ollama VRAM crash detected. "
                                         "Truncating context and retrying with reduced "
-                                        f"context window ({
-                                            cfg.ollama_num_ctx_small} tokens)...\n"
+                                        f"context window ({cfg.ollama_num_ctx_small} tokens)...\n"
                                     )
                                 },
                             )
@@ -949,9 +984,10 @@ class AgentLoop(_ValidatorMixin, _FormatterMixin,
                         elif "connection refused" in err_lower:
                             error_msg = "Cannot connect to Ollama (connection refused).\nFix: start Ollama with `ollama serve`."
                         elif "model not found" in err_lower or "pull" in err_lower:
-                            error_msg = f"Model not found: {
-                                cfg.ollama_model}\nFix: run `ollama pull {
-                                cfg.ollama_model}`."
+                            error_msg = (
+                                f"Model not found: {cfg.ollama_model}\n"
+                                f"Fix: run `ollama pull {cfg.ollama_model}`."
+                            )
                         elif "context length" in err_lower or "out of memory" in err_lower:
                             error_msg = "Model ran out of context or memory.\nFix: lower `ollama_num_ctx` in config (e.g. 32768)."
                         elif "timeout" in err_lower or "timed out" in err_lower:
@@ -1594,8 +1630,7 @@ class AgentLoop(_ValidatorMixin, _FormatterMixin,
                             tool_name, raw_command
                         )
                         content_str += (
-                            f"\n\n[SYSTEM: {
-                                self._consecutive_failures} CONSECUTIVE FAILURES DETECTED] "
+                            f"\n\n[SYSTEM: {self._consecutive_failures} CONSECUTIVE FAILURES DETECTED] "
                             "MANDATORY: Stop using the current approach. "
                             "Switch to a completely different tool or strategy. "
                             + (
@@ -1888,8 +1923,8 @@ class AgentLoop(_ValidatorMixin, _FormatterMixin,
             old_lines = full_path.read_text(errors="ignore").splitlines()
             self._pending_output_merges[str(full_path)] = old_lines
             logger.info(
-                f"Saved {
-                    len(old_lines)} existing lines from '{output_file}' for post-run merge")
+                f"Saved {len(old_lines)} existing lines from '{output_file}' for post-run merge"
+            )
         except Exception as e:
             logger.warning(
                 f"Could not save old content of '{output_file}' for merge: {e}")
