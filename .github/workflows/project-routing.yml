@@ -1,0 +1,88 @@
+name: Project Board Routing
+
+# Routes issues and PRs to the correct column based on labels.
+# Requires a PAT with 'project' scope stored as GH_PROJECT_TOKEN secret.
+#
+# Column mapping:
+#   enhancement label → Feature
+#   bug label         → Bugs
+#   closed/merged     → Done
+
+on:
+  issues:
+    types: [labeled, closed]
+  pull_request:
+    types: [labeled, closed]
+
+env:
+  PROJECT_ID: PVT_kwHOA5U7w84BQ8-i
+  STATUS_FIELD_ID: PVTSSF_lAHOA5U7w84BQ8-izg-7KBQ
+  OPTION_FEATURE: "4faccbe7"
+  OPTION_BUGS: "888ace52"
+  OPTION_PROGRESS: "2a2680d5"
+  OPTION_DONE: "0aac36d4"
+
+jobs:
+  route:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Determine target column
+        id: target
+        env:
+          EVENT: ${{ github.event_name }}
+          ACTION: ${{ github.event.action }}
+          LABEL: ${{ github.event.label.name }}
+          IS_MERGED: ${{ github.event.pull_request.merged }}
+        run: |
+          OPTION_ID=""
+
+          if [[ "$ACTION" == "closed" ]]; then
+            # PR must be merged (not just closed) to count as Done
+            if [[ "$EVENT" == "pull_request" && "$IS_MERGED" != "true" ]]; then
+              echo "PR closed without merge — skipping"
+              exit 0
+            fi
+            OPTION_ID="$OPTION_DONE"
+          elif [[ "$ACTION" == "labeled" ]]; then
+            case "$LABEL" in
+              enhancement) OPTION_ID="$OPTION_FEATURE" ;;
+              bug)         OPTION_ID="$OPTION_BUGS" ;;
+              *)
+                echo "Label '$LABEL' has no column mapping — skipping"
+                exit 0
+                ;;
+            esac
+          fi
+
+          echo "option_id=$OPTION_ID" >> "$GITHUB_OUTPUT"
+
+      - name: Add item to project
+        if: steps.target.outputs.option_id != ''
+        id: add_item
+        env:
+          GH_TOKEN: ${{ secrets.GH_PROJECT_TOKEN }}
+          CONTENT_ID: ${{ github.event.issue.node_id || github.event.pull_request.node_id }}
+        run: |
+          ITEM_ID=$(gh api graphql \
+            -f query='mutation($p:ID!,$c:ID!){addProjectV2ItemById(input:{projectId:$p,contentId:$c}){item{id}}}' \
+            -f p="$PROJECT_ID" \
+            -f c="$CONTENT_ID" \
+            --jq '.data.addProjectV2ItemById.item.id')
+
+          echo "item_id=$ITEM_ID" >> "$GITHUB_OUTPUT"
+
+      - name: Set status column
+        if: steps.target.outputs.option_id != '' && steps.add_item.outputs.item_id != ''
+        env:
+          GH_TOKEN: ${{ secrets.GH_PROJECT_TOKEN }}
+          ITEM_ID: ${{ steps.add_item.outputs.item_id }}
+          OPTION_ID: ${{ steps.target.outputs.option_id }}
+        run: |
+          gh api graphql \
+            -f query='mutation($p:ID!,$i:ID!,$f:ID!,$v:String!){updateProjectV2ItemFieldValue(input:{projectId:$p,itemId:$i,fieldId:$f,value:{singleSelectOptionId:$v}}){projectV2Item{id}}}' \
+            -f p="$PROJECT_ID" \
+            -f i="$ITEM_ID" \
+            -f f="$STATUS_FIELD_ID" \
+            -f v="$OPTION_ID"
+
+          echo "✓ Item routed to column (option: $OPTION_ID)"
