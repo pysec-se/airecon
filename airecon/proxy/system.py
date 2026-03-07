@@ -179,13 +179,13 @@ _FULL_EMBED_SKILLS = {
     "install.md",
     "scripting.md",
     "tool_catalog.md",
-    "full_recon_sop.md",
+    "full_recon.md",
     "browser_automation.md",
-    "nuclei_doc.md",
-    "sqlmap_doc.md",
-    "dalfox_doc.md",
-    "nmap_doc.md",
-    "semgrep_doc.md",
+    "nuclei.md",
+    "sqlmap.md",
+    "dalfox.md",
+    "nmap.md",
+    "semgrep.md",
 }
 
 # Minimal set embedded for CTF mode (only what's needed for local exploitation)

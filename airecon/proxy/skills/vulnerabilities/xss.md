@@ -225,7 +225,7 @@ This is the mandatory execution sequence. Do NOT skip steps. Do NOT run scanners
     cat output/xss_candidates.txt | dalfox pipe \
       --proxy http://127.0.0.1:48080 \
       -o output/dalfox_results.txt 2>&1
-    # Full dalfox guide: read dalfox_doc.md
+    # Full dalfox guide: read dalfox.md
 
   STEP B2: For authenticated endpoints (requires session cookie):
     dalfox url "http://target.com/profile?name=test" \

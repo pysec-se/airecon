@@ -41,7 +41,7 @@ TYPE 3: BUG BOUNTY / EXTERNAL ASSESSMENT
   Indicators: target is a public domain, has subdomains, is internet-facing; user mentions
   "bug bounty", "recon", "scope", "program".
   Key principle: Full reconnaissance, manual profiling, then targeted testing.
-  Follow the comprehensive full_recon_sop engagement plan below.
+  Follow the comprehensive full_recon engagement plan below.
 
 TYPE 4: CLOUD PENETRATION TEST
   Indicators: target involves AWS, GCP, Azure; user mentions "cloud", "S3", "EC2",

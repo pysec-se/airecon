@@ -228,7 +228,7 @@ STEP 2.3 — XSS scan on filtered candidates:
     Run XSS scanner on the candidate list routing traffic through Caido proxy.
     For VULN results: verify in browser before reporting.
     See tool_catalog.md → Phase 2 Tools → XSS Scanning for specific commands.
-    Full dalfox reference: read dalfox_doc.md
+    Full dalfox reference: read dalfox.md
 
 STEP 2.4 — SQLi manual probe on filtered candidates:
     For each URL in candidates_sqli.txt: send the three probes manually (single-quote,

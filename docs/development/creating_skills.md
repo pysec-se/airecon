@@ -82,7 +82,7 @@ Loading all skills at startup would consume 50,000+ tokens of context window —
 |------|-------|
 | `api_testing.md` | REST/SOAP/GraphQL parameter discovery, verb tampering, rate limit bypass |
 | `authentication_jwt.md` | JWT attacks: alg:none, weak secrets, RS256→HS256 confusion, kid injection |
-| `broken_function_level_authorization.md` | BFLA / privilege escalation via HTTP method tampering |
+| `bfla.md` | BFLA / privilege escalation via HTTP method tampering |
 | `business_logic.md` | Business logic flaws, 7-step procedure, workflow abuse, state machine attacks |
 | `csrf.md` | CSRF bypass techniques: SameSite confusion, token stealing, JSON CSRF, multipart |
 | `deserialization.md` | Java gadget chains, PHP object injection, Python pickle, .NET deserialization |
@@ -96,7 +96,7 @@ Loading all skills at startup would consume 50,000+ tokens of context window —
 | `mass_assignment.md` | Mass assignment and parameter pollution attacks |
 | `oauth_saml.md` | Authorization code abuse, implicit flow, SAML assertion manipulation |
 | `open_redirect.md` | Open redirect detection and OAuth `redirect_uri` abuse |
-| `path_traversal_lfi_rfi.md` | Path traversal, LFI, RFI, PHP wrapper chains, log poisoning |
+| `path_traversal.md` | Path traversal, LFI, RFI, PHP wrapper chains, log poisoning |
 | `privilege_escalation.md` | Vertical/horizontal privilege escalation, JWT privilege claims, role confusion |
 | `prototype_pollution.md` | Client-side and server-side (Node.js), lodash/merge sinks |
 | `race_conditions.md` | Race condition testing: limit bypass, TOCTOU, last-write-wins |
@@ -116,7 +116,7 @@ Loading all skills at startup would consume 50,000+ tokens of context window —
 
 | File | Topic |
 |------|-------|
-| `full_recon_sop.md` | 19KB Standard Operating Procedure — complete recon workflow with concrete success criteria, tool sequencing, artifact requirements, and phase transition rules |
+| `full_recon.md` | 19KB Standard Operating Procedure — complete recon workflow with concrete success criteria, tool sequencing, artifact requirements, and phase transition rules |
 
 ### Frameworks (`skills/frameworks/`)
 
@@ -159,13 +159,13 @@ Loading all skills at startup would consume 50,000+ tokens of context window —
 | `advanced_fuzzing.md` | AIRecon fuzzing engine usage: quick_fuzz, advanced_fuzz, deep_fuzz, schemathesis |
 | `browser_automation.md` | Playwright browser automation: auth flows, JS execution, network capture |
 | `caido.md` | Caido proxy integration: HTTPQL filters, §FUZZ§ markers, automate patterns |
-| `dalfox_doc.md` | Dalfox XSS scanner: flags, blind XSS, DOM scan, custom payloads |
+| `dalfox.md` | Dalfox XSS scanner: flags, blind XSS, DOM scan, custom payloads |
 | `install.md` | Tool installation procedures for the Kali sandbox |
-| `nmap_doc.md` | Nmap usage: script categories, output formats, NSE scripts for web |
-| `nuclei_doc.md` | Nuclei templates: custom templates, severity filters, OOB templates |
+| `nmap.md` | Nmap usage: script categories, output formats, NSE scripts for web |
+| `nuclei.md` | Nuclei templates: custom templates, severity filters, OOB templates |
 | `scripting.md` | 81KB scripting guide: Python patterns for HTTP testing, auth, rate limiting |
-| `semgrep_doc.md` | Semgrep SAST: custom rules, OWASP rulesets, triage workflow |
-| `sqlmap_doc.md` | SQLmap: tamper scripts, blind injection, file read/write, OS shell |
+| `semgrep.md` | Semgrep SAST: custom rules, OWASP rulesets, triage workflow |
+| `sqlmap.md` | SQLmap: tamper scripts, blind injection, file read/write, OS shell |
 | `tool_catalog.md` | Full catalog of all preinstalled Kali sandbox tools with usage examples |
 
 ---

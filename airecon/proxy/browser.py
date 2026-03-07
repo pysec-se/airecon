@@ -181,6 +181,18 @@ class BrowserInstance:
             return self.current_page_id
         raise ValueError("No active browser tab available")
 
+    async def _navigate_with_fallback(self, page: Any, url: str, timeout_ms: int = 60000) -> None:
+        """Navigate to URL, falling back to wait_until='commit' on domcontentloaded timeout."""
+        try:
+            await page.goto(url, wait_until="domcontentloaded", timeout=timeout_ms)
+        except Exception as e:
+            if "timeout" in str(e).lower():
+                logger.warning(
+                    f"domcontentloaded timed out for {url!r}, retrying with wait_until='commit'")
+                await page.goto(url, wait_until="commit", timeout=timeout_ms)
+            else:
+                raise
+
     async def _setup_console_logging(self, page: Page, tab_id: str) -> None:
         self.console_logs[tab_id] = []
         self.network_requests[tab_id] = []
@@ -270,7 +282,7 @@ class BrowserInstance:
         self.current_page_id = tab_id
         await self._setup_console_logging(page, tab_id)
         if url:
-            await page.goto(url, wait_until="domcontentloaded")
+            await self._navigate_with_fallback(page, url)
         return await self._get_page_state(tab_id)
 
     async def _get_page_state(
@@ -330,7 +342,7 @@ class BrowserInstance:
                     None = None) -> dict[str, Any]:
         tab_id = self._resolve_tab_id(tab_id)
         page = self.pages[tab_id]
-        await page.goto(url, wait_until="domcontentloaded")
+        await self._navigate_with_fallback(page, url)
         return await self._get_page_state(tab_id)
 
     def click(self, coordinate: str, tab_id: str |
@@ -386,7 +398,14 @@ class BrowserInstance:
     async def _back(self, tab_id: str | None = None) -> dict[str, Any]:
         tab_id = self._resolve_tab_id(tab_id)
         page = self.pages[tab_id]
-        await page.go_back(wait_until="domcontentloaded")
+        try:
+            await page.go_back(wait_until="domcontentloaded", timeout=60000)
+        except Exception as e:
+            if "timeout" in str(e).lower():
+                logger.warning("go_back domcontentloaded timed out, falling back to 'commit'")
+                await page.go_back(wait_until="commit", timeout=60000)
+            else:
+                raise
         return await self._get_page_state(tab_id)
 
     def forward(self, tab_id: str | None = None) -> dict[str, Any]:
@@ -396,7 +415,14 @@ class BrowserInstance:
     async def _forward(self, tab_id: str | None = None) -> dict[str, Any]:
         tab_id = self._resolve_tab_id(tab_id)
         page = self.pages[tab_id]
-        await page.go_forward(wait_until="domcontentloaded")
+        try:
+            await page.go_forward(wait_until="domcontentloaded", timeout=60000)
+        except Exception as e:
+            if "timeout" in str(e).lower():
+                logger.warning("go_forward domcontentloaded timed out, falling back to 'commit'")
+                await page.go_forward(wait_until="commit", timeout=60000)
+            else:
+                raise
         return await self._get_page_state(tab_id)
 
     def new_tab(self, url: str | None = None) -> dict[str, Any]:
@@ -413,7 +439,7 @@ class BrowserInstance:
         self.current_page_id = tab_id
         await self._setup_console_logging(page, tab_id)
         if url:
-            await page.goto(url, wait_until="domcontentloaded")
+            await self._navigate_with_fallback(page, url)
         return await self._get_page_state(tab_id)
 
     def switch_tab(self, tab_id: str) -> dict[str, Any]:

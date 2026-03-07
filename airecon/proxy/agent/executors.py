@@ -733,7 +733,7 @@ class _ExecutorMixin:
         tool_name: str,
         arguments: dict[str, Any],
     ) -> tuple[bool, float, dict[str, Any], str | None]:
-        from ..subagent import ParallelAgentRunner
+        from .subagent import ParallelAgentRunner
         self._last_output_file = None
         start_time = time.time()
 

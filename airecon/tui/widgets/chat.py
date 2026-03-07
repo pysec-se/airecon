@@ -3,6 +3,7 @@
 from __future__ import annotations
 from textual.containers import Horizontal
 
+from textual.app import ComposeResult
 from textual.widgets import Static, LoadingIndicator, RichLog
 from textual.containers import VerticalScroll, Vertical
 from textual.reactive import reactive
@@ -114,7 +115,7 @@ class ChatMessage(Static):
         self.message_content = content
         self.add_class(f"{role}-message")
 
-    def compose(self):
+    def compose(self) -> ComposeResult:
         # Role label with icon
         role_config = {
             "user": ("❯", "role-label-user"),
@@ -183,7 +184,7 @@ class ToolMessage(Vertical):
         self._live_output: RichLog | None = None
         self.add_class("running")
 
-    def compose(self):
+    def compose(self) -> ComposeResult:
         # Header line: ⚙ TOOL_NAME  {args_preview}
         header = Text()
         header.append("⚙ ", style="bold #58a6ff")
@@ -350,7 +351,7 @@ class StreamingMessage(Static):
         self._initial_label_yielded = False
         self._last_flush_len = 0
 
-    def compose(self):
+    def compose(self) -> ComposeResult:
         if not self._initial_label_yielded:
             yield Static("◆ AIRecon", classes="role-label role-label-assistant")
             self._initial_label_yielded = True
@@ -395,7 +396,7 @@ class ThinkingSpinner(Horizontal):
 
     DEFAULT_CSS = ""  # Defer to styles.tcss
 
-    def compose(self):
+    def compose(self) -> ComposeResult:
         yield LoadingIndicator(id="thinking-spinner")
         yield Static("  Thinking…", classes="thinking-label")
 
@@ -434,7 +435,7 @@ class SubAgentBlock(Vertical):
         self._text_static: Static | None = None
         self.add_class("subagent-block", "running")
 
-    def compose(self):
+    def compose(self) -> ComposeResult:
         yield Static(self._header_text(), classes="subagent-header")
         yield LoadingIndicator(classes="subagent-spinner")
         self._body = Vertical(classes="subagent-body")

@@ -164,7 +164,7 @@ Commercial API-based models (OpenAI GPT-4, Claude, Gemini) become prohibitively 
   │  payloads/          xss, sqli, ssrf, xxe, lfi, ssti, cmd_injection          │
   │  tools/             nmap, nuclei, sqlmap, dalfox, semgrep, caido,           │
   │                     browser_automation, scripting, advanced_fuzzing         │
-  │  reconnaissance/    full_recon_sop                                          │
+  │  reconnaissance/    full_recon                                          │
   └─────────────────────────────────────────────────────────────────────────────┘
 
   ┌─────────────────────────────────────────────────────────────────────────────┐
@@ -336,7 +336,7 @@ Deep usage guides for: `nmap`, `nuclei`, `sqlmap`, `dalfox`, `semgrep`, `caido`,
 
 ### Reconnaissance (1 skill)
 
-`full_recon_sop` — 19KB Standard Operating Procedure covering full-cycle recon with concrete success criteria, tool sequencing, and artifact requirements
+`full_recon` — 19KB Standard Operating Procedure covering full-cycle recon with concrete success criteria, tool sequencing, and artifact requirements
 
 ---
 

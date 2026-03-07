@@ -25,9 +25,6 @@ logger = logging.getLogger("airecon.agent.session")
 
 SESSIONS_DIR = Path.home() / ".airecon" / "sessions"
 
-# Similarity threshold for vulnerability deduplication (0-1)
-VULN_SIMILARITY_THRESHOLD = 0.7
-
 # ---------------------------------------------------------------------------
 # Injection point extraction
 # ---------------------------------------------------------------------------
@@ -226,13 +223,14 @@ def _is_duplicate_vulnerability(
         new_vuln: dict, existing_vulns: list[dict]) -> bool:
     """Check if a vulnerability is a duplicate of an existing one.
 
-    Uses vuln_similarity_threshold from config (default: VULN_SIMILARITY_THRESHOLD).
+    Uses vuln_similarity_threshold from config (default: 0.7).
     """
     try:
         from ..config import get_config
         threshold = get_config().vuln_similarity_threshold
     except Exception:
-        threshold = VULN_SIMILARITY_THRESHOLD
+        from ..config import DEFAULT_CONFIG
+        threshold = DEFAULT_CONFIG["vuln_similarity_threshold"]
 
     new_finding = new_vuln.get("finding", "")
     new_target = new_vuln.get("target", "")

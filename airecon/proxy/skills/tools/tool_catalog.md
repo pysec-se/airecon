@@ -44,8 +44,8 @@ If a tool is NOT installed, install it immediately. Do NOT skip the task.
     naabu, masscan (IP-only — resolve domain first!), netcat
     MASSCAN NOTE: Accepts IP addresses ONLY. Always resolve domains with dig or python before passing.
 
-    nmap / naabu — REQUIRES reading nmap_doc skill first. Has mandatory pre-conditions.
-                   Load with: read_file on the nmap_doc skill before any nmap/naabu usage.
+    nmap / naabu — REQUIRES reading nmap skill first. Has mandatory pre-conditions.
+                   Load with: read_file on the nmap skill before any nmap/naabu usage.
                    The "vuln" NSE script category is FORBIDDEN at all times.
 
 ## Web Crawling & URL Discovery
@@ -137,19 +137,19 @@ If a tool is NOT installed, install it immediately. Do NOT skip the task.
 
     bandit, eslint, jshint, trivy
 
-    semgrep — REQUIRES reading semgrep_doc skill first. Has mandatory pre-conditions.
+    semgrep — REQUIRES reading semgrep skill first. Has mandatory pre-conditions.
               Source code or JS files must exist on disk before semgrep is useful.
-              Load with: read_file on the semgrep_doc skill before any semgrep usage.
+              Load with: read_file on the semgrep skill before any semgrep usage.
 
 ## Vulnerability Scanning
 
     nikto, wapiti, dalfox, csprecon, nosqli, toxicache, semgrep, trivy, crlfuzz, misconfig-mapper
 
-    nuclei  — REQUIRES reading nuclei_doc skill first. Has mandatory pre-conditions.
-              Load with: read_file on the nuclei_doc skill before any nuclei usage.
+    nuclei  — REQUIRES reading nuclei skill first. Has mandatory pre-conditions.
+              Load with: read_file on the nuclei skill before any nuclei usage.
 
-    sqlmap / ghauri — REQUIRES reading sqlmap_doc skill first. Has mandatory pre-conditions.
-                      Load with: read_file on the sqlmap_doc skill before any sqlmap/ghauri usage.
+    sqlmap / ghauri — REQUIRES reading sqlmap skill first. Has mandatory pre-conditions.
+                      Load with: read_file on the sqlmap skill before any sqlmap/ghauri usage.
 
 ## Secret & Leak Detection
 
@@ -162,7 +162,7 @@ If a tool is NOT installed, install it immediately. Do NOT skip the task.
     dalfox, nosqli, headi, interactsh-client (OOB/blind callback listener), caido-cli
     interlace, xnldorker
 
-    sqlmap / ghauri — See sqlmap_doc skill. Mandatory pre-conditions apply.
+    sqlmap / ghauri — See sqlmap skill. Mandatory pre-conditions apply.
 
 ## Proxy & Traffic Interception
 
@@ -239,7 +239,7 @@ Adapt every command to the actual target — these are patterns, not copy-paste 
       --proxy http://127.0.0.1:48080 \
       -o output/dalfox_auth.txt
 
-    # Full dalfox reference: read dalfox_doc.md
+    # Full dalfox reference: read dalfox.md
 
 ### SQLi Probe
 
@@ -253,7 +253,7 @@ Adapt every command to the actual target — these are patterns, not copy-paste 
 
     time curl -sk "http://target.com/path?param=1; SELECT SLEEP(3)--" -o /dev/null
 
-    # Only after signal confirmed: run sqlmap (see sqlmap_doc.md)
+    # Only after signal confirmed: run sqlmap (see sqlmap.md)
     sqlmap -u "http://target.com/path?param=VALUE" -p param \
       --batch --level=1 --risk=1 \
       --proxy http://127.0.0.1:48080 \
@@ -272,12 +272,12 @@ Commands marked with [HOST PROFILE REQUIRED] cannot be run until output/host_pro
 contains a complete entry for the target host.
 
 Nuclei and sqlmap/ghauri commands are NOT listed here.
-Load the nuclei_doc or sqlmap_doc skills for those tools — they have mandatory pre-conditions.
+Load the nuclei or sqlmap skills for those tools — they have mandatory pre-conditions.
 
 ### Nuclei Usage
 
-Nuclei commands are documented in the nuclei_doc skill.
-Load it with: read_file on nuclei_doc — mandatory pre-conditions must be met first.
+Nuclei commands are documented in the nuclei skill.
+Load it with: read_file on nuclei — mandatory pre-conditions must be met first.
 
 ### Advanced Profiling & OOB
 
