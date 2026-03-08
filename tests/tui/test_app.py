@@ -4,6 +4,14 @@ from airecon.tui.app import AIReconApp
 from airecon.tui.widgets.input import CommandInput
 
 
+@pytest.fixture(autouse=True)
+def isolated_workspace(tmp_path, monkeypatch):
+    """Keep TUI tests isolated from large real workspace trees."""
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    monkeypatch.setattr("airecon.tui.app.get_workspace_root", lambda: workspace)
+
+
 @pytest.mark.asyncio
 async def test_app_initialization():
     async with AIReconApp().run_test() as pilot:

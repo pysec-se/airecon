@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
 import logging
 import os
@@ -127,6 +128,19 @@ class AIReconApp(App):
 
         # Start background status polling (retries until connected)
         self._status_task = asyncio.create_task(self._poll_services())
+
+    async def on_unmount(self) -> None:
+        """Best-effort cleanup for test/exit paths that bypass action_quit."""
+        if self._status_task and not self._status_task.done():
+            self._status_task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await self._status_task
+
+        if self._chat_worker and self._chat_worker.is_running:
+            self._chat_worker.cancel()
+
+        with contextlib.suppress(Exception):  # nosec B110 - cleanup is best-effort
+            await self._http.aclose()
 
     _SPINNER_CHARS = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"]
 
