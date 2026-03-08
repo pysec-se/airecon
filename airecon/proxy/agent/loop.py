@@ -1247,11 +1247,70 @@ class AgentLoop(_ValidatorMixin, _FormatterMixin,
                                 self.state.planned_tools.append(tool)
 
                 if not tool_calls_acc:
+                    self._no_tool_iterations += 1
                     if _has_task_complete:
                         logger.info(
                             "Agent emitted [TASK_COMPLETE] — stopping.")
-                    # Save session on any early text-only exit (with or without
-                    # TASK_COMPLETE)
+                        # Save session on explicit completion
+                        if self._session:
+                            save_session(self._session)
+                        yield AgentEvent(type="done", data={})
+                        return
+
+                    # In active recon sessions, do NOT stop on text-only hallucinations.
+                    # Force another iteration so the model must produce real tool calls.
+                    _force_tool_mode = bool(self.state.active_target)
+                    _retry_text_only = (
+                        _force_tool_mode
+                        and (
+                            has_fake_cmd_block
+                            or has_hallucination_risk
+                            or self._no_tool_iterations >= 2
+                        )
+                    )
+                    if _retry_text_only:
+                        _max_text_only_retries = max(
+                            3,
+                            int(getattr(cfg, "agent_missing_tool_retry_limit", 2)) + 1,
+                        )
+                        if self._no_tool_iterations >= _max_text_only_retries:
+                            msg = (
+                                "Model is stuck in text-only mode and is not calling tools. "
+                                "Stopping to avoid infinite loop. "
+                                "Try restarting the model/session and rerun."
+                            )
+                            logger.error(
+                                "Text-only loop abort: active_target=%r no_tool_iters=%d",
+                                self.state.active_target,
+                                self._no_tool_iterations,
+                            )
+                            if self._session:
+                                save_session(self._session)
+                            yield AgentEvent(type="error", data={"message": msg})
+                            yield AgentEvent(type="done", data={})
+                            return
+
+                        self.state.conversation.append(
+                            {
+                                "role": "system",
+                                "content": (
+                                    "[SYSTEM: RETRY REQUIRED — TOOL CALL MISSING]\n"
+                                    "Do NOT continue with text analysis.\n"
+                                    "You MUST call at least one real tool now "
+                                    "(execute, browser_action, quick_fuzz, read_file, etc.).\n"
+                                    "Respond with tool_call only."
+                                ),
+                            }
+                        )
+                        logger.warning(
+                            "Retrying iteration due to text-only response in recon mode "
+                            "(target=%r, no_tool_iters=%d)",
+                            self.state.active_target,
+                            self._no_tool_iterations,
+                        )
+                        continue
+
+                    # Non-recon text-only response: treat as final assistant answer.
                     if self._session:
                         save_session(self._session)
                     yield AgentEvent(type="done", data={})
@@ -1270,8 +1329,6 @@ class AgentLoop(_ValidatorMixin, _FormatterMixin,
 
                 if tool_calls_acc:
                     self._no_tool_iterations = 0
-                else:
-                    self._no_tool_iterations += 1
 
                 if not content_acc.strip():
                     tool_names_str = ", ".join(

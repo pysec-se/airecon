@@ -242,3 +242,60 @@ class TestLoopStreamingWithMockedOllama:
         assert len(error_events) >= 1
         assert "Ollama" in error_events[0].data.get("message", "") or \
                "connect" in error_events[0].data.get("message", "").lower()
+
+    @pytest.mark.asyncio
+    async def test_recovery_does_not_stop_on_text_only_hallucination(self, loop, mocker):
+        """When active recon target exists, a text-only hallucinated response
+        must trigger retry, not immediate done.
+        """
+        mocker.patch("airecon.proxy.system.get_system_prompt", return_value="SYS")
+        mocker.patch.object(loop, "_scan_workspace_state", return_value="")
+        await loop.initialize(target="test.com", user_message="start recon test.com")
+        loop.state.active_target = "test.com"
+
+        stream_calls = 0
+
+        async def _stream(*args, **kwargs):
+            nonlocal stream_calls
+            stream_calls += 1
+            if stream_calls == 1:
+                yield {
+                    "message": {
+                        "content": (
+                            "Let me run WPScan first.\n"
+                            "```bash\n"
+                            "wpscan --url https://test.com\n"
+                            "```"
+                        )
+                    },
+                    "done": True,
+                }
+            else:
+                yield {
+                    "message": {
+                        "tool_calls": [
+                            {
+                                "id": "call_1",
+                                "type": "function",
+                                "function": {
+                                    "name": "execute",
+                                    "arguments": "{\"command\":\"echo recovered\"}",
+                                },
+                            }
+                        ]
+                    },
+                    "done": True,
+                }
+
+        loop.ollama.chat_stream = _stream
+
+        events = []
+        async for event in loop.process_message("continue recon test.com"):
+            events.append(event)
+            if event.type == "tool_start":
+                break
+
+        assert stream_calls >= 2
+        assert not any(e.type == "done" for e in events)
+        tool_start = next(e for e in events if e.type == "tool_start")
+        assert tool_start.data.get("tool") == "execute"
