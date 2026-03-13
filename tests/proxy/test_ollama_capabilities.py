@@ -71,3 +71,38 @@ def test_init_keeps_config_defaults_when_detection_fails() -> None:
         # Detection failed → should keep config defaults (True), not override with False
         assert client.supports_thinking is True
         assert client.supports_native_tools is True
+
+
+def test_explicit_false_config_skips_detection_entirely() -> None:
+    """When both config flags are False, ollama show is never called."""
+    with patch("ollama.Client") as mock_client_cls, \
+         patch("ollama.AsyncClient"), \
+         patch("airecon.proxy.ollama.get_config") as mock_cfg:
+        mock_cfg.return_value.ollama_url = "http://127.0.0.1:11434"
+        mock_cfg.return_value.ollama_model = "qwen3:32b"
+        mock_cfg.return_value.ollama_supports_thinking = False
+        mock_cfg.return_value.ollama_supports_native_tools = False
+        mock_cfg.return_value.ollama_timeout = 30
+        client = OllamaClient()
+        # ollama show must never be called when both flags are False
+        mock_client_cls.return_value.show.assert_not_called()
+        assert client.supports_thinking is False
+        assert client.supports_native_tools is False
+
+
+def test_detection_success_overrides_optimistic_config() -> None:
+    """When detection succeeds with (False, False), it overrides the True config defaults."""
+    show_data = {"capabilities": [], "template": "No reasoning tags", "modelfile": "FROM x"}
+    with patch("ollama.Client") as mock_client_cls, \
+         patch("ollama.AsyncClient"), \
+         patch("airecon.proxy.ollama.get_config") as mock_cfg:
+        mock_cfg.return_value.ollama_url = "http://127.0.0.1:11434"
+        mock_cfg.return_value.ollama_model = "plain-model:latest"
+        mock_cfg.return_value.ollama_supports_thinking = True
+        mock_cfg.return_value.ollama_supports_native_tools = True
+        mock_cfg.return_value.ollama_timeout = 30
+        mock_client_cls.return_value.show.return_value = show_data
+        client = OllamaClient()
+        # Detection succeeded → must use detected values, not keep optimistic True
+        assert client.supports_thinking is False
+        assert client.supports_native_tools is False

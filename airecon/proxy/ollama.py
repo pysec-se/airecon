@@ -112,7 +112,10 @@ class OllamaClient:
         except Exception as e:
             logger.warning(
                 "Could not inspect model metadata via `ollama show` for %s: %s. "
-                "Keeping config defaults for thinking/native-tool mode.",
+                "Keeping config defaults (thinking/native-tools remain as configured). "
+                "If your model does NOT support thinking or tool-calling, set "
+                "ollama_supports_thinking=false and/or ollama_supports_native_tools=false "
+                "in config.json to avoid runtime errors.",
                 self.model,
                 e,
             )
