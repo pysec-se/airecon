@@ -21,7 +21,7 @@ from textual.widgets import Header, Static, DirectoryTree
 from .widgets.chat import ChatPanel, ToolMessageSelected
 from .widgets.workspace import WorkspacePanel, WorkspaceTree
 from .widgets.file_preview import FilePreviewScreen
-from .widgets.input import CommandInput
+from .widgets.input import CommandInput, SlashCompleter
 from .widgets.path_completer import PathCompleter
 from .widgets.status import StatusBar, SkillsModal
 from airecon.proxy.config import get_workspace_root
@@ -94,6 +94,7 @@ class AIReconApp(App):
         with Container(id="chat-area"):
             yield ChatPanel(id="chat-panel")
             yield Static("", id="recon-bar")
+            yield SlashCompleter(id="slash-completer")
             yield PathCompleter(id="path-completer")
             yield CommandInput(id="command-input")
 
@@ -593,7 +594,19 @@ class AIReconApp(App):
 
     def on_command_input_tab_pressed(
             self, event: CommandInput.TabPressed) -> None:
-        """Complete with the first/highlighted path entry on Tab."""
+        """Complete with the first/highlighted entry on Tab."""
+        try:
+            slash_completer = self.query_one("#slash-completer", SlashCompleter)
+            if slash_completer.display:
+                cmd = slash_completer.get_first_command()
+                if cmd:
+                    cmd_input = self.query_one("#command-input", CommandInput)
+                    cmd_input.do_slash_completion(cmd)
+                    slash_completer.hide()
+                return
+        except Exception:  # nosec B110
+            pass
+
         try:
             completer = self.query_one("#path-completer", PathCompleter)
             if not completer.display:
@@ -613,13 +626,46 @@ class AIReconApp(App):
 
     def on_command_input_escape_completion(
             self, event: CommandInput.EscapeCompletion) -> None:
-        """Dismiss the path completer on Escape."""
+        """Dismiss completers on Escape."""
+        try:
+            slash_completer = self.query_one("#slash-completer", SlashCompleter)
+            if slash_completer.display:
+                slash_completer.hide()
+        except Exception:  # nosec B110
+            pass
         try:
             completer = self.query_one("#path-completer", PathCompleter)
             if completer.display:
                 completer.hide()
         except Exception:  # nosec B110
             pass
+
+    # ── /slash Command Autocomplete Handlers ────────────────────────────────
+
+    def on_command_input_slash_changed(
+            self, event: CommandInput.SlashChanged) -> None:
+        """Show or update the slash completer when user types /..."""
+        try:
+            completer = self.query_one("#slash-completer", SlashCompleter)
+            if event.fragment is None:
+                completer.hide()
+            else:
+                completer.show_for(event.fragment)
+        except Exception:  # nosec B110
+            pass
+
+    def on_slash_completer_completed(
+            self, event: SlashCompleter.Completed) -> None:
+        """User clicked/selected a slash command entry."""
+        try:
+            cmd_input = self.query_one("#command-input", CommandInput)
+            cmd_input.do_slash_completion(event.command)
+            self.query_one("#slash-completer", SlashCompleter).hide()
+            cmd_input.focus()
+        except Exception:  # nosec B110
+            pass
+
+    # ── @/path Autocomplete Handlers ────────────────────────────────────────
 
     def on_path_completer_completed(
             self, event: PathCompleter.Completed) -> None:
@@ -645,7 +691,11 @@ class AIReconApp(App):
         if not user_input:
             return
 
-        # Dismiss path completer on submit
+        # Dismiss completers on submit
+        try:
+            self.query_one("#slash-completer", SlashCompleter).hide()
+        except Exception:  # nosec B110
+            pass
         try:
             self.query_one("#path-completer", PathCompleter).hide()
         except Exception:  # nosec B110
