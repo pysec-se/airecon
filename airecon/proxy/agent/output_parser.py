@@ -13,6 +13,8 @@ import defusedxml.ElementTree as ET
 from xml.etree.ElementTree import ParseError as XMLParseError  # nosec B405 - only importing exception class, not a parser
 from dataclasses import dataclass, field
 
+from .command_parse import extract_primary_binary
+
 
 logger = logging.getLogger("airecon.agent.output_parser")
 
@@ -66,13 +68,9 @@ _TOOL_PATTERNS: list[tuple[re.Pattern, str]] = [
 
 def detect_tool(command: str) -> str | None:
     """Detect the primary tool from a command string."""
-    # Strip the cd prefix that executors.py adds
-    cmd = re.sub(r"^cd\s+/workspace/[^\s]+\s*&&\s*", "", command).strip()
-    # Get the first token (the binary name)
-    first_token = cmd.split()[0] if cmd.split() else ""
-    # Also check for sudo prefix
-    if first_token == "sudo" and len(cmd.split()) > 1:  # nosec B105 - not a password
-        first_token = cmd.split()[1]
+    first_token = extract_primary_binary(command)
+    if not first_token:
+        return None
 
     for pattern, tool_name in _TOOL_PATTERNS:
         if pattern.search(first_token):
@@ -118,7 +116,7 @@ def parse_tool_output(command: str, stdout: str) -> ParsedOutput | None:
     # Fallback: generic smart parser for ALL unknown tools
     try:
         result = _parse_generic_smart(stdout)
-        detected = tool or _detect_tool_name_from_cmd(command)
+        detected = tool or extract_primary_binary(command) or "unknown"
         if not tool:
             logger.warning(
                 f"Unknown tool detected: {detected}. Using generic parser. "
@@ -132,20 +130,6 @@ def parse_tool_output(command: str, stdout: str) -> ParsedOutput | None:
     except Exception as e:
         logger.warning(f"Generic parser failed: {e}")
         return None
-
-
-def _detect_tool_name_from_cmd(command: str) -> str:
-    """Extract the tool binary name from a command string."""
-    cmd = re.sub(r"^cd\s+/workspace/[^\s]+\s*&&\s*", "", command).strip()
-    tokens = cmd.split()
-    if not tokens:
-        return "unknown"
-    name = tokens[0]
-    if name == "sudo" and len(tokens) > 1:
-        name = tokens[1]
-    # Strip path prefix
-    name = name.rsplit("/", 1)[-1]
-    return name
 
 
 def _parse_nmap(stdout: str) -> ParsedOutput:

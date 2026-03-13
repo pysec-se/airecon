@@ -10,6 +10,12 @@ def test_detect_tool():
     assert detect_tool("unknowncommand arg1 arg2") is None
 
 
+def test_detect_tool_with_common_wrappers():
+    assert detect_tool("timeout 30 nmap -sV example.com") == "nmap"
+    assert detect_tool("stdbuf -oL -eL nuclei -u https://example.com") == "nuclei"
+    assert detect_tool("env FOO=1 BAR=2 httpx -u https://example.com") == "httpx"
+
+
 def test_parse_tool_output_empty():
     assert parse_tool_output("nmap localhost", "") is None
     assert parse_tool_output("nmap localhost", "    \n   ") is None
@@ -93,3 +99,14 @@ def test_generic_smart_parser_fallback():
     # The Generic Tagged parser retains non-tagged lines (like the header)
     assert parsed.total_count == 4
     assert "[+]" in parsed.items[1]
+
+
+def test_detect_tool_with_shell_trampoline():
+    assert detect_tool("bash -lc 'nmap -sV example.com'") == "nmap"
+    assert detect_tool("sh -c \"httpx -u https://example.com\"") == "httpx"
+
+
+def test_detect_tool_with_timeout_env_options():
+    assert detect_tool("timeout --signal=KILL 30 nmap -sV example.com") == "nmap"
+    assert detect_tool("env -i FOO=1 BAR=2 httpx -u https://example.com") == "httpx"
+    assert detect_tool("/usr/bin/sudo /usr/bin/nuclei -u https://example.com") == "nuclei"

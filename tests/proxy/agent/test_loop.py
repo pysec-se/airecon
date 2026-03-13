@@ -121,3 +121,19 @@ class TestSubdomainWorkspacePreservation:
     def test_ip_as_extracted_is_different_domain(self):
         """IP is always treated as a different target, not a subdomain."""
         assert self._would_switch("192.168.1.1", "target.example.com") is True
+
+
+def test_skill_phase_for_message_start_uses_current_phase(agent_loop):
+    class _P:
+        value = "EXPLOIT"
+
+    agent_loop._get_current_phase = lambda: _P()
+    assert agent_loop._skill_phase_for_message_start() == "EXPLOIT"
+
+
+def test_skill_phase_for_message_start_fallback_recon(agent_loop):
+    def _boom():
+        raise RuntimeError("phase unavailable")
+
+    agent_loop._get_current_phase = _boom
+    assert agent_loop._skill_phase_for_message_start() == "RECON"

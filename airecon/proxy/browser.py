@@ -162,12 +162,13 @@ class BrowserInstance:
     def _run_async(self, coro: Any) -> dict[str, Any]:
         if not self._loop or not self.is_running:
             raise RuntimeError("Browser instance is not running")
+        timeout = get_config().browser_action_timeout
         future = asyncio.run_coroutine_threadsafe(coro, self._loop)
         try:
-            return cast("dict[str, Any]", future.result(timeout=60))
+            return cast("dict[str, Any]", future.result(timeout=timeout))
         except TimeoutError:
             future.cancel()
-            raise RuntimeError("Browser action timed out after 60s")
+            raise RuntimeError(f"Browser action timed out after {timeout}s")
 
     def _resolve_tab_id(self, tab_id: str | None) -> str:
         """Resolve tab_id, falling back to current tab if given id not found."""
@@ -175,8 +176,7 @@ class BrowserInstance:
             return tab_id
         if tab_id and tab_id not in self.pages:
             logger.warning(
-                f"Tab '{tab_id}' not found — falling back to current tab '{
-                    self.current_page_id}'")
+                f"Tab '{tab_id}' not found — falling back to current tab '{self.current_page_id}'")
         if self.current_page_id and self.current_page_id in self.pages:
             return self.current_page_id
         raise ValueError("No active browser tab available")

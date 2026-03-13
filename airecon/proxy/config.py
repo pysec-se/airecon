@@ -35,12 +35,19 @@ def get_workspace_root() -> Path:
 
 DEFAULT_CONFIG = {
     "ollama_url": "http://127.0.0.1:11434",
+    # Qwen3.5:122b — 122B parameter model with 128K context and extended thinking.
+    # Tuned for maximum reasoning depth and autonomous pentesting coverage.
     "ollama_model": "qwen3.5:122b",
-    "ollama_timeout": 1900.0,
-    "ollama_num_ctx": 65536,
-    "ollama_num_ctx_small": 32768,
+    # 2400s — 122B parameter inference takes longer than smaller models.
+    "ollama_timeout": 2400.0,
+    # 131072 = full 128K context window supported by Qwen3.5:122b.
+    "ollama_num_ctx": 131072,
+    # 65536 = 64K for secondary/summary calls (compression, tool summaries).
+    "ollama_num_ctx_small": 65536,
+    # Low temperature keeps reasoning deterministic and reduces hallucination.
     "ollama_temperature": 0.15,
-    "ollama_num_predict": 16384,
+    # 32768 tokens for deep thinking + detailed tool-call responses.
+    "ollama_num_predict": 32768,
     "ollama_enable_thinking": True,
     "ollama_supports_thinking": True,
     "ollama_supports_native_tools": True,
@@ -51,19 +58,24 @@ DEFAULT_CONFIG = {
     "docker_auto_build": True,
     "tool_response_role": "tool",
     "deep_recon_autostart": True,
-    "agent_max_tool_iterations": 500,
+    # 800 iterations — 122B model can sustain long chains without degrading.
+    "agent_max_tool_iterations": 800,
     "agent_repeat_tool_call_limit": 2,
     "agent_missing_tool_retry_limit": 2,
     "agent_plan_revision_interval": 30,
     "agent_exploration_mode": True,
-    "agent_exploration_intensity": 0.8,
+    # 0.9 — push exploration hard; 122B model handles branching paths well.
+    "agent_exploration_intensity": 0.9,
     "agent_exploration_temperature": 0.35,
     "agent_stagnation_threshold": 2,
     "agent_tool_diversity_window": 8,
     "agent_max_same_tool_streak": 3,
     "allow_destructive_testing": False,
     "browser_page_load_delay": 1.0,
-    "ollama_keep_alive": "30m",
+    # Browser action timeout in seconds (applies to each browser coroutine).
+    "browser_action_timeout": 120,
+    # 60m — keep 122B model warm in VRAM across long engagements.
+    "ollama_keep_alive": "60m",
     "searxng_url": "http://localhost:8080",
     "searxng_engines": "google,bing,duckduckgo,brave,google_news,github,stackoverflow",
     "vuln_similarity_threshold": 0.7,
@@ -122,6 +134,8 @@ class Config:
 
     # Browser
     browser_page_load_delay: float
+    # Timeout (seconds) for each browser coroutine dispatched via run_coroutine_threadsafe.
+    browser_action_timeout: int
 
     # Ollama model keep_alive (how long to keep model in VRAM)
     ollama_keep_alive: str
@@ -148,7 +162,6 @@ class Config:
 
             # Ensure directory exists only for default path
             if not config_dir.exists():
-                # print(f"DEBUG: Creating config directory at {config_dir}")
                 config_dir.mkdir(parents=True, exist_ok=True)
 
         current_config = DEFAULT_CONFIG.copy()
@@ -199,13 +212,13 @@ class Config:
                 elif isinstance(default_val, int):
                     try:
                         current_config[key] = int(val)
-                    except BaseException:
-                        pass
+                    except (ValueError, TypeError):
+                        logger.warning("AIRECON_%s env var %r is not a valid int — ignored", key.upper(), val)
                 elif isinstance(default_val, float):
                     try:
                         current_config[key] = float(val)
-                    except BaseException:
-                        pass
+                    except (ValueError, TypeError):
+                        logger.warning("AIRECON_%s env var %r is not a valid float — ignored", key.upper(), val)
                 else:
                     current_config[key] = val
 
@@ -277,6 +290,7 @@ class Config:
             "ollama_num_ctx": (1024, None),
             "ollama_num_ctx_small": (1024, None),
             "ollama_num_predict": (1, None),
+            "browser_action_timeout": (5, None),
         }
         for bkey, (lo, hi) in _BOUNDS.items():
             bval = merged.get(bkey)

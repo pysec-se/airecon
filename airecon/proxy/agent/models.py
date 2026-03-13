@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import re
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Any
@@ -11,6 +12,7 @@ MAX_TOOL_ITERATIONS = 2000
 MAX_TOOL_HISTORY = 100
 MAX_OBJECTIVES = 64
 MAX_EVIDENCE = 200
+FLAG_PATTERN = re.compile(r"flag\{[^}]+\}", re.IGNORECASE)
 
 
 @dataclass
@@ -187,13 +189,14 @@ class AgentState:
         """Return how many times tool_name was used in the given phase."""
         return self.phase_tool_usage.get(phase, {}).get(tool_name, 0)
 
-    def build_focus_context(
+    def get_phase_context(
         self,
         phase: str,
         max_objectives: int = 4,
         max_evidence: int = 6,
-    ) -> str:
-        """Create objective+evidence context to keep the LLM execution-focused."""
+        filter_evidence_by_phase: bool = True,
+    ) -> tuple[list[dict[str, Any]], list[dict[str, Any]], list[dict[str, Any]]]:
+        """Return (pending, completed, evidence) for a given phase."""
         phase_key = phase.upper()
 
         pending = [
@@ -211,10 +214,28 @@ class AgentState:
             and str(o.get("status", "")).lower() == "done"
         ][:max_objectives]
 
-        evidence = [
-            e for e in reversed(self.evidence_log)
-            if str(e.get("phase", "")).upper() == phase_key
-        ][:max_evidence]
+        if filter_evidence_by_phase:
+            evidence = [
+                e for e in reversed(self.evidence_log)
+                if str(e.get("phase", "")).upper() == phase_key
+            ][:max_evidence]
+        else:
+            evidence = list(reversed(self.evidence_log))[:max_evidence]
+
+        return pending, completed, evidence
+
+    def build_focus_context(
+        self,
+        phase: str,
+        max_objectives: int = 4,
+        max_evidence: int = 6,
+    ) -> str:
+        """Create objective+evidence context to keep the LLM execution-focused."""
+        phase_key = phase.upper()
+
+        pending, completed, evidence = self.get_phase_context(
+            phase_key, max_objectives=max_objectives, max_evidence=max_evidence
+        )
 
         if not pending and not evidence and not completed:
             return ""
@@ -390,6 +411,11 @@ class AgentState:
     # ------------------------------------------------------------------
 
     @staticmethod
+    def _extract_flags(content: str) -> list[str]:
+        """Return unique FLAG{...} values found in content."""
+        return list({m.group(0) for m in FLAG_PATTERN.finditer(content)})
+
+    @staticmethod
     def _extract_key_info(content: str, max_chars: int = 500) -> str:
         """Extract high-priority lines from tool output rather than dumb truncation.
 
@@ -400,12 +426,11 @@ class AgentState:
           4. Lines containing key security-relevant words  — error/success/token/cred
           5. Remaining content (first N chars)             — fill remaining budget
         """
-        import re as _re
         PRIORITY_PATTERNS = [
-            _re.compile(r"FLAG\{[^}]+\}", _re.IGNORECASE),
-            _re.compile(r"HTTP/[\d.]+ \d+"),
-            _re.compile(r"https?://\S+"),
-            _re.compile(
+            FLAG_PATTERN,
+            re.compile(r"HTTP/[\d.]+ \d+"),
+            re.compile(r"https?://\S+"),
+            re.compile(
                 r"(?i)(error|found|success|failed|token|secret|password|key|"
                 r"admin|root|flag|credential|auth|login|cookie|session)"
             ),
@@ -485,16 +510,11 @@ class AgentState:
             ]
 
             # Extract flags directly to ensure they are never lost
-            extracted_flags = []
+            extracted_flags: list[str] = []
             for m in chunk:
                 content = str(m.get("content", ""))
-                import re
-                flags = re.findall(r"FLAG\{[^\}]+\}", content)
-                flags.extend(re.findall(r"flag\{[^\}]+\}", content))
-                if flags:
-                    extracted_flags.extend(flags)
+                extracted_flags.extend(AgentState._extract_flags(content))
 
-            # Deduplicate flags
             extracted_flags = list(set(extracted_flags))
 
             try:

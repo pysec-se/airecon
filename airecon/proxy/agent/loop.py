@@ -13,7 +13,7 @@ from .pipeline import PipelineEngine, PipelinePhase, _PHASE_TOOL_BUDGETS
 from .output_parser import parse_tool_output
 from .models import AgentEvent, AgentState, MAX_TOOL_ITERATIONS
 from .formatters import _FormatterMixin
-from .executors import _ExecutorMixin
+from .executors import _ExecutorMixin, _RECON_PORT_SCAN_BINS
 from ..system import auto_load_skills_for_message
 from .file_reference import (
     parse_refs, strip_refs, resolve_ref,
@@ -59,6 +59,22 @@ class AgentLoop(_ValidatorMixin, _FormatterMixin,
         r"```(?:bash|sh|shell|cmd|terminal|zsh)?\s*\n(.+?)```",
         re.DOTALL | re.IGNORECASE,
     )
+    # Detects plain-text shell commands written outside any code block.
+    # Two patterns are considered unambiguous:
+    #   1. cd /workspace/<target> && ...  — AIRecon workspace invocation pattern
+    #   2. curl/wget followed by an http(s) URL AND a shell operator (&&, |, ;, \)
+    #      The shell-operator requirement avoids false positives on explanation text
+    #      like "you can use curl https://target.com to verify" which legitimately
+    #      starts a line but is not a hallucinated command invocation.
+    # Both patterns indicate the LLM is "writing" commands rather than calling
+    # the execute tool.
+    _FAKE_PLAIN_CMD_RE = re.compile(
+        r"(?m)^[ \t]*"
+        r"(?:"
+        r"cd\s+/workspace/\S+\s*&&"                    # cd /workspace/target &&
+        r"|(?:curl|wget)\s+https?://\S+\s*(?:&&|\||;|\\)" # curl/wget https://... followed by shell operator (&& | ; or line-continuation \)
+        r")",
+    )
 
     # Tools exempt from dedup (interactive / stateful operations that must be
     # re-runnable)
@@ -102,12 +118,6 @@ class AgentLoop(_ValidatorMixin, _FormatterMixin,
         "quick_fuzz", "advanced_fuzz", "deep_fuzz",
         "schemathesis_fuzz", "create_vulnerability_report",
     })
-    _RECON_BIN_HINTS = (
-        "subfinder", "amass", "assetfinder", "findomain",
-        "httpx", "nmap", "masscan", "naabu", "dnsx",
-        "ffuf", "dirsearch", "gobuster", "katana", "hakrawler",
-    )
-
     def __init__(self, ollama: OllamaClient, engine: DockerEngine) -> None:
         self.ollama = ollama
         self.engine = engine
@@ -135,6 +145,9 @@ class AgentLoop(_ValidatorMixin, _FormatterMixin,
         # If set, overrides config in process_message
         self._override_max_iterations: int | None = None
         self._ctf_mode: bool = False  # True when target is CTF/XBOW/localhost
+        # True for subagents — skips AIRECON_SESSION_ID env var so subagent
+        # never loads or overwrites the parent's persisted session.
+        self._is_subagent: bool = False
         self.pipeline: PipelineEngine | None = None
 
     async def stop(self) -> None:
@@ -255,9 +268,10 @@ class AgentLoop(_ValidatorMixin, _FormatterMixin,
         self._initial_messages = list(self.state.conversation)
 
         # Initialize session: load from env var ID if provided, otherwise
-        # create fresh
+        # create fresh.  Subagents always get a fresh session so they never
+        # load or overwrite the parent agent's persisted session data.
         import os as _os
-        _session_id = _os.environ.get("AIRECON_SESSION_ID")
+        _session_id = _os.environ.get("AIRECON_SESSION_ID") if not self._is_subagent else None
         if _session_id:
             self._session = load_session(_session_id) or SessionData(
                 session_id=_session_id, target=""
@@ -287,6 +301,13 @@ class AgentLoop(_ValidatorMixin, _FormatterMixin,
         # Create a new session on reset (keeps the old one on disk)
         self._session = SessionData(target="")
         self.pipeline = PipelineEngine(self._session)
+
+    def _skill_phase_for_message_start(self) -> str:
+        """Return phase hint for initial skill auto-loading on user message."""
+        try:
+            return self._get_current_phase().value
+        except Exception:
+            return "RECON"
 
     async def process_message(
             self, user_message: str) -> AsyncIterator[AgentEvent]:
@@ -470,9 +491,10 @@ class AgentLoop(_ValidatorMixin, _FormatterMixin,
                 {"role": "user", "content": user_message})
 
             # Auto-load relevant skills based on user message keywords.
-            # Phase at message start is always RECON (or current if re-entry).
+            # Use current phase (important for resumed sessions), fallback RECON.
+            _skill_phase = self._skill_phase_for_message_start()
             skill_context, loaded_skills = auto_load_skills_for_message(
-                user_message, phase="RECON")
+                user_message, phase=_skill_phase)
             if loaded_skills:
                 for s in loaded_skills:
                     if s not in self.state.skills_used:
@@ -1158,10 +1180,14 @@ class AgentLoop(_ValidatorMixin, _FormatterMixin,
                     signal in combined_lower for signal in hallucination_signals
                 )
 
-                # Bash/shell code block = LLM wrote a command as text instead of
-                # calling execute{}.  This is the most common hallucination pattern.
-                has_fake_cmd_block = bool(
-                    self._FAKE_CMD_BLOCK_RE.search(content_acc)
+                # Bash/shell code block OR plain-text command = LLM wrote a command
+                # instead of calling execute{}.
+                # _FAKE_CMD_BLOCK_RE catches  ```bash...```  blocks.
+                # _FAKE_PLAIN_CMD_RE catches bare  cd /workspace/...&&  or  curl https://...
+                # lines that slip through without any backtick wrapping.
+                has_fake_cmd_block = (
+                    bool(self._FAKE_CMD_BLOCK_RE.search(content_acc))
+                    or bool(self._FAKE_PLAIN_CMD_RE.search(content_acc))
                 ) if not tool_calls_acc else False
 
                 is_exploit_phase = self.pipeline and self.pipeline.get_current_phase(
@@ -1906,8 +1932,8 @@ class AgentLoop(_ValidatorMixin, _FormatterMixin,
                             if unexecuted:
                                 content_str += (
                                     f"\n\n[SYSTEM: PLANNED TOOLS NOT EXECUTED!]\n"
-                                    f"You PLANNED to use these tools but haven't executed them: {
-                                        ', '.join(unexecuted)}\n"
+                                    "You PLANNED to use these tools but haven't executed them: "
+                                    f"{', '.join(unexecuted)}\n"
                                     f"You MUST execute these tools now before moving to the next phase!\n"
                                     f"Examples:\n"
                                     f"- For 'sqlmap': sqlmap -u 'URL' --batch --level=5 --risk=3\n"
@@ -2444,9 +2470,7 @@ class AgentLoop(_ValidatorMixin, _FormatterMixin,
         if phase == PipelinePhase.RECON:
             if tool_name in ("execute", "web_search", "browser_action"):
                 self.state.mark_objective(phase.value, defaults[0], "done")
-            if cmd and any(hint in cmd for hint in self._RECON_BIN_HINTS):
-                self.state.mark_objective(phase.value, defaults[0], "done")
-            if cmd and any(hint in cmd for hint in ("nmap", "masscan", "naabu", "rustscan")):
+            if cmd and any(b in cmd for b in _RECON_PORT_SCAN_BINS):
                 self.state.mark_objective(phase.value, defaults[1], "done")
             if output_file and output_file.startswith("output/"):
                 self.state.mark_objective(phase.value, defaults[2], "done")
@@ -2916,14 +2940,9 @@ class AgentLoop(_ValidatorMixin, _FormatterMixin,
             ),
         ]
 
-        pending = [
-            o for o in self.state.objective_queue
-            if str(o.get("phase", "")).upper() == phase.value
-            and str(o.get("status", "pending")).lower() != "done"
-        ]
-        pending = sorted(
-            pending, key=lambda x: int(x.get("priority", 0)), reverse=True
-        )[:3]
+        pending, _completed, evidence = self.state.get_phase_context(
+            phase.value, max_objectives=3, max_evidence=3, filter_evidence_by_phase=False
+        )
         if pending:
             lines.append("Top pending objectives:")
             for obj in pending:
@@ -2938,10 +2957,9 @@ class AgentLoop(_ValidatorMixin, _FormatterMixin,
             for entry in recent_tools:
                 lines.append(f"- {entry.tool_name}")
 
-        recent_evidence = list(reversed(self.state.evidence_log))[:3]
-        if recent_evidence:
+        if evidence:
             lines.append("Recent evidence:")
-            for ev in recent_evidence:
+            for ev in evidence:
                 lines.append(f"- [{ev.get('source_tool', 'tool')}] {ev.get('summary', '')}")
 
         lines.append(

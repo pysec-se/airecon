@@ -46,3 +46,11 @@ def test_auto_load_mobile_pentest_skill_keywords():
     )
     assert "technologies/mobile_app_pentesting.md" in ctx
     assert "mobile_app_pentesting" in loaded
+
+
+def test_auto_load_avoids_substring_false_positive_for_express():
+    ctx, loaded = auto_load_skills_for_message(
+        "expression parser bug in custom DSL"
+    )
+    assert "frameworks/express.md" not in ctx
+    assert "express" not in loaded

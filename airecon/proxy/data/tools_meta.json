@@ -13,7 +13,8 @@
             "port_scan": [
                 "nmap",
                 "masscan",
-                "naabu"
+                "naabu",
+                "rustscan"
             ],
             "web_probing": [
                 "httpx",

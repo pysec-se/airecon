@@ -285,7 +285,7 @@ class TestGenericSmartParserExtended:
         stdout = "[*] Found: victim1.com\n[*] Found: victim2.com\n"
         parsed = parse_tool_output("theHarvester -d example.com", stdout)
         assert parsed is not None
-        assert parsed.tool == "theHarvester"
+        assert parsed.tool == "theharvester"  # extract_primary_binary always returns lowercase
 
     def test_json_lines_detected_auto(self):
         lines = "\n".join([

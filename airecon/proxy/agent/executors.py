@@ -7,6 +7,7 @@ import os
 import re
 import time
 from datetime import datetime
+from pathlib import Path
 from typing import TYPE_CHECKING, Any, Callable
 from urllib.parse import urlparse
 
@@ -17,6 +18,7 @@ from ..reporting import create_vulnerability_report
 from ..web_search import web_search
 from .models import ToolExecution
 from .session import _is_duplicate_vulnerability
+from .command_parse import extract_primary_binary
 
 if TYPE_CHECKING:
     from ..docker import DockerEngine
@@ -24,6 +26,42 @@ if TYPE_CHECKING:
     from .session import SessionData
 
 logger = logging.getLogger("airecon.agent")
+
+
+def _load_recon_bins(category: str, fallback: frozenset[str]) -> frozenset[str]:
+    """Load a recon binary list from data/tools_meta.json by category name.
+
+    Single loader used by all RECON_*_BINS constants to keep tools_meta.json
+    as the single source of truth for tool names.
+    """
+    try:
+        path = Path(__file__).resolve().parent.parent / "data" / "tools_meta.json"
+        data = json.loads(path.read_text(encoding="utf-8"))
+        bins = (
+            data.get("categories", {})
+            .get("reconnaissance", {})
+            .get(category, [])
+        )
+        return frozenset(str(x).strip().lower() for x in bins if str(x).strip())
+    except Exception as exc:
+        logger.warning(
+            "Could not load recon bins (category=%r) from tools_meta.json: %s — "
+            "falling back to built-in list. Check that data/tools_meta.json exists.",
+            category,
+            exc,
+        )
+        return fallback
+
+
+_RECON_SUBDOMAIN_BINS: frozenset[str] = _load_recon_bins(
+    "subdomain_enum",
+    frozenset({"subfinder", "amass", "assetfinder", "findomain", "dnsx"}),
+)
+
+_RECON_PORT_SCAN_BINS: frozenset[str] = _load_recon_bins(
+    "port_scan",
+    frozenset({"nmap", "masscan", "naabu", "rustscan"}),
+)
 
 
 class _ExecutorMixin:
@@ -36,6 +74,32 @@ class _ExecutorMixin:
         _session: SessionData | None
         _last_output_file: str | None
         _executed_tool_counts: dict[tuple[str, str], int]
+
+    def _extract_command_binary(self, command: str) -> str:
+        """Extract executable binary from command, stripping wrappers."""
+        return extract_primary_binary(command)
+
+    def _is_recon_phase_repeat_blocked(self, tool_name: str, arguments: dict[str, Any], count: int) -> bool:
+        """Return True if a repeated recon execute command should be blocked.
+
+        Recon enumeration binaries are blocked after first successful execution
+        in RECON phase to avoid low-value loops (e.g. subfinder rerun spam).
+        """
+        if tool_name != "execute" or count < 1:
+            return False
+
+        phase_name = ""
+        try:
+            if hasattr(self, "_get_current_phase"):
+                phase_name = str(self._get_current_phase().value).upper()  # type: ignore[misc]
+        except Exception:
+            phase_name = ""
+
+        if phase_name != "RECON":
+            return False
+
+        binary = self._extract_command_binary(arguments.get("command", ""))
+        return binary in _RECON_SUBDOMAIN_BINS
 
     async def _execute_local_browser_tool(
         self,
@@ -1408,21 +1472,28 @@ class _ExecutorMixin:
 
         try:
             from .loop import AgentLoop
-            from ..ollama import OllamaClient
-            from ..config import get_config
 
-            cfg = get_config()
-            ollama = OllamaClient(model=cfg.ollama_model)
+            # Reuse parent's OllamaClient — avoids a redundant blocking
+            # `ollama show` network call on every spawn_agent invocation.
+            parent_ollama = getattr(self, "ollama", None)
+            if parent_ollama is None:
+                from ..ollama import OllamaClient
+                from ..config import get_config
+                parent_ollama = OllamaClient(model=get_config().ollama_model)
+
             # Subagent uses same engine as parent
-            agent = AgentLoop(ollama=ollama, engine=self.engine)
+            agent = AgentLoop(ollama=parent_ollama, engine=self.engine)
+            # Subagent always gets a fresh session — never touches parent's.
+            agent._is_subagent = True
             # Limit subagent iterations — focused task, not full recon
-            # process_message respects this over config
-            agent._override_max_iterations = 200
+            agent._override_max_iterations = 100
             # Subagents must NOT be able to spawn further subagents (depth=1)
             agent._blocked_tools = {"spawn_agent", "run_parallel_agents"}
 
+            # Drain subagent events, counting iterations for the result summary.
+            _sub_iters = 0
             async for _ in agent.process_message(prompt):
-                pass  # drain all events
+                _sub_iters += 1
 
             findings: list[str] = []
             if agent._session:
@@ -1444,6 +1515,7 @@ class _ExecutorMixin:
                 "target": target,
                 "findings": findings,
                 "total": len(findings),
+                "iterations": _sub_iters,
             }
             success = True
         except Exception as e:
@@ -1494,6 +1566,17 @@ class _ExecutorMixin:
         count = self._executed_tool_counts.get(
             args_key, 0)
         limit = get_config().agent_repeat_tool_call_limit
+
+        if self._is_recon_phase_repeat_blocked(tool_name, arguments, count):
+            binary = self._extract_command_binary(arguments.get("command", ""))
+            return False, 0.0, {
+                "success": False,
+                "error": (
+                    f"Duplicate recon execution blocked for '{binary}'. "
+                    "Use previous results and pivot to a new recon vector."
+                ),
+            }, None
+
         if count >= limit:
             return False, 0.0, {
                 "success": False, "error": f"Duplicate tool execution prevented (already ran {count}x)."}, None

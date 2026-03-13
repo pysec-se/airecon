@@ -94,8 +94,7 @@ class DockerEngine:
 
         # Image doesn't exist — build it
         logger.info(
-            f"Building Docker image '{
-                self.IMAGE_NAME}' — this may take 10-20 minutes...")
+            f"Building Docker image '{self.IMAGE_NAME}' — this may take 10-20 minutes...")
         dockerfile_dir = self.DOCKERFILE_DIR
 
         if not dockerfile_dir.exists() or not (dockerfile_dir / "Dockerfile").exists():

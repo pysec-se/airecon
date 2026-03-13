@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import logging
-import re
 from typing import Any, AsyncIterator
 
 import ollama
@@ -11,57 +10,52 @@ from .config import get_config
 
 logger = logging.getLogger("airecon.ollama")
 
-# Models known to support native thinking (reasoning models)
-THINKING_MODELS = {
-    "qwen3",
-    "qwen2.5",
-    "deepseek-r1",
-    "deepseek-reasoner",
-    "llama4",
-    "gemini-2.5",
-    "gemma3",
-    "phi4",
-}
 
-# Models known to support native function calling
-NATIVE_TOOL_MODELS = {
-    "qwen3",
-    "qwen2.5",
-    "llama3.1",
-    "llama3.2",
-    "llama4",
-    "mistral",
-    "mixtral",
-    "phi4",
-    "gemini-2.5",
-    "gemma3",
-}
+def _detect_model_capabilities_from_show(
+    model_name: str,
+    show_response: dict[str, Any] | Any,
+) -> tuple[bool, bool]:
+    """Detect capabilities from Ollama `show` metadata.
 
-
-def _detect_model_capabilities(model_name: str) -> tuple[bool, bool]:
-    """Auto-detect model capabilities based on model name patterns.
-
-    Returns: (supports_thinking, supports_native_tools)
+    We intentionally trust model metadata over name heuristics. This keeps
+    capability detection aligned with Ollama model definitions instead of
+    broad assumptions from tag names.
     """
-    model_lower = model_name.lower()
+    data = show_response if isinstance(show_response, dict) else dict(show_response)
 
-    # Check for thinking capability
-    supports_thinking = any(
-        pattern in model_lower for pattern in THINKING_MODELS)
-    # Override: models with "reasoner" in name are reasoning models
-    if "reasoner" in model_lower:
-        supports_thinking = True
+    capabilities = {
+        str(item).strip().lower()
+        for item in (data.get("capabilities") or [])
+        if item is not None
+    }
+    template = (data.get("template") or "").lower()
+    modelfile = (data.get("modelfile") or "").lower()
 
-    # Check for native tool calling
-    supports_native_tools = any(
-        pattern in model_lower for pattern in NATIVE_TOOL_MODELS
+    supports_thinking = (
+        "thinking" in capabilities
+        or "<think>" in template
+        or "<think>" in modelfile
+        or "<thinking>" in template
+        or "<thinking>" in modelfile
     )
-    # Override: latest generations often have improved tool support
-    if re.search(r"(3\.\d|4\.\d)", model_lower):
-        supports_native_tools = True
+
+    has_native_tools = any(
+        cap in capabilities
+        for cap in ("tools", "tool-calling", "function-calling")
+    )
+
+    # AIRecon's tool loop relies on reasoning traces to validate tool calls.
+    # A model that supports tool-calling but produces no thinking output is
+    # disabled for safety — without reasoning traces the agent cannot verify
+    # whether a tool invocation is well-grounded.
+    supports_native_tools = has_native_tools and supports_thinking
 
     logger.info(
-        f"Model {model_name}: thinking={supports_thinking}, native_tools={supports_native_tools}"
+        "Model %s (show): capabilities=%s thinking=%s native_tools=%s",
+        model_name,
+        sorted(capabilities),
+        supports_thinking,
+        supports_native_tools,
     )
     return supports_thinking, supports_native_tools
 
@@ -73,22 +67,21 @@ class OllamaClient:
                  model: str | None = None) -> None:
         cfg = get_config()
         host = (base_url or cfg.ollama_url).rstrip("/")
+        self._host = host
         self.model = model or cfg.ollama_model
 
         # Auto-detect model capabilities
         self._supports_thinking = cfg.ollama_supports_thinking
         self._supports_native_tools = cfg.ollama_supports_native_tools
 
-        # If config has auto-detect (True by default), try to detect
-        # Only override if config explicitly enables auto-detection
-        if cfg.ollama_supports_thinking is True:
-            detected_think, detected_tools = _detect_model_capabilities(
-                self.model)
-            self._supports_thinking = detected_think
-        if cfg.ollama_supports_native_tools is True:
-            detected_think, detected_tools = _detect_model_capabilities(
-                self.model)
-            self._supports_native_tools = detected_tools
+        # If config has auto-detect (True by default), run ONE metadata call
+        # and apply results to whichever capabilities need detection.
+        if cfg.ollama_supports_thinking is True or cfg.ollama_supports_native_tools is True:
+            detected_think, detected_tools = self._detect_capabilities()
+            if cfg.ollama_supports_thinking is True:
+                self._supports_thinking = detected_think
+            if cfg.ollama_supports_native_tools is True:
+                self._supports_native_tools = detected_tools
 
         logger.info(
             f"Initializing Ollama SDK client for host: {host}, model: {self.model}, "
@@ -100,6 +93,25 @@ class OllamaClient:
         )
         self._client = ollama.AsyncClient(
             host=host, timeout=cfg.ollama_timeout)
+
+    def _detect_capabilities(self) -> tuple[bool, bool]:
+        """Detect model capabilities via Ollama `show` metadata.
+
+        Returns (False, False) on any error — the agent falls back to
+        text-based tool parsing which works for all models.
+        """
+        try:
+            sync_client = ollama.Client(host=self._host)
+            show_response = sync_client.show(model=self.model)
+            return _detect_model_capabilities_from_show(self.model, show_response)
+        except Exception as e:
+            logger.warning(
+                "Could not inspect model metadata via `ollama show` for %s: %s. "
+                "Disabling thinking and native-tool mode (safe default).",
+                self.model,
+                e,
+            )
+            return False, False
 
     @property
     def supports_thinking(self) -> bool:

@@ -216,8 +216,7 @@ def _load_local_skills(ctf_mode: bool = False) -> str:
             try:
                 content = path.read_text(encoding="utf-8", errors="replace")
                 embedded_parts.append(
-                    f'\n<embedded_skill name="{
-                        path.name}">\n{content}\n</embedded_skill>\n'
+                    f'\n<embedded_skill name="{path.name}">\n{content}\n</embedded_skill>\n'
                 )
             except Exception:
                 reference_parts.append(f"- {path.absolute().as_posix()}")
@@ -266,6 +265,23 @@ def _load_skill_keywords() -> dict[str, str]:
     return {}
 
 
+def _keyword_matches_message(keyword: str, msg_lower: str) -> bool:
+    """Return True when a skill keyword is present without broad substring noise.
+
+    Uses word boundaries for alphanumeric edge keywords (e.g. `express`) to
+    avoid false positives like `expression`. Falls back to literal matching for
+    keywords with symbolic edges.
+    """
+    k = keyword.lower().strip()
+    if not k:
+        return False
+
+    prefix = r"\b" if k[0].isalnum() else ""
+    suffix = r"\b" if k[-1].isalnum() else ""
+    pattern = prefix + re.escape(k) + suffix
+    return re.search(pattern, msg_lower) is not None
+
+
 # Keyword → skill file mapping for auto-loading (loaded from data/skills.json)
 _SKILL_KEYWORDS: dict[str, str] = _load_skill_keywords()
 
@@ -306,7 +322,7 @@ def auto_load_skills_for_message(
     # More keyword hits = more relevant to this specific query.
     skill_scores: dict[str, int] = {}
     for keyword, skill_path in _SKILL_KEYWORDS.items():
-        if keyword in msg_lower:
+        if _keyword_matches_message(keyword, msg_lower):
             skill_scores[skill_path] = skill_scores.get(skill_path, 0) + 1
 
     if not skill_scores:
