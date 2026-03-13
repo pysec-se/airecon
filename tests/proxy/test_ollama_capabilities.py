@@ -90,6 +90,25 @@ def test_explicit_false_config_skips_detection_entirely() -> None:
         assert client.supports_native_tools is False
 
 
+def test_native_tools_forced_off_when_thinking_disabled() -> None:
+    """native_tools cannot be True when thinking is False — invariant enforced in __init__."""
+    with patch("ollama.Client") as mock_client_cls, \
+         patch("ollama.AsyncClient"), \
+         patch("airecon.proxy.ollama.get_config") as mock_cfg:
+        mock_cfg.return_value.ollama_url = "http://127.0.0.1:11434"
+        mock_cfg.return_value.ollama_model = "qwen3:32b"
+        mock_cfg.return_value.ollama_supports_thinking = False
+        mock_cfg.return_value.ollama_supports_native_tools = True
+        mock_cfg.return_value.ollama_timeout = 30
+        # Detection returns tools=True but thinking=False from config → invariant enforced
+        mock_client_cls.return_value.show.return_value = {
+            "capabilities": ["tools"], "template": "<think>...</think>", "modelfile": "",
+        }
+        client = OllamaClient()
+        assert client.supports_thinking is False
+        assert client.supports_native_tools is False  # forced off by invariant
+
+
 def test_detection_success_overrides_optimistic_config() -> None:
     """When detection succeeds with (False, False), it overrides the True config defaults."""
     show_data = {"capabilities": [], "template": "No reasoning tags", "modelfile": "FROM x"}

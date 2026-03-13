@@ -88,6 +88,15 @@ class OllamaClient:
                 if cfg.ollama_supports_native_tools is True:
                     self._supports_native_tools = detected_tools
 
+        # Invariant: native tool-calling requires thinking traces for validation.
+        # Enforce regardless of how capabilities were set (config or detection).
+        if not self._supports_thinking and self._supports_native_tools:
+            logger.warning(
+                "native_tools=True requires thinking=True (AIRecon uses reasoning "
+                "traces to validate tool calls). Forcing native_tools=False."
+            )
+            self._supports_native_tools = False
+
         logger.info(
             f"Initializing Ollama SDK client for host: {host}, model: {self.model}, "
             f"timeout: {cfg.ollama_timeout}s"
@@ -158,6 +167,7 @@ class OllamaClient:
         """
         import asyncio
 
+        max_retries = max(0, max_retries)
         for attempt in range(max_retries + 1):
             try:
                 response = await self._client.chat(
