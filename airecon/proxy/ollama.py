@@ -188,6 +188,7 @@ class OllamaClient:
                     await asyncio.sleep(wait)
                     continue
                 raise
+        return ""  # unreachable in practice — all non-transient errors raise above
 
     async def chat_stream(
         self,
