@@ -304,6 +304,7 @@ def _run_status(args) -> None:
     """Check status of all services."""
     import asyncio
     import httpx
+    import re as _re
 
     async def check():
         from airecon.proxy.config import get_config
@@ -313,7 +314,7 @@ def _run_status(args) -> None:
         try:
             version = importlib.metadata.version("airecon")
         except importlib.metadata.PackageNotFoundError:
-            version = "0.1.4"
+            version = "0.1.5"
 
         # Colors
         G = "\033[32m"   # green
@@ -323,26 +324,32 @@ def _run_status(args) -> None:
         B = "\033[1m"    # bold
         D = "\033[2m"    # dim
         X = "\033[0m"    # reset
-        ON = f"{G}● online{X}"
+        ON  = f"{G}● online{X}"
         OFF = f"{R}● offline{X}"
 
-        W = 74  # box width
+        W = 74  # inner box width (chars between the two ║)
+        _ANSI = _re.compile(r'\033\[[0-9;]*m')
+
+        def _vlen(s: str) -> int:
+            """Visible length after stripping ANSI escape codes."""
+            return len(_ANSI.sub('', s))
+
+        def _row(content: str = "") -> str:
+            """One padded box row: ║ content<spaces> ║"""
+            pad = max(0, W - _vlen(content))
+            return f"  {C}║{X}{content}{' ' * pad}{C}║{X}"
 
         print()
         print(f"  {C}╔{'═' * W}╗{X}")
-        print(
-            f"  {C}║{X}  {B}▄▖▄▖▄▖                                          {X}  {C}║{X}")
-        print(
-            f"  {C}║{X}  {B}▌▌▐ ▙▘█▌▛▘▛▌▛▌                                  {X}  {C}║{X}")
-        print(
-            f"  {C}║{X}  {B}▛▌▟▖▌▌▙▖▙▖▙▌▌▌                                  {X}  {C}║{X}")
-        print(
-            f"  {C}║{X}  {D}v{version} — AI-Powered Security Reconnaissance{X}        {C}║{X}")
+        print(_row(f"  {B}▄▖▄▖▄▖{X}"))
+        print(_row(f"  {B}▌▌▐ ▙▘█▌▛▘▛▌▛▌{X}"))
+        print(_row(f"  {B}▛▌▟▖▌▌▙▖▙▖▙▌▌▌{X}"))
+        print(_row(f"  {D}v{version} — AI-Powered Security Reconnaissance{X}"))
         print(f"  {C}╠{'═' * W}╣{X}")
 
         # ── Ollama ──
         ollama_status = OFF
-        model_names = []
+        model_names: list[str] = []
         active_model = cfg.ollama_model
         try:
             async with httpx.AsyncClient(timeout=5.0) as client:
@@ -353,26 +360,27 @@ def _run_status(args) -> None:
         except Exception:  # nosec B110 - status check, best-effort
             pass
 
-        print(f"  {C}║{X}")
-        print(f"  {C}║{X}  {B}Ollama{X}        {ollama_status}")
-        print(f"  {C}║{X}  {D}Endpoint:{X}     {cfg.ollama_url}")
-        print(f"  {C}║{X}  {D}Active Model:{X} {Y}{active_model}{X}")
+        print(_row())
+        print(_row(f"  {B}Ollama{X}        {ollama_status}"))
+        print(_row(f"  {D}Endpoint:{X}     {cfg.ollama_url}"))
+        print(_row(f"  {D}Active Model:{X} {Y}{active_model}{X}"))
         if model_names:
-            # Show models in a compact grid (3 per line)
-            print(f"  {C}║{X}  {D}Available:{X}    ", end="")
+            # Build model list — 3 per line, aligned under "Available:" label
+            label = f"  {D}Available:{X}    "
+            indent = " " * _vlen(label)
+            line_content = label
             for i, name in enumerate(model_names):
+                cell = f"{G}{name}{X}" if name == active_model else f"{D}{name}{X}"
                 if i > 0 and i % 3 == 0:
-                    print(f"\n  {C}║{X}               ", end="")
-                if i % 3 > 0:
-                    print("  ", end="")
-                if name == active_model:
-                    print(f"{G}{name}{X}", end="")
-                else:
-                    print(f"{D}{name}{X}", end="")
-            print()
+                    print(_row(line_content))
+                    line_content = indent
+                elif i % 3 > 0:
+                    line_content += "  "
+                line_content += cell
+            print(_row(line_content))
 
         # ── Docker ──
-        print(f"  {C}║{X}")
+        print(_row())
         docker_status = OFF
         docker_detail = ""
         try:
@@ -380,12 +388,8 @@ def _run_status(args) -> None:
             import subprocess as sp  # nosec B404
             _docker = shutil.which("docker") or "docker"
             result = sp.run(  # nosec B603
-                [_docker,
-                 "ps",
-                 "--filter",
-                 "name=airecon-sandbox-active",
-                 "--format",
-                 "{{.Status}}"],
+                [_docker, "ps", "--filter", "name=airecon-sandbox-active",
+                 "--format", "{{.Status}}"],
                 capture_output=True, text=True, timeout=3,
             )
             if result.stdout.strip():
@@ -398,12 +402,12 @@ def _run_status(args) -> None:
             docker_status = f"{R}● not found{X}"
             docker_detail = "Docker is not installed or not in PATH"
 
-        print(f"  {C}║{X}  {B}Docker{X}        {docker_status}")
+        print(_row(f"  {B}Docker{X}        {docker_status}"))
         if docker_detail:
-            print(f"  {C}║{X}  {D}Detail:{X}       {docker_detail}")
+            print(_row(f"  {D}Detail:{X}       {docker_detail}"))
 
         # ── SearXNG ──
-        print(f"  {C}║{X}")
+        print(_row())
         searxng_status = OFF
         searxng_detail = ""
         try:
@@ -412,12 +416,13 @@ def _run_status(args) -> None:
             _docker = shutil.which("docker") or "docker"
             result = sp.run(  # nosec B603
                 [_docker, "ps", "--filter", "name=airecon-searxng",
-                    "--filter", "status=running", "--format", "{{.Status}}"],
+                 "--filter", "status=running", "--format", "{{.Status}}"],
                 capture_output=True, text=True, timeout=3,
             )
             if result.stdout.strip():
                 searxng_configured = bool(cfg.searxng_url)
-                searxng_status = f"{G}● running{X}" if searxng_configured else f"{Y}● running (unconfigured){X}"
+                searxng_status = (f"{G}● running{X}" if searxng_configured
+                                  else f"{Y}● running (unconfigured){X}")
                 searxng_detail = cfg.searxng_url or "http://localhost:8080 (auto-managed)"
             else:
                 searxng_status = f"{Y}● stopped{X}"
@@ -426,12 +431,12 @@ def _run_status(args) -> None:
             searxng_status = f"{Y}● unknown{X}"
             searxng_detail = "Docker not available"
 
-        print(f"  {C}║{X}  {B}SearXNG{X}       {searxng_status}")
+        print(_row(f"  {B}SearXNG{X}       {searxng_status}"))
         if searxng_detail:
-            print(f"  {C}║{X}  {D}Endpoint:{X}     {searxng_detail}")
+            print(_row(f"  {D}Endpoint:{X}     {searxng_detail}"))
 
         # ── Proxy ──
-        print(f"  {C}║{X}")
+        print(_row())
         proxy_url = f"http://{cfg.proxy_host}:{cfg.proxy_port}"
         proxy_status = OFF
         try:
@@ -442,10 +447,10 @@ def _run_status(args) -> None:
         except Exception:  # nosec B110 - status check, best-effort
             pass
 
-        print(f"  {C}║{X}  {B}Proxy{X}         {proxy_status}")
-        print(f"  {C}║{X}  {D}Endpoint:{X}     {proxy_url}")
+        print(_row(f"  {B}Proxy{X}         {proxy_status}"))
+        print(_row(f"  {D}Endpoint:{X}     {proxy_url}"))
 
-        print(f"  {C}║{X}")
+        print(_row())
         print(f"  {C}╚{'═' * W}╝{X}")
         print()
 
