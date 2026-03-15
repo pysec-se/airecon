@@ -8,6 +8,8 @@ from .session import (
     save_session,
     update_from_parsed_output,
     session_to_context,
+    find_prior_session,
+    merge_prior_findings,
 )
 from .pipeline import PipelineEngine, PipelinePhase, _PHASE_TOOL_BUDGETS
 from .output_parser import parse_tool_output
@@ -138,6 +140,7 @@ class AgentLoop(_ValidatorMixin, _FormatterMixin,
         self._recent_tool_names: list[str] = []
         self._last_evidence_count: int = 0
         self._watchdog_forced_calls: int = 0
+        self._empty_response_retried: bool = False
         self._session: SessionData | None = None
         self._pending_output_merges: dict[str, list[str]] = {}
         # Tools blocked for this agent (e.g. depth control)
@@ -455,6 +458,37 @@ class AgentLoop(_ValidatorMixin, _FormatterMixin,
                     if self.pipeline:
                         self.pipeline = PipelineEngine(self._session)
 
+                # Cross-session memory: pre-populate new session with findings
+                # from the most recent prior scan of the same target so the
+                # agent doesn't re-discover already-known subdomains/ports/URLs.
+                # Only runs once per session (scan_count == 0 → brand new session).
+                if (
+                    self._session
+                    and self._session.scan_count == 0
+                    and not getattr(self._session, "_prior_merged", False)
+                ):
+                    prior = find_prior_session(self.state.active_target)
+                    if prior and prior.session_id != self._session.session_id:
+                        merge_prior_findings(self._session, prior)
+                        # Inject a brief context note so the LLM knows what's pre-loaded
+                        _prior_ctx = (
+                            f"[PRIOR SESSION MEMORY] Loaded {len(prior.subdomains)} subdomains, "
+                            f"{len(prior.urls)} URLs, {len(prior.injection_points)} injection points "
+                            f"from previous scan of {self.state.active_target} "
+                            f"(session {prior.session_id}). "
+                            "This data is pre-populated in your session — no need to rediscover them. "
+                            "Focus on new coverage and deeper exploitation."
+                        )
+                        self.state.conversation.append(
+                            {"role": "system", "content": _prior_ctx}
+                        )
+                        logger.info(
+                            "Cross-session memory: merged prior session %s → %s",
+                            prior.session_id, self._session.session_id,
+                        )
+                    # Mark as merged (even if no prior found) to prevent re-running
+                    setattr(self._session, "_prior_merged", True)
+
                 if self._session and self._session.scan_count > 0:
                     session_ctx = session_to_context(self._session)
                     self.state.conversation.append(
@@ -523,6 +557,7 @@ class AgentLoop(_ValidatorMixin, _FormatterMixin,
                 if e.get("confidence", 0) >= _MEANINGFUL_EVIDENCE_THRESHOLD
             )
             self._watchdog_forced_calls = 0
+            self._empty_response_retried = False
             # NOTE: Do NOT clear _executed_tool_counts here — dedup must persist
             # across messages within the same session. It is only cleared in
             # reset().
@@ -655,6 +690,15 @@ class AgentLoop(_ValidatorMixin, _FormatterMixin,
                             if new_phase:
                                 pipeline_prompt = self.pipeline.get_transition_prompt(
                                     new_phase)
+                                # New phase = fresh start for exploration pressure.
+                                # Without this reset, stagnation accumulated in the
+                                # previous phase inflates pressure in the new one,
+                                # causing overly aggressive exploration from iter 1.
+                                self._stagnation_iterations = 0
+                                logger.debug(
+                                    "Phase transition to %s — stagnation counter reset",
+                                    new_phase.value,
+                                )
                         elif self.pipeline:
                             pipeline_prompt = "\n" + self.pipeline.get_phase_prompt()
 
@@ -672,7 +716,10 @@ class AgentLoop(_ValidatorMixin, _FormatterMixin,
                                 f"[SYSTEM: EXECUTION CHECKPOINT — Itr {self.state.iteration}]"
                                 f"{session_info}\n\n"
                                 f"{pipeline_prompt}"
-                                "MANDATORY ACTION: Do not just plan. Pick the absolute best next tool and execute it. If done, output [TASK_COMPLETE]."
+                                "MANDATORY ACTION: Your NEXT response MUST be a tool call — NOT text, NOT a plan, NOT a code block. "
+                                "Pick the highest-value next action and call the tool immediately. "
+                                "Writing commands as text does nothing. Only tool calls execute. "
+                                "If all objectives are complete, output [TASK_COMPLETE]."
                             ),
                         }
                     )
@@ -788,6 +835,18 @@ class AgentLoop(_ValidatorMixin, _FormatterMixin,
                                         corr_lines.append(
                                             f"- [{severity}] ATTACK CHAIN DETECTED "
                                             f"({name}): {steps_str}"
+                                        )
+
+                                    elif vuln_type == "synthesized_chain":
+                                        chain_id = corr.get("chain_id", "?")
+                                        title = corr.get("title", "?")
+                                        confidence = corr.get("confidence", 0.0)
+                                        steps = corr.get("steps", [])
+                                        steps_str = " → ".join(steps[:5])
+                                        corr_lines.append(
+                                            f"- [{severity}] SYNTHESIZED CHAIN "
+                                            f"(conf={confidence:.0%}) {title}"
+                                            + (f": {steps_str}" if steps_str else "")
                                         )
 
                                     else:
@@ -953,15 +1012,19 @@ class AgentLoop(_ValidatorMixin, _FormatterMixin,
                 # VRAM crash retry
                 adaptive_num_ctx = cfg.ollama_num_ctx
                 adaptive_temperature = self._get_iteration_temperature(cfg)
+                adaptive_num_predict = self._get_adaptive_num_predict(
+                    cfg, current_phase.value if current_phase else "RECON"
+                )
 
-                # --- VRAM-CRASH RECOVERY LOOP ---
-                # Attempt the LLM stream up to 2 times.
-                # On first failure with an HTML error page (Ollama OOM), we truncate
-                # the conversation aggressively, switch to ollama_num_ctx_small, and retry.
-                # On any other error (or if the retry also fails), we stop with
-                # an error message.
+                # --- STREAM RECOVERY LOOP ---
+                # Up to 4 attempts total:
+                #   VRAM crash  → 1 retry (truncate + reduced ctx)
+                #   Connection refused → 3 retries with exponential backoff (5s/10s/20s)
+                #   Timeout          → 1 retry (already waited; model may finish faster)
+                # Any other error is fatal on first occurrence.
                 _last_chunk_data = {}  # Store last chunk to extract token info
-                for _stream_attempt in range(2):
+                _vram_retry_used = False
+                for _stream_attempt in range(4):
                     try:
                         async for chunk in self.ollama.chat_stream(
                             messages=self.state.conversation,
@@ -969,7 +1032,7 @@ class AgentLoop(_ValidatorMixin, _FormatterMixin,
                             options={
                                 "num_ctx": adaptive_num_ctx,
                                 "temperature": adaptive_temperature,
-                                "num_predict": cfg.ollama_num_predict,
+                                "num_predict": adaptive_num_predict,
                             },
                             think=cfg.ollama_enable_thinking
                             and self.ollama.supports_thinking,
@@ -1089,9 +1152,14 @@ class AgentLoop(_ValidatorMixin, _FormatterMixin,
                             or "llm runner process no longer alive" in err_lower
                             or "signal: killed" in err_lower
                         )
-                        if _is_vram_crash and _stream_attempt == 0:
-                            # First attempt: auto-recover and retry with
-                            # smaller context
+                        _is_conn_refused = "connection refused" in err_lower
+                        _is_timeout = (
+                            "timeout" in err_lower or "timed out" in err_lower
+                        )
+
+                        if _is_vram_crash and not _vram_retry_used:
+                            # One-shot VRAM recovery: truncate + reduced ctx.
+                            _vram_retry_used = True
                             logger.warning(
                                 "Ollama VRAM crash detected — auto-recovering "
                                 "(aggressive truncation + reduced context window)"
@@ -1119,16 +1187,74 @@ class AgentLoop(_ValidatorMixin, _FormatterMixin,
                             in_thinking_tag = False
                             _carry = ""
                             continue  # retry the stream with smaller context
-                        # Fatal error: not VRAM crash, or second attempt also
-                        # failed
+
+                        elif _is_conn_refused and _stream_attempt < 3:
+                            # Connection refused: Ollama may be restarting after
+                            # a crash (common with large models). Back off and
+                            # retry up to 3 times (5 s → 10 s → 20 s).
+                            wait_s = 5 * (2 ** _stream_attempt)  # 5, 10, 20
+                            logger.warning(
+                                "Ollama connection refused (attempt %d/3) — "
+                                "retrying in %ds",
+                                _stream_attempt + 1,
+                                wait_s,
+                            )
+                            yield AgentEvent(
+                                type="text",
+                                data={
+                                    "content": (
+                                        f"\n[AUTO-RECOVERY] Ollama unreachable "
+                                        f"(attempt {_stream_attempt + 1}/3). "
+                                        f"Retrying in {wait_s}s...\n"
+                                    )
+                                },
+                            )
+                            await asyncio.sleep(wait_s)
+                            thinking_acc = ""
+                            content_acc = ""
+                            tool_calls_acc = []
+                            in_thinking_tag = False
+                            _carry = ""
+                            continue
+
+                        elif _is_timeout and _stream_attempt < 1:
+                            # Single retry on timeout — the model may have been
+                            # under heavy load or the response was truncated.
+                            logger.warning(
+                                "Ollama request timed out — retrying once "
+                                "(iteration=%d)",
+                                self.state.iteration,
+                            )
+                            yield AgentEvent(
+                                type="text",
+                                data={
+                                    "content": (
+                                        "\n[AUTO-RECOVERY] Ollama timed out. "
+                                        "Retrying once...\n"
+                                    )
+                                },
+                            )
+                            thinking_acc = ""
+                            content_acc = ""
+                            tool_calls_acc = []
+                            in_thinking_tag = False
+                            _carry = ""
+                            continue
+
+                        # Fatal: VRAM crash already retried, conn refused
+                        # exhausted, timeout exhausted, or unknown error.
                         if _is_vram_crash:
                             error_msg = (
                                 "Ollama crashed twice (VRAM exhausted). "
                                 "Run `systemctl restart ollama` and reduce "
                                 "`ollama_num_ctx` in config (e.g. 32768)."
                             )
-                        elif "connection refused" in err_lower:
-                            error_msg = "Cannot connect to Ollama (connection refused).\nFix: start Ollama with `ollama serve`."
+                        elif _is_conn_refused:
+                            error_msg = (
+                                "Cannot connect to Ollama after 3 retries "
+                                "(connection refused).\n"
+                                "Fix: start Ollama with `ollama serve`."
+                            )
                         elif "model not found" in err_lower or "pull" in err_lower:
                             error_msg = (
                                 f"Model not found: {cfg.ollama_model}\n"
@@ -1136,8 +1262,12 @@ class AgentLoop(_ValidatorMixin, _FormatterMixin,
                             )
                         elif "context length" in err_lower or "out of memory" in err_lower:
                             error_msg = "Model ran out of context or memory.\nFix: lower `ollama_num_ctx` in config (e.g. 32768)."
-                        elif "timeout" in err_lower or "timed out" in err_lower:
-                            error_msg = "Ollama request timed out.\nFix: increase `ollama_timeout` in config or use a faster model."
+                        elif _is_timeout:
+                            error_msg = (
+                                "Ollama request timed out twice.\n"
+                                "Fix: increase `ollama_timeout` in config or "
+                                "reduce `ollama_num_ctx`."
+                            )
                         else:
                             error_msg = f"Model connection error: {err_str}"
                         logger.error(f"Ollama stream error: {stream_err}")
@@ -1146,11 +1276,32 @@ class AgentLoop(_ValidatorMixin, _FormatterMixin,
                         return
 
                 if not content_acc and not tool_calls_acc and not thinking_acc:
+                    # Empty response can be a transient Ollama glitch —
+                    # retry once before giving up.
+                    if not getattr(self, "_empty_response_retried", False):
+                        self._empty_response_retried = True
+                        logger.warning(
+                            "Empty response from Ollama (iteration=%d) — "
+                            "retrying once",
+                            self.state.iteration,
+                        )
+                        yield AgentEvent(
+                            type="text",
+                            data={
+                                "content": (
+                                    "\n[AUTO-RECOVERY] Empty response from model. "
+                                    "Retrying...\n"
+                                )
+                            },
+                        )
+                        continue  # re-enter the while loop (new iteration)
+                    self._empty_response_retried = False
                     yield AgentEvent(
                         type="error", data={"message": "Empty response from model."}
                     )
                     yield AgentEvent(type="done", data={})
                     return
+                self._empty_response_retried = False
 
                 # --- RESPONSE QUALITY GATE ---
                 combined_response = content_acc + " " + thinking_acc
@@ -1200,13 +1351,16 @@ class AgentLoop(_ValidatorMixin, _FormatterMixin,
                 # Trigger nudge when:
                 # - hallucination signal found, OR fake bash block detected
                 # - AND no actual tool calls this iteration
-                # - AND either in post-vuln context OR 2+ consecutive no-tool iterations
+                # - Threshold: iteration 1 in any active session; iteration 2 otherwise.
                 #
-                # Removed the old `not has_prior_tool_runs` gate — it caused the
-                # check to be silently skipped whenever the previous iteration had
-                # tool calls, which is always true mid-recon.
+                # In active recon (active_target set), waiting 2 iterations wastes
+                # ~60 seconds on a 122B model. Nudge immediately on first text-only
+                # response so the model corrects itself before it settles into a loop.
+                _in_active_session = bool(self.state.active_target)
                 _nudge_threshold_met = (
-                    is_post_vuln_context or self._no_tool_iterations >= 2
+                    is_post_vuln_context
+                    or (_in_active_session and self._no_tool_iterations >= 1)
+                    or self._no_tool_iterations >= 2
                 )
                 if (has_hallucination_risk or has_fake_cmd_block) and not tool_calls_acc:
                     if has_fake_cmd_block:
@@ -1282,11 +1436,12 @@ class AgentLoop(_ValidatorMixin, _FormatterMixin,
                             "", content_acc).strip()
 
                 # --- TEXT-ONLY RESPONSE DETECTION (ALL PHASES) ---
-                # After 2+ consecutive no-tool iterations, if the response looks like
-                # planning/analysis text, discard it and force the LLM to call a tool.
-                # Previously this only triggered in EXPLOIT phase — extended to all
-                # phases because hallucination also occurs during RECON and ANALYSIS.
-                if not tool_calls_acc and content_acc.strip() and self._no_tool_iterations >= 2:
+                # Discard planning/analysis text and force a tool call.
+                # Threshold: 1 iteration in active sessions (active_target set),
+                # 2 elsewhere. One wasted iteration on a 122B model costs ~60s —
+                # intervene immediately rather than waiting for a second failure.
+                _text_only_threshold = 1 if _in_active_session else 2
+                if not tool_calls_acc and content_acc.strip() and self._no_tool_iterations >= _text_only_threshold:
                     # Check if response is analysis/planning text (not a final answer)
                     _planning_keywords = [
                         "i will", "i'll", "let me", "next step",
@@ -1422,7 +1577,7 @@ class AgentLoop(_ValidatorMixin, _FormatterMixin,
                                 thinking_acc=thinking_acc,
                                 phase=current_phase,
                             )
-                            if watchdog_call and self._watchdog_forced_calls < 2:
+                            if watchdog_call and self._watchdog_forced_calls < 3:
                                 self._watchdog_forced_calls += 1
                                 tool_calls_acc = [watchdog_call]
                                 self._no_tool_iterations = 0
@@ -1606,14 +1761,19 @@ class AgentLoop(_ValidatorMixin, _FormatterMixin,
 
                     if tn == "browser_action":
                         s, d, r, o = await self._execute_local_browser_tool(tn, args)
+                        self.state.missing_tool_count = 0
                     elif tn == "create_vulnerability_report":
                         s, d, r, o = await self._execute_report_tool(tn, args)
+                        self.state.missing_tool_count = 0
                     elif tn in ("create_file", "read_file", "list_files"):
                         s, d, r, o = await self._execute_filesystem_tool(tn, args)
+                        self.state.missing_tool_count = 0
                     elif tn == "web_search":
                         s, d, r, o = await self._execute_web_search_tool(args)
+                        self.state.missing_tool_count = 0
                     elif any(tn == t["function"]["name"] for t in (self._tools_ollama or [])):
                         s, d, r, o = await self._execute_tool_and_record(tn, args)
+                        self.state.missing_tool_count = 0
                     else:
                         self.state.missing_tool_count += 1
                         return (
@@ -2279,6 +2439,42 @@ class AgentLoop(_ValidatorMixin, _FormatterMixin,
         except Exception:
             return default
 
+    # Tools that need minimal reasoning — reduce token budget to speed up iteration.
+    _SHALLOW_TOOLS: frozenset[str] = frozenset({
+        "list_files", "read_file", "create_file", "get_console_logs",
+        "get_network_logs", "view_source", "caido_list_requests",
+    })
+    # Tools / phases that need maximum reasoning depth.
+    _DEEP_TOOLS: frozenset[str] = frozenset({
+        "advanced_fuzz", "deep_fuzz", "schemathesis_fuzz",
+        "spawn_agent", "create_vulnerability_report", "code_analysis",
+    })
+
+    def _get_adaptive_num_predict(self, cfg: Any, phase: str) -> int:
+        """Return an adaptive num_predict based on phase complexity and last tool.
+
+        SHALLOW (fast iteration):  8 192 tokens   — file ops, listing, log reads
+        MEDIUM  (default):        16 384 tokens   — recon, analysis tasks
+        DEEP    (max reasoning):  cfg value        — exploit dev, reporting, stagnation
+        """
+        base = self._cfg_int(cfg, "ollama_num_predict", 32768)
+        last_tool = self._recent_tool_names[-1] if self._recent_tool_names else ""
+
+        # Always use full budget when stagnating or in exploit/report phase
+        stagnation_threshold = self._cfg_int(cfg, "agent_stagnation_threshold", 2)
+        if (
+            self._stagnation_iterations >= stagnation_threshold
+            or phase in ("EXPLOIT", "REPORT")
+            or last_tool in self._DEEP_TOOLS
+        ):
+            return base  # full thinking budget
+
+        if last_tool in self._SHALLOW_TOOLS:
+            return min(base, 8192)  # shallow: fast
+
+        # ANALYSIS or RECON with non-trivial tools — medium budget
+        return min(base, 16384)
+
     def _get_iteration_temperature(self, cfg: Any) -> float:
         base_temp = self._cfg_float(cfg, "ollama_temperature", 0.15)
         if not self._cfg_bool(cfg, "agent_exploration_mode", True):
@@ -2769,15 +2965,34 @@ class AgentLoop(_ValidatorMixin, _FormatterMixin,
                 if safe:
                     return safe
 
+        # Scan raw text lines — content first, then thinking block.
+        # qwen3 thinking blocks often contain the intended command wrapped in
+        # backticks (e.g. `nmap -sV target`) or after a colon ("Run: nmap ...").
+        # Strip those wrappers before matching.
+        _backtick_re = re.compile(r"`([^`]+)`")
+        _run_prefix_re = re.compile(
+            r"(?:run|execute|use|call|try|invoke)\s*:?\s*(.+)", re.IGNORECASE
+        )
         for raw_line in (content_acc + "\n" + thinking_acc).splitlines():
             line = raw_line.strip().lstrip("-*0123456789. ").strip()
             if not line:
                 continue
-            line = line.lstrip("$").strip()
-            if command_prefix_re.match(line):
-                safe = _safe(line)
-                if safe:
-                    return safe
+
+            # Try stripping backtick wrapping first
+            bt_match = _backtick_re.search(line)
+            candidates = [bt_match.group(1).strip()] if bt_match else []
+            # Try stripping "Run: ..." prefix
+            rp_match = _run_prefix_re.match(line)
+            if rp_match:
+                candidates.append(rp_match.group(1).strip().lstrip("`").rstrip("`").strip())
+            # Raw line as fallback
+            candidates.append(line.lstrip("$").strip())
+
+            for candidate_line in candidates:
+                if command_prefix_re.match(candidate_line):
+                    safe = _safe(candidate_line)
+                    if safe:
+                        return safe
 
         return None
 
@@ -2787,7 +3002,12 @@ class AgentLoop(_ValidatorMixin, _FormatterMixin,
         thinking_acc: str,
         phase: PipelinePhase,
     ) -> dict[str, Any]:
-        """Build a deterministic fallback tool_call when model is text-only."""
+        """Build a deterministic fallback tool_call when model is text-only.
+
+        Priority:
+        1. Extract an actual shell command the LLM wrote in text.
+        2. Phase-aware smart fallback — something useful, not just list_files.
+        """
         candidate_cmd = self._extract_shell_command_candidate(
             content_acc=content_acc,
             thinking_acc=thinking_acc,
@@ -2802,16 +3022,55 @@ class AgentLoop(_ValidatorMixin, _FormatterMixin,
                 },
             }
 
-        fallback_path = "output"
-        if phase == PipelinePhase.REPORT:
-            fallback_path = "vulnerabilities"
+        # Phase-aware fallback — pick the most productive action per phase.
+        active_target = self.state.active_target or ""
 
+        if phase == PipelinePhase.EXPLOIT and active_target:
+            # In EXPLOIT, quick_fuzz is far more valuable than listing files.
+            # Use https:// scheme; quick_fuzz handles non-responsive targets
+            # gracefully.
+            return {
+                "id": f"watchdog_fuzz_{self.state.iteration}",
+                "type": "function",
+                "function": {
+                    "name": "quick_fuzz",
+                    "arguments": {"target": f"https://{active_target}"},
+                },
+            }
+
+        if phase == PipelinePhase.ANALYSIS and active_target:
+            # In ANALYSIS, a web_search on the target can surface new attack
+            # surface that the LLM was trying to research via text.
+            return {
+                "id": f"watchdog_search_{self.state.iteration}",
+                "type": "function",
+                "function": {
+                    "name": "web_search",
+                    "arguments": {
+                        "query": f"site:{active_target} OR \"{active_target}\" vulnerability",
+                        "max_results": 5,
+                    },
+                },
+            }
+
+        if phase == PipelinePhase.REPORT:
+            return {
+                "id": f"watchdog_list_files_{self.state.iteration}",
+                "type": "function",
+                "function": {
+                    "name": "list_files",
+                    "arguments": {"path": "vulnerabilities"},
+                },
+            }
+
+        # RECON or unknown phase: list output files to remind the model what
+        # has already been discovered.
         return {
             "id": f"watchdog_list_files_{self.state.iteration}",
             "type": "function",
             "function": {
                 "name": "list_files",
-                "arguments": {"path": fallback_path},
+                "arguments": {"path": "output"},
             },
         }
 

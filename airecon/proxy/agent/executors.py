@@ -135,7 +135,7 @@ class _ExecutorMixin:
                 # The underlying sync Playwright thread cannot be force-killed
                 # from asyncio. Schedule a best-effort close to release the
                 # browser process before we return the error.
-                asyncio.get_event_loop().run_in_executor(
+                asyncio.get_running_loop().run_in_executor(
                     None,
                     lambda: browser_action(action="close"),
                 )
@@ -723,7 +723,10 @@ class _ExecutorMixin:
         self._last_output_file = None
         start_time = time.time()
 
-        output_file = arguments.get("output_file", "wordlist.txt")
+        # Strip any directory components — only allow plain filenames to
+        # prevent path traversal (e.g. output_file="../../etc/cron.d/x").
+        raw_output_file = arguments.get("output_file", "wordlist.txt")
+        output_file = Path(raw_output_file).name or "wordlist.txt"
         max_combinations = min(
             int(arguments.get("max_combinations", 300)), 1000)
         vuln_types = arguments.get("vuln_types") or None
@@ -1194,41 +1197,95 @@ class _ExecutorMixin:
         self._last_output_file = None
         start_time = time.time()
 
+        # tools.json uses snake_case field names; Caido GraphQL uses camelCase.
         allowlist = arguments.get("allowlist", [])
         denylist = arguments.get("denylist", [])
-
-        query = """
-        mutation CreateScope($input: CreateScopeInput!) {
-            createScope(input: $input) {
-                scope { id name }
-            }
-        }
-        """
         scope_name = f"airecon-{self.state.active_target or 'scope'}"
-        variables = {
-            "input": {
-                "name": scope_name,
-                "allowlist": allowlist,
-                "denylist": denylist}}
 
         try:
-            data = await CaidoClient.gql(query, variables)
+            # Step 1: Check if a scope with the same name already exists so we
+            # can update it instead of accumulating duplicate scopes on every
+            # call.
+            list_q = """
+            query ListScopes {
+                scopes {
+                    edges { node { id name } }
+                }
+            }
+            """
+            existing_id: str | None = None
+            try:
+                list_data = await CaidoClient.gql(list_q)
+                edges = (
+                    list_data.get("data", {})
+                    .get("scopes", {})
+                    .get("edges", [])
+                )
+                for edge in edges:
+                    if (edge.get("node") or {}).get("name") == scope_name:
+                        existing_id = edge["node"]["id"]
+                        break
+            except Exception as _list_err:
+                logger.debug("Could not list Caido scopes: %s — will create new", _list_err)
+
+            if existing_id:
+                # Update the existing scope (avoids duplicate accumulation).
+                # allowList / denyList: camelCase as required by Caido GraphQL.
+                update_q = """
+                mutation UpdateScope($id: ID!, $input: UpdateScopeInput!) {
+                    updateScope(id: $id, input: $input) {
+                        scope { id name }
+                    }
+                }
+                """
+                variables: dict[str, Any] = {
+                    "id": existing_id,
+                    "input": {
+                        "allowList": allowlist,
+                        "denyList": denylist,
+                    },
+                }
+                data = await CaidoClient.gql(update_q, variables)
+                scope_key = "updateScope"
+            else:
+                # Create a fresh scope.
+                create_q = """
+                mutation CreateScope($input: CreateScopeInput!) {
+                    createScope(input: $input) {
+                        scope { id name }
+                    }
+                }
+                """
+                variables = {
+                    "input": {
+                        "name": scope_name,
+                        "allowList": allowlist,
+                        "denyList": denylist,
+                    },
+                }
+                data = await CaidoClient.gql(create_q, variables)
+                scope_key = "createScope"
+
             if "errors" in data:
                 res_dict = {
                     "success": False,
-                    "error": data["errors"][0]["message"]}
+                    "error": data["errors"][0]["message"],
+                }
                 success = False
             else:
-                scope = data.get(
-                    "data",
-                    {}).get(
-                    "createScope",
-                    {}).get(
-                    "scope",
-                    {})
-                res_dict = {"success": True, "scope_id": scope.get("id"),
-                            "scope_name": scope.get("name"),
-                            "allowlist": allowlist, "denylist": denylist}
+                scope = (
+                    data.get("data", {})
+                    .get(scope_key, {})
+                    .get("scope", {})
+                )
+                res_dict = {
+                    "success": True,
+                    "scope_id": scope.get("id"),
+                    "scope_name": scope.get("name"),
+                    "action": "updated" if existing_id else "created",
+                    "allowlist": allowlist,
+                    "denylist": denylist,
+                }
                 success = True
         except Exception as e:
             logger.error(f"caido_set_scope error: {e}")
@@ -1362,7 +1419,11 @@ class _ExecutorMixin:
             stdout = exec_result.get(
                 "stdout", "") or exec_result.get(
                 "result", "") or ""
-            success = bool(stdout) and "Error" not in stdout[:200]
+            # Treat as failure only on hard execution errors (no output at all,
+            # or explicit exec error). Schemathesis normally prints "ERROR:"
+            # level lines for individual test cases — those are NOT failures.
+            exec_error = exec_result.get("error") or exec_result.get("stderr") or ""
+            success = bool(stdout.strip()) or not bool(exec_error)
 
             # Parse summary line counts
             violations = stdout.count("FAILED") + \

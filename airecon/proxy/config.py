@@ -79,6 +79,14 @@ DEFAULT_CONFIG = {
     "searxng_url": "http://localhost:8080",
     "searxng_engines": "google,bing,duckduckgo,brave,google_news,github,stackoverflow",
     "vuln_similarity_threshold": 0.7,
+    # Phase transition depth requirements for RECON phase.
+    # Agent must discover >= N subdomains before RECON→ANALYSIS transition.
+    "pipeline_recon_min_subdomains": 3,
+    # Agent must collect >= N URLs before RECON→ANALYSIS transition.
+    "pipeline_recon_min_urls": 1,
+    # Soft timeout (iterations) — force RECON→ANALYSIS after this many iterations
+    # regardless of depth criteria, to prevent infinite RECON loops.
+    "pipeline_recon_soft_timeout": 30,
 }
 
 
@@ -146,6 +154,11 @@ class Config:
 
     # Vulnerability deduplication threshold (0.0-1.0, default 0.7)
     vuln_similarity_threshold: float
+
+    # Phase transition depth requirements
+    pipeline_recon_min_subdomains: int
+    pipeline_recon_min_urls: int
+    pipeline_recon_soft_timeout: int
 
     @classmethod
     def load(cls, config_path: str | Path | None = None) -> Config:
@@ -291,6 +304,9 @@ class Config:
             "ollama_num_ctx_small": (1024, None),
             "ollama_num_predict": (1, None),
             "browser_action_timeout": (5, None),
+            "pipeline_recon_min_subdomains": (0, None),
+            "pipeline_recon_min_urls": (0, None),
+            "pipeline_recon_soft_timeout": (5, None),
         }
         for bkey, (lo, hi) in _BOUNDS.items():
             bval = merged.get(bkey)

@@ -394,6 +394,128 @@ def list_sessions() -> list[dict]:
     return sessions
 
 
+def find_prior_session(target: str) -> SessionData | None:
+    """Find the most recent completed session for the given target.
+
+    Returns None if no prior session exists or the target has never been scanned.
+    Only considers sessions that made meaningful progress (scan_count >= 3 or
+    at least one completed phase) to avoid pre-populating from aborted runs.
+    """
+    if not SESSIONS_DIR.exists():
+        return None
+
+    target_norm = target.strip().lower()
+    candidates: list[tuple[str, str]] = []  # (updated_at, session_id)
+
+    for path in SESSIONS_DIR.glob("*.json"):
+        try:
+            with open(path, "r") as f:
+                data = json.load(f)
+            if data.get("target", "").strip().lower() != target_norm:
+                continue
+            # Only consider sessions with meaningful progress
+            has_progress = (
+                data.get("scan_count", 0) >= 3
+                or bool(data.get("completed_phases"))
+            )
+            if not has_progress:
+                continue
+            ts = data.get("updated_at") or data.get("created_at", "")
+            candidates.append((ts, data.get("session_id", path.stem)))
+        except Exception as _e:
+            logger.debug("Could not inspect session file %s: %s", path, _e)
+
+    if not candidates:
+        return None
+
+    # Most recently updated session
+    candidates.sort(reverse=True)
+    _, best_id = candidates[0]
+    return load_session(best_id)
+
+
+def merge_prior_findings(new_session: SessionData, prior: SessionData) -> None:
+    """Merge findings from a prior session into a new session for the same target.
+
+    Only merges factual reconnaissance data (subdomains, ports, URLs, technologies,
+    injection points, attack_chains). Does NOT merge vulnerabilities (may be patched),
+    phase state (always restart from RECON), or auth state (tokens may be expired).
+
+    This gives the new session a head-start without polluting it with stale vuln data.
+    """
+    if prior.target.strip().lower() != new_session.target.strip().lower():
+        logger.warning(
+            "merge_prior_findings: target mismatch (%r vs %r) — skipping",
+            prior.target, new_session.target,
+        )
+        return
+
+    merged_count = 0
+
+    # Subdomains — deduplicated
+    existing_subs = set(new_session.subdomains)
+    for sub in prior.subdomains:
+        if sub not in existing_subs:
+            new_session.subdomains.append(sub)
+            existing_subs.add(sub)
+            merged_count += 1
+
+    # Live hosts — deduplicated
+    existing_hosts = set(new_session.live_hosts)
+    for host in prior.live_hosts:
+        if host not in existing_hosts:
+            new_session.live_hosts.append(host)
+            existing_hosts.add(host)
+
+    # Open ports — merge dict (host → sorted unique port list)
+    for host, ports in prior.open_ports.items():
+        if host not in new_session.open_ports:
+            new_session.open_ports[host] = list(ports)
+        else:
+            merged = sorted(set(new_session.open_ports[host]) | set(ports))
+            new_session.open_ports[host] = merged
+
+    # URLs — deduplicated (cap at 500 to avoid flooding context)
+    existing_urls = set(new_session.urls)
+    for url in prior.urls:
+        if url not in existing_urls and len(new_session.urls) < 500:
+            new_session.urls.append(url)
+            existing_urls.add(url)
+            merged_count += 1
+
+    # Technologies — merge dict (newer value wins on conflict)
+    for name, version in prior.technologies.items():
+        if name not in new_session.technologies:
+            new_session.technologies[name] = version
+
+    # Injection points — deduplicate by (url, parameter, method) key
+    existing_ips = {
+        (ip.get("url", ""), ip.get("parameter", ""), ip.get("method", ""))
+        for ip in new_session.injection_points
+    }
+    for ip in prior.injection_points:
+        key = (ip.get("url", ""), ip.get("parameter", ""), ip.get("method", ""))
+        if key not in existing_ips:
+            new_session.injection_points.append(ip)
+            existing_ips.add(key)
+            merged_count += 1
+
+    # Attack chains — merge by name
+    existing_chains = {c.get("name", "") for c in new_session.attack_chains}
+    for chain in prior.attack_chains:
+        if chain.get("name", "") not in existing_chains:
+            new_session.attack_chains.append(chain)
+
+    logger.info(
+        "Merged prior session %s into new session %s "
+        "(%d items: %d subs, %d urls, %d injection_points)",
+        prior.session_id, new_session.session_id,
+        merged_count,
+        len(new_session.subdomains), len(new_session.urls),
+        len(new_session.injection_points),
+    )
+
+
 def update_from_parsed_output(
     session: SessionData,
     parsed: ParsedOutput,

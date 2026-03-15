@@ -14,6 +14,10 @@ MAX_OBJECTIVES = 64
 MAX_EVIDENCE = 200
 FLAG_PATTERN = re.compile(r"flag\{[^}]+\}", re.IGNORECASE)
 
+# Jaccard similarity threshold for evidence deduplication.
+# Two evidence entries with token-overlap >= this value are treated as duplicates.
+_EVIDENCE_SIMILARITY_THRESHOLD: float = 0.75
+
 
 @dataclass
 class ToolExecution:
@@ -133,6 +137,19 @@ class AgentState:
                     obj["note"] = note
                 return
 
+    @staticmethod
+    def _jaccard_similarity(a: str, b: str) -> float:
+        """Token-overlap (Jaccard) similarity between two strings.
+
+        Tokenizes on whitespace and lowercases both strings.
+        Returns 0.0 when either input is empty.
+        """
+        tokens_a = set(a.lower().split())
+        tokens_b = set(b.lower().split())
+        if not tokens_a or not tokens_b:
+            return 0.0
+        return len(tokens_a & tokens_b) / len(tokens_a | tokens_b)
+
     def add_evidence(
         self,
         phase: str,
@@ -141,11 +158,16 @@ class AgentState:
         confidence: float = 0.6,
         artifact: str | None = None,
         tags: list[str] | None = None,
-    ) -> None:
-        """Record deduplicated evidence from real tool output."""
+    ) -> bool:
+        """Record deduplicated evidence from real tool output.
+
+        Returns True if the evidence was added, False if it was rejected as a
+        duplicate (exact match or Jaccard similarity >= threshold within the
+        same phase).
+        """
         clean_summary = " ".join(str(summary).strip().split())
         if not clean_summary:
-            return
+            return False
 
         phase_key = phase.upper()
         tags = tags or []
@@ -155,7 +177,10 @@ class AgentState:
             clean_summary.lower(),
             (artifact or "").strip().lower(),
         )
-        for existing in self.evidence_log[-50:]:
+
+        summary_lower = clean_summary.lower()
+        for existing in self.evidence_log:
+            # Fast path: exact tuple match (all fields identical)
             prev_key = (
                 str(existing.get("phase", "")).upper(),
                 str(existing.get("source_tool", "")).strip().lower(),
@@ -163,7 +188,21 @@ class AgentState:
                 str(existing.get("artifact", "")).strip().lower(),
             )
             if dedup_key == prev_key:
-                return
+                return False
+
+            # Semantic path: Jaccard similarity on summary within same phase.
+            # Cross-phase entries are allowed (RECON and EXPLOIT can have
+            # similar summaries for different reasons).
+            if str(existing.get("phase", "")).upper() != phase_key:
+                continue
+            existing_summary = str(existing.get("summary", "")).strip().lower()
+            if self._jaccard_similarity(summary_lower, existing_summary) >= _EVIDENCE_SIMILARITY_THRESHOLD:
+                logger.debug(
+                    "Evidence dedup (semantic): '%s...' ~ '%s...'",
+                    summary_lower[:40],
+                    existing_summary[:40],
+                )
+                return False
 
         self.evidence_log.append(
             {
@@ -179,6 +218,7 @@ class AgentState:
         )
         if len(self.evidence_log) > MAX_EVIDENCE:
             self.evidence_log = self.evidence_log[-MAX_EVIDENCE:]
+        return True
 
     def record_tool_use(self, phase: str, tool_name: str) -> None:
         """Increment per-phase tool usage counter for budget tracking."""
