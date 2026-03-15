@@ -165,6 +165,29 @@ def _extract_injection_points(url: str) -> list[dict[str, Any]]:
     return points
 
 
+def injection_point_key(url: str, parameter: str, method: str = "GET") -> str:
+    """Build a stable string key for an injection point triple."""
+    return f"{url}||{parameter}||{method.upper()}"
+
+
+def mark_injection_point_tested(session: "SessionData", url: str, parameter: str, method: str = "GET") -> None:
+    """Mark an injection point as tested so the agent won't re-test it."""
+    key = injection_point_key(url, parameter, method)
+    if key not in session.tested_injection_points:
+        session.tested_injection_points.append(key)
+
+
+def get_untested_injection_points(session: "SessionData") -> list[dict[str, Any]]:
+    """Return injection points that have NOT been tested yet this session."""
+    tested_set = set(session.tested_injection_points)
+    return [
+        pt for pt in session.injection_points
+        if injection_point_key(
+            pt.get("url", ""), pt.get("parameter", ""), pt.get("method", "GET")
+        ) not in tested_set
+    ]
+
+
 def _merge_injection_points(
     session_points: list[dict[str, Any]],
     new_points: list[dict[str, Any]],
@@ -327,6 +350,19 @@ class SessionData:
     auth_tokens: dict[str, str] = field(default_factory=dict)
     auth_type: str = ""  # "form", "totp", "oauth", "cookie"
 
+    # Tracks which injection points have already been tested this session.
+    # Key format: "<url>||<parameter>||<method>" — exact dedup to prevent
+    # re-testing the same (url, param, method) triple across iterations.
+    # Populated by loop.py after execute/quick_fuzz/advanced_fuzz tool calls.
+    tested_injection_points: list[str] = field(default_factory=list)
+
+    # Dedup set for correlation engine suggestions: stores fingerprints of
+    # chains/patterns already injected into context this session so the
+    # correlation engine doesn't repeat the same hints every 10 iterations.
+    # Format: "<type>:<key>" e.g. "port:80", "technology:wordpress",
+    # "expert_test:idor_hotspot", "attack_chain:XSS → CSRF"
+    suggested_correlations: list[str] = field(default_factory=list)
+
     def __post_init__(self) -> None:
         if not self.session_id:
             self.session_id = generate_session_id()
@@ -366,6 +402,8 @@ def load_session(session_id: str) -> SessionData | None:
             auth_cookies=data.get("auth_cookies", []),
             auth_tokens=data.get("auth_tokens", {}),
             auth_type=data.get("auth_type", ""),
+            tested_injection_points=data.get("tested_injection_points", []),
+            suggested_correlations=data.get("suggested_correlations", []),
         )
         logger.info(
             f"Loaded session {session_id} (target={session.target}): "
@@ -721,26 +759,38 @@ def session_to_context(session: SessionData) -> str:
 
     if session.injection_points:
         count = len(session.injection_points)
-        # Group by type_hint so the LLM sees what categories of tests are needed
+        untested = get_untested_injection_points(session)
+        tested_count = count - len(untested)
+
+        # Show UNTESTED injection points first — these are highest priority.
+        # Fall back to all IPs if everything is already tested.
+        show_list = untested if untested else session.injection_points
+
+        # Group by type_hint for clarity
         by_type: dict[str, list[dict[str, Any]]] = {}
-        for pt in session.injection_points:
+        for pt in show_list:
             t = pt.get("type_hint", "INJECT")
             by_type.setdefault(t, []).append(pt)
+
         preview_lines: list[str] = []
         shown = 0
         for type_hint, pts in by_type.items():
             for pt in pts[:3]:
                 param = pt.get("parameter", "?")
                 url_short = pt.get("url", "")
-                # Show only the path portion to keep it compact
                 path = urlparse(url_short).path or url_short
                 preview_lines.append(f"  [{type_hint}] {param} @ {path}")
                 shown += 1
             if shown >= 9:
                 break
-        suffix = f" ... +{count - shown} more" if count > shown else ""
+
+        suffix = f" ... +{len(show_list) - shown} more" if len(show_list) > shown else ""
+        untested_note = (
+            f"⚠ {len(untested)} UNTESTED — prioritize these!" if untested
+            else f"✓ all {tested_count} tested"
+        )
         parts.append(
-            f"Injection points mapped: {count} — TEST THESE in EXPLOIT phase:\n"
+            f"Injection points: {count} total ({untested_note}):\n"
             + "\n".join(preview_lines) + suffix
         )
 

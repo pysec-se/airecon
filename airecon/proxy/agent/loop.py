@@ -16,7 +16,7 @@ from .output_parser import parse_tool_output
 from .models import AgentEvent, AgentState, MAX_TOOL_ITERATIONS
 from .formatters import _FormatterMixin
 from .executors import _ExecutorMixin, _RECON_PORT_SCAN_BINS
-from ..system import auto_load_skills_for_message
+from ..system import auto_load_skills_for_message, auto_load_skills_for_technologies
 from .file_reference import (
     parse_refs, strip_refs, resolve_ref,
     build_injection_message, workspace_name_for_ref,
@@ -152,6 +152,10 @@ class AgentLoop(_ValidatorMixin, _FormatterMixin,
         # never loads or overwrites the parent's persisted session.
         self._is_subagent: bool = False
         self.pipeline: PipelineEngine | None = None
+        # Tracks skill rel-paths already injected via tech-skill loader so
+        # the same skill file isn't injected again when the same technology
+        # is re-detected in later tool outputs.
+        self._loaded_tech_skill_paths: set[str] = set()
 
     async def stop(self) -> None:
         logger.warning("Stopping Agent Loop...")
@@ -2024,12 +2028,37 @@ class AgentLoop(_ValidatorMixin, _FormatterMixin,
                                 "result", "") or ""
                         )
                         if isinstance(stdout, str) and stdout.strip():
+                            _techs_before = dict(self._session.technologies)
                             parsed_out = parse_tool_output(raw_command, stdout)
                             if parsed_out and parsed_out.total_count > 0:
                                 update_from_parsed_output(
                                     self._session, parsed_out, raw_command
                                 )
                                 save_session(self._session)
+                            # Inject tech-specific skills when new technologies
+                            # are fingerprinted by this tool execution.
+                            # Fires once per tech: deduped by _loaded_tech_skill_paths.
+                            _new_techs = {
+                                k: v for k, v in self._session.technologies.items()
+                                if k not in _techs_before
+                            }
+                            if _new_techs:
+                                _tech_skill_ctx, _tech_names = auto_load_skills_for_technologies(
+                                    _new_techs,
+                                    already_loaded=self._loaded_tech_skill_paths,
+                                )
+                                if _tech_skill_ctx:
+                                    self.state.conversation.append(
+                                        {"role": "system", "content": _tech_skill_ctx}
+                                    )
+                                    for _sn in _tech_names:
+                                        if _sn not in self.state.skills_used:
+                                            self.state.skills_used.append(_sn)
+                                    logger.info(
+                                        "Tech-skill auto-injected for new techs: %s → skills: %s",
+                                        list(_new_techs.keys()),
+                                        _tech_names,
+                                    )
 
                     phase_after_tool = self._get_current_phase()
                     self._record_evidence_from_result(
@@ -3312,6 +3341,36 @@ class AgentLoop(_ValidatorMixin, _FormatterMixin,
                 else:
                     vuln_vals.append(vt)
             parts.append(f"VULNERABILITIES: {'; '.join(vuln_vals)}")
+
+        # Injection points: show untested first so they don't get lost after
+        # context truncation — these are the highest-priority attack surface.
+        if s.injection_points:
+            from .session import get_untested_injection_points
+            untested = get_untested_injection_points(s)
+            all_ips = s.injection_points
+            tested_count = len(all_ips) - len(untested)
+            # Show up to 8 untested injection points; fallback to all if none untested
+            show = untested[:8] if untested else all_ips[:8]
+            ip_lines: list[str] = []
+            for pt in show:
+                from urllib.parse import urlparse as _urlparse
+                path = _urlparse(pt.get("url", "")).path or pt.get("url", "")
+                ip_lines.append(
+                    f"  [{pt.get('type_hint','?')}] {pt.get('parameter','?')} @ {path}"
+                )
+            untested_note = f"{len(untested)} UNTESTED" if untested else "all tested"
+            parts.append(
+                f"INJECTION POINTS ({len(all_ips)} total, {untested_note}, {tested_count} tested):\n"
+                + "\n".join(ip_lines)
+                + (f"\n  ... +{len(untested) - 8} more untested" if len(untested) > 8 else "")
+            )
+
+        if s.technologies:
+            tech_parts = [
+                f"{name}/{ver}" if ver else name
+                for name, ver in list(s.technologies.items())[:10]
+            ]
+            parts.append(f"TECHNOLOGIES: {', '.join(tech_parts)}")
 
         if s.completed_phases:
             parts.append(f"COMPLETED PHASES: {', '.join(s.completed_phases)}")

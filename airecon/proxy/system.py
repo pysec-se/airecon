@@ -377,6 +377,80 @@ def auto_load_skills_for_message(
     )
 
 
+def auto_load_skills_for_technologies(
+    technologies: dict[str, str],
+    already_loaded: set[str] | None = None,
+) -> tuple[str, list[str]]:
+    """Load skills for newly detected technologies in the session.
+
+    Called after tool execution when `session.technologies` grows.
+    Unlike `auto_load_skills_for_message` (keyword-based on text),
+    this fires directly on technology names from fingerprinting tools
+    (httpx -tech-detect, whatweb, nmap scripts, etc.).
+
+    Deduplicates against `already_loaded` set (skill rel-paths already
+    injected this session) to prevent re-injecting the same skill.
+
+    Returns (skill_context_string, list_of_loaded_skill_names).
+    """
+    if not technologies:
+        return "", []
+
+    skills_dir = Path(__file__).resolve().parent / "skills"
+    if not skills_dir.exists():
+        return "", []
+
+    if already_loaded is None:
+        already_loaded = set()
+
+    # Build a synthetic message from all technology names so we can reuse
+    # the existing keyword matcher.  Join with spaces to allow word-boundary
+    # matching on multi-word tech names like "spring boot".
+    tech_message = " ".join(technologies.keys()).lower()
+
+    skill_scores: dict[str, int] = {}
+    for keyword, skill_path in _SKILL_KEYWORDS.items():
+        if _keyword_matches_message(keyword, tech_message):
+            skill_scores[skill_path] = skill_scores.get(skill_path, 0) + 1
+
+    if not skill_scores:
+        return "", []
+
+    sorted_skills = sorted(
+        skill_scores.keys(),
+        key=lambda s: (-skill_scores[s], s),
+    )
+
+    parts: list[str] = []
+    loaded_names: list[str] = []
+    for skill_rel in sorted_skills[:3]:
+        # Skip skills already injected this session (dedup by rel-path)
+        if skill_rel in already_loaded:
+            continue
+        skill_file = skills_dir / skill_rel
+        if skill_file.exists():
+            try:
+                content = skill_file.read_text(encoding="utf-8", errors="replace")
+                limit = 20000 if skill_rel.startswith("technologies/") or skill_rel.startswith("frameworks/") else 4000
+                if len(content) > limit:
+                    content = content[:limit] + f"\n... (truncated, use read_file for full: {skill_file.absolute().as_posix()})"
+                parts.append(f"[AUTO-LOADED TECH SKILL: {skill_rel}]\n{content}")
+                loaded_names.append(skill_file.stem)
+                already_loaded.add(skill_rel)
+            except Exception:  # nosec B110
+                pass
+
+    if not parts:
+        return "", []
+
+    tech_names = ", ".join(list(technologies.keys())[:8])
+    return (
+        f"[SYSTEM: TECH-SPECIFIC SKILLS LOADED — detected: {tech_names}]\n"
+        + "\n---\n".join(parts),
+        loaded_names,
+    )
+
+
 def get_system_prompt(
     target: str | None = None,
     user_message: str | None = None,

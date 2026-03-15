@@ -185,9 +185,46 @@ def synthesize_attack_chains(session: SessionData) -> list[dict]:
     return [item[2] for item in scored[:_CHAIN_MAX_RESULTS]]
 
 
+def _corr_fingerprint(corr: dict) -> str:
+    """Build a stable dedup key for a correlation result.
+
+    Used to prevent the same suggestion being re-injected into context
+    every 10 iterations.  Format: "<type>:<key>".
+    """
+    ctype = corr.get("type", "unknown")
+    if ctype == "port":
+        return f"port:{corr.get('port', '?')}"
+    if ctype in ("technology", "technology_cve"):
+        return f"tech:{corr.get('technology', '?')}"
+    if ctype == "url_path":
+        return f"url_path:{corr.get('path', '?')}"
+    if ctype == "expert_test":
+        return f"expert:{corr.get('pattern', '?')}"
+    if ctype == "zeroday_potential":
+        return f"zeroday:{corr.get('pattern', '?')}"
+    if ctype == "business_logic":
+        return f"bizlogic:{corr.get('pattern', '?')}"
+    if ctype == "injection_chain":
+        return f"injchain:{corr.get('injection_type', '?')}:{corr.get('chain_name', '?')}"
+    if ctype == "attack_chain":
+        return f"chain:{corr.get('name', '?')}"
+    if ctype == "synthesized_chain":
+        return f"synth:{corr.get('chain_id', '?')}"
+    return f"{ctype}:{str(corr)[:40]}"
+
+
 def run_correlation(session: SessionData) -> list[dict]:
-    """Run full correlation analysis on session data."""
+    """Run full correlation analysis on session data.
+
+    Already-suggested correlations (tracked in session.suggested_correlations)
+    are filtered out so the LLM doesn't see the same hint every 10 iterations.
+    New suggestions are added to session.suggested_correlations after the call
+    (caller responsibility: loop.py updates session after injecting results).
+    """
     results = []
+    _already_suggested: set[str] = set(
+        getattr(session, "suggested_correlations", [])
+    )
 
     # Port-based correlations.
     # session.open_ports is always dict[str, list[int]] — {host: [80, 443, 22]}
@@ -386,4 +423,38 @@ def run_correlation(session: SessionData) -> list[dict]:
     synthesized = synthesize_attack_chains(session)
     results.extend(synthesized)
 
-    return results
+    # --- DEDUP FILTER ---
+    # Remove correlations the LLM has already seen this session to prevent
+    # context flooding.  New results are registered in session so future calls
+    # skip them.  High-severity correlations (CRITICAL) are re-suggested after
+    # 5 injections to keep them visible throughout a long session.
+    _high_severities = {"CRITICAL", "HIGH"}
+    _already_injected_count = len(_already_suggested)
+    filtered: list[dict] = []
+    new_fingerprints: list[str] = []
+
+    for r in results:
+        fp = _corr_fingerprint(r)
+        sev = str(r.get("severity", "MEDIUM")).upper()
+        # Always show CRITICAL/HIGH correlations on first encounter;
+        # re-surface them if the session has grown significantly (every 5 new
+        # suggestions) so they're not buried after early iterations.
+        already_seen = fp in _already_suggested
+        resurface = (
+            already_seen
+            and sev in _high_severities
+            and (_already_injected_count % 5 == 0)
+        )
+        if not already_seen or resurface:
+            filtered.append(r)
+            if not already_seen:
+                new_fingerprints.append(fp)
+
+    # Persist new fingerprints into session so they're skipped next time.
+    _sc = getattr(session, "suggested_correlations", None)
+    if _sc is not None:
+        for fp in new_fingerprints:
+            if fp not in _sc:
+                _sc.append(fp)
+
+    return filtered
