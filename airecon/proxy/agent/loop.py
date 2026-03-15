@@ -33,8 +33,13 @@ import json
 from pathlib import Path
 
 _tools_meta_path = Path(__file__).parent.parent / "data" / "tools_meta.json"
-with open(_tools_meta_path, "r") as f:
-    _TOOLS_META = json.load(f)
+try:
+    with open(_tools_meta_path, "r") as f:
+        _TOOLS_META = json.load(f)
+except (OSError, json.JSONDecodeError) as _e:
+    import warnings
+    warnings.warn(f"tools_meta.json unavailable ({_e}); tool catalog features disabled.")
+    _TOOLS_META = {}
 
 
 # from ..correlation import run_correlation

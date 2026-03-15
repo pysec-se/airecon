@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import importlib.metadata
 import json
 import logging
 from contextlib import asynccontextmanager
@@ -77,16 +78,22 @@ async def lifespan(app: FastAPI):
     logger.info("AIRecon Proxy shutdown complete")
 
 
+try:
+    _version = importlib.metadata.version("airecon")
+except importlib.metadata.PackageNotFoundError:
+    _version = "0.1.5"
+
 app = FastAPI(
     title="AIRecon Proxy",
-    version="0.1.4",
+    version=_version,
     description="Ollama + Docker Sandbox Bridge",
     lifespan=lifespan,
 )
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    # Restrict to localhost only — this proxy is not meant to be internet-facing
+    allow_origin_regex=r"https?://(localhost|127\.0\.0\.1)(:\d+)?",
     allow_methods=["*"],
     allow_headers=["*"],
 )

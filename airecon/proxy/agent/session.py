@@ -355,6 +355,9 @@ class SessionData:
     # re-testing the same (url, param, method) triple across iterations.
     # Populated by loop.py after execute/quick_fuzz/advanced_fuzz tool calls.
     tested_injection_points: list[str] = field(default_factory=list)
+    # Transient flag: True after prior-session findings have been merged this run.
+    # Stored in JSON so it survives a session reload and prevents duplicate merges.
+    _prior_merged: bool = field(default=False)
 
     # Dedup set for correlation engine suggestions: stores fingerprints of
     # chains/patterns already injected into context this session so the
@@ -404,6 +407,7 @@ def load_session(session_id: str) -> SessionData | None:
             auth_type=data.get("auth_type", ""),
             tested_injection_points=data.get("tested_injection_points", []),
             suggested_correlations=data.get("suggested_correlations", []),
+            _prior_merged=data.get("_prior_merged", False),
         )
         logger.info(
             f"Loaded session {session_id} (target={session.target}): "
