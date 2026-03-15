@@ -63,6 +63,12 @@ _TOOL_PATTERNS: list[tuple[re.Pattern, str]] = [
     (re.compile(r"\bwfuzz\b"), "ffuf"),            # similar format
     (re.compile(r"\bdirsearch\b"), "url_list"),
     (re.compile(r"\bferoxbuster\b"), "url_list"),
+    (re.compile(r"\bgobuster\b"), "url_list"),
+    (re.compile(r"\bsqlmap\b"), "sqlmap"),
+    (re.compile(r"\bghauri\b"), "sqlmap"),        # same finding format
+    (re.compile(r"\bnikto\b"), "nikto"),
+    (re.compile(r"\bdalfox\b"), "dalfox"),
+    (re.compile(r"\bwpscan\b"), "wpscan"),
 ]
 
 
@@ -99,6 +105,10 @@ def parse_tool_output(command: str, stdout: str) -> ParsedOutput | None:
         "url_list": _parse_line_list,
         "ffuf": _parse_ffuf,
         "naabu": _parse_naabu,
+        "sqlmap": _parse_sqlmap,
+        "nikto": _parse_nikto,
+        "dalfox": _parse_dalfox,
+        "wpscan": _parse_wpscan,
         "dnsx": _parse_line_list,
         "whatweb": _parse_whatweb,
         "dig": _parse_line_list,
@@ -581,6 +591,267 @@ def _parse_naabu(stdout: str) -> ParsedOutput:
         summary=f"naabu: {len(ports)} open ports across {len(port_counts)} hosts — {host_summary}",
         items=ports[:MAX_ITEMS],
         total_count=len(ports),
+    )
+
+
+# ── Exploitation Tool Parsers ────────────────────────────────────────
+
+def _parse_sqlmap(stdout: str) -> ParsedOutput:
+    """Parse sqlmap/ghauri output — extract injection points and payloads."""
+    findings: list[str] = []
+    param_vulns: list[str] = []
+    dbms: str = ""
+    current_url: str = ""
+
+    for line in stdout.split("\n"):
+        line = line.strip()
+        if not line:
+            continue
+
+        # Target URL
+        if line.startswith("URL:") or "testing URL" in line.lower():
+            m = re.search(r"https?://\S+", line)
+            if m:
+                current_url = m.group(0)
+
+        # Vulnerable parameter found
+        vuln_param = re.match(
+            r".*parameter\s+'?([^']+?)'?\s+(?:is|appears to be|was found)\s+(?:vulnerable|injectable)",
+            line, re.IGNORECASE,
+        )
+        if vuln_param:
+            param = vuln_param.group(1).strip()
+            entry = f"[HIGH] SQLi parameter vulnerable: {param}"
+            if current_url:
+                entry += f" @ {current_url}"
+            param_vulns.append(entry)
+            findings.append(entry)
+            continue
+
+        # Payload/technique lines
+        if re.match(r"\s+Type:", line, re.IGNORECASE):
+            findings.append(f"  Technique: {line.strip()}")
+        elif re.match(r"\s+Payload:", line, re.IGNORECASE):
+            findings.append(f"  {line.strip()}")
+
+        # DBMS detection
+        m_db = re.search(r"back-end DBMS(?:\s+is)?\s*:?\s+(.+)", line, re.IGNORECASE)
+        if m_db:
+            dbms = m_db.group(1).strip()
+
+        # Data extraction / dump lines
+        if re.match(r"\[INFO\].*(?:fetching|dumping|retrieving)", line, re.IGNORECASE):
+            findings.append(line)
+
+        # Critical results — extracted data
+        if re.match(r"Database:\s+", line, re.IGNORECASE):
+            findings.append(f"[CRITICAL] {line}")
+        elif re.match(r"Table:\s+", line, re.IGNORECASE):
+            findings.append(f"[HIGH] {line}")
+
+    if not findings and not param_vulns:
+        # Check if it ran but found nothing
+        if "sqlmap identified the following injection point" in stdout.lower():
+            findings.append("[HIGH] sqlmap identified injection points (check full output)")
+        elif "no parameter(s) found" in stdout.lower() or "not injectable" in stdout.lower():
+            return ParsedOutput(
+                tool="sqlmap",
+                summary="sqlmap: no injectable parameters found",
+                items=[],
+                total_count=0,
+                raw_truncated=stdout[:MAX_RAW_FALLBACK],
+            )
+        else:
+            return ParsedOutput(
+                tool="sqlmap",
+                summary="sqlmap: scan complete",
+                items=[],
+                total_count=0,
+                raw_truncated=stdout[:MAX_RAW_FALLBACK],
+            )
+
+    vuln_count = len(param_vulns)
+    dbms_note = f" | DBMS: {dbms}" if dbms else ""
+    return ParsedOutput(
+        tool="sqlmap",
+        summary=f"sqlmap: {vuln_count} vulnerable parameter(s) found{dbms_note}",
+        items=findings[:MAX_ITEMS],
+        total_count=len(findings),
+    )
+
+
+def _parse_nikto(stdout: str) -> ParsedOutput:
+    """Parse nikto output — extract findings and vulnerabilities."""
+    findings: list[str] = []
+    target: str = ""
+
+    for line in stdout.split("\n"):
+        line = line.strip()
+        if not line:
+            continue
+
+        # Target header
+        if line.startswith("- Target IP:") or line.startswith("+ Target IP:"):
+            target = line
+            continue
+        if line.startswith("+ Target Hostname:") or line.startswith("- Target Hostname:"):
+            target += " " + line.split(":", 1)[-1].strip()
+            continue
+
+        # Findings start with "+ " or "- "
+        if line.startswith("+ ") or line.startswith("- "):
+            content = line[2:].strip()
+
+            # Skip non-finding info lines
+            skip_patterns = (
+                "Nikto", "Start Time", "End Time", "No CGI",
+                "allowed HTTP Methods", "Server:", "retrieved:",
+                "items found", "0 errors", "scan took", "Host:",
+            )
+            if any(s.lower() in content.lower() for s in skip_patterns):
+                continue
+
+            # Severity tagging based on content
+            sev = "MEDIUM"
+            high_patterns = ("XSS", "SQL", "RCE", "command", "injection",
+                             "traversal", "passwd", "password", "credentials",
+                             "admin", "phpinfo", "config", "backup", "shell")
+            low_patterns = ("X-Frame-Options", "X-Content-Type", "anti-clickjacking",
+                            "Strict-Transport", "Content-Security")
+            if any(p.lower() in content.lower() for p in high_patterns):
+                sev = "HIGH"
+            elif any(p.lower() in content.lower() for p in low_patterns):
+                sev = "LOW"
+
+            # Extract OSVDB IDs as reference
+            osvdb_match = re.search(r"OSVDB-(\d+)", content)
+            osvdb_note = f" [OSVDB-{osvdb_match.group(1)}]" if osvdb_match else ""
+
+            findings.append(f"[{sev}] {content}{osvdb_note}")
+
+    if not findings:
+        return ParsedOutput(
+            tool="nikto",
+            summary="nikto: no findings",
+            items=[],
+            total_count=0,
+            raw_truncated=stdout[:MAX_RAW_FALLBACK],
+        )
+
+    high_count = sum(1 for f in findings if f.startswith("[HIGH]"))
+    target_note = f" on {target}" if target else ""
+    return ParsedOutput(
+        tool="nikto",
+        summary=f"nikto: {len(findings)} findings ({high_count} HIGH){target_note}",
+        items=findings[:MAX_ITEMS],
+        total_count=len(findings),
+    )
+
+
+def _parse_dalfox(stdout: str) -> ParsedOutput:
+    """Parse dalfox output — extract XSS vulnerability findings."""
+    findings: list[str] = []
+    poc_lines: list[str] = []
+
+    for line in stdout.split("\n"):
+        line = line.strip()
+        if not line:
+            continue
+
+        # dalfox marks vulns with [V] and POC with [POC]
+        if line.startswith("[V]") or "] [V]" in line:
+            findings.append(f"[HIGH] XSS VERIFIED: {line}")
+        elif line.startswith("[POC]") or "] [POC]" in line:
+            poc_lines.append(f"  PoC: {line}")
+        elif line.startswith("[G]") or "] [G]" in line:
+            # [G] = Good finding (potential XSS)
+            findings.append(f"[MEDIUM] XSS potential: {line}")
+        elif re.match(r"\[WEAK\]|\[I\]", line, re.IGNORECASE):
+            findings.append(f"[LOW] {line}")
+
+    # Combine findings with their PoC lines
+    combined = findings[:MAX_ITEMS]
+    if poc_lines:
+        combined.extend(poc_lines[:10])
+
+    if not combined:
+        return ParsedOutput(
+            tool="dalfox",
+            summary="dalfox: no XSS vulnerabilities found",
+            items=[],
+            total_count=0,
+            raw_truncated=stdout[:MAX_RAW_FALLBACK],
+        )
+
+    verified = sum(1 for f in findings if "[HIGH]" in f)
+    return ParsedOutput(
+        tool="dalfox",
+        summary=f"dalfox: {len(findings)} XSS findings ({verified} verified)",
+        items=combined,
+        total_count=len(combined),
+    )
+
+
+def _parse_wpscan(stdout: str) -> ParsedOutput:
+    """Parse wpscan output — extract WordPress vulnerabilities, plugins, users."""
+    findings: list[str] = []
+    current_section: str = ""
+
+    lines = stdout.split("\n")
+    i = 0
+    while i < len(lines):
+        line = lines[i].strip()
+
+        # Section headers
+        if re.match(r"\[i\]\s+(WordPress|Plugins|Themes|Users|Config)", line, re.IGNORECASE):
+            current_section = line
+        elif re.match(r"\[\+\]\s+WordPress version", line, re.IGNORECASE):
+            findings.append(f"[INFO] {line}")
+        elif re.match(r"\[!\]", line):
+            # [!] = vulnerability / issue
+            sev = "HIGH"
+            content = line[3:].strip()
+            if any(k in content.lower() for k in ("critical", "rce", "sqli", "exec")):
+                sev = "CRITICAL"
+            elif any(k in content.lower() for k in ("xss", "csrf", "auth", "bypass")):
+                sev = "HIGH"
+            elif any(k in content.lower() for k in ("info", "disclosure", "enum")):
+                sev = "MEDIUM"
+            findings.append(f"[{sev}] {content}")
+        elif re.match(r"\[\+\]\s+Username found", line, re.IGNORECASE):
+            findings.append(f"[MEDIUM] {line[3:].strip()}")
+        elif re.match(r"\[\+\]\s+.+found", line, re.IGNORECASE) and "plugin" in current_section.lower():
+            findings.append(f"[INFO] Plugin: {line[3:].strip()}")
+
+        # CVE references on the next few lines after a [!]
+        if findings and "[HIGH]" in findings[-1] or (findings and "[CRITICAL]" in findings[-1]):
+            # Look ahead for CVE
+            for j in range(1, min(5, len(lines) - i)):
+                ahead = lines[i + j].strip()
+                cve_m = re.search(r"CVE-\d{4}-\d+", ahead)
+                if cve_m:
+                    findings[-1] += f" ({cve_m.group(0)})"
+                    break
+                if not ahead or ahead.startswith("["):
+                    break
+
+        i += 1
+
+    if not findings:
+        return ParsedOutput(
+            tool="wpscan",
+            summary="wpscan: no vulnerabilities found",
+            items=[],
+            total_count=0,
+            raw_truncated=stdout[:MAX_RAW_FALLBACK],
+        )
+
+    vuln_count = sum(1 for f in findings if "[HIGH]" in f or "[CRITICAL]" in f)
+    return ParsedOutput(
+        tool="wpscan",
+        summary=f"wpscan: {len(findings)} findings ({vuln_count} HIGH/CRITICAL)",
+        items=findings[:MAX_ITEMS],
+        total_count=len(findings),
     )
 
 
