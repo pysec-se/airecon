@@ -49,7 +49,6 @@
                 "nuclei",
                 "nikto",
                 "zaproxy",
-                "cvemap",
                 "vulnx"
             ],
             "cms_scanners": [
@@ -139,7 +138,7 @@
             "analysis": [
                 "jsluice",
                 "jsleak",
-                "js-snooper",
+                "js_snooper",
                 "jsniper",
                 "csprecon"
             ]
@@ -173,7 +172,7 @@
         "utilities": {
             "data_manipulation": [
                 "jq",
-                "ripgrep",
+                "rg",
                 "grep",
                 "gf",
                 "meg",
@@ -182,7 +181,7 @@
             ],
             "networking": [
                 "interactsh-client",
-                "testssl.sh",
+                "testssl",
                 "dnstake",
                 "vhostfinder",
                 "hakip2host",
@@ -205,7 +204,7 @@
         "katana",
         "nmap",
         "x8",
-        "ripgrep",
+        "rg",
         "grep",
         "gospider",
         "subfinder",
