@@ -209,9 +209,7 @@ RUN pipx install arjun && \
     pipx install whatwaf && \
     pipx install git+https://github.com/s0md3v/XSStrike.git 2>/dev/null || true && \
     pipx install git+https://github.com/vladko312/SSTImap.git 2>/dev/null || true && \
-    pipx install git+https://github.com/defparam/smuggler.git 2>/dev/null || true && \
-    pipx install git+https://github.com/doomstein/oralyzer.git 2>/dev/null || true && \
-    pipx install git+https://github.com/machinexa2/xssmap.git 2>/dev/null || true
+    pipx install git+https://github.com/defparam/smuggler.git 2>/dev/null || true
 
 # ── Node.js Tools & Linters ──
 ENV NPM_CONFIG_PREFIX=/home/pentester/.npm-global
@@ -265,7 +263,6 @@ RUN git clone https://github.com/aravind0x7/JS-Snooper.git 2>/dev/null || true &
     git clone https://github.com/Arcanum-Sec/msftrecon.git 2>/dev/null || true && \
     git clone --depth=1 https://github.com/vincentcox/bypass-firewalls-by-DNS-history.git 2>/dev/null || true && \
     git clone --depth=1 https://github.com/NullArray/DorkNet.git 2>/dev/null || true && \
-    git clone --depth=1 https://github.com/AonCyberLabs/AWS-Bypass.git 2>/dev/null || true && \
     true && \
     (cd cloudsploit && npm install 2>/dev/null && \
     ln -sf /home/pentester/tools/cloudsploit/index.js /home/pentester/.local/bin/cloudsploit 2>/dev/null) || true
