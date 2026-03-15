@@ -145,9 +145,8 @@ def test_add_evidence_rejects_empty_summary():
 
 def test_add_evidence_exact_duplicate_rejected():
     state = AgentState()
-    kw = dict(phase="RECON", source_tool="execute", summary="Port 80 open on host")
-    state.add_evidence(**kw)
-    result = state.add_evidence(**kw)
+    state.add_evidence(phase="RECON", source_tool="execute", summary="Port 80 open on host")
+    result = state.add_evidence(phase="RECON", source_tool="execute", summary="Port 80 open on host")
     assert result is False
     assert len(state.evidence_log) == 1
 

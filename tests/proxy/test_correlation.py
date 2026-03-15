@@ -68,7 +68,7 @@ def test_synthesize_attack_chains_happy_path(mock_session):
     mock_session.vulnerabilities = [{"title": "SSRF detected in image proxy"}]
 
     results = synthesize_attack_chains(mock_session)
-    chain_ids = [r.get("chain_id") for r in results]
+    chain_ids = [r.get("chain_id") or "" for r in results]
     assert any("SSRF" in cid for cid in chain_ids), \
         f"Expected SSRF chain, got: {chain_ids}"
 
