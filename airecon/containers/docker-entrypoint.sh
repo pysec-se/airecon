@@ -16,6 +16,7 @@ chromium \
     --remote-debugging-address=0.0.0.0 \
     --disable-web-security \
     --remote-allow-origins="*" \
+    --ignore-certificate-errors \
     > /dev/null 2>&1 &
 
 # Keep container alive
