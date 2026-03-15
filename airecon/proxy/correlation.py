@@ -60,6 +60,14 @@ _URL_TECH_MAP: dict[str, str] = {
     if path
 }
 
+# Pre-compiled boundary-aware regexes for each URL path in _URL_TECH_MAP.
+# Using word-boundary / delimiter check avoids false positives like "admin"
+# matching "/administrator".  Compiled once at module load for performance.
+_URL_TECH_PATH_RES: dict[str, re.Pattern[str]] = {
+    path: re.compile(re.escape(path) + r"(?:[/?# ]|$)")
+    for path in _URL_TECH_MAP
+}
+
 # Injection point type → attack chain keyword mapping.
 # Connects session.injection_points type_hints to relevant ATTACK_CHAINS entries.
 _INJECTION_TO_CHAIN_KEYWORD: dict[str, str] = {
@@ -142,21 +150,13 @@ def synthesize_attack_chains(session: SessionData) -> list[dict]:
             f = finding.strip()
             if not f:
                 continue
-            # Word-boundary match for single-word entries; substring for phrases
+            # Word-boundary match for single-word entries; substring for phrases.
             if " " in f:
-                pattern = f.lower()
-                if pattern in full_signal_str:
+                if f.lower() in full_signal_str:
                     matched.append(f)
             else:
-                if _WORD_BOUNDARY_RE.sub(f.lower(), "").replace(
-                    f.lower(), ""
-                ) != full_signal_str or re.search(
-                    r"\b" + re.escape(f.lower()) + r"\b", full_signal_str
-                ):
-                    # Use simpler search; the word-boundary regex is only for
-                    # false-positive suppression, not for inclusion.
-                    if re.search(r"\b" + re.escape(f.lower()) + r"\b", full_signal_str):
-                        matched.append(f)
+                if re.search(r"\b" + re.escape(f.lower()) + r"\b", full_signal_str):
+                    matched.append(f)
 
         match_ratio = len(matched) / len(req)
         if match_ratio < _CHAIN_MIN_MATCH_RATIO:
@@ -255,7 +255,7 @@ def run_correlation(session: SessionData) -> list[dict]:
     url_str = " ".join(session.urls).lower()
     seen_url_techs: set[str] = set()
     for path, tech in _URL_TECH_MAP.items():
-        if path in url_str and tech not in seen_url_techs:
+        if _URL_TECH_PATH_RES[path].search(url_str) and tech not in seen_url_techs:
             tech_info = TECH_CORRELATIONS.get(tech, {})
             results.append(
                 {
