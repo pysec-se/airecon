@@ -2922,7 +2922,7 @@ class AgentLoop(_ValidatorMixin, _FormatterMixin,
             r"^(?:"
             r"nmap|naabu|masscan|httpx|ffuf|dirsearch|gobuster|katana|hakrawler|"
             r"subfinder|amass|assetfinder|wpscan|nikto|sqlmap|ghauri|dalfox|"
-            r"curl|wget|python|python3|bash|sh|ls|cat|find|grep"
+            r"curl|wget|python|python3|bash|sh|ls|cat|find|grep|echo"
             r")\b",
             re.IGNORECASE,
         )
@@ -2931,7 +2931,9 @@ class AgentLoop(_ValidatorMixin, _FormatterMixin,
             cleaned = cmd.strip().lstrip("$").strip()
             if not cleaned:
                 return None
-            if len(cleaned) > 2000:
+            # Multi-line scripts (from ```bash blocks) can be legitimately long.
+            # Allow up to 8000 chars; single-line commands rarely exceed 2000.
+            if len(cleaned) > 8000:
                 return None
             has_danger, _ = has_dangerous_patterns(cleaned)
             if has_danger:
@@ -2945,21 +2947,32 @@ class AgentLoop(_ValidatorMixin, _FormatterMixin,
             if not lines:
                 continue
 
+            # Collect ALL lines from the block once the first valid command is
+            # found.  Earlier behaviour broke after the first non-continuation
+            # line, so a multi-line script like:
+            #   echo "Test 1"
+            #   curl -s -k "https://…/users/1"
+            #   echo "Test 2"
+            #   curl -s -k "https://…/users/2"
+            # would be truncated to only the first curl.  Now we keep every
+            # line from the first matched prefix onward, preserving the full
+            # script so the watchdog can execute it intact.
             picked: list[str] = []
+            found_first = False
             for line in lines:
                 if line.startswith("#"):
                     continue
                 line = line.lstrip("-*0123456789. ").strip()
-                if not picked and not command_prefix_re.match(line.lstrip("$")):
-                    continue
-                picked.append(line)
-                if not line.endswith("\\"):
-                    break
+                if not found_first:
+                    if not command_prefix_re.match(line.lstrip("$")):
+                        continue
+                    found_first = True
+                picked.append(line.rstrip("\\").strip())
 
             if picked:
-                candidate = " ".join(
-                    part.rstrip("\\").strip() for part in picked if part.strip()
-                )
+                # Join as a newline-separated script so bash executes every
+                # command in order (not space-joined into one broken line).
+                candidate = "\n".join(p for p in picked if p)
                 safe = _safe(candidate)
                 if safe:
                     return safe

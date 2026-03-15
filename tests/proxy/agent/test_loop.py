@@ -137,3 +137,62 @@ def test_skill_phase_for_message_start_fallback_recon(agent_loop):
 
     agent_loop._get_current_phase = _boom
     assert agent_loop._skill_phase_for_message_start() == "RECON"
+
+
+class TestExtractShellCommandCandidate:
+    """Tests for _extract_shell_command_candidate — watchdog command extractor."""
+
+    def _extract(self, loop, content: str) -> str | None:
+        return loop._extract_shell_command_candidate(content_acc=content, thinking_acc="")
+
+    def test_single_curl_extracted(self, agent_loop):
+        content = '```bash\ncurl -s https://example.com/api\n```'
+        result = self._extract(agent_loop, content)
+        assert result is not None
+        assert "curl" in result
+
+    def test_multiline_script_extracted_fully(self, agent_loop):
+        """Watchdog must capture the entire multi-line bash script, not just first curl."""
+        content = (
+            "```bash\n"
+            'echo "=== Testing IDOR ==="\n'
+            'curl -s -k "https://example.com/wp-json/wp/v2/users/1"\n'
+            'echo ""\n'
+            'curl -s -k "https://example.com/wp-json/wp/v2/users/2"\n'
+            'echo "=== Done ==="\n'
+            "```"
+        )
+        result = self._extract(agent_loop, content)
+        assert result is not None
+        # Must contain ALL curl calls, not just the first one
+        assert result.count("curl") == 2
+        assert "users/1" in result
+        assert "users/2" in result
+
+    def test_echo_prefix_triggers_extraction(self, agent_loop):
+        """echo was previously missing from command_prefix_re — must match now."""
+        content = '```bash\necho "hello world"\n```'
+        result = self._extract(agent_loop, content)
+        assert result is not None
+        assert "echo" in result
+
+    def test_comment_lines_skipped(self, agent_loop):
+        content = (
+            "```bash\n"
+            "# This is a comment\n"
+            "curl -s https://example.com\n"
+            "```"
+        )
+        result = self._extract(agent_loop, content)
+        assert result is not None
+        assert "#" not in result
+
+    def test_non_command_block_returns_none(self, agent_loop):
+        """A block with no known command prefixes should return None."""
+        content = "```bash\nsome_unknown_binary --flag value\n```"
+        result = self._extract(agent_loop, content)
+        assert result is None
+
+    def test_no_bash_block_returns_none(self, agent_loop):
+        result = self._extract(agent_loop, "just some plain text with no commands")
+        assert result is None
