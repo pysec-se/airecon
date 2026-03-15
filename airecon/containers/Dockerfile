@@ -134,7 +134,11 @@ RUN cp -n /home/pentester/go/bin/* /usr/local/bin/ 2>/dev/null || true && \
     # stratus-red-team Go install produces binary 'stratus'; alias to canonical meta name
     ln -sf /usr/local/bin/stratus /usr/local/bin/stratus-red-team 2>/dev/null || true && \
     # nomore403 Go install produces binary 'nomore403'; alias to catalog name 'nowaf'
-    ln -sf /usr/local/bin/nomore403 /usr/local/bin/nowaf 2>/dev/null || true
+    ln -sf /usr/local/bin/nomore403 /usr/local/bin/nowaf 2>/dev/null || true && \
+    # ligolo-ng Go install cmd/proxy produces binary 'proxy'; alias to catalog name
+    ln -sf /usr/local/bin/proxy /usr/local/bin/ligolo-ng 2>/dev/null || true && \
+    # VhostFinder Go install produces binary 'VhostFinder' (capital V); alias lowercase
+    ln -sf /usr/local/bin/VhostFinder /usr/local/bin/vhostfinder 2>/dev/null || true
 
 # ── Rust tools (pre-compiled binaries, optional — build continues if download fails) ──
 # ── RustScan (fast port scanner) ──
@@ -224,7 +228,9 @@ RUN mkdir -p /home/pentester/.npm-global && \
 # npm may store either files or symlinks — cover both
 USER root
 RUN find /home/pentester/.local/bin -maxdepth 1 \( -type f -o -type l \) -exec ln -sf {} /usr/local/bin/ \; 2>/dev/null || true && \
-    find /home/pentester/.npm-global/bin -maxdepth 1 \( -type f -o -type l \) -exec ln -sf {} /usr/local/bin/ \; 2>/dev/null || true
+    find /home/pentester/.npm-global/bin -maxdepth 1 \( -type f -o -type l \) -exec ln -sf {} /usr/local/bin/ \; 2>/dev/null || true && \
+    # scoutsuite pipx installs binary 'scout'; alias to catalog name
+    ln -sf /usr/local/bin/scout /usr/local/bin/scoutsuite 2>/dev/null || true
 USER pentester
 
 # ── Additional tools from git ──
@@ -285,6 +291,7 @@ RUN curl -sfL https://raw.githubusercontent.com/aquasecurity/trivy/main/contrib/
 # ── Privilege Escalation Scripts ──
 RUN wget -qO /usr/local/bin/linpeas.sh https://github.com/peass-ng/PEASS-ng/releases/latest/download/linpeas.sh && \
     chmod +x /usr/local/bin/linpeas.sh && \
+    ln -sf /usr/local/bin/linpeas.sh /usr/local/bin/linpeas && \
     wget -qO /usr/local/bin/pspy64 https://github.com/DominicBreuker/pspy/releases/latest/download/pspy64 && \
     chmod +x /usr/local/bin/pspy64
 
