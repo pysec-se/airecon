@@ -115,7 +115,12 @@ async def _create_browser() -> Browser:
                 try:
                     _state.browser = await _state.playwright.chromium.launch(
                         headless=True,
-                        args=['--no-sandbox', '--disable-setuid-sandbox']
+                        args=[
+                            '--no-sandbox',
+                            '--disable-setuid-sandbox',
+                            # Allow TLS 1.0/1.1 and legacy ciphers on pentest targets
+                            '--ignore-certificate-errors',  # nosec B501
+                        ]
                     )
                     return _state.browser
                 except Exception as e2:
