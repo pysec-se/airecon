@@ -119,8 +119,6 @@
                 "dalfox",
                 "xsstrike",
                 "kxss",
-                "xssmap",
-                "oralyzer",
                 "tplmap",
                 "sstimap",
                 "smuggler"
@@ -163,7 +161,6 @@
                 "eslint"
             ],
             "cloud_exploitation": [
-                "awsbypasser",
                 "stratus-red-team",
                 "cloudsploit",
                 "pacu"

@@ -17,6 +17,8 @@ from enum import Enum
 from pathlib import Path
 from typing import Any
 
+from ..config import get_config as _get_config
+
 logger = logging.getLogger("airecon.agent.pipeline")
 
 _PROMPTS_DIR = Path(__file__).parent.parent / "prompts" / "phases"
@@ -173,14 +175,10 @@ class PipelineEngine:
         self._ctf_mode: bool = False           # bypass standard phase heuristics
 
         # Depth requirements for RECON → ANALYSIS transition (loaded lazily from config)
-        if config is not None:
-            self._recon_min_subdomains: int = getattr(config, "pipeline_recon_min_subdomains", 3)
-            self._recon_min_urls: int = getattr(config, "pipeline_recon_min_urls", 1)
-            self._recon_soft_timeout: int = getattr(config, "pipeline_recon_soft_timeout", 30)
-        else:
-            self._recon_min_subdomains = 3
-            self._recon_min_urls = 1
-            self._recon_soft_timeout = 30
+        cfg = config if config is not None else _get_config()
+        self._recon_min_subdomains: int = getattr(cfg, "pipeline_recon_min_subdomains", 3)
+        self._recon_min_urls: int = getattr(cfg, "pipeline_recon_min_urls", 1)
+        self._recon_soft_timeout: int = getattr(cfg, "pipeline_recon_soft_timeout", 30)
 
         self._load_phase_prompts()
 
