@@ -1,5 +1,5 @@
 import json
-from airecon.proxy.config import Config, DEFAULT_CONFIG, get_config, reload_config
+from airecon.proxy.config import Config, DEFAULT_CONFIG
 
 
 def test_config_default_initialization(tmp_path):

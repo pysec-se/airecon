@@ -10,7 +10,7 @@ Verifies that _execute_spawn_agent_tool:
 from __future__ import annotations
 
 import pytest
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import MagicMock, patch
 
 from airecon.proxy.agent.executors import _ExecutorMixin
 from airecon.proxy.agent.session import SessionData

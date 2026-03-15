@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import pytest
 
 from airecon.proxy.agent.session import (
     _extract_injection_points,
@@ -350,5 +349,5 @@ class TestExtractInjectionPointUrlNormalization:
         after = len(session_points)
 
         assert after == before, (
-            f"Fragment-vs-no-fragment produced duplicate injection point"
+            "Fragment-vs-no-fragment produced duplicate injection point"
         )

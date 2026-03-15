@@ -1,7 +1,6 @@
 """Tests for Phase 2: Skill Orchestration Policy + Tool Budget."""
 from __future__ import annotations
 
-import pytest
 from airecon.proxy.system import auto_load_skills_for_message, _PHASE_SKILL_DIRECTORIES
 from airecon.proxy.agent.models import AgentState
 from airecon.proxy.agent.pipeline import _PHASE_TOOL_BUDGETS, PipelineEngine
