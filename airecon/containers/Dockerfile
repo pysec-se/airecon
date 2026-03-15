@@ -124,12 +124,17 @@ RUN go install -v github.com/projectdiscovery/httpx/cmd/httpx@latest && \
     go install -v github.com/praetorian-inc/fingerprintx/cmd/fingerprintx@latest && \
     go install -v github.com/pwnesia/dnstake/cmd/dnstake@latest && \
     go install -v github.com/hakluke/hakoriginfinder@latest && \
-    go install -v github.com/DataDog/stratus-red-team/v2/cmd/stratus@latest 2>/dev/null || true
+    go install -v github.com/DataDog/stratus-red-team/v2/cmd/stratus@latest 2>/dev/null || true && \
+    go install -v github.com/devploit/nomore403@latest 2>/dev/null || true
 
 # ── Copy Go binaries to /usr/local/bin so they are always in default PATH ──
 # Ollama subprocess calls (which/command -v) don't always inherit custom PATH
 USER root
-RUN cp -n /home/pentester/go/bin/* /usr/local/bin/ 2>/dev/null || true
+RUN cp -n /home/pentester/go/bin/* /usr/local/bin/ 2>/dev/null || true && \
+    # stratus-red-team Go install produces binary 'stratus'; alias to canonical meta name
+    ln -sf /usr/local/bin/stratus /usr/local/bin/stratus-red-team 2>/dev/null || true && \
+    # nomore403 Go install produces binary 'nomore403'; alias to catalog name 'nowaf'
+    ln -sf /usr/local/bin/nomore403 /usr/local/bin/nowaf 2>/dev/null || true
 
 # ── Rust tools (pre-compiled binaries, optional — build continues if download fails) ──
 # ── RustScan (fast port scanner) ──
@@ -249,14 +254,13 @@ RUN git clone https://github.com/aravind0x7/JS-Snooper.git 2>/dev/null || true &
     git clone https://github.com/kiranreddyrebel/PostMessage_Fuzz_Tool.git 2>/dev/null || true && \
     git clone https://github.com/PortSwigger/param-miner.git 2>/dev/null || true && \
     git clone https://github.com/Tuhinshubhra/CMSeeK.git 2>/dev/null || true && \
-    git clone https://github.com/devploit/nomore403.git 2>/dev/null || true && \
     git clone https://github.com/UndeadSec/SwaggerSpy.git 2>/dev/null || true && \
     git clone https://github.com/MattKeeley/Spoofy.git 2>/dev/null || true && \
     git clone https://github.com/Arcanum-Sec/msftrecon.git 2>/dev/null || true && \
     git clone --depth=1 https://github.com/vincentcox/bypass-firewalls-by-DNS-history.git 2>/dev/null || true && \
     git clone --depth=1 https://github.com/NullArray/DorkNet.git 2>/dev/null || true && \
     git clone --depth=1 https://github.com/AonCyberLabs/AWS-Bypass.git 2>/dev/null || true && \
-    git clone --depth=1 https://github.com/devploit/nomore403.git nowaf 2>/dev/null || true && \
+    true && \
     (cd cloudsploit && npm install 2>/dev/null && \
     ln -sf /home/pentester/tools/cloudsploit/index.js /home/pentester/.local/bin/cloudsploit 2>/dev/null) || true
 

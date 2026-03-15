@@ -92,7 +92,7 @@
                 "commix",
                 "ghauri",
                 "sqlmap",
-                "lfi-fuzz"
+                "ffuf"
             ],
             "network_pivoting": [
                 "ligolo-ng",
