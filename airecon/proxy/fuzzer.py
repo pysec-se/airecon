@@ -164,15 +164,19 @@ class Fuzzer:
         threads: int = 10,
         timeout: int = 30,
         method: str = "GET",
+        headers: dict[str, str] | None = None,
     ):
         self.target = target
         self.wordlist = wordlist or FUZZ_POINTS
         self.threads = threads
         self.timeout = timeout
         self.method = method.upper()
+        self.headers: dict[str, str] = headers or {}
         self.results: list[FuzzResult] = []
         self._baseline: dict[str, dict[str, Any]] = {}  # param → baseline data
         self._semaphore = asyncio.Semaphore(threads)
+        # Track timeout occurrences per (param, vuln_type) for time-based confirmation
+        self._timeout_counts: dict[str, int] = {}
 
     async def _fetch_baseline(self, param: str) -> dict[str, Any]:
         """Fetch baseline response for a parameter with a benign value.
@@ -187,7 +191,8 @@ class Fuzzer:
         try:
             samples: list[dict[str, Any]] = []
             async with httpx.AsyncClient(
-                timeout=self.timeout, verify=False, follow_redirects=True  # nosec B501 - security testing tool
+                timeout=self.timeout, verify=False, follow_redirects=True,  # nosec B501 - security testing tool
+                headers=self.headers,
             ) as client:
                 for _ in range(2):
                     t0 = time.monotonic()
@@ -259,18 +264,31 @@ class Fuzzer:
         baseline_tasks = [self._fetch_baseline(p) for p in params]
         await asyncio.gather(*baseline_tasks, return_exceptions=True)
 
-        # WAF pre-check: skip params whose baseline response indicates blocking
-        # (401/403/429/503). Sending 100+ payloads through a WAF that blocks
-        # everything wastes time and burns rate limits.
+        # WAF pre-check: skip params whose baseline response indicates hard blocking.
+        # 401/403 are only skipped when no auth headers are configured — if we have
+        # session auth and still get 401, the endpoint itself is auth-gated and we
+        # should still fuzz it (the auth may be bypassed).
+        # 429/503 are rate-limit / unavailable — always skip to avoid burning limits.
+        has_auth = bool(self.headers)
         clean_params: list[str] = []
         for param in params:
             b_status = self._baseline.get(param, {}).get("status", 200)
-            if b_status in (401, 403, 429, 503):
+            if b_status in (429, 503):
                 logger.warning(
                     f"Skipping param '{param}' — baseline returned HTTP {b_status} "
-                    "(WAF/auth blocking detected)"
+                    "(rate-limited / service unavailable)"
+                )
+            elif b_status in (401, 403) and not has_auth:
+                logger.warning(
+                    f"Skipping param '{param}' — baseline returned HTTP {b_status} "
+                    "(WAF/auth blocking detected; pass auth headers to fuzz anyway)"
                 )
             else:
+                if b_status in (401, 403) and has_auth:
+                    logger.info(
+                        f"Param '{param}' baseline returned HTTP {b_status} but auth headers "
+                        "are configured — fuzzing anyway (may reveal auth bypass)"
+                    )
                 clean_params.append(param)
 
         all_vuln_types = list(FUZZ_PAYLOADS.keys())
@@ -312,7 +330,8 @@ class Fuzzer:
             })
             try:
                 async with httpx.AsyncClient(
-                    timeout=self.timeout, verify=False, follow_redirects=True  # nosec B501 - security testing tool
+                    timeout=self.timeout, verify=False, follow_redirects=True,  # nosec B501 - security testing tool
+                    headers=self.headers,
                 ) as client:
                     t0 = time.monotonic()
                     if self.method == "GET":
@@ -355,19 +374,32 @@ class Fuzzer:
                         time_ms=elapsed,
                     )
             except httpx.TimeoutException:
-                # Timeout itself can indicate time-based injection
+                # A timeout MAY indicate time-based injection, but a single
+                # timeout is unreliable (slow network, rate-limited CDN, etc.).
+                # Require 2 independent timeouts for the same (param, vuln_type)
+                # before reporting — reduces false positives significantly.
                 if vuln_type in ("sql_injection", "ssti", "command_injection"):
-                    return FuzzResult(
-                        target=self.target,
-                        parameter=param,
-                        payload=payload,
-                        vuln_type=f"time_based_{vuln_type}",
-                        severity="high",
-                        evidence="Request timed out — possible time-based injection",
-                        confidence=0.65,
-                        response_code=0,
-                        response_length=0,
-                        time_ms=self.timeout * 1000.0,
+                    hit_key = f"{param}:{vuln_type}"
+                    self._timeout_counts[hit_key] = self._timeout_counts.get(hit_key, 0) + 1
+                    if self._timeout_counts[hit_key] >= 2:
+                        return FuzzResult(
+                            target=self.target,
+                            parameter=param,
+                            payload=payload,
+                            vuln_type=f"time_based_{vuln_type}",
+                            severity="high",
+                            evidence=(
+                                f"Request timed out {self._timeout_counts[hit_key]}x "
+                                "— consistent time-based injection (multi-sample confirmed)"
+                            ),
+                            confidence=0.75,
+                            response_code=0,
+                            response_length=0,
+                            time_ms=self.timeout * 1000.0,
+                        )
+                    logger.debug(
+                        "Timeout hit #%d for param=%s vuln=%s — waiting for 2nd confirmation",
+                        self._timeout_counts[hit_key], param, vuln_type,
                     )
             except Exception as exc:
                 logger.debug(

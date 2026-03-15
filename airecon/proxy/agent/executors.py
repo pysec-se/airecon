@@ -111,7 +111,9 @@ class _ExecutorMixin:
         args_key = self._normalize_args_for_dedup(tool_name, arguments)
         allow_repeat = arguments.get("action") in [
             "wait", "scroll_down", "scroll_up", "get_console_logs", "get_network_logs", "execute_js",
-            "goto", "click", "type", "press_key"
+            "goto", "click", "type", "press_key",
+            # Auth actions may legitimately be called multiple times (e.g. re-login)
+            "login_form", "inject_cookies", "handle_totp",
         ]
 
         if not allow_repeat:
@@ -124,12 +126,13 @@ class _ExecutorMixin:
                     "error": f"Duplicate tool execution prevented (already ran {count}x)."
                 }, None
 
+        _browser_timeout = float(get_config().browser_action_timeout)
         start_time = time.time()
         try:
             try:
                 result = await asyncio.wait_for(
                     asyncio.to_thread(browser_action, **arguments),
-                    timeout=120.0,
+                    timeout=_browser_timeout,
                 )
             except asyncio.TimeoutError:
                 # The underlying sync Playwright thread cannot be force-killed
@@ -139,9 +142,9 @@ class _ExecutorMixin:
                     None,
                     lambda: browser_action(action="close"),
                 )
-                return False, 120.0, {
+                return False, _browser_timeout, {
                     "success": False,
-                    "error": "Browser action timed out after 120s. Browser close requested.",
+                    "error": f"Browser action timed out after {_browser_timeout:.0f}s. Browser close requested.",
                 }, None
 
             # Auto-inject session cookies immediately after launch
@@ -568,7 +571,21 @@ class _ExecutorMixin:
                                     "mass_assignment"])
 
         try:
-            fuzzer = Fuzzer(target=target, method=method)
+            # Pass session auth context so fuzzer doesn't false-negative on
+            # authenticated endpoints. Merge Cookie header + custom auth_headers.
+            fuzz_headers: dict[str, str] = {}
+            if hasattr(self, "_session") and self._session is not None:
+                auth_cookies: list[dict[str, Any]] = getattr(self._session, "auth_cookies", [])
+                if auth_cookies:
+                    cookie_str = "; ".join(
+                        f"{c.get('name', '')}={c.get('value', '')}"
+                        for c in auth_cookies if c.get("name")
+                    )
+                    if cookie_str:
+                        fuzz_headers["Cookie"] = cookie_str
+                auth_headers: dict[str, str] = getattr(self._session, "auth_headers", {}) or {}
+                fuzz_headers.update(auth_headers)
+            fuzzer = Fuzzer(target=target, method=method, headers=fuzz_headers or None)
             results = await fuzzer.fuzz_parameters(params, vuln_types)
 
             if not results:
@@ -1431,12 +1448,14 @@ class _ExecutorMixin:
             passed = stdout.count("PASSED")
 
             res_dict = {
-                "success": True,
+                "success": success,
                 "summary": f"Schemathesis completed: {passed} passed, {violations} potential violations.",
                 "violations": violations,
                 "output_file": output_file,
                 "raw_output": stdout[:3000],
             }
+            if not success:
+                res_dict["error"] = exec_error[:500] if exec_error else "No output produced"
             try:
                 self._save_tool_output(tool_name, arguments, res_dict)
             except Exception as _e:

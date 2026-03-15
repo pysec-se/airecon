@@ -96,13 +96,18 @@
                             "get_network_logs",
                             "view_source",
                             "close",
-                            "list_tabs"
+                            "list_tabs",
+                            "login_form",
+                            "handle_totp",
+                            "save_auth_state",
+                            "inject_cookies",
+                            "oauth_authorize"
                         ],
-                        "description": "The action to perform. Use get_network_logs to capture XHR/fetch API requests and responses like DevTools Network tab."
+                        "description": "The action to perform. Use get_network_logs to capture XHR/fetch API requests and responses like DevTools Network tab. Auth actions: login_form (fill+submit login), handle_totp (enter TOTP code), save_auth_state (capture cookies+localStorage), inject_cookies (inject session cookies), oauth_authorize (complete OAuth flow)."
                     },
                     "url": {
                         "type": "string",
-                        "description": "URL for launch/goto/new_tab."
+                        "description": "URL for launch/goto/new_tab/login_form/oauth_authorize."
                     },
                     "coordinate": {
                         "type": "string",
@@ -135,6 +140,43 @@
                     "clear": {
                         "type": "boolean",
                         "description": "Clear logs after fetching."
+                    },
+                    "username": {
+                        "type": "string",
+                        "description": "Username or email for login_form action."
+                    },
+                    "password": {
+                        "type": "string",
+                        "description": "Password for login_form action."
+                    },
+                    "username_selector": {
+                        "type": "string",
+                        "description": "CSS selector for username field in login_form (comma-separated fallbacks). Default tries common selectors."
+                    },
+                    "password_selector": {
+                        "type": "string",
+                        "description": "CSS selector for password field in login_form. Default: input[type=\"password\"]."
+                    },
+                    "submit_selector": {
+                        "type": "string",
+                        "description": "CSS selector for submit button in login_form. Default tries button[type=submit]."
+                    },
+                    "totp_secret": {
+                        "type": "string",
+                        "description": "Base32 TOTP secret for handle_totp action (generates current TOTP code automatically)."
+                    },
+                    "cookies": {
+                        "type": "array",
+                        "items": {"type": "object"},
+                        "description": "Array of cookie objects [{name, value, domain, path}] for inject_cookies action."
+                    },
+                    "oauth_url": {
+                        "type": "string",
+                        "description": "OAuth authorization URL for oauth_authorize action."
+                    },
+                    "callback_prefix": {
+                        "type": "string",
+                        "description": "Expected callback URL prefix for oauth_authorize to detect redirect completion."
                     }
                 },
                 "required": [
