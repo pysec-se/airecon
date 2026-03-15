@@ -101,7 +101,11 @@ async def test_fuzzer_skips_429_with_auth():
     fuzzer = _fuzzer_with_baseline(429, headers={"Cookie": "s=abc"})
     with pytest.MonkeyPatch().context() as mp:
         calls = []
-        async def fake_fuzz(*a, **kw): calls.append(1); return None
+
+        async def fake_fuzz(*a, **kw):
+            calls.append(1)
+            return None
+
         mp.setattr(fuzzer, "_fuzz_single", fake_fuzz)
         await fuzzer.fuzz_parameters(["id"], ["xss"])
     assert calls == []
@@ -113,7 +117,11 @@ async def test_fuzzer_skips_401_without_auth():
     fuzzer = _fuzzer_with_baseline(401, headers=None)
     with pytest.MonkeyPatch().context() as mp:
         calls = []
-        async def fake_fuzz(*a, **kw): calls.append(1); return None
+
+        async def fake_fuzz(*a, **kw):
+            calls.append(1)
+            return None
+
         mp.setattr(fuzzer, "_fuzz_single", fake_fuzz)
         await fuzzer.fuzz_parameters(["id"], ["xss"])
     assert calls == []
@@ -125,7 +133,11 @@ async def test_fuzzer_keeps_401_with_auth():
     fuzzer = _fuzzer_with_baseline(401, headers={"Cookie": "s=abc"})
     with pytest.MonkeyPatch().context() as mp:
         calls = []
-        async def fake_fuzz(*a, **kw): calls.append(1); return None
+
+        async def fake_fuzz(*a, **kw):
+            calls.append(1)
+            return None
+
         mp.setattr(fuzzer, "_fuzz_single", fake_fuzz)
         await fuzzer.fuzz_parameters(["id"], ["xss"])
     assert len(calls) > 0
