@@ -35,7 +35,7 @@ AIRecon is built 100% for local, private operation.
 - **Privacy First** — Target intelligence, tool output, and reports never leave your machine.
 - **Caido Native** — 5 built-in tools: list, replay, automate (`§FUZZ§`), findings, scope.
 - **Full Stack** — Kali sandbox + browser automation + custom fuzzer + Schemathesis API fuzzing + Semgrep SAST.
-- **Skills Knowledge Base** — 56 skill files, 289 keyword → skill auto-mappings covering every major vuln class.
+- **Skills Knowledge Base** — 57 built-in skill files, 289 keyword → skill auto-mappings. Extended by **[airecon-skills](https://github.com/pikpikcu/airecon-skills)** — a community skill library with 57 additional CLI-based playbooks for CTF, bug bounty, and pentesting.
 
 ---
 
