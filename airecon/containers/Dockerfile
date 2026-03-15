@@ -34,8 +34,8 @@ RUN apt-get update && \
     libatspi2.0-0 libxcomposite1 libxdamage1 libxfixes3 libxrandr2 libgbm1 libxkbcommon0 \
     libpango-1.0-0 libcairo2 libasound2t64 fonts-unifont fonts-noto-color-emoji \
     fonts-freefont-ttf fonts-dejavu-core ttf-bitstream-vera libnss3-tools libpcap-dev \
-    # Networking
-    net-tools dnsutils whois iproute2 iputils-ping netcat-traditional \
+    # Networking & Pivoting
+    net-tools dnsutils whois iproute2 iputils-ping netcat-traditional socat \
     # Active Directory / SMB / Pivoting / Exploitation
     responder smbclient impacket-scripts commix enum4linux \
     # Recon tools (from Kali repos)
@@ -102,6 +102,7 @@ RUN go install -v github.com/projectdiscovery/httpx/cmd/httpx@latest && \
     go install -v github.com/hahwul/dalfox/v2@latest && \
     go install -v github.com/projectdiscovery/shuffledns/cmd/shuffledns@latest && \
     go install -v github.com/edoardottt/csprecon/cmd/csprecon@latest && \
+    go install -v github.com/hakluke/hakrawler@latest && \
     go install -v github.com/hakluke/hakip2host@latest && \
     go install -v github.com/projectdiscovery/naabu/v2/cmd/naabu@latest 2>/dev/null || true && \
     go install -v github.com/byt3hx/jsleak@latest && \
@@ -116,6 +117,7 @@ RUN go install -v github.com/projectdiscovery/httpx/cmd/httpx@latest && \
     go install -v github.com/lc/subjs@latest && \
     go install -v github.com/projectdiscovery/urlfinder/cmd/urlfinder@latest && \
     go install -v github.com/dwisiswant0/crlfuzz/cmd/crlfuzz@latest && \
+    go install -v github.com/Emoe/kxss@latest && \
     go install -v github.com/wdahlenburg/VhostFinder@latest && \
     go install -v github.com/intigriti/misconfig-mapper/cmd/misconfig-mapper@latest && \
     go install -v github.com/trickest/dsieve@master && \
@@ -129,6 +131,13 @@ USER root
 RUN cp -n /home/pentester/go/bin/* /usr/local/bin/ 2>/dev/null || true
 
 # ── Rust tools (pre-compiled binaries, optional — build continues if download fails) ──
+# ── RustScan (fast port scanner) ──
+RUN (RUSTSCAN_VER=$(curl -s https://api.github.com/repos/RustScan/RustScan/releases/latest | grep -oP '"tag_name":\s*"\K[^"]+' | head -1) && \
+    RUSTSCAN_VER=${RUSTSCAN_VER:-2.3.0} && \
+    curl -fsL "https://github.com/RustScan/RustScan/releases/download/${RUSTSCAN_VER}/rustscan_${RUSTSCAN_VER}_amd64.deb" -o /tmp/rustscan.deb && \
+    dpkg -i /tmp/rustscan.deb && rm -f /tmp/rustscan.deb) || \
+    echo "[WARN] rustscan installation skipped"
+
 RUN (curl -fsL "https://github.com/Sh1Yo/x8/releases/download/v4.3.0/x86_64-linux-x8.gz" -o x8.tar.gz && \
     tar -xzf x8.tar.gz && chmod +x x8 && mv x8 /usr/local/bin/ && rm -f x8.tar.gz) || \
     echo "[WARN] x8 installation skipped (release asset not found)"
@@ -185,7 +194,12 @@ RUN pipx install arjun && \
     pipx install git+https://github.com/xnl-h4ck3r/xnLinkFinder.git && \
     pipx install git+https://github.com/xnl-h4ck3r/xnldorker.git && \
     pipx install git+https://github.com/MandConsultingGroup/porch-pirate.git && \
-    pipx install git+https://github.com/roys/cewler.git
+    pipx install git+https://github.com/roys/cewler.git && \
+    pipx install wfuzz && \
+    pipx install whatwaf && \
+    pipx install git+https://github.com/s0md3v/XSStrike.git 2>/dev/null || true && \
+    pipx install git+https://github.com/vladko312/SSTImap.git 2>/dev/null || true && \
+    pipx install git+https://github.com/defparam/smuggler.git 2>/dev/null || true
 
 # ── Node.js Tools & Linters ──
 ENV NPM_CONFIG_PREFIX=/home/pentester/.npm-global
@@ -212,6 +226,8 @@ RUN git clone https://github.com/aravind0x7/JS-Snooper.git 2>/dev/null || true &
     git clone https://github.com/xchopath/jsniper.sh.git 2>/dev/null || true && \
     chmod +x jsniper.sh/jsniper.sh 2>/dev/null || true && \
     git clone --depth=1 https://github.com/ticarpi/jwt_tool.git 2>/dev/null || true && \
+    git clone --depth=1 https://github.com/epinna/tplmap.git 2>/dev/null || true && \
+    git clone --depth=1 https://github.com/aquasecurity/cloudsploit.git 2>/dev/null || true && \
     chmod +x jwt_tool/jwt_tool.py 2>/dev/null || true && \
     git clone --depth=1 https://github.com/s0md3v/Corsy.git 2>/dev/null || true && \
     git clone --depth=1 https://github.com/drwetter/testssl.sh.git 2>/dev/null || true && \
@@ -233,7 +249,9 @@ RUN git clone https://github.com/aravind0x7/JS-Snooper.git 2>/dev/null || true &
     git clone https://github.com/devploit/nomore403.git 2>/dev/null || true && \
     git clone https://github.com/UndeadSec/SwaggerSpy.git 2>/dev/null || true && \
     git clone https://github.com/MattKeeley/Spoofy.git 2>/dev/null || true && \
-    git clone https://github.com/Arcanum-Sec/msftrecon.git 2>/dev/null || true
+    git clone https://github.com/Arcanum-Sec/msftrecon.git 2>/dev/null || true && \
+    (cd cloudsploit && npm install 2>/dev/null && \
+    ln -sf /home/pentester/tools/cloudsploit/index.js /home/pentester/.local/bin/cloudsploit 2>/dev/null) || true
 
 # ── Symlink git tools to /usr/local/bin ──
 # Rules:

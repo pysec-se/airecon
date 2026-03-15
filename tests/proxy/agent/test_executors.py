@@ -1,3 +1,6 @@
+import json
+from pathlib import Path
+
 import pytest
 from unittest.mock import patch, MagicMock
 from airecon.proxy.agent.executors import _ExecutorMixin
@@ -80,3 +83,61 @@ async def test_execute_report_tool(agent, mocker):
 
     assert success
     assert result["finding_id"] == "VULN-1"
+
+
+# ── schemathesis success flag fix ─────────────────────────────────────────────
+
+def test_schemathesis_res_dict_uses_success_variable():
+    """res_dict['success'] must use the computed variable, not hardcoded True."""
+    src = Path(__file__).parents[3] / "airecon/proxy/agent/executors.py"
+    text = src.read_text()
+    start = text.find("schemathesis_fuzz error:")
+    block = text[text.rfind("res_dict = {", 0, start):start]
+    assert '"success": success' in block
+
+
+def test_schemathesis_res_dict_error_on_failure():
+    """When success is False, res_dict must include an error key."""
+    src = Path(__file__).parents[3] / "airecon/proxy/agent/executors.py"
+    text = src.read_text()
+    assert 'res_dict["error"]' in text or "res_dict['error']" in text
+
+
+# ── browser_action_timeout from config fix ────────────────────────────────────
+
+def test_browser_action_timeout_reads_config():
+    """browser timeout must come from get_config().browser_action_timeout."""
+    src = Path(__file__).parents[3] / "airecon/proxy/agent/executors.py"
+    text = src.read_text()
+    assert "get_config().browser_action_timeout" in text
+
+
+def test_browser_action_timeout_not_hardcoded():
+    """timeout=120.0 must no longer appear in _execute_local_browser_tool."""
+    src = Path(__file__).parents[3] / "airecon/proxy/agent/executors.py"
+    text = src.read_text()
+    start = text.find("async def _execute_local_browser_tool")
+    end = text.find("\n    async def ", start + 1)
+    assert "timeout=120.0" not in text[start:end]
+
+
+# ── tools.json browser_action auth actions fix ────────────────────────────────
+
+def _browser_tool_fn() -> dict:
+    tools_path = Path(__file__).parents[3] / "airecon/proxy/data/tools.json"
+    for t in json.loads(tools_path.read_text()):
+        if t.get("function", {}).get("name") == "browser_action":
+            return t["function"]
+    raise AssertionError("browser_action not in tools.json")
+
+
+def test_browser_action_enum_has_auth_actions():
+    enum_vals = _browser_tool_fn()["parameters"]["properties"]["action"]["enum"]
+    for action in ("login_form", "handle_totp", "save_auth_state", "inject_cookies", "oauth_authorize"):
+        assert action in enum_vals, f"browser_action enum missing: {action}"
+
+
+def test_browser_action_has_auth_param_descriptions():
+    props = _browser_tool_fn()["parameters"]["properties"]
+    for param in ("username", "password", "totp_secret", "cookies", "oauth_url"):
+        assert param in props, f"browser_action missing param description: {param}"
