@@ -148,8 +148,8 @@ RUN (RUSTSCAN_VER=$(curl -s https://api.github.com/repos/RustScan/RustScan/relea
     dpkg -i /tmp/rustscan.deb && rm -f /tmp/rustscan.deb) || \
     echo "[WARN] rustscan installation skipped"
 
-RUN (curl -fsL "https://github.com/Sh1Yo/x8/releases/download/v4.3.0/x86_64-linux-x8.gz" -o x8.tar.gz && \
-    tar -xzf x8.tar.gz && chmod +x x8 && mv x8 /usr/local/bin/ && rm -f x8.tar.gz) || \
+RUN (curl -fsL "https://github.com/Sh1Yo/x8/releases/download/v4.3.0/x86_64-linux-x8.gz" -o /tmp/x8.gz && \
+    gunzip /tmp/x8.gz && chmod +x /tmp/x8 && mv /tmp/x8 /usr/local/bin/x8) || \
     echo "[WARN] x8 installation skipped (release asset not found)"
 RUN (curl -fsL "https://gitlab.com/api/v4/projects/33695681/packages/generic/nrich/0.4.2/nrich-linux-x86_64" -o nrich && \
     chmod +x nrich && mv nrich /usr/local/bin/ && rm -f nrich) || \

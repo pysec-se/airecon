@@ -407,7 +407,7 @@ def _docker_path_for(path: Path, fallback: Path) -> Path:
         from ..config import get_workspace_root
         workspace_root = get_workspace_root()
         return Path("/workspace") / path.relative_to(workspace_root)
-    except (ValueError, Exception):
+    except Exception:
         return fallback
 
 

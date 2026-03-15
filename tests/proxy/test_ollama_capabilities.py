@@ -1,5 +1,4 @@
 from unittest.mock import patch
-import ollama as _ollama
 
 from airecon.proxy.ollama import _detect_model_capabilities_from_show, OllamaClient
 

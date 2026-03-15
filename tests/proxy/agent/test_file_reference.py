@@ -6,7 +6,6 @@ import tempfile
 from pathlib import Path
 from unittest.mock import patch
 
-import pytest
 
 from airecon.proxy.agent.file_reference import (
     FileRef,

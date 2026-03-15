@@ -7,7 +7,6 @@ Covers:
 """
 from __future__ import annotations
 
-import pytest
 from airecon.proxy.system import _is_ctf_target
 
 
