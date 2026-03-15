@@ -16,7 +16,9 @@ FLAG_PATTERN = re.compile(r"flag\{[^}]+\}", re.IGNORECASE)
 
 # Jaccard similarity threshold for evidence deduplication.
 # Two evidence entries with token-overlap >= this value are treated as duplicates.
-_EVIDENCE_SIMILARITY_THRESHOLD: float = 0.75
+# 0.70 is more forgiving than 0.75 — reduces false-negatives where the same
+# finding is described with slightly different wording (e.g. word order swap).
+_EVIDENCE_SIMILARITY_THRESHOLD: float = 0.70
 
 
 @dataclass
@@ -155,7 +157,7 @@ class AgentState:
         phase: str,
         source_tool: str,
         summary: str,
-        confidence: float = 0.6,
+        confidence: float = 0.70,
         artifact: str | None = None,
         tags: list[str] | None = None,
     ) -> bool:
@@ -254,13 +256,20 @@ class AgentState:
             and str(o.get("status", "")).lower() == "done"
         ][:max_objectives]
 
+        # Only surface evidence with meaningful confidence to avoid cluttering
+        # the LLM context with low-signal noise (e.g. bare execute traces).
+        _CONF_FLOOR = 0.65
         if filter_evidence_by_phase:
             evidence = [
                 e for e in reversed(self.evidence_log)
                 if str(e.get("phase", "")).upper() == phase_key
+                and float(e.get("confidence", 1.0)) >= _CONF_FLOOR
             ][:max_evidence]
         else:
-            evidence = list(reversed(self.evidence_log))[:max_evidence]
+            evidence = [
+                e for e in reversed(self.evidence_log)
+                if float(e.get("confidence", 1.0)) >= _CONF_FLOOR
+            ][:max_evidence]
 
         return pending, completed, evidence
 

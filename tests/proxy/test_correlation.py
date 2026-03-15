@@ -1,5 +1,5 @@
 import pytest
-from airecon.proxy.correlation import run_correlation
+from airecon.proxy.correlation import run_correlation, synthesize_attack_chains
 from airecon.proxy.agent.session import SessionData
 
 
@@ -59,8 +59,6 @@ def test_correlation_attack_chains(mock_session):
 # ---------------------------------------------------------------------------
 # Upgrade 1: Attack chain synthesis (synthesize_attack_chains)
 # ---------------------------------------------------------------------------
-
-from airecon.proxy.correlation import synthesize_attack_chains
 
 
 def test_synthesize_attack_chains_happy_path(mock_session):

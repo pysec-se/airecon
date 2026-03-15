@@ -838,7 +838,6 @@ class AgentLoop(_ValidatorMixin, _FormatterMixin,
                                         )
 
                                     elif vuln_type == "synthesized_chain":
-                                        chain_id = corr.get("chain_id", "?")
                                         title = corr.get("title", "?")
                                         confidence = corr.get("confidence", 0.0)
                                         steps = corr.get("steps", [])
