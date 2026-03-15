@@ -269,12 +269,28 @@ class PipelineEngine:
 
         # Soft timeout: if RECON has gone on too long, force transition regardless
         # of depth criteria to prevent infinite loops on difficult targets.
+        # Guard: only force if we have *some* data (at least URLs or ports or
+        # subdomains).  If the target is completely unreachable we still
+        # transition — but we log a warning so the operator can investigate.
         if (current == PipelinePhase.RECON
                 and iterations_in_phase >= self._recon_soft_timeout):
-            logger.info(
-                "RECON soft timeout reached (%d iterations) — forcing transition to ANALYSIS",
-                iterations_in_phase,
+            has_any_data = bool(
+                getattr(self.session, "urls", [])
+                or getattr(self.session, "open_ports", {})
+                or getattr(self.session, "subdomains", [])
             )
+            if not has_any_data:
+                logger.warning(
+                    "RECON soft timeout (%d iter) with NO data collected — "
+                    "target may be unreachable.  Forcing transition to ANALYSIS "
+                    "anyway; agent will likely produce a low-confidence report.",
+                    iterations_in_phase,
+                )
+            else:
+                logger.info(
+                    "RECON soft timeout reached (%d iterations) — forcing transition to ANALYSIS",
+                    iterations_in_phase,
+                )
             return True
 
         met_criteria = self._evaluate_criteria(current)

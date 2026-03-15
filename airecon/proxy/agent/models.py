@@ -219,7 +219,15 @@ class AgentState:
             }
         )
         if len(self.evidence_log) > MAX_EVIDENCE:
-            self.evidence_log = self.evidence_log[-MAX_EVIDENCE:]
+            # Prioritized truncation: keep high-confidence entries regardless of
+            # age.  Pure FIFO ([-MAX_EVIDENCE:]) would silently discard early
+            # high-value findings (e.g. a confirmed SQLi found at iteration 5)
+            # when the evidence log fills up after 200+ iterations.
+            # Strategy: sort by confidence DESC, keep top MAX_EVIDENCE, then
+            # restore chronological order so context injection stays coherent.
+            self.evidence_log.sort(key=lambda e: float(e.get("confidence", 0.0)), reverse=True)
+            self.evidence_log = self.evidence_log[:MAX_EVIDENCE]
+            self.evidence_log.sort(key=lambda e: int(e.get("iteration", 0)))
         return True
 
     def record_tool_use(self, phase: str, tool_name: str) -> None:

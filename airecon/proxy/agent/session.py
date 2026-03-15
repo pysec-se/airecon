@@ -35,6 +35,29 @@ _UUID_RE = re.compile(
     re.IGNORECASE,
 )
 
+# Analytics/tracking parameters that are never injection points.
+# Including them as IDOR/INJECT creates false positives that waste agent time.
+_TRACKING_PARAMS: frozenset[str] = frozenset({
+    "utm_source", "utm_medium", "utm_campaign", "utm_term", "utm_content",
+    "utm_id", "utm_reader", "utm_name",
+    "fbclid", "gclid", "gclsrc", "dclid", "msclkid", "twclid",
+    "mc_cid", "mc_eid",
+    "_ga", "_gl", "_hsenc", "_hsmi",
+    "ref", "referrer", "source", "medium", "campaign",
+})
+
+# Numeric values that look like IDs but are actually common false positives.
+# Exact-match set for O(1) lookup before the regex heuristic fires.
+_NUMERIC_FP_VALUES: frozenset[str] = frozenset({
+    # Common HTTP ports
+    "80", "443", "8080", "8443", "8000", "8888", "3000", "4000", "5000",
+    "9000", "9090", "3306", "5432", "6379", "27017",
+    # HTTP status codes (100-599)
+    *[str(s) for s in range(100, 600)],
+    # Calendar years (reasonable range)
+    *[str(y) for y in range(1990, 2035)],
+})
+
 # Canonical param→attack-type mapping, loaded from fuzzer_data.json.
 # Fallback is empty dict — _guess_injection_type still works via heuristics.
 def _load_param_type_map() -> dict[str, str]:
@@ -74,9 +97,10 @@ def _guess_injection_type(param: str, value: str) -> str:
     # Suffix/prefix heuristics
     if re.search(r"_id$|^id_|id$", p):
         return "IDOR"
-    # Numeric value in any param → likely IDOR (require 4+ digits to avoid
-    # matching version numbers, status codes, boolean flags like 0/1)
-    if value and re.match(r"^\d{4,10}$", value):
+    # Numeric value heuristic — only flag as IDOR when value looks like a real
+    # resource ID (4-10 digits) AND is NOT a known false positive (port numbers,
+    # HTTP status codes, calendar years).
+    if value and re.match(r"^\d{4,10}$", value) and value not in _NUMERIC_FP_VALUES:
         return "IDOR"
     return "INJECT"
 
@@ -106,8 +130,11 @@ def _extract_injection_points(url: str) -> list[dict[str, Any]]:
             "", "", "",
         ))
 
-        # Query string parameters
+        # Query string parameters — skip pure analytics/tracking params that
+        # are never injection points and only inflate the injection_points list.
         for param, value in parse_qsl(p.query, keep_blank_values=True):
+            if param.lower() in _TRACKING_PARAMS:
+                continue
             points.append({
                 "url": base,
                 "parameter": param,
