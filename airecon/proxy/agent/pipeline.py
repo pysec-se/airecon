@@ -67,6 +67,8 @@ DEFAULT_PHASES: dict[PipelinePhase, PhaseConfig] = {
             "subdomains_discovered",      # session.subdomains is non-empty
             "ports_scanned",              # session.open_ports is non-empty
             "recon_artifacts_saved",      # output/ directory has files
+            "subdomain_depth_met",        # >= pipeline_recon_min_subdomains discovered
+            "url_discovery_met",          # >= pipeline_recon_min_urls collected
         ],
     ),
     PipelinePhase.ANALYSIS: PhaseConfig(
@@ -163,12 +165,23 @@ class PipelineEngine:
     # criteria.
     MIN_ITERATIONS_PER_PHASE = 10
 
-    def __init__(self, session: Any) -> None:
+    def __init__(self, session: Any, config: Any = None) -> None:
         self.session = session
         self._phase_prompts: dict[PipelinePhase, str] = {}
         self._phase_entry_iteration: int = 0   # iteration when current phase started
         self._current_iteration: int = 0       # updated by AgentLoop each checkpoint
         self._ctf_mode: bool = False           # bypass standard phase heuristics
+
+        # Depth requirements for RECON → ANALYSIS transition (loaded lazily from config)
+        if config is not None:
+            self._recon_min_subdomains: int = getattr(config, "pipeline_recon_min_subdomains", 3)
+            self._recon_min_urls: int = getattr(config, "pipeline_recon_min_urls", 1)
+            self._recon_soft_timeout: int = getattr(config, "pipeline_recon_soft_timeout", 30)
+        else:
+            self._recon_min_subdomains = 3
+            self._recon_min_urls = 1
+            self._recon_soft_timeout = 30
+
         self._load_phase_prompts()
 
     def _load_phase_prompts(self) -> None:
@@ -254,6 +267,16 @@ class PipelineEngine:
         if iterations_in_phase < self.MIN_ITERATIONS_PER_PHASE:
             return False
 
+        # Soft timeout: if RECON has gone on too long, force transition regardless
+        # of depth criteria to prevent infinite loops on difficult targets.
+        if (current == PipelinePhase.RECON
+                and iterations_in_phase >= self._recon_soft_timeout):
+            logger.info(
+                "RECON soft timeout reached (%d iterations) — forcing transition to ANALYSIS",
+                iterations_in_phase,
+            )
+            return True
+
         met_criteria = self._evaluate_criteria(current)
         total = len(config.transition_criteria)
 
@@ -290,6 +313,11 @@ class PipelineEngine:
             # trivially satisfying RECON completion via failed calls alone.
             if _has_output_files or getattr(session, "scan_count", 0) >= 5:
                 met.append("recon_artifacts_saved")
+            # Depth checks: require minimum subdomain and URL discovery
+            if len(getattr(session, "subdomains", [])) >= self._recon_min_subdomains:
+                met.append("subdomain_depth_met")
+            if len(getattr(session, "urls", [])) >= self._recon_min_urls:
+                met.append("url_discovery_met")
 
         elif phase == PipelinePhase.ANALYSIS:
             if getattr(session, "urls", []):
@@ -327,8 +355,16 @@ class PipelineEngine:
         if current == PipelinePhase.COMPLETE:
             return None
 
-        # Validate current phase has met minimum criteria
-        if not self._evaluate_criteria(current):
+        # Soft-timeout bypass: if RECON has exceeded the timeout, allow transition
+        # without requiring criteria to be met (target may be unreachable).
+        iterations_in_phase = self._current_iteration - self._phase_entry_iteration
+        _soft_timeout_bypass = (
+            current == PipelinePhase.RECON
+            and iterations_in_phase >= self._recon_soft_timeout
+        )
+
+        # Validate current phase has met minimum criteria (skipped on timeout bypass)
+        if not _soft_timeout_bypass and not self._evaluate_criteria(current):
             logger.warning(
                 f"Attempted transition from {current.value} without meeting criteria")
             return current

@@ -99,3 +99,102 @@ def test_agent_state_evidence_dedup_and_focus_context():
     assert "OBJECTIVE FOCUS" in context
     assert "Map technologies" in context
     assert "CVE-2024-1234" in context
+
+
+# ---------------------------------------------------------------------------
+# Upgrade 3: Semantic evidence deduplication (Jaccard similarity)
+# ---------------------------------------------------------------------------
+
+def test_jaccard_identical_strings():
+    assert AgentState._jaccard_similarity("foo bar baz", "foo bar baz") == 1.0
+
+
+def test_jaccard_completely_different():
+    score = AgentState._jaccard_similarity("alpha beta", "gamma delta")
+    assert score == 0.0
+
+
+def test_jaccard_partial_overlap():
+    score = AgentState._jaccard_similarity("nginx 1.18 running", "nginx version 2.0")
+    # "nginx" is the only shared token out of {"nginx","1.18","running","version","2.0"}
+    assert 0.0 < score < 1.0
+
+
+def test_jaccard_empty_inputs():
+    assert AgentState._jaccard_similarity("", "anything") == 0.0
+    assert AgentState._jaccard_similarity("anything", "") == 0.0
+    assert AgentState._jaccard_similarity("", "") == 0.0
+
+
+def test_add_evidence_returns_true_on_first_add():
+    state = AgentState()
+    result = state.add_evidence(
+        phase="RECON", source_tool="execute",
+        summary="Port 80 open on 192.168.1.1",
+    )
+    assert result is True
+    assert len(state.evidence_log) == 1
+
+
+def test_add_evidence_rejects_empty_summary():
+    state = AgentState()
+    result = state.add_evidence(phase="RECON", source_tool="execute", summary="  ")
+    assert result is False
+    assert len(state.evidence_log) == 0
+
+
+def test_add_evidence_exact_duplicate_rejected():
+    state = AgentState()
+    state.add_evidence(phase="RECON", source_tool="execute", summary="Port 80 open on host")
+    result = state.add_evidence(phase="RECON", source_tool="execute", summary="Port 80 open on host")
+    assert result is False
+    assert len(state.evidence_log) == 1
+
+
+def test_add_evidence_semantic_duplicate_rejected():
+    state = AgentState()
+    state.add_evidence(
+        phase="EXPLOIT", source_tool="quick_fuzz",
+        summary="SQL injection confirmed in login parameter id",
+    )
+    # Nearly identical wording — should be rejected as semantic duplicate
+    result = state.add_evidence(
+        phase="EXPLOIT", source_tool="quick_fuzz",
+        summary="SQL injection confirmed in login parameter id field",
+    )
+    assert result is False
+    assert len(state.evidence_log) == 1
+
+
+def test_add_evidence_cross_phase_not_blocked():
+    """Same summary in a different phase should NOT be deduplicated."""
+    state = AgentState()
+    state.add_evidence(
+        phase="RECON", source_tool="execute",
+        summary="nginx server detected on port 80",
+    )
+    result = state.add_evidence(
+        phase="ANALYSIS", source_tool="execute",
+        summary="nginx server detected on port 80",
+    )
+    assert result is True
+    assert len(state.evidence_log) == 2
+
+
+def test_add_evidence_full_log_scan():
+    """Deduplication should check ALL entries, not just the last 50."""
+    state = AgentState()
+    # Fill up evidence_log with 60 unrelated entries
+    for i in range(60):
+        state.add_evidence(
+            phase="RECON", source_tool="execute",
+            summary=f"Unique finding number {i} with distinct content",
+        )
+    original_count = len(state.evidence_log)
+    # Now try to add the very first entry again
+    result = state.add_evidence(
+        phase="RECON", source_tool="execute",
+        summary="Unique finding number 0 with distinct content",
+    )
+    assert result is False
+    assert len(state.evidence_log) == original_count

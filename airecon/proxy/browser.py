@@ -264,6 +264,7 @@ class BrowserInstance:
         self.context = await self._browser.new_context(
             viewport={"width": 1280, "height": 720},
             user_agent="Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36",
+            ignore_https_errors=True,  # nosec B501 — intentional for pentest targets with expired/self-signed certs
         )
 
         # Restore authentication cookies if provided (from resumed session)

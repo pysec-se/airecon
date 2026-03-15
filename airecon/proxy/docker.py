@@ -340,7 +340,16 @@ class DockerEngine:
 
             stdout_str = "".join(stdout_chunks)
             stderr_str = "".join(stderr_chunks)
-            success = proc.returncode == 0
+            # exit_code=1 is returned by grep/find when the last pipeline step
+            # finds no match — common in bash for-loops used for pentest
+            # enumeration (e.g. curl | grep location over N targets).  If stdout
+            # has meaningful content we treat it as a partial success so the LLM
+            # can use the output.  Genuine error codes (≥2, timeout, cancelled)
+            # are still treated as failures.
+            stdout_has_output = bool(stdout_str.strip())
+            success = proc.returncode == 0 or (
+                proc.returncode == 1 and stdout_has_output
+            )
 
             return {
                 "success": success,

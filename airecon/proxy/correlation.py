@@ -70,6 +70,120 @@ _INJECTION_TO_CHAIN_KEYWORD: dict[str, str] = {
     "AUTH":           "JWT",
 }
 
+# Minimum ratio of required_findings that must match to include a chain.
+_CHAIN_MIN_MATCH_RATIO: float = 0.5
+# Maximum synthesized chains returned (prevent context flooding).
+_CHAIN_MAX_RESULTS: int = 10
+_CHAIN_SEVERITY_RANK: dict[str, int] = {
+    "CRITICAL": 4, "HIGH": 3, "MEDIUM": 2, "LOW": 1
+}
+# Word-boundary pattern to avoid short-word false positives (e.g. "log" in "catalog").
+_WORD_BOUNDARY_RE = re.compile(r"\b{}\b", re.IGNORECASE)
+
+
+def synthesize_attack_chains(session: SessionData) -> list[dict]:
+    """Cross-correlate multiple signal types to produce ranked attack chains.
+
+    Unlike the existing per-signal attack_chain entries which fire on ANY single
+    match, this function requires >= 50% of required_findings to be satisfied
+    simultaneously and scores each chain by how many signals converge.
+
+    Returns a list of ``synthesized_chain`` dicts sorted by (severity, confidence)
+    descending, capped at ``_CHAIN_MAX_RESULTS``.
+    """
+    # --- Build signal bag from all session data sources ---
+    # Ports: service names from open_ports, mapped through PORT_CORRELATIONS
+    port_signals: list[str] = []
+    for host_ports in session.open_ports.values():
+        if not isinstance(host_ports, list):
+            continue
+        for p in host_ports:
+            info = PORT_CORRELATIONS.get(int(p)) or PORT_CORRELATIONS.get(p)
+            if info:
+                port_signals.append(info.get("service", "").lower())
+
+    # Technologies
+    techs = session.technologies
+    if isinstance(techs, dict):
+        tech_signals = [f"{n} {v}".lower() for n, v in techs.items()]
+    else:
+        tech_signals = [str(t).lower() for t in techs]
+
+    # Injection point type hints
+    inj_signals = [
+        ip.get("type_hint", "").lower()
+        for ip in getattr(session, "injection_points", [])
+        if ip.get("type_hint")
+    ]
+
+    # URL paths (token-level, not raw full URLs)
+    url_signals = " ".join(session.urls).lower()
+
+    # Existing vulnerability findings
+    vuln_signals = " ".join(
+        v.get("title", v.get("finding", "")).lower()
+        for v in getattr(session, "vulnerabilities", [])
+    )
+
+    # Single searchable string combining all signals
+    full_signal_str = " ".join(
+        port_signals + tech_signals + inj_signals + [url_signals, vuln_signals]
+    )
+
+    # --- Score each chain ---
+    scored: list[tuple[int, float, dict]] = []
+    for chain in ATTACK_CHAINS:
+        req = chain.get("required_findings", [])
+        if not req:
+            continue
+
+        matched: list[str] = []
+        for finding in req:
+            f = finding.strip()
+            if not f:
+                continue
+            # Word-boundary match for single-word entries; substring for phrases
+            if " " in f:
+                pattern = f.lower()
+                if pattern in full_signal_str:
+                    matched.append(f)
+            else:
+                if _WORD_BOUNDARY_RE.sub(f.lower(), "").replace(
+                    f.lower(), ""
+                ) != full_signal_str or re.search(
+                    r"\b" + re.escape(f.lower()) + r"\b", full_signal_str
+                ):
+                    # Use simpler search; the word-boundary regex is only for
+                    # false-positive suppression, not for inclusion.
+                    if re.search(r"\b" + re.escape(f.lower()) + r"\b", full_signal_str):
+                        matched.append(f)
+
+        match_ratio = len(matched) / len(req)
+        if match_ratio < _CHAIN_MIN_MATCH_RATIO:
+            continue
+
+        confidence = round(min(1.0, match_ratio * 1.1), 2)
+        severity_rank = _CHAIN_SEVERITY_RANK.get(
+            str(chain.get("severity", "MEDIUM")).upper(), 2
+        )
+        scored.append((severity_rank, confidence, {
+            "type": "synthesized_chain",
+            "chain_id": chain.get("name", "Unknown Chain"),
+            "title": (
+                f"{chain.get('name')} — {len(matched)}/{len(req)} signals matched"
+                f" ({', '.join(matched[:3])}{'…' if len(matched) > 3 else ''})"
+            ),
+            "steps": chain.get("steps", []),
+            "severity": chain.get("severity", "MEDIUM"),
+            "confidence": confidence,
+            "required_findings": req,
+            "matched_signals": matched,
+        }))
+
+    # Sort by severity descending, then confidence descending
+    scored.sort(key=lambda x: (x[0], x[1]), reverse=True)
+    return [item[2] for item in scored[:_CHAIN_MAX_RESULTS]]
+
 
 def run_correlation(session: SessionData) -> list[dict]:
     """Run full correlation analysis on session data."""
@@ -266,5 +380,10 @@ def run_correlation(session: SessionData) -> list[dict]:
                     "severity": chain.get("severity", "CRITICAL"),
                 }
             )
+
+    # Synthesized cross-signal attack chains — cross-correlate port + tech +
+    # injection + URL + vuln signals together for higher-fidelity suggestions.
+    synthesized = synthesize_attack_chains(session)
+    results.extend(synthesized)
 
     return results
