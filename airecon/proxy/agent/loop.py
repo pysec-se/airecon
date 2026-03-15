@@ -496,7 +496,7 @@ class AgentLoop(_ValidatorMixin, _FormatterMixin,
                             prior.session_id, self._session.session_id,
                         )
                     # Mark as merged (even if no prior found) to prevent re-running
-                    setattr(self._session, "_prior_merged", True)
+                    self._session._prior_merged = True
 
                 if self._session and self._session.scan_count > 0:
                     session_ctx = session_to_context(self._session)

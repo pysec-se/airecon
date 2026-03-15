@@ -110,7 +110,7 @@ class FileAnalyzeRequest(BaseModel):
     file_path: str = Field(..., max_length=500)
     file_content: str = Field(..., max_length=10_000_000)  # 10 MB
     task: str = Field(..., max_length=10_000)
-    max_iterations: int = Field(30, ge=1, le=500)
+    max_iterations: int = Field(30, ge=1, le=50)
 
 
 class StatusResponse(BaseModel):
@@ -289,7 +289,8 @@ async def _stream_file_agent_events(
 ) -> AsyncIterator[dict]:
     """Stream events from a mini file-analysis AgentLoop."""
     mini_agent = AgentLoop(ollama_client, engine)  # type: ignore[arg-type]
-    mini_agent._override_max_iterations = min(request.max_iterations, 50)
+    mini_agent._is_subagent = True  # prevent loading/overwriting parent session via AIRECON_SESSION_ID
+    mini_agent._override_max_iterations = request.max_iterations
     # Block destructive/recon-heavy tools — file analysis only needs read/exec
     mini_agent._blocked_tools = {
         "spawn_agent",

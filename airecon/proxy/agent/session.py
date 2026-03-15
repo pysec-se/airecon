@@ -160,8 +160,8 @@ def _extract_injection_points(url: str) -> list[dict[str, Any]]:
                     "value_sample": seg,
                     "type_hint": "IDOR",
                 })
-    except Exception:
-        pass
+    except Exception as _e:
+        logger.debug("_extract_injection_points path traversal error: %s", _e)
     return points
 
 
