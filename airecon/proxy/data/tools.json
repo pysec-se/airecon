@@ -195,7 +195,7 @@
                 "properties": {
                     "path": {
                         "type": "string",
-                        "description": "File path (relative to workspace/ or absolute within workspace/)"
+                        "description": "File path relative to the workspace root (e.g. 'output/results.txt'). Do NOT include a leading 'workspace/' prefix — it is stripped automatically."
                     },
                     "content": {
                         "type": "string",
@@ -219,7 +219,7 @@
                 "properties": {
                     "path": {
                         "type": "string",
-                        "description": "File path to read (relative to workspace or absolute within workspace)."
+                        "description": "File path relative to the workspace root (e.g. 'output/nmap.txt'). Do NOT include a leading 'workspace/' prefix — it is stripped automatically."
                     },
                     "offset": {
                         "type": "integer",

@@ -123,7 +123,8 @@ RUN go install -v github.com/projectdiscovery/httpx/cmd/httpx@latest && \
     go install -v github.com/trickest/dsieve@master && \
     go install -v github.com/praetorian-inc/fingerprintx/cmd/fingerprintx@latest && \
     go install -v github.com/pwnesia/dnstake/cmd/dnstake@latest && \
-    go install -v github.com/hakluke/hakoriginfinder@latest
+    go install -v github.com/hakluke/hakoriginfinder@latest && \
+    go install -v github.com/DataDog/stratus-red-team/v2/cmd/stratus@latest 2>/dev/null || true
 
 # ── Copy Go binaries to /usr/local/bin so they are always in default PATH ──
 # Ollama subprocess calls (which/command -v) don't always inherit custom PATH
@@ -199,7 +200,9 @@ RUN pipx install arjun && \
     pipx install whatwaf && \
     pipx install git+https://github.com/s0md3v/XSStrike.git 2>/dev/null || true && \
     pipx install git+https://github.com/vladko312/SSTImap.git 2>/dev/null || true && \
-    pipx install git+https://github.com/defparam/smuggler.git 2>/dev/null || true
+    pipx install git+https://github.com/defparam/smuggler.git 2>/dev/null || true && \
+    pipx install git+https://github.com/doomstein/oralyzer.git 2>/dev/null || true && \
+    pipx install git+https://github.com/machinexa2/xssmap.git 2>/dev/null || true
 
 # ── Node.js Tools & Linters ──
 ENV NPM_CONFIG_PREFIX=/home/pentester/.npm-global
@@ -250,6 +253,10 @@ RUN git clone https://github.com/aravind0x7/JS-Snooper.git 2>/dev/null || true &
     git clone https://github.com/UndeadSec/SwaggerSpy.git 2>/dev/null || true && \
     git clone https://github.com/MattKeeley/Spoofy.git 2>/dev/null || true && \
     git clone https://github.com/Arcanum-Sec/msftrecon.git 2>/dev/null || true && \
+    git clone --depth=1 https://github.com/vincentcox/bypass-firewalls-by-DNS-history.git 2>/dev/null || true && \
+    git clone --depth=1 https://github.com/NullArray/DorkNet.git 2>/dev/null || true && \
+    git clone --depth=1 https://github.com/AonCyberLabs/AWS-Bypass.git 2>/dev/null || true && \
+    git clone --depth=1 https://github.com/devploit/nomore403.git nowaf 2>/dev/null || true && \
     (cd cloudsploit && npm install 2>/dev/null && \
     ln -sf /home/pentester/tools/cloudsploit/index.js /home/pentester/.local/bin/cloudsploit 2>/dev/null) || true
 

@@ -1160,9 +1160,10 @@ class InteractiveRealTimeTester:
         threads: int = 5,
         timeout: int = 10,
         on_finding: Callable[[FuzzResult], None] | None = None,
+        headers: dict[str, str] | None = None,
     ):
         self.target = target
-        self.fuzzer = Fuzzer(target=target, threads=threads, timeout=timeout)
+        self.fuzzer = Fuzzer(target=target, threads=threads, timeout=timeout, headers=headers)
         self.chain_engine = ExploitChainEngine(self.fuzzer)
         self.on_finding = on_finding
         self._stop_event = asyncio.Event()
@@ -1359,10 +1360,13 @@ def _chain_impact(trigger: str, follow_on: str) -> str:
 # ---------------------------------------------------------------------------
 
 async def quick_fuzz_url(
-        url: str, params: list[str] | None = None) -> list[FuzzResult]:
+        url: str,
+        params: list[str] | None = None,
+        headers: dict[str, str] | None = None,
+) -> list[FuzzResult]:
     """Quick fuzz a URL with common payloads and return findings."""
     params = params or ["q", "search", "id", "page"]
-    fuzzer = Fuzzer(url, threads=5, timeout=15)
+    fuzzer = Fuzzer(url, threads=5, timeout=15, headers=headers)
     return await fuzzer.fuzz_parameters(
         params=params,
         vuln_types=["sql_injection", "xss", "path_traversal", "ssti"],

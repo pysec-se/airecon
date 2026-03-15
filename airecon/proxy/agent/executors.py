@@ -571,21 +571,7 @@ class _ExecutorMixin:
                                     "mass_assignment"])
 
         try:
-            # Pass session auth context so fuzzer doesn't false-negative on
-            # authenticated endpoints. Merge Cookie header + custom auth_headers.
-            fuzz_headers: dict[str, str] = {}
-            if hasattr(self, "_session") and self._session is not None:
-                auth_cookies: list[dict[str, Any]] = getattr(self._session, "auth_cookies", [])
-                if auth_cookies:
-                    cookie_str = "; ".join(
-                        f"{c.get('name', '')}={c.get('value', '')}"
-                        for c in auth_cookies if c.get("name")
-                    )
-                    if cookie_str:
-                        fuzz_headers["Cookie"] = cookie_str
-                auth_headers: dict[str, str] = getattr(self._session, "auth_headers", {}) or {}
-                fuzz_headers.update(auth_headers)
-            fuzzer = Fuzzer(target=target, method=method, headers=fuzz_headers or None)
+            fuzzer = Fuzzer(target=target, method=method, headers=self._build_fuzz_headers())
             results = await fuzzer.fuzz_parameters(params, vuln_types)
 
             if not results:
@@ -638,7 +624,10 @@ class _ExecutorMixin:
         params = arguments.get("params") or None
 
         try:
-            results = await quick_fuzz_url(url=target, params=params)
+            results = await quick_fuzz_url(
+                url=target, params=params,
+                headers=self._build_fuzz_headers(),
+            )
 
             if not results:
                 res_dict = {
@@ -691,7 +680,10 @@ class _ExecutorMixin:
 
         try:
             from ..fuzzer import InteractiveRealTimeTester
-            tester = InteractiveRealTimeTester(target, threads=10, timeout=20)
+            tester = InteractiveRealTimeTester(
+                target, threads=10, timeout=20,
+                headers=self._build_fuzz_headers(),
+            )
             async for event in tester.stream_fuzz(params=params, vuln_types=vuln_types):
                 pass
             summary = tester.get_summary()
@@ -1613,6 +1605,24 @@ class _ExecutorMixin:
         self.state.tool_counts["subagents"] = self.state.tool_counts.get(
             "subagents", 0) + 1
         return success, duration, res_dict, None
+
+    def _build_fuzz_headers(self) -> dict[str, str] | None:
+        """Build auth headers dict from session cookies/headers for fuzzer auth context."""
+        headers: dict[str, str] = {}
+        session = getattr(self, "_session", None)
+        if session is None:
+            return None
+        auth_cookies: list[dict[str, Any]] = getattr(session, "auth_cookies", []) or []
+        if auth_cookies:
+            cookie_str = "; ".join(
+                f"{c.get('name', '')}={c.get('value', '')}"
+                for c in auth_cookies if c.get("name")
+            )
+            if cookie_str:
+                headers["Cookie"] = cookie_str
+        auth_hdrs: dict[str, str] = getattr(session, "auth_headers", {}) or {}
+        headers.update(auth_hdrs)
+        return headers or None
 
     def _normalize_args_for_dedup(
             self, tool_name: str, arguments: dict[str, Any]) -> tuple[str, str]:

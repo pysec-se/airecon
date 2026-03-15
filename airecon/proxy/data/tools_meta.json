@@ -28,7 +28,7 @@
                 "wappalyzer",
                 "fingerprintx",
                 "tlsx",
-                "nmap -sV"
+                "nmap"
             ],
             "parameter_discovery": [
                 "arjun",
