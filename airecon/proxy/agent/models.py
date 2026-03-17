@@ -78,13 +78,15 @@ class AgentState:
         if len(self.tool_history) > MAX_TOOL_HISTORY:
             self.tool_history = self.tool_history[-MAX_TOOL_HISTORY:]
 
-        # Truncate oversized result strings in the oldest entries to cap memory usage
-        _MAX_RESULT_CHARS = 50_000
-        for entry in self.tool_history:
-            if entry.result and isinstance(entry.result, dict):
-                for k, v in entry.result.items():
-                    if isinstance(v, str) and len(v) > _MAX_RESULT_CHARS:
-                        entry.result[k] = v[:_MAX_RESULT_CHARS] + " ... [TRUNCATED]"
+        # Truncate oversized result strings — only scan when history is large enough
+        # to matter, and only touch entries that were just pushed into the trim zone.
+        if len(self.tool_history) > 50:
+            _MAX_RESULT_CHARS = 50_000
+            for entry in self.tool_history:
+                if entry.result and isinstance(entry.result, dict):
+                    for k, v in entry.result.items():
+                        if isinstance(v, str) and len(v) > _MAX_RESULT_CHARS:
+                            entry.result[k] = v[:_MAX_RESULT_CHARS] + " ... [TRUNCATED]"
 
     def ensure_phase_objectives(
         self, phase: str, defaults: list[str]
@@ -223,11 +225,17 @@ class AgentState:
             # age.  Pure FIFO ([-MAX_EVIDENCE:]) would silently discard early
             # high-value findings (e.g. a confirmed SQLi found at iteration 5)
             # when the evidence log fills up after 200+ iterations.
-            # Strategy: sort by confidence DESC, keep top MAX_EVIDENCE, then
-            # restore chronological order so context injection stays coherent.
-            self.evidence_log.sort(key=lambda e: float(e.get("confidence", 0.0)), reverse=True)
-            self.evidence_log = self.evidence_log[:MAX_EVIDENCE]
-            self.evidence_log.sort(key=lambda e: int(e.get("iteration", 0)))
+            # Strategy: use heapq.nlargest to pick top MAX_EVIDENCE by confidence
+            # in O(n log k), then restore chronological order so context injection
+            # stays coherent. Avoids two full sorts on the whole list.
+            import heapq
+            kept = heapq.nlargest(
+                MAX_EVIDENCE,
+                self.evidence_log,
+                key=lambda e: float(e.get("confidence", 0.0)),
+            )
+            kept.sort(key=lambda e: int(e.get("iteration", 0)))
+            self.evidence_log = kept
         return True
 
     def record_tool_use(self, phase: str, tool_name: str) -> None:

@@ -432,7 +432,12 @@ def _docker_path_for(path: Path, fallback: Path) -> Path:
         from ..config import get_workspace_root
         workspace_root = get_workspace_root()
         return Path("/workspace") / path.relative_to(workspace_root)
+    except ValueError:
+        # path is not under workspace_root — use fallback Docker path
+        return fallback
     except Exception:
+        # Unexpected error (e.g. config unavailable) — safe fallback
+        logger.debug("_docker_path_for: unexpected error for %s, using fallback", path)
         return fallback
 
 
@@ -516,6 +521,9 @@ def workspace_name_for_ref(ref: FileRef) -> str:
     return _sanitize_workspace_name(stem if stem else (path.name or "workspace"))
 
 
+_MAX_UNIQUE_ATTEMPTS = 9999
+
+
 def _unique_file_path(parent_dir: Path, filename: str) -> Path:
     """Return a non-colliding file path under parent_dir."""
     base = Path(filename)
@@ -525,12 +533,14 @@ def _unique_file_path(parent_dir: Path, filename: str) -> Path:
     if not candidate.exists():
         return candidate
 
-    idx = 1
-    while True:
+    for idx in range(1, _MAX_UNIQUE_ATTEMPTS + 1):
         candidate = parent_dir / f"{stem}_{idx}{suffix}"
         if not candidate.exists():
             return candidate
-        idx += 1
+    raise OSError(
+        f"Could not find a unique filename for '{filename}' in {parent_dir} "
+        f"after {_MAX_UNIQUE_ATTEMPTS} attempts"
+    )
 
 
 def _unique_directory_path(parent_dir: Path, dirname: str) -> Path:
@@ -539,12 +549,14 @@ def _unique_directory_path(parent_dir: Path, dirname: str) -> Path:
     if not candidate.exists():
         return candidate
 
-    idx = 1
-    while True:
+    for idx in range(1, _MAX_UNIQUE_ATTEMPTS + 1):
         candidate = parent_dir / f"{dirname}_{idx}"
         if not candidate.exists():
             return candidate
-        idx += 1
+    raise OSError(
+        f"Could not find a unique directory name for '{dirname}' in {parent_dir} "
+        f"after {_MAX_UNIQUE_ATTEMPTS} attempts"
+    )
 
 
 def build_injection_message(resolved: list[ResolvedRef]) -> str | None:
