@@ -535,7 +535,7 @@ class AIReconApp(App):
             self.query_one(ChatPanel).add_error_message(
                 f"Failed to open file: {e}")
 
-    def on_preview_result(self, result: Any) -> None:
+    async def on_preview_result(self, result: Any) -> None:
         """Handle result from FilePreviewScreen dismissal.
 
         Instead of sending the prompt to the main recon agent (which would
@@ -559,15 +559,16 @@ class AIReconApp(App):
                 "[dim]Running as background sub-agent — main recon continues uninterrupted.[/dim]"
             )
 
-            # Read file content to send to the mini-agent
-            try:
-                p = _abs
-                if p.stat().st_size > 100_000:
-                    content = p.read_text(errors="replace")[:100_000]
-                else:
-                    content = p.read_text(errors="replace")
-            except Exception as e:
-                content = f"[Could not read file: {e}]"
+            # Read file content in a thread to avoid blocking the TUI event loop
+            def _read_file_sync() -> str:
+                try:
+                    if _abs.stat().st_size > 100_000:
+                        return _abs.read_text(errors="replace")[:100_000]
+                    return _abs.read_text(errors="replace")
+                except Exception as e:
+                    return f"[Could not read file: {e}]"
+
+            content = await asyncio.to_thread(_read_file_sync)
 
             self.run_worker(
                 self._stream_file_analysis(abs_path, content, result.user_prompt)

@@ -91,8 +91,8 @@ class PathCompleter(Widget):
         self.display = False
         try:
             self.query_one("#path-list", ListView).clear()
-        except Exception:  # nosec B110
-            pass
+        except Exception as _e:  # nosec B110 - widget may not be mounted yet
+            logger.debug("PathCompleter.hide: could not clear list: %s", _e)
 
     def get_first_path(self) -> str | None:
         """Return the path of the first (or highlighted) item — for Tab completion."""
@@ -106,7 +106,8 @@ class PathCompleter(Widget):
             if 0 <= idx < len(items):
                 return items[idx].name
             return items[0].name
-        except Exception:  # nosec B110
+        except Exception as _e:  # nosec B110 - widget may not be mounted yet
+            logger.debug("PathCompleter.get_first_path: %s", _e)
             return None
 
     # ── Event Handlers ───────────────────────────────────────────────────────

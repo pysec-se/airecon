@@ -282,7 +282,7 @@ def _resolve_directory(ref: FileRef, workspace_dir: Path) -> ResolvedRef:
     """Copy a directory to workspace, then inject tree + key file contents."""
     path = ref.path
     try:
-        dest, copied_files = _copy_directory_to_uploads(path, workspace_dir)
+        dest, copied_files, copy_skipped = _copy_directory_to_uploads(path, workspace_dir)
     except OSError as e:
         return ResolvedRef(
             raw=ref.raw, path=path, kind="directory", context_block="",
@@ -293,40 +293,53 @@ def _resolve_directory(ref: FileRef, workspace_dir: Path) -> ResolvedRef:
     file_contents: list[str] = []
     total_content_size = 0
     files_read = 0
-    total_walked = 0
+    skipped_binary = 0
+    skipped_too_large = 0
+    skipped_limit = 0
 
     # Build tree and collect readable files — single walk
     for fpath in _walk_dir(path):
-        total_walked += 1
         rel = fpath.relative_to(path)
         ext = fpath.suffix.lower()
         size = fpath.stat().st_size
 
         tree_lines.append(f"  {rel}  ({size // 1024}KB)" if size > 1024 else f"  {rel}")
 
-        # Read source/text files up to limits
-        if (
-            ext in _TEXT_EXTENSIONS
-            and size <= _MAX_DIR_FILE_SIZE
-            and files_read < _MAX_DIR_FILES
-            and total_content_size < _MAX_TOTAL_DIR_CONTENT
-        ):
-            try:
-                content = fpath.read_text(encoding="utf-8", errors="replace")
-                block = _format_text_block(fpath, content, base=path)
-                file_contents.append(block)
-                total_content_size += len(content)
-                files_read += 1
-            except OSError:
-                pass
+        # Read source/text files up to limits — track skip reason
+        if ext not in _TEXT_EXTENSIONS:
+            skipped_binary += 1
+            continue
+        if size > _MAX_DIR_FILE_SIZE:
+            skipped_too_large += 1
+            continue
+        if files_read >= _MAX_DIR_FILES or total_content_size >= _MAX_TOTAL_DIR_CONTENT:
+            skipped_limit += 1
+            continue
+        try:
+            content = fpath.read_text(encoding="utf-8", errors="replace")
+            block = _format_text_block(fpath, content, base=path)
+            file_contents.append(block)
+            total_content_size += len(content)
+            files_read += 1
+        except OSError:
+            skipped_too_large += 1  # treat unreadable as skipped
 
     tree_str = "\n".join(tree_lines) if tree_lines else "  (empty)"
     content_str = "\n\n".join(file_contents) if file_contents else ""
 
-    skipped = total_walked - files_read
+    skip_parts: list[str] = []
+    if skipped_binary:
+        skip_parts.append(f"{skipped_binary} binary/non-text")
+    if skipped_too_large:
+        skip_parts.append(f"{skipped_too_large} too large (>{_MAX_DIR_FILE_SIZE // 1024}KB)")
+    if skipped_limit:
+        skip_parts.append(f"{skipped_limit} over read limit ({_MAX_DIR_FILES} files / {_MAX_TOTAL_DIR_CONTENT // 1024}KB)")
+    if copy_skipped:
+        skip_parts.append(f"{len(copy_skipped)} unreadable/deleted during copy")
+
     summary = (
-        f"Files copied: {copied_files} | Files read: {files_read}"
-        + (f" | Skipped (too large/binary): {skipped}" if skipped > 0 else "")
+        f"Files copied: {copied_files} | Files read into context: {files_read}"
+        + (f" | Skipped: {', '.join(skip_parts)}" if skip_parts else "")
     )
 
     context_block = f"""[FILE REFERENCE — DIRECTORY]
@@ -374,8 +387,14 @@ def _copy_file_to_uploads(src: Path, workspace_dir: Path) -> Path:
     return dest
 
 
-def _copy_directory_to_uploads(src_dir: Path, workspace_dir: Path) -> tuple[Path, int]:
-    """Copy directory tree into workspace uploads/, skipping heavy cache dirs/symlinks."""
+def _copy_directory_to_uploads(
+    src_dir: Path, workspace_dir: Path
+) -> tuple[Path, int, list[str]]:
+    """Copy directory tree into workspace uploads/, skipping heavy cache dirs/symlinks.
+
+    Returns (dest_dir, copied_count, skipped_names) where skipped_names lists
+    files that could not be copied (deleted, permission error, etc.).
+    """
     uploads_dir = workspace_dir / "uploads"
     uploads_dir.mkdir(parents=True, exist_ok=True)
     dest_name = src_dir.name or "directory"
@@ -383,6 +402,7 @@ def _copy_directory_to_uploads(src_dir: Path, workspace_dir: Path) -> tuple[Path
     dest_dir.mkdir(parents=True, exist_ok=True)
 
     copied_files = 0
+    skipped_files: list[str] = []
     for root, dirs, files in os.walk(src_dir, topdown=True, followlinks=False):
         root_path = Path(root)
         dirs[:] = [
@@ -396,9 +416,14 @@ def _copy_directory_to_uploads(src_dir: Path, workspace_dir: Path) -> tuple[Path
             rel = src_file.relative_to(src_dir)
             dst_file = dest_dir / rel
             dst_file.parent.mkdir(parents=True, exist_ok=True)
-            shutil.copy2(src_file, dst_file)
-            copied_files += 1
-    return dest_dir, copied_files
+            try:
+                shutil.copy2(src_file, dst_file)
+                copied_files += 1
+            except OSError as e:
+                # File may have been deleted, moved, or is unreadable.
+                logger.debug("Skipped file during directory copy: %s — %s", src_file, e)
+                skipped_files.append(str(rel))
+    return dest_dir, copied_files, skipped_files
 
 
 def _docker_path_for(path: Path, fallback: Path) -> Path:

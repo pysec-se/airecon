@@ -366,11 +366,37 @@ class SessionData:
     # "expert_test:idor_hotspot", "attack_chain:XSS → CSRF"
     suggested_correlations: list[str] = field(default_factory=list)
 
+    # Endpoints that have been actively tested this session.
+    # Format: "METHOD url" e.g. "GET https://example.com/api/users"
+    # Capped at 500 entries (LRU — oldest dropped first).
+    # Persisted to disk so the LLM never re-tests the same endpoint after
+    # a crash or extreme context truncation.
+    tested_endpoints: list[str] = field(default_factory=list)
+
     def __post_init__(self) -> None:
         if not self.session_id:
             self.session_id = generate_session_id()
         if not self.created_at:
             self.created_at = datetime.now().isoformat()
+
+
+_MAX_TESTED_ENDPOINTS = 500
+
+
+def record_tested_endpoint(session: SessionData, url: str, method: str = "GET") -> None:
+    """Record a URL as tested so it survives context truncation and crashes.
+
+    Normalises to "METHOD URL" format and deduplicates.  When the list
+    exceeds the cap, the oldest entries are dropped (LRU).
+    """
+    if not url or not url.strip():
+        return
+    key = f"{method.upper()} {url.strip()}"
+    if key not in session.tested_endpoints:
+        session.tested_endpoints.append(key)
+        if len(session.tested_endpoints) > _MAX_TESTED_ENDPOINTS:
+            # Drop oldest entries to stay within cap
+            session.tested_endpoints = session.tested_endpoints[-_MAX_TESTED_ENDPOINTS:]
 
 
 def load_session(session_id: str) -> SessionData | None:
@@ -407,6 +433,7 @@ def load_session(session_id: str) -> SessionData | None:
             auth_type=data.get("auth_type", ""),
             tested_injection_points=data.get("tested_injection_points", []),
             suggested_correlations=data.get("suggested_correlations", []),
+            tested_endpoints=data.get("tested_endpoints", []),
             _prior_merged=data.get("_prior_merged", False),
         )
         logger.info(

@@ -1,6 +1,6 @@
 [tool.poetry]
 name = "airecon"
-version = "0.1.5-beta"
+version = "0.1.6-beta"
 description = "AI-powered security reconnaissance: Ollama + Kali Linux Docker sandbox + Textual TUI"
 authors = ["pikpikcu"]
 readme = "README.md"

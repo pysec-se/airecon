@@ -514,8 +514,13 @@ class AgentState:
             return key_part + "\n" + filler
         return (key_part or filler)[:max_chars]
 
-    async def compress_with_llm(self, ollama: Any,
-                                keep_recent: int = 30) -> None:
+    async def compress_with_llm(
+        self,
+        ollama: Any,
+        keep_recent: int = 30,
+        num_ctx: int = 8192,
+        num_predict: int = 1024,
+    ) -> None:
         """Compress old messages via LLM summarization when conversation grows large.
 
         Trigger: conversation > 80 messages (non-system).
@@ -575,7 +580,10 @@ class AgentState:
             extracted_flags = list(set(extracted_flags))
 
             try:
-                summary_text = await ollama.complete(prompt)
+                summary_text = await ollama.complete(
+                    prompt,
+                    options={"num_ctx": num_ctx, "num_predict": num_predict, "temperature": 0.1},
+                )
 
                 # Append extracted flags to summary to guarantee they survive
                 if extracted_flags:

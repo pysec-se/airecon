@@ -189,6 +189,8 @@ class _ValidatorMixin:
         "forward", "new_tab", "switch_tab", "close_tab", "wait", "execute_js",
         "double_click", "hover", "press_key", "save_pdf", "get_console_logs",
         "get_network_logs", "view_source", "close", "list_tabs",
+        # Auth actions — implemented in browser.py, defined in tools.json
+        "login_form", "handle_totp", "save_auth_state", "inject_cookies", "oauth_authorize",
     })
 
     def _validate_tool_args(
@@ -200,6 +202,9 @@ class _ValidatorMixin:
                 return False, "'command' must be a non-empty string."
             if len(cmd) > 20_000:
                 return False, f"'command' is too long ({len(cmd)} chars). Split into smaller calls."
+            has_danger, danger_msg = has_dangerous_patterns(cmd)
+            if has_danger:
+                return False, f"Command rejected: {danger_msg}"
 
         elif tool_name == "browser_action":
             action = arguments.get("action", "")
@@ -374,9 +379,7 @@ class _ValidatorMixin:
                     _HTTP_EVIDENCE_PATTERNS["error_indicator"].search(poc_desc) or
                     _HTTP_EVIDENCE_PATTERNS["data_extraction"].search(poc_desc)
                 )
-                
-                impact_proven = has_status_change or (has_content_proof or has_error_or_data)
-                
+                impact_proven = has_status_change or has_content_proof or has_error_or_data
                 if not impact_proven:
                     return False, (
                         "REPORT REJECTED: HTTP status shown but exploitation impact not documented. "

@@ -398,7 +398,7 @@ class TestResolveDirectory:
         ref = FileRef(raw=f"@{proj}", path=proj)
         resolved = resolve_ref(ref, self.workspace)
         # 3 text files read, 1 binary skipped
-        assert "Files read: 3" in resolved.context_block
+        assert "Files read into context: 3" in resolved.context_block
         assert "Skipped" in resolved.context_block
 
     def test_binary_skipped_in_dir_read(self):

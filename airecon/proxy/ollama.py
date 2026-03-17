@@ -159,7 +159,12 @@ class OllamaClient:
         except Exception:
             return False
 
-    async def complete(self, messages: list[dict[str, Any]], max_retries: int = 3) -> str:
+    async def complete(
+        self,
+        messages: list[dict[str, Any]],
+        max_retries: int = 3,
+        options: dict[str, Any] | None = None,
+    ) -> str:
         """Non-streaming single completion for internal use (e.g. memory compression).
 
         Returns the assistant message content as a plain string.
@@ -170,12 +175,15 @@ class OllamaClient:
         max_retries = max(0, max_retries)
         for attempt in range(max_retries + 1):
             try:
-                response = await self._client.chat(
-                    model=self.model,
-                    messages=messages,
-                    stream=False,
-                    keep_alive=get_config().ollama_keep_alive,
-                )
+                kwargs: dict[str, Any] = {
+                    "model": self.model,
+                    "messages": messages,
+                    "stream": False,
+                    "keep_alive": get_config().ollama_keep_alive,
+                }
+                if options:
+                    kwargs["options"] = options
+                response = await self._client.chat(**kwargs)
                 if hasattr(response, "message"):
                     return response.message.content or ""
                 if isinstance(response, dict):
