@@ -1215,24 +1215,22 @@ class _ExecutorMixin:
             # Step 1: Check if a scope with the same name already exists so we
             # can update it instead of accumulating duplicate scopes on every
             # call.
+            # Caido scopes query returns a direct array, not a connection (no edges/node).
             list_q = """
             query ListScopes {
-                scopes {
-                    edges { node { id name } }
-                }
+                scopes { id name }
             }
             """
             existing_id: str | None = None
             try:
                 list_data = await CaidoClient.gql(list_q)
-                edges = (
+                scopes_list = (
                     list_data.get("data", {})
-                    .get("scopes", {})
-                    .get("edges", [])
+                    .get("scopes", [])
                 )
-                for edge in edges:
-                    if (edge.get("node") or {}).get("name") == scope_name:
-                        existing_id = edge["node"]["id"]
+                for scope in scopes_list:
+                    if scope.get("name") == scope_name:
+                        existing_id = scope["id"]
                         break
             except Exception as _list_err:
                 logger.debug("Could not list Caido scopes: %s — will create new", _list_err)
@@ -1250,6 +1248,7 @@ class _ExecutorMixin:
                 variables: dict[str, Any] = {
                     "id": existing_id,
                     "input": {
+                        "name": scope_name,  # UpdateScopeInput also requires name
                         "allowlist": allowlist,
                         "denylist": denylist,
                     },
