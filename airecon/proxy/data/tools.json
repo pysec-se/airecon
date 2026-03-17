@@ -628,6 +628,49 @@
     {
         "type": "function",
         "function": {
+            "name": "caido_intercept",
+            "description": "Control Caido's HTTP intercept. Check status, pause/resume capture, list queued intercept messages, forward a queued message (optionally with a modified raw HTTP request), or drop it. Use to monitor and manipulate in-flight HTTP traffic during active testing.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "action": {
+                        "type": "string",
+                        "enum": ["status", "pause", "resume", "list", "forward", "drop"],
+                        "description": "Action to perform: status (get intercept state: RUNNING/PAUSED), pause (stop capturing), resume (start capturing), list (show queued messages), forward (forward a queued message), drop (discard a queued message)"
+                    },
+                    "message_id": {
+                        "type": "string",
+                        "description": "ID of the intercept message to forward or drop (from list action)"
+                    },
+                    "raw_http": {
+                        "type": "string",
+                        "description": "Modified raw HTTP request to send when forwarding (optional — omit to forward unchanged)"
+                    }
+                },
+                "required": ["action"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "caido_sitemap",
+            "description": "Browse the Caido proxy sitemap — the tree of discovered hosts, directories, and endpoints captured during testing. Call without parent_id to list root domains/hosts. Pass a node's id as parent_id to drill into its children. Use during RECON to enumerate all URLs/paths the proxy has seen.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "parent_id": {
+                        "type": "string",
+                        "description": "Node ID to list children for (from a previous caido_sitemap call). Omit to list root hosts."
+                    }
+                },
+                "required": []
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
             "name": "caido_set_scope",
             "description": "Set Caido proxy scope to focus capture and testing on specific hosts. Allowlisted hosts are captured; denylisted hosts are excluded.",
             "parameters": {

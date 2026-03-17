@@ -1310,6 +1310,312 @@ class _ExecutorMixin:
         return success, duration, res_dict, None
 
     # ------------------------------------------------------------------
+    # Caido Intercept Control
+    # ------------------------------------------------------------------
+
+    async def _execute_caido_intercept_tool(
+        self,
+        tool_name: str,
+        arguments: dict[str, Any],
+    ) -> tuple[bool, float, dict[str, Any], str | None]:
+        from ..caido_client import CaidoClient
+        self._last_output_file = None
+        start_time = time.time()
+
+        action = arguments.get("action", "status")
+        message_id = arguments.get("message_id")
+        raw_http = arguments.get("raw_http")
+
+        try:
+            if action == "status":
+                data = await CaidoClient.gql("{ interceptStatus }")
+                if "errors" in data:
+                    res_dict = {"success": False, "error": data["errors"][0]["message"]}
+                    success = False
+                else:
+                    status = data.get("data", {}).get("interceptStatus", "UNKNOWN")
+                    res_dict = {"success": True, "status": status}
+                    success = True
+
+            elif action == "pause":
+                data = await CaidoClient.gql(
+                    "mutation { pauseIntercept { status } }"
+                )
+                if "errors" in data:
+                    res_dict = {"success": False, "error": data["errors"][0]["message"]}
+                    success = False
+                else:
+                    status = (
+                        data.get("data", {})
+                        .get("pauseIntercept", {})
+                        .get("status", "UNKNOWN")
+                    )
+                    res_dict = {"success": True, "status": status}
+                    success = True
+
+            elif action == "resume":
+                data = await CaidoClient.gql(
+                    "mutation { resumeIntercept { status } }"
+                )
+                if "errors" in data:
+                    res_dict = {"success": False, "error": data["errors"][0]["message"]}
+                    success = False
+                else:
+                    status = (
+                        data.get("data", {})
+                        .get("resumeIntercept", {})
+                        .get("status", "UNKNOWN")
+                    )
+                    res_dict = {"success": True, "status": status}
+                    success = True
+
+            elif action == "list":
+                query = """
+                query {
+                    interceptMessages(first: 20, kind: REQUEST) {
+                        edges {
+                            node {
+                                id
+                                ... on InterceptRequestMessage {
+                                    request {
+                                        method
+                                        host
+                                        path
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+                """
+                data = await CaidoClient.gql(query)
+                if "errors" in data:
+                    res_dict = {"success": False, "error": data["errors"][0]["message"]}
+                    success = False
+                else:
+                    edges = (
+                        data.get("data", {})
+                        .get("interceptMessages", {})
+                        .get("edges", [])
+                    )
+                    messages = [
+                        {
+                            "id": e["node"]["id"],
+                            "method": e["node"].get("request", {}).get("method"),
+                            "host": e["node"].get("request", {}).get("host"),
+                            "path": e["node"].get("request", {}).get("path"),
+                        }
+                        for e in edges
+                    ]
+                    res_dict = {"success": True, "queued": len(messages), "messages": messages}
+                    success = True
+
+            elif action == "forward":
+                if not message_id:
+                    res_dict = {"success": False, "error": "message_id required for forward"}
+                    success = False
+                else:
+                    variables: dict[str, Any] = {"id": message_id}
+                    if raw_http:
+                        encoded = CaidoClient.encode_raw_http(raw_http)
+                        variables["input"] = {
+                            "request": {"updateRaw": encoded, "updateContentLength": True}
+                        }
+                    else:
+                        variables["input"] = {}
+                    mutation = """
+                    mutation ForwardMessage($id: ID!, $input: ForwardInterceptMessageInput!) {
+                        forwardInterceptMessage(id: $id, input: $input) {
+                            ... on ForwardInterceptMessageSuccess { deletedId }
+                            ... on Error { code message }
+                        }
+                    }
+                    """
+                    data = await CaidoClient.gql(mutation, variables)
+                    if "errors" in data:
+                        res_dict = {"success": False, "error": data["errors"][0]["message"]}
+                        success = False
+                    else:
+                        payload = data.get("data", {}).get("forwardInterceptMessage", {})
+                        if "code" in payload:
+                            res_dict = {"success": False, "error": payload.get("message")}
+                            success = False
+                        else:
+                            res_dict = {
+                                "success": True,
+                                "action": "forwarded",
+                                "deleted_id": payload.get("deletedId"),
+                            }
+                            success = True
+
+            elif action == "drop":
+                if not message_id:
+                    res_dict = {"success": False, "error": "message_id required for drop"}
+                    success = False
+                else:
+                    mutation = """
+                    mutation DropMessage($id: ID!) {
+                        dropInterceptMessage(id: $id) {
+                            ... on DropInterceptMessageSuccess { deletedId }
+                            ... on Error { code message }
+                        }
+                    }
+                    """
+                    data = await CaidoClient.gql(mutation, {"id": message_id})
+                    if "errors" in data:
+                        res_dict = {"success": False, "error": data["errors"][0]["message"]}
+                        success = False
+                    else:
+                        payload = data.get("data", {}).get("dropInterceptMessage", {})
+                        if "code" in payload:
+                            res_dict = {"success": False, "error": payload.get("message")}
+                            success = False
+                        else:
+                            res_dict = {
+                                "success": True,
+                                "action": "dropped",
+                                "deleted_id": payload.get("deletedId"),
+                            }
+                            success = True
+
+            else:
+                res_dict = {
+                    "success": False,
+                    "error": f"Unknown action: {action}. Use status/pause/resume/list/forward/drop",
+                }
+                success = False
+
+        except Exception as e:
+            logger.error(f"caido_intercept error: {e}")
+            res_dict = {"success": False, "error": str(e)}
+            success = False
+
+        duration = time.time() - start_time
+        self.state.tool_history.append(
+            ToolExecution(tool_name=tool_name, arguments=arguments,
+                          result=res_dict, duration=duration,
+                          status="success" if success else "error")
+        )
+        self.state.tool_counts["total"] += 1
+        return success, duration, res_dict, None
+
+    # ------------------------------------------------------------------
+    # Caido Sitemap Browser
+    # ------------------------------------------------------------------
+
+    async def _execute_caido_sitemap_tool(
+        self,
+        tool_name: str,
+        arguments: dict[str, Any],
+    ) -> tuple[bool, float, dict[str, Any], str | None]:
+        from ..caido_client import CaidoClient
+        self._last_output_file = None
+        start_time = time.time()
+
+        parent_id = arguments.get("parent_id")  # None = list roots
+
+        try:
+            if parent_id is None:
+                # List root entries (top-level domains/hosts)
+                query = """
+                {
+                    sitemapRootEntries {
+                        edges {
+                            node {
+                                id
+                                label
+                                kind
+                                hasDescendants
+                            }
+                        }
+                    }
+                }
+                """
+                data = await CaidoClient.gql(query)
+                if "errors" in data:
+                    res_dict = {"success": False, "error": data["errors"][0]["message"]}
+                    success = False
+                else:
+                    edges = (
+                        data.get("data", {})
+                        .get("sitemapRootEntries", {})
+                        .get("edges", [])
+                    )
+                    entries = [
+                        {
+                            "id": e["node"]["id"],
+                            "label": e["node"]["label"],
+                            "kind": e["node"]["kind"],
+                            "has_children": e["node"]["hasDescendants"],
+                        }
+                        for e in edges
+                    ]
+                    res_dict = {
+                        "success": True,
+                        "level": "root",
+                        "count": len(entries),
+                        "entries": entries,
+                    }
+                    success = True
+            else:
+                # List direct children of a given node
+                query = """
+                query SitemapChildren($parentId: ID!) {
+                    sitemapDescendantEntries(parentId: $parentId, depth: DIRECT) {
+                        edges {
+                            node {
+                                id
+                                label
+                                kind
+                                hasDescendants
+                            }
+                        }
+                    }
+                }
+                """
+                data = await CaidoClient.gql(query, {"parentId": str(parent_id)})
+                if "errors" in data:
+                    res_dict = {"success": False, "error": data["errors"][0]["message"]}
+                    success = False
+                else:
+                    edges = (
+                        data.get("data", {})
+                        .get("sitemapDescendantEntries", {})
+                        .get("edges", [])
+                    )
+                    entries = [
+                        {
+                            "id": e["node"]["id"],
+                            "label": e["node"]["label"],
+                            "kind": e["node"]["kind"],
+                            "has_children": e["node"]["hasDescendants"],
+                        }
+                        for e in edges
+                    ]
+                    res_dict = {
+                        "success": True,
+                        "level": "children",
+                        "parent_id": parent_id,
+                        "count": len(entries),
+                        "entries": entries,
+                    }
+                    success = True
+
+        except Exception as e:
+            logger.error(f"caido_sitemap error: {e}")
+            res_dict = {"success": False, "error": str(e)}
+            success = False
+
+        duration = time.time() - start_time
+        self.state.tool_history.append(
+            ToolExecution(tool_name=tool_name, arguments=arguments,
+                          result=res_dict, duration=duration,
+                          status="success" if success else "error")
+        )
+        self.state.tool_counts["total"] += 1
+        return success, duration, res_dict, None
+
+    # ------------------------------------------------------------------
     # Source Code Analysis (Semgrep)
     # ------------------------------------------------------------------
 
@@ -1699,6 +2005,12 @@ class _ExecutorMixin:
 
         if tool_name == "caido_set_scope":
             return await self._execute_caido_set_scope_tool(tool_name, arguments)
+
+        if tool_name == "caido_intercept":
+            return await self._execute_caido_intercept_tool(tool_name, arguments)
+
+        if tool_name == "caido_sitemap":
+            return await self._execute_caido_sitemap_tool(tool_name, arguments)
 
         if tool_name == "spawn_agent":
             return await self._execute_spawn_agent_tool(tool_name, arguments)

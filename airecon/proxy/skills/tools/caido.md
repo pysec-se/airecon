@@ -162,19 +162,21 @@ curl -sL -X POST \
 
 ### Check intercept status
 ```bash
+# interceptStatus is a scalar enum (RUNNING | PAUSED) — no subfields
 curl -sL -X POST \
   -H "Content-Type: application/json" \
   -H "Authorization: Bearer $TOKEN" \
-  -d '{"query":"query { interceptStatus { type } interceptOptions { request { enabled } response { enabled } } }"}' \
+  -d '{"query":"query { interceptStatus interceptOptions { request { enabled } response { enabled } } }"}' \
   http://127.0.0.1:48080/graphql | jq '.data'
 ```
 
-### Enable intercept (pause requests)
+### Enable intercept (resume capturing)
 ```bash
+# pauseIntercept / resumeIntercept return { status } — status is a scalar enum
 curl -sL -X POST \
   -H "Content-Type: application/json" \
   -H "Authorization: Bearer $TOKEN" \
-  -d '{"query":"mutation { resumeIntercept { status { type } } }"}' \
+  -d '{"query":"mutation { resumeIntercept { status } }"}' \
   http://127.0.0.1:48080/graphql | jq '.data.resumeIntercept'
 ```
 
@@ -209,10 +211,29 @@ curl -sL -X POST \
 ### Forward an intercepted message (let it pass through)
 ```bash
 MSG_ID="msg123"
+# Use inline fragments for union return type
 curl -sL -X POST \
   -H "Content-Type: application/json" \
   -H "Authorization: Bearer $TOKEN" \
-  -d "{\"query\":\"mutation { forwardInterceptMessage(id: \\\"$MSG_ID\\\") { forwardedMessage { id } } }\"}" \
+  -d "{
+    \"query\": \"mutation ForwardMsg(\$id: ID!, \$input: ForwardInterceptMessageInput!) { forwardInterceptMessage(id: \$id, input: \$input) { ... on ForwardInterceptMessageSuccess { deletedId } ... on Error { code message } } }\",
+    \"variables\": {\"id\": \"$MSG_ID\", \"input\": {}}
+  }" \
+  http://127.0.0.1:48080/graphql | jq '.data.forwardInterceptMessage'
+```
+
+### Forward with modified request (edit before forwarding)
+```bash
+MSG_ID="msg123"
+# Encode modified raw HTTP request
+MODIFIED_RAW=$(printf 'GET /api/admin HTTP/1.1\r\nHost: target.com\r\nAuthorization: Bearer INJECTED\r\n\r\n' | base64 -w0)
+curl -sL -X POST \
+  -H "Content-Type: application/json" \
+  -H "Authorization: Bearer $TOKEN" \
+  -d "{
+    \"query\": \"mutation ForwardMsg(\$id: ID!, \$input: ForwardInterceptMessageInput!) { forwardInterceptMessage(id: \$id, input: \$input) { ... on ForwardInterceptMessageSuccess { deletedId } ... on Error { code message } } }\",
+    \"variables\": {\"id\": \"$MSG_ID\", \"input\": {\"request\": {\"updateRaw\": \"$MODIFIED_RAW\", \"updateContentLength\": true}}}
+  }" \
   http://127.0.0.1:48080/graphql | jq '.data.forwardInterceptMessage'
 ```
 
@@ -222,7 +243,10 @@ MSG_ID="msg123"
 curl -sL -X POST \
   -H "Content-Type: application/json" \
   -H "Authorization: Bearer $TOKEN" \
-  -d "{\"query\":\"mutation { dropInterceptMessage(id: \\\"$MSG_ID\\\") { droppedMessage { id } } }\"}" \
+  -d "{
+    \"query\": \"mutation DropMsg(\$id: ID!) { dropInterceptMessage(id: \$id) { ... on DropInterceptMessageSuccess { deletedId } ... on Error { code message } } }\",
+    \"variables\": {\"id\": \"$MSG_ID\"}
+  }" \
   http://127.0.0.1:48080/graphql | jq '.data.dropInterceptMessage'
 ```
 
@@ -231,7 +255,7 @@ curl -sL -X POST \
 curl -sL -X POST \
   -H "Content-Type: application/json" \
   -H "Authorization: Bearer $TOKEN" \
-  -d '{"query":"mutation { pauseIntercept { status { type } } }"}' \
+  -d '{"query":"mutation { pauseIntercept { status } }"}' \
   http://127.0.0.1:48080/graphql | jq '.data.pauseIntercept'
 ```
 
@@ -545,11 +569,12 @@ curl -sL -X POST \
 
 ### Get descendants of a sitemap entry
 ```bash
+# depth must be DIRECT (immediate children) or ALL (full subtree)
 PARENT_ID="sitemap123"
 curl -sL -X POST \
   -H "Content-Type: application/json" \
   -H "Authorization: Bearer $TOKEN" \
-  -d "{\"query\":\"query { sitemapDescendantEntries(parentId: \\\"$PARENT_ID\\\", depth: 3) { edges { node { id label } } } }\"}" \
+  -d "{\"query\":\"query { sitemapDescendantEntries(parentId: \\\"$PARENT_ID\\\", depth: DIRECT) { edges { node { id label kind hasDescendants } } } }\"}" \
   http://127.0.0.1:48080/graphql | jq '.data.sitemapDescendantEntries.edges[].node'
 ```
 
@@ -711,11 +736,13 @@ DO NOT USE CAIDO FOR:
 TYPICAL PENETRATION TESTING WORKFLOW:
   1. caido-setup → get TOKEN
   2. Set proxy (curl -x or env vars) → browse/spider the target
-  3. requests query → identify interesting endpoints
-  4. Pick a target request ID → createReplaySession → startReplayTask (modify and replay)
-  5. If injection point found → createAutomateSession → updateAutomateSession → startAutomateTask
-  6. createFinding → attach findings to request IDs for report
-  7. Export findings
+  3. caido_sitemap (no parent_id) → enumerate discovered hosts → drill into directories
+  4. caido_list_requests / requests query → identify interesting endpoints
+  5. caido_intercept status → check if RUNNING; use pause/resume/list/forward/drop for live traffic
+  6. Pick a target request ID → createReplaySession → startReplayTask (modify and replay)
+  7. If injection point found → caido_automate or createAutomateSession → updateAutomateSession → startAutomateTask
+  8. createFinding → attach findings to request IDs for report
+  9. Export findings
 
 ---
 
