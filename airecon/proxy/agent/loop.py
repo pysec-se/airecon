@@ -151,6 +151,9 @@ class AgentLoop(_ValidatorMixin, _FormatterMixin,
         self._last_evidence_count: int = 0
         self._watchdog_forced_calls: int = 0
         self._empty_response_retried: bool = False
+        # When set, force the next response(s) to include a tool call after
+        # recovery events (VRAM crash/timeout). Prevents text-only hallucinations.
+        self._recovery_force_tool_calls: int = 0
         self._session: SessionData | None = None
         self._pending_output_merges: dict[str, list[str]] = {}
         # Tools blocked for this agent (e.g. depth control)
@@ -527,6 +530,35 @@ class AgentLoop(_ValidatorMixin, _FormatterMixin,
                             "content": session_ctx,
                         }
                     )
+
+            # Ensure a compact, pinned target context is always present so the
+            # model never loses the primary target during long sessions.
+            self.state.conversation = [
+                msg
+                for msg in self.state.conversation
+                if not (
+                    msg.get("role") == "system"
+                    and msg.get("content", "").startswith("[SYSTEM: PINNED CONTEXT]")
+                )
+            ]
+            if self.state.active_target:
+                phase_hint = ""
+                try:
+                    if self.pipeline:
+                        phase_hint = self.pipeline.get_current_phase().value
+                except Exception:
+                    phase_hint = ""
+                pin_lines = [
+                    "[SYSTEM: PINNED CONTEXT]",
+                    f"TARGET: {self.state.active_target}",
+                ]
+                if phase_hint:
+                    pin_lines.append(f"PHASE: {phase_hint}")
+                pin_lines.append("Do not change target unless the user explicitly asks.")
+                pin_lines.append("Use session summary and critical findings as the source of truth.")
+                self.state.conversation.append(
+                    {"role": "system", "content": "\n".join(pin_lines)}
+                )
 
             # Resolve @/path file references (parsed earlier, before autostart)
             if _file_refs:
@@ -1306,6 +1338,21 @@ class AgentLoop(_ValidatorMixin, _FormatterMixin,
                                 self.state.conversation.append(
                                     {"role": "system", "content": recovery_ctx}
                                 )
+                            # Force tool-call-only recovery on the next iteration.
+                            self._recovery_force_tool_calls = max(
+                                self._recovery_force_tool_calls, 2
+                            )
+                            self.state.conversation.append(
+                                {
+                                    "role": "system",
+                                    "content": (
+                                        "[SYSTEM: RECOVERY MODE — TOOL CALL ONLY]\n"
+                                        "A crash occurred. Your next response MUST be a tool call.\n"
+                                        "If unsure, call list_files on output/ or run a safe probe.\n"
+                                        "Do not write analysis-only text."
+                                    ),
+                                }
+                            )
                             # Save session immediately after recovery so a
                             # second crash doesn't lose accumulated findings.
                             if self._session:
@@ -1347,6 +1394,9 @@ class AgentLoop(_ValidatorMixin, _FormatterMixin,
                             tool_calls_acc = []
                             in_thinking_tag = False
                             _carry = ""
+                            self._recovery_force_tool_calls = max(
+                                self._recovery_force_tool_calls, 1
+                            )
                             continue
 
                         elif _is_timeout and _stream_attempt < 1:
@@ -1371,6 +1421,9 @@ class AgentLoop(_ValidatorMixin, _FormatterMixin,
                             tool_calls_acc = []
                             in_thinking_tag = False
                             _carry = ""
+                            self._recovery_force_tool_calls = max(
+                                self._recovery_force_tool_calls, 1
+                            )
                             continue
 
                         # Fatal: all recovery attempts exhausted.
@@ -1425,6 +1478,9 @@ class AgentLoop(_ValidatorMixin, _FormatterMixin,
                                     "Retrying...\n"
                                 )
                             },
+                        )
+                        self._recovery_force_tool_calls = max(
+                            self._recovery_force_tool_calls, 1
                         )
                         continue  # re-enter the while loop (new iteration)
                     self._empty_response_retried = False
@@ -1696,6 +1752,7 @@ class AgentLoop(_ValidatorMixin, _FormatterMixin,
                             has_fake_cmd_block
                             or has_hallucination_risk
                             or self._no_tool_iterations >= 2
+                            or self._recovery_force_tool_calls > 0
                         )
                     )
                     if _retry_text_only:
@@ -1792,6 +1849,7 @@ class AgentLoop(_ValidatorMixin, _FormatterMixin,
 
                 if tool_calls_acc:
                     self._no_tool_iterations = 0
+                    self._recovery_force_tool_calls = 0
 
                 if not content_acc.strip():
                     tool_names_str = ", ".join(
@@ -2785,16 +2843,19 @@ class AgentLoop(_ValidatorMixin, _FormatterMixin,
                 "Workflow: enumerate subdomains → httpx filter → port scan live hosts → dir/URL discovery.",
                 "Switch discovery families: DNS → HTTP fingerprint (httpx) → content discovery (ffuf/ferox).",
                 "Prioritize unusual assets on LIVE hosts: admin panels, legacy paths, debug endpoints.",
+                "If two tool families stall with no new data, write a custom script in tools/ to correlate outputs or extract endpoints.",
             ],
             PipelinePhase.ANALYSIS: [
                 "Mutate parameters aggressively (encoding, type confusion, boundary values).",
                 "Correlate endpoints, auth flows, and object IDs for privilege paths.",
                 "Generate at least one non-obvious hypothesis and test it immediately.",
+                "If testing requires many variants (IDs/roles/auth states), write a script to automate and log results.",
             ],
             PipelinePhase.EXPLOIT: [
                 "Rotate payload families every failed attempt (SQLi -> SSTI -> auth logic).",
                 "Prefer impact proof over scanner output: state change, data access, or privilege gain.",
                 "Chain medium findings into one higher-impact attack path.",
+                "When exploitation is multi-step, write a PoC script in tools/ instead of manual repetition.",
             ],
             PipelinePhase.REPORT: [
                 "Convert strongest evidence into reproducible PoC steps with exact inputs.",

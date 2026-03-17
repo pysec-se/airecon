@@ -28,6 +28,8 @@ ANALYSIS FRAMEWORK (execute in order):
      • External service calls → SSRF candidate
      • Authentication logic → Bypass/credential stuffing/JWT attacks
      • Object references → IDOR/BOLA candidate
+   - If hypothesis requires many variations (IDs, roles, auth states), WRITE A SCRIPT in tools/
+     to automate the test and output one candidate per line for parsing.
 
 4. INFORMATION DISCLOSURE & MISCONFIG REVIEW
    - Source maps, error messages, comments in JavaScript/HTML

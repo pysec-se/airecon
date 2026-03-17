@@ -679,6 +679,16 @@ def update_from_parsed_output(
         item_stripped = item.strip()
         if not item_stripped:
             continue
+        # Normalize common script output prefixes (e.g., "URL: https://...",
+        # "SUBDOMAIN=api.example.com") so custom scripts integrate with
+        # session parsing.
+        prefix_match = re.match(
+            r"^(url|endpoint|link|host|domain|subdomain|live|target|asset|hostport)\s*[:=]\s*(\S+)",
+            item_stripped,
+            re.IGNORECASE,
+        )
+        if prefix_match:
+            item_stripped = prefix_match.group(2).strip()
 
         # 1. Severity-tagged finding → vulnerability
         if _SEVERITY_RE.match(item_stripped):
