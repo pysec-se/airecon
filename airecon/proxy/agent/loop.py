@@ -104,8 +104,10 @@ class AgentLoop(_ValidatorMixin, _FormatterMixin,
     _CTF_MAX_ITERATIONS = 150
     _PHASE_OBJECTIVES: dict[str, list[str]] = {
         "RECON": [
-            "Enumerate target surface (domains/hosts/services)",
-            "Validate live hosts and open ports",
+            "Enumerate subdomains/hosts (subfinder, amass, etc.)",
+            "Filter to LIVE hosts only — run httpx/dnsx on subdomain list before anything else",
+            "Port scan and fingerprint ONLY the live validated hosts",
+            "Discover directories and URLs on confirmed live hosts",
             "Persist recon artifacts in output/ files",
         ],
         "ANALYSIS": [
@@ -2778,9 +2780,11 @@ class AgentLoop(_ValidatorMixin, _FormatterMixin,
 
         tactic_map: dict[PipelinePhase, list[str]] = {
             PipelinePhase.RECON: [
-                "Run one passive and one active recon method in the same loop.",
-                "Switch discovery families: DNS -> HTTP fingerprint -> content discovery.",
-                "Prioritize unusual assets: admin panels, legacy hosts, debug endpoints.",
+                "If you have subdomains but no live_hosts yet: run httpx NOW to filter alive hosts.",
+                "Never port-scan or directory-brute-force a host that hasn't been validated alive first.",
+                "Workflow: enumerate subdomains → httpx filter → port scan live hosts → dir/URL discovery.",
+                "Switch discovery families: DNS → HTTP fingerprint (httpx) → content discovery (ffuf/ferox).",
+                "Prioritize unusual assets on LIVE hosts: admin panels, legacy paths, debug endpoints.",
             ],
             PipelinePhase.ANALYSIS: [
                 "Mutate parameters aggressively (encoding, type confusion, boundary values).",
@@ -3522,6 +3526,13 @@ class AgentLoop(_ValidatorMixin, _FormatterMixin,
         if s.live_hosts:
             parts.append(
                 f"LIVE HOSTS ({len(s.live_hosts)}): {', '.join(s.live_hosts[:15])}"
+            )
+        elif s.subdomains:
+            # Subdomains found but no live_hosts yet — warn the LLM to validate first
+            parts.append(
+                "WARNING: subdomains enumerated but NOT YET validated. "
+                "Run: httpx -l subdomains.txt -o live.txt -status-code "
+                "to filter live hosts BEFORE port scanning or directory brute-force."
             )
 
         if s.open_ports:
