@@ -219,6 +219,58 @@
         "assetfinder",
         "jq"
     ],
+    "tool_flag_conflicts": {
+        "curl": {
+            "flags": ["-sc", "-title", "-server", "-tech-detect", "-td", "-tls-grab",
+                      "-web-server", "-status-code", "-content-length", "-location"],
+            "correct_tool": "httpx"
+        },
+        "nmap": {
+            "flags": ["--rate", "--randomize-hosts", "--banners"],
+            "correct_tool": "masscan"
+        },
+        "masscan": {
+            "flags": ["-sV", "-sC", "-A", "-O", "--script"],
+            "correct_tool": "nmap"
+        }
+    },
+    "output_parser_tool_patterns": {
+        "nmap": "nmap",
+        "nuclei": "nuclei",
+        "subfinder": "subfinder",
+        "amass": "subfinder",
+        "assetfinder": "subfinder",
+        "findomain": "subfinder",
+        "httpx": "httpx",
+        "katana": "url_list",
+        "gospider": "url_list",
+        "waybackurls": "url_list",
+        "gau": "url_list",
+        "ffuf": "ffuf",
+        "naabu": "naabu",
+        "dnsx": "dnsx",
+        "whatweb": "whatweb",
+        "dig": "dig",
+        "wfuzz": "ffuf",
+        "dirsearch": "url_list",
+        "feroxbuster": "url_list",
+        "gobuster": "url_list",
+        "sqlmap": "sqlmap",
+        "ghauri": "sqlmap",
+        "nikto": "nikto",
+        "dalfox": "dalfox",
+        "wpscan": "wpscan"
+    },
+    "analysis_phase_vuln_tools": [
+        "sqlmap", "dalfox", "nuclei", "xsser", "ffuf", "wfuzz", "nikto"
+    ],
+    "watchdog_safe_command_prefixes": [
+        "nmap", "naabu", "masscan", "httpx", "ffuf", "dirsearch", "gobuster",
+        "katana", "hakrawler", "subfinder", "amass", "assetfinder", "wpscan",
+        "nikto", "sqlmap", "ghauri", "dalfox",
+        "curl", "wget", "python", "python3", "bash", "sh", "ls", "cat",
+        "find", "grep", "echo"
+    ],
     "tool_alternatives": {
         "nmap": "[BLOCKED BY FW / SLOW] Nmap failed. SUGGESTION: 1) Try `naabu -top-ports 1000 -c 50`. 2) If still blocked, use `masscan` or perform highly targeted TCP SYN via custom Scapy script.",
         "sqlmap": "[WAF / TIME-BLIND] SQLmap failed. SUGGESTION: 1) Switch to `ghauri` for advanced evasion. 2) Fallback to `curl` with manual time-delay payloads (e.g., `pg_sleep(10)`). 3) Test for NoSQLi instead (`nosqli`).",

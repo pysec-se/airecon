@@ -22,7 +22,7 @@ def agent_loop(mocker):
 
 @pytest.mark.asyncio
 async def test_agent_initialization(agent_loop, mocker):
-    mocker.patch('airecon.proxy.system.get_system_prompt',
+    mocker.patch('airecon.proxy.agent.loop.get_system_prompt',
                  return_value="You are AIRecon.")
 
     await agent_loop.initialize(target="test.com", user_message="scan test.com")

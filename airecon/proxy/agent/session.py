@@ -674,6 +674,12 @@ def update_from_parsed_output(
     _PRIVATE_IP_RE = re.compile(
         r"^(10\.|172\.(1[6-9]|2\d|3[01])\.|192\.168\.|127\.|169\.254\.|::1|fd)"
     )
+    # Custom script output prefixes — normalize "URL: https://...", "SUBDOMAIN=host", etc.
+    # so script output is auto-parsed into the session without manual post-processing.
+    _SCRIPT_PREFIX_RE = re.compile(
+        r"^(url|endpoint|link|host|domain|subdomain|live|target|asset|hostport)\s*[:=]\s*(\S+)",
+        re.IGNORECASE,
+    )
 
     for item in parsed.items:
         item_stripped = item.strip()
@@ -682,11 +688,7 @@ def update_from_parsed_output(
         # Normalize common script output prefixes (e.g., "URL: https://...",
         # "SUBDOMAIN=api.example.com") so custom scripts integrate with
         # session parsing.
-        prefix_match = re.match(
-            r"^(url|endpoint|link|host|domain|subdomain|live|target|asset|hostport)\s*[:=]\s*(\S+)",
-            item_stripped,
-            re.IGNORECASE,
-        )
+        prefix_match = _SCRIPT_PREFIX_RE.match(item_stripped)
         if prefix_match:
             item_stripped = prefix_match.group(2).strip()
 

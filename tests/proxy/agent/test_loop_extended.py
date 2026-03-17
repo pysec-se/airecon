@@ -130,7 +130,7 @@ class TestDuplicateCommandDetection:
 class TestAgentLoopInitialisation:
     @pytest.mark.asyncio
     async def test_initialize_creates_session(self, loop, mocker):
-        mocker.patch("airecon.proxy.system.get_system_prompt", return_value="SYS")
+        mocker.patch("airecon.proxy.agent.loop.get_system_prompt", return_value="SYS")
         await loop.initialize(target="scanme.com", user_message="start recon")
 
         # initialize() creates a fresh session with empty target — the target is
@@ -140,7 +140,7 @@ class TestAgentLoopInitialisation:
 
     @pytest.mark.asyncio
     async def test_initialize_sets_pipeline(self, loop, mocker):
-        mocker.patch("airecon.proxy.system.get_system_prompt", return_value="SYS")
+        mocker.patch("airecon.proxy.agent.loop.get_system_prompt", return_value="SYS")
         await loop.initialize(target="test.com", user_message="go")
 
         assert loop.pipeline is not None
@@ -149,7 +149,7 @@ class TestAgentLoopInitialisation:
 
     @pytest.mark.asyncio
     async def test_initialize_adds_system_prompt_to_conversation(self, loop, mocker):
-        mocker.patch("airecon.proxy.system.get_system_prompt", return_value="CUSTOM SYS PROMPT")
+        mocker.patch("airecon.proxy.agent.loop.get_system_prompt", return_value="CUSTOM SYS PROMPT")
         await loop.initialize(target="test.com", user_message="run scan")
 
         messages = loop.state.conversation
@@ -157,7 +157,7 @@ class TestAgentLoopInitialisation:
 
     @pytest.mark.asyncio
     async def test_initialize_registers_tools_in_conversation(self, loop, mocker):
-        mocker.patch("airecon.proxy.system.get_system_prompt", return_value="SYS")
+        mocker.patch("airecon.proxy.agent.loop.get_system_prompt", return_value="SYS")
         await loop.initialize(target="test.com", user_message="scan all ports")
 
         # After initialize(), the conversation should have system messages listing
@@ -195,7 +195,7 @@ class TestLoopStreamingWithMockedOllama:
 
     @pytest.mark.asyncio
     async def test_plain_text_response_yields_text_events(self, loop, mocker):
-        mocker.patch("airecon.proxy.system.get_system_prompt", return_value="SYS")
+        mocker.patch("airecon.proxy.agent.loop.get_system_prompt", return_value="SYS")
         await loop.initialize(target="test.com", user_message="hello")
 
         # Build a mock streaming response: 3 chunks + done chunk
@@ -224,7 +224,7 @@ class TestLoopStreamingWithMockedOllama:
 
     @pytest.mark.asyncio
     async def test_error_event_on_connection_refused(self, loop, mocker):
-        mocker.patch("airecon.proxy.system.get_system_prompt", return_value="SYS")
+        mocker.patch("airecon.proxy.agent.loop.get_system_prompt", return_value="SYS")
         await loop.initialize(target="test.com", user_message="go")
 
         async def _failing_stream(*args, **kwargs):
@@ -249,7 +249,7 @@ class TestLoopStreamingWithMockedOllama:
         """When active recon target exists, a text-only hallucinated response
         must trigger retry, not immediate done.
         """
-        mocker.patch("airecon.proxy.system.get_system_prompt", return_value="SYS")
+        mocker.patch("airecon.proxy.agent.loop.get_system_prompt", return_value="SYS")
         mocker.patch.object(loop, "_scan_workspace_state", return_value="")
         await loop.initialize(target="test.com", user_message="start recon test.com")
         loop.state.active_target = "test.com"
@@ -304,7 +304,7 @@ class TestLoopStreamingWithMockedOllama:
     @pytest.mark.asyncio
     async def test_watchdog_forces_tool_call_after_text_only_retries(self, loop, mocker):
         """After repeated text-only iterations, watchdog should inject a tool call."""
-        mocker.patch("airecon.proxy.system.get_system_prompt", return_value="SYS")
+        mocker.patch("airecon.proxy.agent.loop.get_system_prompt", return_value="SYS")
         mocker.patch.object(loop, "_scan_workspace_state", return_value="")
         await loop.initialize(target="test.com", user_message="start recon test.com")
         loop.state.active_target = "test.com"

@@ -11,13 +11,19 @@ from .session import (
     find_prior_session,
     merge_prior_findings,
     record_tested_endpoint,
+    get_untested_injection_points,
 )
 from .pipeline import PipelineEngine, PipelinePhase, _PHASE_TOOL_BUDGETS
 from .output_parser import parse_tool_output
 from .models import AgentEvent, AgentState, MAX_TOOL_ITERATIONS
 from .formatters import _FormatterMixin
 from .executors import _ExecutorMixin, _RECON_PORT_SCAN_BINS
-from ..system import auto_load_skills_for_message, auto_load_skills_for_technologies
+from ..system import (
+    auto_load_skills_for_message,
+    auto_load_skills_for_technologies,
+    get_system_prompt,
+    _is_ctf_target,
+)
 from .file_reference import (
     parse_refs, strip_refs, resolve_ref,
     build_injection_message, workspace_name_for_ref,
@@ -26,11 +32,15 @@ from ..ollama import OllamaClient
 from ..docker import DockerEngine
 from ..config import get_config, get_workspace_root
 from typing import Any, AsyncIterator
+from urllib.parse import urlparse
 import re
 import logging
-
 import asyncio
 import json
+import hashlib
+import os
+import shlex
+import warnings
 from pathlib import Path
 
 _tools_meta_path = Path(__file__).parent.parent / "data" / "tools_meta.json"
@@ -38,7 +48,6 @@ try:
     with open(_tools_meta_path, "r") as f:
         _TOOLS_META = json.load(f)
 except (OSError, json.JSONDecodeError) as _e:
-    import warnings
     warnings.warn(f"tools_meta.json unavailable ({_e}); tool catalog features disabled.")
     _TOOLS_META = {}
 
@@ -51,6 +60,20 @@ logger = logging.getLogger("airecon.agent")
 # Low-confidence traces (e.g., execute command log at 0.55) must NOT reset stagnation
 # counter — stagnation should only reset on real security findings.
 _MEANINGFUL_EVIDENCE_THRESHOLD = 0.65
+
+# Vulnerability tool hints used in ANALYSIS phase objective marking.
+# Loaded from tools_meta.json (single source of truth).
+_ANALYSIS_VULN_TOOLS: frozenset[str] = frozenset(
+    _TOOLS_META.get("analysis_phase_vuln_tools", [])
+)
+
+# Safe command prefixes for watchdog shell-command extraction.
+# Built from tools_meta.json at import time; never hardcoded in Python.
+_watchdog_prefixes = _TOOLS_META.get("watchdog_safe_command_prefixes", [])
+_WATCHDOG_COMMAND_PREFIX_RE: re.Pattern[str] = re.compile(
+    r"^(?:" + "|".join(re.escape(p) for p in _watchdog_prefixes) + r")\b",
+    re.IGNORECASE,
+) if _watchdog_prefixes else re.compile(r"(?!)")
 
 
 class AgentLoop(_ValidatorMixin, _FormatterMixin,
@@ -150,7 +173,7 @@ class AgentLoop(_ValidatorMixin, _FormatterMixin,
         self._recent_tool_names: list[str] = []
         self._last_evidence_count: int = 0
         self._watchdog_forced_calls: int = 0
-        self._empty_response_retried: bool = False
+        self._empty_response_retry_count: int = 0
         # When set, force the next response(s) to include a tool call after
         # recovery events (VRAM crash/timeout). Prevents text-only hallucinations.
         self._recovery_force_tool_calls: int = 0
@@ -200,8 +223,6 @@ class AgentLoop(_ValidatorMixin, _FormatterMixin,
         tool invocation; exempt tools and interactive browser actions bypass
         the check entirely.
         """
-        import hashlib
-
         # Exempt: stateful / side-effect tools that must always run
         if tool_name in self._DEDUP_EXEMPT_TOOLS:
             return False, ""
@@ -255,9 +276,8 @@ class AgentLoop(_ValidatorMixin, _FormatterMixin,
         target: str | None = None,
         user_message: str | None = None,
     ) -> None:
-        from ..system import get_system_prompt as _gsp, _is_ctf_target
         self.state.conversation = [
-            {"role": "system", "content": _gsp(
+            {"role": "system", "content": get_system_prompt(
                 target=target, user_message=user_message)}
         ]
         # Detect CTF mode early so process_message can apply iteration cap
@@ -306,8 +326,7 @@ class AgentLoop(_ValidatorMixin, _FormatterMixin,
         # Initialize session: load from env var ID if provided, otherwise
         # create fresh.  Subagents always get a fresh session so they never
         # load or overwrite the parent agent's persisted session data.
-        import os as _os
-        _session_id = _os.environ.get("AIRECON_SESSION_ID") if not self._is_subagent else None
+        _session_id = os.environ.get("AIRECON_SESSION_ID") if not self._is_subagent else None
         if _session_id:
             self._session = load_session(_session_id) or SessionData(
                 session_id=_session_id, target=""
@@ -375,7 +394,6 @@ class AgentLoop(_ValidatorMixin, _FormatterMixin,
                 # (or the user's follow-up) contained security terms like
                 # "flag", "challenge", or "benchmark" during a normal recon.
                 if not self._ctf_mode and extracted_target:
-                    from ..system import _is_ctf_target
                     if _is_ctf_target(extracted_target, user_message=None):
                         self._ctf_mode = True
                         if self._override_max_iterations is None:
@@ -619,7 +637,7 @@ class AgentLoop(_ValidatorMixin, _FormatterMixin,
                 if e.get("confidence", 0) >= _MEANINGFUL_EVIDENCE_THRESHOLD
             )
             self._watchdog_forced_calls = 0
-            self._empty_response_retried = False
+            self._empty_response_retry_count = 0
             # NOTE: Do NOT clear _executed_tool_counts here — dedup must persist
             # across messages within the same session. It is only cleared in
             # reset().
@@ -995,12 +1013,23 @@ class AgentLoop(_ValidatorMixin, _FormatterMixin,
                             }
                         )
 
+                # --- PERIODIC SESSION CHECKPOINT ---
+                # Save session every 5 iterations so a crash never loses more
+                # than ~5 iterations of work. Tool-execution saves (line ~2340)
+                # already cover normal flow; this is the safety net for the
+                # gap between tool executions (thinking, planning iterations).
+                if self._session and self.state.iteration % 5 == 0:
+                    save_session(self._session)
+
                 # --- CONTEXT MANAGEMENT (adaptive interval + progressive truncation) ---
                 # Dynamic interval: compress more aggressively as context fills.
                 # Use session-level override if set, else fall back to config.
                 _cur_ctx_limit = self._adaptive_num_ctx or cfg.ollama_num_ctx
+                # Use effective input limit (subtract output reservation) so the
+                # compression interval reacts correctly before Ollama truncates.
+                _cur_effective_ctx = max(1024, _cur_ctx_limit - cfg.ollama_num_predict)
                 _cur_token_ratio = (
-                    self.state.token_usage.get("used", 0) / max(_cur_ctx_limit, 1)
+                    self.state.token_usage.get("used", 0) / max(_cur_effective_ctx, 1)
                 )
                 if _cur_token_ratio > 0.60:
                     _ctx_interval = 5   # very frequent when getting full
@@ -1105,12 +1134,20 @@ class AgentLoop(_ValidatorMixin, _FormatterMixin,
                 self.state.token_usage["limit"] = adaptive_num_ctx
 
                 # ── PROACTIVE CONTEXT MONITORING ────────────────────────────
-                # If the PREVIOUS call used ≥80% of the context window, trim
-                # conversation NOW before the next call to prevent a mid-stream
-                # OOM crash.
+                # If the conversation is approaching the effective INPUT limit,
+                # trim NOW before the next call to prevent Ollama silently
+                # truncating the system prompt/task mid-stream.
+                #
+                # Ollama KV cache = input tokens + output tokens ≤ num_ctx.
+                # Effective input space = num_ctx - num_predict.
+                # When input > effective limit, Ollama discards the oldest
+                # tokens (system prompt first) causing silent scope/context loss
+                # and hallucination.
                 _ctx_used = self.state.token_usage.get("used", 0)
                 if _ctx_used > 0 and adaptive_num_ctx > 0:
-                    _usage_ratio = _ctx_used / adaptive_num_ctx
+                    _num_predict_reserved = getattr(cfg, "ollama_num_predict", 32768)
+                    _effective_input_ctx = max(1024, adaptive_num_ctx - _num_predict_reserved)
+                    _usage_ratio = _ctx_used / _effective_input_ctx
                     if _usage_ratio >= 0.80:
                         logger.warning(
                             "Proactive context trim: %.0f%% used (%d/%d tokens)",
@@ -1135,6 +1172,12 @@ class AgentLoop(_ValidatorMixin, _FormatterMixin,
                 if self._adaptive_num_predict_cap > 0:
                     adaptive_num_predict = min(
                         adaptive_num_predict, self._adaptive_num_predict_cap)
+
+                # HARD PRE-CALL GUARD: compress conversation if total chars
+                # exceed the token budget (1 token ≈ 3 chars).  This runs
+                # every iteration and catches large tool outputs that
+                # message-count truncation misses.
+                self._enforce_char_budget(adaptive_num_ctx)
 
                 # --- STREAM RECOVERY LOOP ---
                 # Up to 6 attempts total:
@@ -1461,35 +1504,56 @@ class AgentLoop(_ValidatorMixin, _FormatterMixin,
                         return
 
                 if not content_acc and not tool_calls_acc and not thinking_acc:
-                    # Empty response can be a transient Ollama glitch —
-                    # retry once before giving up.
-                    if not getattr(self, "_empty_response_retried", False):
-                        self._empty_response_retried = True
+                    # Empty response = transient Ollama glitch (network hiccup,
+                    # remote server busy, transient OOM). Retry up to 4 times
+                    # with increasing wait before giving up.
+                    # Previously: only 1 retry → agent stopped on second empty.
+                    _MAX_EMPTY_RETRIES = 4
+                    self._empty_response_retry_count = getattr(
+                        self, "_empty_response_retry_count", 0
+                    ) + 1
+                    if self._empty_response_retry_count <= _MAX_EMPTY_RETRIES:
+                        _wait = min(5 * self._empty_response_retry_count, 20)
                         logger.warning(
-                            "Empty response from Ollama (iteration=%d) — "
-                            "retrying once",
+                            "Empty response from Ollama (iteration=%d, attempt=%d/%d) — "
+                            "waiting %ds then retrying",
                             self.state.iteration,
+                            self._empty_response_retry_count,
+                            _MAX_EMPTY_RETRIES,
+                            _wait,
                         )
                         yield AgentEvent(
                             type="text",
                             data={
                                 "content": (
-                                    "\n[AUTO-RECOVERY] Empty response from model. "
-                                    "Retrying...\n"
+                                    f"\n[AUTO-RECOVERY] Empty response from model "
+                                    f"(attempt {self._empty_response_retry_count}/{_MAX_EMPTY_RETRIES}). "
+                                    f"Waiting {_wait}s and retrying...\n"
                                 )
                             },
                         )
+                        await asyncio.sleep(_wait)
                         self._recovery_force_tool_calls = max(
                             self._recovery_force_tool_calls, 1
                         )
                         continue  # re-enter the while loop (new iteration)
-                    self._empty_response_retried = False
+                    # All retries exhausted — surface error but preserve session
+                    self._empty_response_retry_count = 0
+                    if self._session:
+                        save_session(self._session)
                     yield AgentEvent(
-                        type="error", data={"message": "Empty response from model."}
+                        type="error",
+                        data={
+                            "message": (
+                                "Empty response from model after 4 retries. "
+                                "Check Ollama server status and network connectivity. "
+                                "Session state has been saved — you can resume."
+                            )
+                        },
                     )
                     yield AgentEvent(type="done", data={})
                     return
-                self._empty_response_retried = False
+                self._empty_response_retry_count = 0
 
                 # --- RESPONSE QUALITY GATE ---
                 combined_response = content_acc + " " + thinking_acc
@@ -1746,15 +1810,13 @@ class AgentLoop(_ValidatorMixin, _FormatterMixin,
                     # In active recon sessions, do NOT stop on text-only hallucinations.
                     # Force another iteration so the model must produce real tool calls.
                     _force_tool_mode = bool(self.state.active_target)
-                    _retry_text_only = (
-                        _force_tool_mode
-                        and (
-                            has_fake_cmd_block
-                            or has_hallucination_risk
-                            or self._no_tool_iterations >= 2
-                            or self._recovery_force_tool_calls > 0
-                        )
-                    )
+                    # Always retry text-only responses when there is an active recon
+                    # target — the first text-only response must never be treated as a
+                    # "final answer" during live recon.  The extra conditions
+                    # (has_fake_cmd_block, _no_tool_iterations >= 2, etc.) were too
+                    # narrow: they let the first plain-text LLM response escape the
+                    # retry path and halt the agent prematurely.
+                    _retry_text_only = _force_tool_mode
                     if _retry_text_only:
                         _max_text_only_retries = max(
                             3,
@@ -1766,7 +1828,26 @@ class AgentLoop(_ValidatorMixin, _FormatterMixin,
                                 thinking_acc=thinking_acc,
                                 phase=current_phase,
                             )
-                            if watchdog_call and self._watchdog_forced_calls < 3:
+                            if self._watchdog_forced_calls >= 3:
+                                # Exhausted all watchdog attempts — abort.
+                                msg = (
+                                    "Model is stuck in text-only mode and watchdog recovery failed. "
+                                    "Stopping to avoid infinite loop. "
+                                    "Try restarting the model/session and rerun."
+                                )
+                                logger.error(
+                                    "Text-only loop abort: active_target=%r no_tool_iters=%d forced_calls=%d",
+                                    self.state.active_target,
+                                    self._no_tool_iterations,
+                                    self._watchdog_forced_calls,
+                                )
+                                if self._session:
+                                    save_session(self._session)
+                                yield AgentEvent(type="error", data={"message": msg})
+                                yield AgentEvent(type="done", data={})
+                                return
+                            elif watchdog_call:
+                                # Watchdog extracted a command — inject it.
                                 self._watchdog_forced_calls += 1
                                 tool_calls_acc = [watchdog_call]
                                 self._no_tool_iterations = 0
@@ -1790,22 +1871,29 @@ class AgentLoop(_ValidatorMixin, _FormatterMixin,
                                     watchdog_call.get("function", {}).get("name", ""),
                                 )
                             else:
-                                msg = (
-                                    "Model is stuck in text-only mode and watchdog recovery failed. "
-                                    "Stopping to avoid infinite loop. "
-                                    "Try restarting the model/session and rerun."
-                                )
-                                logger.error(
-                                    "Text-only loop abort: active_target=%r no_tool_iters=%d forced_calls=%d",
+                                # Watchdog couldn't extract a command from text
+                                # (no recognizable binary pattern found).
+                                # Inject a stronger nudge instead of aborting —
+                                # do NOT consume a watchdog token since no call was made.
+                                logger.warning(
+                                    "Watchdog: no command found in text — injecting recovery nudge "
+                                    "(target=%r, phase=%s, no_tool_iters=%d)",
                                     self.state.active_target,
-                                    self._no_tool_iterations,
-                                    self._watchdog_forced_calls,
+                                    current_phase.value,
+                                    self._no_tool_iterations,  # log BEFORE reset
                                 )
-                                if self._session:
-                                    save_session(self._session)
-                                yield AgentEvent(type="error", data={"message": msg})
-                                yield AgentEvent(type="done", data={})
-                                return
+                                self._no_tool_iterations = 0
+                                self.state.conversation.append(
+                                    {
+                                        "role": "system",
+                                        "content": (
+                                            "[SYSTEM: RECOVERY — TOOL CALL REQUIRED]\n"
+                                            "You produced text-only output. No executable command was found.\n"
+                                            "You MUST respond with a tool_call NOW. Do not write analysis text.\n"
+                                            "Call 'execute' with a concrete shell command relevant to your current objective."
+                                        ),
+                                    }
+                                )
 
                         if not tool_calls_acc:
                             self.state.conversation.append(
@@ -1850,6 +1938,10 @@ class AgentLoop(_ValidatorMixin, _FormatterMixin,
                 if tool_calls_acc:
                     self._no_tool_iterations = 0
                     self._recovery_force_tool_calls = 0
+                    # Reset watchdog counter on successful tool call: the model
+                    # recovered, so the 3-token budget is restored for future
+                    # text-only episodes in the same session.
+                    self._watchdog_forced_calls = 0
 
                 if not content_acc.strip():
                     tool_names_str = ", ".join(
@@ -2358,23 +2450,28 @@ class AgentLoop(_ValidatorMixin, _FormatterMixin,
             yield AgentEvent(type="done", data={})
 
     # Max chars for a single tool result in conversation history.
-    # Dynamic cap: adaptive_num_ctx * ~3 chars/token, max 40 % of context.
-    # Absolute ceiling 40 000 chars (~10 K tokens) even on large models.
-    _MAX_TOOL_RESULT_CHARS: int = 40_000
+    # Scales down with context window size: 8% of num_ctx * 3 chars/token,
+    # floored at 3000 chars, ceiling at 15000 chars (~4K tokens).
+    # Smaller cap = fewer OOM crashes; full output always saved to file.
+    _MAX_TOOL_RESULT_CHARS: int = 15_000
+
+    def _get_tool_result_cap(self) -> int:
+        """Return per-message tool result cap scaled to current context window."""
+        ctx = self._adaptive_num_ctx if self._adaptive_num_ctx > 0 else get_config().ollama_num_ctx
+        # 8% of estimated token budget in chars (1 token ≈ 3 chars)
+        # With 128K ctx: 128000 * 0.08 * 3 = ~30K → capped at 15K
+        # After crash (32K ctx): 32000 * 0.08 * 3 = ~7.6K
+        cap = max(3_000, min(self._MAX_TOOL_RESULT_CHARS, int(ctx * 0.08 * 3)))
+        return cap
 
     def _cap_tool_result(self, content: str) -> str:
         """Truncate a large tool result before adding it to conversation.
 
         Keeps the first 70 % and last 10 % of the content so that both the
         command summary and the tail (often a final summary/stats line) are
-        preserved.  Dynamic cap scales down when VRAM-crash mode is active.
+        preserved.  Cap scales down when VRAM-crash mode is active.
         """
-        # When context has been reduced due to crashes, scale cap proportionally
-        if self._adaptive_num_ctx > 0:
-            # ~3 chars per token; keep at most 25 % of reduced context
-            cap = max(2_000, self._adaptive_num_ctx * 3 // 4)
-        else:
-            cap = self._MAX_TOOL_RESULT_CHARS
+        cap = self._get_tool_result_cap()
         if len(content) <= cap:
             return content
         head = int(cap * 0.70)
@@ -2384,6 +2481,69 @@ class AgentLoop(_ValidatorMixin, _FormatterMixin,
             content[:head]
             + f"\n... [{omitted} chars omitted — use read_file to see full output] ...\n"
             + content[-tail:]
+        )
+
+    def _enforce_char_budget(self, num_ctx: int) -> None:
+        """Hard pre-call guard: compress conversation if total chars exceed token budget.
+
+        Runs before every Ollama call. Prevents OOM from large tool outputs
+        accumulating across iterations even after message-count truncation.
+
+        Ollama's num_ctx is the TOTAL KV cache for both input AND output tokens.
+        The effective input budget = num_ctx - num_predict. Using the full num_ctx
+        as the budget causes silent context truncation by Ollama when the input
+        exceeds (num_ctx - num_predict), stripping the system prompt and causing
+        hallucination. We subtract the output reservation to trigger compression
+        before Ollama does its own (destructive) truncation.
+
+        Budget = (num_ctx - num_predict) * 3 chars (1 token ≈ 3 chars).
+        At 128K ctx / 32K predict: (131072-32768)*3 = ~294K chars input budget.
+        """
+        cfg = get_config()
+        num_predict = getattr(cfg, "ollama_num_predict", 32768)
+        effective_input_ctx = max(1024, num_ctx - num_predict)
+        budget = effective_input_ctx * 3
+        total = sum(
+            len(str(m.get("content") or "")) + len(str(m.get("tool_calls") or ""))
+            for m in self.state.conversation
+        )
+        if total <= budget:
+            return
+
+        logger.warning(
+            "Pre-call char budget exceeded: %d chars > %d budget (num_ctx=%d) — compressing",
+            total, budget, num_ctx,
+        )
+
+        # Pass 1: compress tool/user messages over compress_cap chars.
+        # EXCEPTION: the first user message contains the original task/scope instruction
+        # (e.g. "pentest target.com"). Never compress it — trimming it causes scope loss
+        # and out-of-scope behavior on the next LLM call.
+        compress_cap = max(300, budget // max(1, len(self.state.conversation)))
+        first_user_seen = False
+        for msg in self.state.conversation:
+            role = msg.get("role")
+            if role == "user" and not first_user_seen:
+                first_user_seen = True
+                continue  # protect original task message
+            if role in ("tool", "user"):
+                content = str(msg.get("content", ""))
+                if len(content) > compress_cap:
+                    msg["content"] = content[:compress_cap] + f"...[hard-trimmed {len(content)} chars]"
+
+        # Recheck after pass 1
+        total = sum(
+            len(str(m.get("content") or "")) for m in self.state.conversation
+        )
+        if total <= budget:
+            return
+
+        # Pass 2: drop oldest non-critical messages until we fit
+        target_msgs = max(15, len(self.state.conversation) // 2)
+        self.state.truncate_conversation(max_messages=target_msgs)
+        logger.warning(
+            "Pre-call char budget: after truncation → %d messages",
+            len(self.state.conversation),
         )
 
     def _append_tool_result(
@@ -2600,7 +2760,6 @@ class AgentLoop(_ValidatorMixin, _FormatterMixin,
 
         Returns (relative_path_str, full_Path) or (None, None) if not found.
         """
-        import shlex
         cmd = arguments.get("command", "")
         if not cmd or not self.state.active_target:
             return None, None
@@ -2978,11 +3137,7 @@ class AgentLoop(_ValidatorMixin, _FormatterMixin,
         elif phase == PipelinePhase.ANALYSIS:
             if tool_name in ("execute", "read_file", "browser_action", "web_search"):
                 self.state.mark_objective(phase.value, defaults[0], "done")
-            if cmd and any(
-                hint in cmd for hint in (
-                    "sqlmap", "dalfox", "nuclei", "xsser", "ffuf", "wfuzz", "nikto"
-                )
-            ):
+            if cmd and any(hint in cmd for hint in _ANALYSIS_VULN_TOOLS):
                 self.state.mark_objective(phase.value, defaults[1], "done")
             if self.state.evidence_log:
                 self.state.mark_objective(phase.value, defaults[2], "done")
@@ -3223,15 +3378,6 @@ class AgentLoop(_ValidatorMixin, _FormatterMixin,
         thinking_acc: str = "",
     ) -> str | None:
         """Extract a safe shell command from hallucinated text/code blocks."""
-        command_prefix_re = re.compile(
-            r"^(?:"
-            r"nmap|naabu|masscan|httpx|ffuf|dirsearch|gobuster|katana|hakrawler|"
-            r"subfinder|amass|assetfinder|wpscan|nikto|sqlmap|ghauri|dalfox|"
-            r"curl|wget|python|python3|bash|sh|ls|cat|find|grep|echo"
-            r")\b",
-            re.IGNORECASE,
-        )
-
         def _safe(cmd: str) -> str | None:
             cleaned = cmd.strip().lstrip("$").strip()
             if not cleaned:
@@ -3269,7 +3415,7 @@ class AgentLoop(_ValidatorMixin, _FormatterMixin,
                     continue
                 line = line.lstrip("-*0123456789. ").strip()
                 if not found_first:
-                    if not command_prefix_re.match(line.lstrip("$")):
+                    if not _WATCHDOG_COMMAND_PREFIX_RE.match(line.lstrip("$")):
                         continue
                     found_first = True
                 picked.append(line.rstrip("\\").strip())
@@ -3306,7 +3452,7 @@ class AgentLoop(_ValidatorMixin, _FormatterMixin,
             candidates.append(line.lstrip("$").strip())
 
             for candidate_line in candidates:
-                if command_prefix_re.match(candidate_line):
+                if _WATCHDOG_COMMAND_PREFIX_RE.match(candidate_line):
                     safe = _safe(candidate_line)
                     if safe:
                         return safe
@@ -3516,30 +3662,49 @@ class AgentLoop(_ValidatorMixin, _FormatterMixin,
             ),
         ]
 
-        pending, _completed, evidence = self.state.get_phase_context(
-            phase.value, max_objectives=3, max_evidence=3, filter_evidence_by_phase=False
+        # Show more context to help the LLM resume correctly after a crash.
+        pending, completed, evidence = self.state.get_phase_context(
+            phase.value, max_objectives=5, max_evidence=6, filter_evidence_by_phase=False
         )
         if pending:
-            lines.append("Top pending objectives:")
+            lines.append("Pending objectives:")
             for obj in pending:
                 lines.append(f"- {obj.get('title', '')}")
+        if completed:
+            lines.append(f"Completed objectives ({len(completed)} total):")
+            for obj in completed[:3]:
+                lines.append(f"  ✓ {obj.get('title', '')}")
 
-        recent_tools = [
-            t for t in reversed(self.state.tool_history)
-            if t.status == "success"
-        ][:2]
+        # Include last few tool calls WITH args so LLM knows what was being run.
+        recent_tools = list(reversed(self.state.tool_history))[:5]
         if recent_tools:
-            lines.append("Recent successful tools:")
+            lines.append("Recent tool calls (newest first):")
             for entry in recent_tools:
-                lines.append(f"- {entry.tool_name}")
+                status_icon = "✓" if entry.status == "success" else "✗"
+                args_hint = ""
+                args = getattr(entry, "arguments", None) or {}
+                if isinstance(args, dict):
+                    # Show the most informative arg: command > url > query > first key
+                    for key in ("command", "url", "query", "action", "target"):
+                        if key in args:
+                            val = str(args[key])[:80]
+                            args_hint = f" [{key}={val}]"
+                            break
+                    if not args_hint and args:
+                        first_key = next(iter(args))
+                        args_hint = f" [{first_key}={str(args[first_key])[:60]}]"
+                lines.append(f"  {status_icon} {entry.tool_name}{args_hint}")
 
         if evidence:
             lines.append("Recent evidence:")
             for ev in evidence:
-                lines.append(f"- [{ev.get('source_tool', 'tool')}] {ev.get('summary', '')}")
+                lines.append(f"- [{ev.get('source_tool', 'tool')}] {ev.get('summary', '')[:120]}")
 
         lines.append(
             "MANDATORY: first response after recovery must include at least one tool_call."
+        )
+        lines.append(
+            "Resume from the last failed/pending step above — do not restart from scratch."
         )
         return "\n".join(lines)
 
@@ -3628,7 +3793,6 @@ class AgentLoop(_ValidatorMixin, _FormatterMixin,
         # Injection points: show untested first so they don't get lost after
         # context truncation — these are the highest-priority attack surface.
         if s.injection_points:
-            from .session import get_untested_injection_points
             untested = get_untested_injection_points(s)
             all_ips = s.injection_points
             tested_count = len(all_ips) - len(untested)
@@ -3636,8 +3800,7 @@ class AgentLoop(_ValidatorMixin, _FormatterMixin,
             show = untested[:8] if untested else all_ips[:8]
             ip_lines: list[str] = []
             for pt in show:
-                from urllib.parse import urlparse as _urlparse
-                path = _urlparse(pt.get("url", "")).path or pt.get("url", "")
+                path = urlparse(pt.get("url", "")).path or pt.get("url", "")
                 ip_lines.append(
                     f"  [{pt.get('type_hint','?')}] {pt.get('parameter','?')} @ {path}"
                 )
