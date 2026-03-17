@@ -23,6 +23,15 @@ PERSISTENCE REQUIREMENT:
 - Do NOT rely on memory — save after EACH successful enumeration
 - Reference these saved files in subsequent phases
 
+SCRIPTING TRIGGERS (DO NOT IGNORE):
+- If TWO different recon tool families produce no new live hosts or URLs, write a custom script in tools/.
+- If you need to correlate, normalize, or deduplicate multi-source outputs, write a script.
+- If crawling fails on SPAs, write a script to fetch JS bundles and extract endpoints.
+
+SCRIPT OUTPUT FORMAT (FOR AUTO-PARSING):
+- Prefer raw, one-item-per-line outputs (URLs, domains, host:port).
+- If you must label, use prefixes: URL:, SUBDOMAIN:, HOSTPORT: (single space after colon).
+
 FALLBACK STRATEGIES:
 - If direct enumeration blocked: try passive sources (DNS history, certificate transparency, OSINT)
 - If rate-limited: adjust timing, use distributed approaches, retry later

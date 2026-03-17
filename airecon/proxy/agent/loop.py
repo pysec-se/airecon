@@ -104,8 +104,10 @@ class AgentLoop(_ValidatorMixin, _FormatterMixin,
     _CTF_MAX_ITERATIONS = 150
     _PHASE_OBJECTIVES: dict[str, list[str]] = {
         "RECON": [
-            "Enumerate target surface (domains/hosts/services)",
-            "Validate live hosts and open ports",
+            "Enumerate subdomains/hosts (subfinder, amass, etc.)",
+            "Filter to LIVE hosts only — run httpx/dnsx on subdomain list before anything else",
+            "Port scan and fingerprint ONLY the live validated hosts",
+            "Discover directories and URLs on confirmed live hosts",
             "Persist recon artifacts in output/ files",
         ],
         "ANALYSIS": [
@@ -149,6 +151,9 @@ class AgentLoop(_ValidatorMixin, _FormatterMixin,
         self._last_evidence_count: int = 0
         self._watchdog_forced_calls: int = 0
         self._empty_response_retried: bool = False
+        # When set, force the next response(s) to include a tool call after
+        # recovery events (VRAM crash/timeout). Prevents text-only hallucinations.
+        self._recovery_force_tool_calls: int = 0
         self._session: SessionData | None = None
         self._pending_output_merges: dict[str, list[str]] = {}
         # Tools blocked for this agent (e.g. depth control)
@@ -525,6 +530,35 @@ class AgentLoop(_ValidatorMixin, _FormatterMixin,
                             "content": session_ctx,
                         }
                     )
+
+            # Ensure a compact, pinned target context is always present so the
+            # model never loses the primary target during long sessions.
+            self.state.conversation = [
+                msg
+                for msg in self.state.conversation
+                if not (
+                    msg.get("role") == "system"
+                    and msg.get("content", "").startswith("[SYSTEM: PINNED CONTEXT]")
+                )
+            ]
+            if self.state.active_target:
+                phase_hint = ""
+                try:
+                    if self.pipeline:
+                        phase_hint = self.pipeline.get_current_phase().value
+                except Exception:
+                    phase_hint = ""
+                pin_lines = [
+                    "[SYSTEM: PINNED CONTEXT]",
+                    f"TARGET: {self.state.active_target}",
+                ]
+                if phase_hint:
+                    pin_lines.append(f"PHASE: {phase_hint}")
+                pin_lines.append("Do not change target unless the user explicitly asks.")
+                pin_lines.append("Use session summary and critical findings as the source of truth.")
+                self.state.conversation.append(
+                    {"role": "system", "content": "\n".join(pin_lines)}
+                )
 
             # Resolve @/path file references (parsed earlier, before autostart)
             if _file_refs:
@@ -1304,6 +1338,21 @@ class AgentLoop(_ValidatorMixin, _FormatterMixin,
                                 self.state.conversation.append(
                                     {"role": "system", "content": recovery_ctx}
                                 )
+                            # Force tool-call-only recovery on the next iteration.
+                            self._recovery_force_tool_calls = max(
+                                self._recovery_force_tool_calls, 2
+                            )
+                            self.state.conversation.append(
+                                {
+                                    "role": "system",
+                                    "content": (
+                                        "[SYSTEM: RECOVERY MODE — TOOL CALL ONLY]\n"
+                                        "A crash occurred. Your next response MUST be a tool call.\n"
+                                        "If unsure, call list_files on output/ or run a safe probe.\n"
+                                        "Do not write analysis-only text."
+                                    ),
+                                }
+                            )
                             # Save session immediately after recovery so a
                             # second crash doesn't lose accumulated findings.
                             if self._session:
@@ -1345,6 +1394,9 @@ class AgentLoop(_ValidatorMixin, _FormatterMixin,
                             tool_calls_acc = []
                             in_thinking_tag = False
                             _carry = ""
+                            self._recovery_force_tool_calls = max(
+                                self._recovery_force_tool_calls, 1
+                            )
                             continue
 
                         elif _is_timeout and _stream_attempt < 1:
@@ -1369,6 +1421,9 @@ class AgentLoop(_ValidatorMixin, _FormatterMixin,
                             tool_calls_acc = []
                             in_thinking_tag = False
                             _carry = ""
+                            self._recovery_force_tool_calls = max(
+                                self._recovery_force_tool_calls, 1
+                            )
                             continue
 
                         # Fatal: all recovery attempts exhausted.
@@ -1423,6 +1478,9 @@ class AgentLoop(_ValidatorMixin, _FormatterMixin,
                                     "Retrying...\n"
                                 )
                             },
+                        )
+                        self._recovery_force_tool_calls = max(
+                            self._recovery_force_tool_calls, 1
                         )
                         continue  # re-enter the while loop (new iteration)
                     self._empty_response_retried = False
@@ -1694,6 +1752,7 @@ class AgentLoop(_ValidatorMixin, _FormatterMixin,
                             has_fake_cmd_block
                             or has_hallucination_risk
                             or self._no_tool_iterations >= 2
+                            or self._recovery_force_tool_calls > 0
                         )
                     )
                     if _retry_text_only:
@@ -1790,6 +1849,7 @@ class AgentLoop(_ValidatorMixin, _FormatterMixin,
 
                 if tool_calls_acc:
                     self._no_tool_iterations = 0
+                    self._recovery_force_tool_calls = 0
 
                 if not content_acc.strip():
                     tool_names_str = ", ".join(
@@ -2778,19 +2838,24 @@ class AgentLoop(_ValidatorMixin, _FormatterMixin,
 
         tactic_map: dict[PipelinePhase, list[str]] = {
             PipelinePhase.RECON: [
-                "Run one passive and one active recon method in the same loop.",
-                "Switch discovery families: DNS -> HTTP fingerprint -> content discovery.",
-                "Prioritize unusual assets: admin panels, legacy hosts, debug endpoints.",
+                "If you have subdomains but no live_hosts yet: run httpx NOW to filter alive hosts.",
+                "Never port-scan or directory-brute-force a host that hasn't been validated alive first.",
+                "Workflow: enumerate subdomains → httpx filter → port scan live hosts → dir/URL discovery.",
+                "Switch discovery families: DNS → HTTP fingerprint (httpx) → content discovery (ffuf/ferox).",
+                "Prioritize unusual assets on LIVE hosts: admin panels, legacy paths, debug endpoints.",
+                "If two tool families stall with no new data, write a custom script in tools/ to correlate outputs or extract endpoints.",
             ],
             PipelinePhase.ANALYSIS: [
                 "Mutate parameters aggressively (encoding, type confusion, boundary values).",
                 "Correlate endpoints, auth flows, and object IDs for privilege paths.",
                 "Generate at least one non-obvious hypothesis and test it immediately.",
+                "If testing requires many variants (IDs/roles/auth states), write a script to automate and log results.",
             ],
             PipelinePhase.EXPLOIT: [
                 "Rotate payload families every failed attempt (SQLi -> SSTI -> auth logic).",
                 "Prefer impact proof over scanner output: state change, data access, or privilege gain.",
                 "Chain medium findings into one higher-impact attack path.",
+                "When exploitation is multi-step, write a PoC script in tools/ instead of manual repetition.",
             ],
             PipelinePhase.REPORT: [
                 "Convert strongest evidence into reproducible PoC steps with exact inputs.",
@@ -2798,7 +2863,7 @@ class AgentLoop(_ValidatorMixin, _FormatterMixin,
             ],
             PipelinePhase.COMPLETE: [],
         }
-        tactics = tactic_map.get(phase, [])[:3]
+        tactics = tactic_map.get(phase, [])[:5]
         if not tactics:
             return ""
 
@@ -2843,12 +2908,21 @@ class AgentLoop(_ValidatorMixin, _FormatterMixin,
 
         s = self._session
         if phase == PipelinePhase.RECON:
+            # defaults[0] = enumerate subdomains/hosts
             if s.subdomains or s.live_hosts:
                 self.state.mark_objective(phase.value, defaults[0], "done")
-            if s.open_ports:
+            # defaults[1] = filter to LIVE hosts (httpx/dnsx ran and populated live_hosts)
+            if s.live_hosts and len(defaults) > 1:
                 self.state.mark_objective(phase.value, defaults[1], "done")
-            if s.scan_count >= 3 or s.urls:
+            # defaults[2] = port scan live hosts
+            if s.open_ports and len(defaults) > 2:
                 self.state.mark_objective(phase.value, defaults[2], "done")
+            # defaults[3] = discover directories/URLs on live hosts
+            if s.urls and len(defaults) > 3:
+                self.state.mark_objective(phase.value, defaults[3], "done")
+            # defaults[4] = persist recon artifacts
+            if s.scan_count >= 3 and len(defaults) > 4:
+                self.state.mark_objective(phase.value, defaults[4], "done")
         elif phase == PipelinePhase.ANALYSIS:
             if s.technologies or s.urls:
                 self.state.mark_objective(phase.value, defaults[0], "done")
@@ -3522,6 +3596,13 @@ class AgentLoop(_ValidatorMixin, _FormatterMixin,
         if s.live_hosts:
             parts.append(
                 f"LIVE HOSTS ({len(s.live_hosts)}): {', '.join(s.live_hosts[:15])}"
+            )
+        elif s.subdomains:
+            # Subdomains found but no live_hosts yet — warn the LLM to validate first
+            parts.append(
+                "WARNING: subdomains enumerated but NOT YET validated. "
+                "Run: httpx -l output/subdomains.txt -sc -o output/live_hosts.txt "
+                "to filter live hosts BEFORE port scanning or directory brute-force."
             )
 
         if s.open_ports:

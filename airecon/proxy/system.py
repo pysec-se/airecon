@@ -171,20 +171,12 @@ def _is_pentest_target(target: str | None = None,
 # Skills loaders
 # ------------------------------------------------------------------
 # Heavy skills embedded in the full prompt context.
+# To keep context stable and avoid OOM/hallucinations, keep this minimal.
 # NOT used in CTF mode to save ~85-100K tokens.
 # Keys are relative paths from the skills/ directory (subdir/filename.md)
 # so same-named files in different subdirectories don't collide.
 _FULL_EMBED_SKILLS = {
     "tools/install.md",
-    "tools/scripting.md",
-    "tools/tool_catalog.md",
-    "reconnaissance/full_recon.md",
-    "tools/browser_automation.md",
-    "tools/nuclei.md",
-    "tools/sqlmap.md",
-    "tools/dalfox.md",
-    "tools/nmap.md",
-    "tools/semgrep.md",
 }
 
 # Minimal set embedded for CTF mode (only what's needed for local exploitation)
@@ -208,7 +200,7 @@ def _load_local_skills(ctf_mode: bool = False) -> str:
     embed_set = _CTF_EMBED_SKILLS if ctf_mode else _FULL_EMBED_SKILLS
 
     embedded_parts: list[str] = []
-    reference_parts: list[str] = []
+    category_counts: dict[str, int] = {}
 
     for path in sorted(skills_dir.rglob("*.md")):
         rel = path.relative_to(skills_dir).as_posix()
@@ -219,9 +211,12 @@ def _load_local_skills(ctf_mode: bool = False) -> str:
                     f'\n<embedded_skill name="{path.name}">\n{content}\n</embedded_skill>\n'
                 )
             except Exception:
-                reference_parts.append(f"- {path.absolute().as_posix()}")
+                # If embed fails, fall back to counting it in its category.
+                top = rel.split("/", 1)[0]
+                category_counts[top] = category_counts.get(top, 0) + 1
         else:
-            reference_parts.append(f"- {path.absolute().as_posix()}")
+            top = rel.split("/", 1)[0]
+            category_counts[top] = category_counts.get(top, 0) + 1
 
     result = ""
 
@@ -234,13 +229,21 @@ def _load_local_skills(ctf_mode: bool = False) -> str:
             + "</core_skills>\n"
         )
 
-    if reference_parts:
+    if category_counts:
+        total = sum(category_counts.values())
+        cat_list = ", ".join(
+            f"{k}({category_counts[k]})" for k in sorted(category_counts)
+        )
+        base_path = skills_dir.as_posix()
         result += (
             "\n\n<available_skills>\n"
-            "Additional skill documents available via read_file. "
-            "Load the relevant one when you need specialized guidance:\n"
-            + "\n".join(reference_parts)
-            + "\n</available_skills>\n"
+            "Additional skills are available via read_file (not pre-loaded).\n"
+            f"Skills base path: {base_path}\n"
+            f"Categories ({total} total): {cat_list}\n"
+            "Auto-load will inject relevant skills based on keywords in the request.\n"
+            "If you need a specific one, call read_file with the full path.\n"
+            f"Example: {base_path}/tools/nmap.md\n"
+            "</available_skills>\n"
         )
 
     return result

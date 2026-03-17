@@ -50,16 +50,28 @@ CAIDO MANDATE: Caido is the mandatory web proxy for ALL HTTP traffic inspection 
     STEP 3 — After manual browsing/spidering, query captured history:
         execute: curl -sL -X POST -H "Content-Type: application/json" \
           -H "Authorization: Bearer $TOKEN" \
-          -d '{"query":"query { requestsByOffset(limit:200, filter:{httpql:\"host.eq:TARGET\"}) { edges { node { id method path response { statusCode length } } } count } }"}' \
+          -d '{"query":"query { requestsByOffset(limit:200, offset:0, filter:{httpql:\"host.eq:TARGET\"}) { edges { node { id method path response { statusCode length } } } count { value } } }"}' \
           http://127.0.0.1:48080/graphql | jq '.data.requestsByOffset.edges[].node'
+
+        Or use AIRecon tool: caido_list_requests with filter 'host.eq:"TARGET"'
+
+    STEP 3b — Browse sitemap to enumerate ALL discovered paths:
+        Use AIRecon tool: caido_sitemap (no parent_id) → lists root domains
+        Then pass node id as parent_id to drill into directories/endpoints
+
+    STEP 3c — Monitor intercept status and forward/drop queued requests:
+        Use AIRecon tool: caido_intercept with action="status" → check RUNNING/PAUSED
+        Use action="list" to see queued messages, "forward"/"drop" to handle them
 
     STEP 4 — Use Caido Replay for manual testing of specific requests:
         Retrieve raw request: query { request(id:"ID") { raw response { raw statusCode } } }
         Replay with modification: createReplaySession → startReplayTask with modified raw (base64).
+        Or use AIRecon tool: caido_send_request with request_id or raw_http
 
     STEP 5 — Use Caido Automate for targeted fuzzing of a confirmed injection point:
         createAutomateSession → updateAutomateSession (set raw + placeholder offsets + payload list)
         → startAutomateTask → query results for anomalous status codes/lengths.
+        Or use AIRecon tool: caido_automate with raw_http containing §FUZZ§ markers
 
     For full GraphQL API reference: read_file the caido skill document listed in <available_skills>.
 
@@ -141,18 +153,28 @@ FORBIDDEN MINDSET: Using automated discovery scanners before manual observation.
 PHASE 1 SEQUENCE (MANDATORY ORDER — Do NOT skip or reorder):
 
   STEP 1 — PASSIVE INTELLIGENCE (No active probing yet):
-    - Enumerate subdomains using passive certificate, DNS API, and archive data sources
+    - Enumerate subdomains using passive certificate, DNS API, and archive data sources:
+        subfinder -d target.com -all -recursive -o output/subdomains.txt
+        amass enum -passive -d target.com >> output/subdomains.txt
+        sort -u output/subdomains.txt -o output/subdomains.txt
       → output/subdomains.txt
-    - Resolve all discovered subdomains to live IP addresses → output/resolved.txt
-    - Extract historical URLs from archive and crawl data sources → output/historical_urls.txt
+    - Resolve all discovered subdomains to live IP addresses using dnsx:
+        dnsx -l output/subdomains.txt -a -resp -o output/resolved.txt
+      → output/resolved.txt  (only subdomains that resolve to an IP — dead ones removed)
+    - Extract historical URLs from archive and crawl data sources:
+        gau --subs target.com | sort -u > output/historical_urls.txt
+        waybackurls target.com >> output/historical_urls.txt
+      → output/historical_urls.txt
     - Hunt for exposed secrets in public code repositories using custom regex patterns
     See tool_catalog.md → Phase 1 Tools → Subdomain Enumeration & URL Collection for specific commands.
     POST-CHECK: Verify output/subdomains.txt and output/resolved.txt are non-empty before continuing.
 
   STEP 2 — LIVE HOST DETECTION (Reachability check only — no exploit or vuln scanning):
-    - Send HTTP probes to all resolved hosts. Record status codes, page titles, and server headers.
-      → output/live_hosts.txt
-    See tool_catalog.md → Phase 1 Tools → Live Host Detection for specific command.
+    - Send HTTP probes to ALL resolved subdomains. Record status codes, titles, server headers:
+        httpx -l output/subdomains.txt -sc -title -server -o output/live_hosts.txt
+      → output/live_hosts.txt  (httpx format: https://host [STATUS] — auto-parsed by AIRecon)
+    - IMPORTANT: Only hosts in output/live_hosts.txt are valid targets for any further action.
+      Dead/unresolved subdomains from output/subdomains.txt MUST be ignored from this point.
     POST-CHECK: Verify output/live_hosts.txt is non-empty before continuing.
     *** STOP HERE. Do NOT proceed to any automated scanner. Begin STEP 3 immediately. ***
 

@@ -60,13 +60,18 @@ DEFAULT_PHASES: dict[PipelinePhase, PhaseConfig] = {
     PipelinePhase.RECON: PhaseConfig(
         phase=PipelinePhase.RECON,
         max_iterations=500,
-        objective="Enumerate attack surface: subdomains, open ports, directories, technologies, endpoints",
+        objective=(
+            "Enumerate attack surface: subdomains, open ports, directories, technologies, endpoints. "
+            "CRITICAL: After subdomain enumeration, ALWAYS run httpx/dnsx to validate which hosts "
+            "are alive BEFORE port scanning or directory brute-force. Never scan dead/unresolved hosts."
+        ),
         recommended_tools=[
             "execute", "web_search", "browser_action", "create_file",
             "read_file", "list_files",
         ],
         transition_criteria=[
             "subdomains_discovered",      # session.subdomains is non-empty
+            "live_hosts_validated",       # session.live_hosts is non-empty (httpx/dnsx ran)
             "ports_scanned",              # session.open_ports is non-empty
             "recon_artifacts_saved",      # output/ directory has files
             "subdomain_depth_met",        # >= pipeline_recon_min_subdomains discovered
@@ -305,6 +310,10 @@ class PipelineEngine:
         if phase == PipelinePhase.RECON:
             if getattr(session, "subdomains", []):
                 met.append("subdomains_discovered")
+            # live_hosts_validated: agent ran httpx/dnsx and confirmed at least one host responds.
+            # This forces the agent to filter dead subdomains before proceeding.
+            if getattr(session, "live_hosts", []):
+                met.append("live_hosts_validated")
             if getattr(session, "open_ports", {}):
                 met.append("ports_scanned")
             # Check if output/ directory actually contains recon files on disk
