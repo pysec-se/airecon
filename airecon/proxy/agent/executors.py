@@ -1239,7 +1239,7 @@ class _ExecutorMixin:
 
             if existing_id:
                 # Update the existing scope (avoids duplicate accumulation).
-                # allowList / denyList: camelCase as required by Caido GraphQL.
+                # Caido GraphQL uses snake_case (allowlist/denylist) not camelCase.
                 update_q = """
                 mutation UpdateScope($id: ID!, $input: UpdateScopeInput!) {
                     updateScope(id: $id, input: $input) {
@@ -1250,8 +1250,8 @@ class _ExecutorMixin:
                 variables: dict[str, Any] = {
                     "id": existing_id,
                     "input": {
-                        "allowList": allowlist,
-                        "denyList": denylist,
+                        "allowlist": allowlist,
+                        "denylist": denylist,
                     },
                 }
                 data = await CaidoClient.gql(update_q, variables)
@@ -1268,8 +1268,8 @@ class _ExecutorMixin:
                 variables = {
                     "input": {
                         "name": scope_name,
-                        "allowList": allowlist,
-                        "denyList": denylist,
+                        "allowlist": allowlist,
+                        "denylist": denylist,
                     },
                 }
                 data = await CaidoClient.gql(create_q, variables)
