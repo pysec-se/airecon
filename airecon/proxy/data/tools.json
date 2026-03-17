@@ -257,7 +257,7 @@
         "type": "function",
         "function": {
             "name": "web_search",
-            "description": "Search the web using DuckDuckGo. Use this to research payloads, CVEs, exploit techniques, WAF bypasses, tool flags, or any information needed during security testing.",
+            "description": "Search the web using SearXNG (preferred) with DuckDuckGo fallback. Use this to research payloads, CVEs, exploit techniques, WAF bypasses, tool flags, or any information needed during security testing.",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -658,7 +658,7 @@
         "type": "function",
         "function": {
             "name": "spawn_agent",
-            "description": "Spawn a specialist subagent to deeply investigate a specific finding or endpoint. The subagent runs independently with a focused task (max 200 iterations) and returns discovered vulnerabilities merged into the parent session. Use when you find a hint that warrants deeper specialist investigation (e.g. SQLi error response → spawn sqli specialist).",
+            "description": "Spawn a specialist subagent to deeply investigate a specific finding or endpoint. The subagent runs independently with a focused task (max 100 iterations) and returns discovered vulnerabilities merged into the parent session. Use when you find a hint that warrants deeper specialist investigation (e.g. SQLi error response → spawn sqli specialist).",
             "parameters": {
                 "type": "object",
                 "properties": {

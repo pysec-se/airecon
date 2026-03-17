@@ -6,15 +6,12 @@ import argparse
 import sys
 import logging
 
+from airecon._version import __version__
+
 
 def main() -> None:
 
-    import importlib.metadata
-
-    try:
-        version = importlib.metadata.version("airecon")
-    except importlib.metadata.PackageNotFoundError:
-        version = "0.1.5"
+    version = __version__
 
     parser = argparse.ArgumentParser(
         prog="airecon",
@@ -308,13 +305,8 @@ def _run_status(args) -> None:
 
     async def check():
         from airecon.proxy.config import get_config
-        import importlib.metadata
+        from airecon._version import __version__ as version
         cfg = get_config()
-
-        try:
-            version = importlib.metadata.version("airecon")
-        except importlib.metadata.PackageNotFoundError:
-            version = "0.1.5"
 
         # Colors
         G = "\033[32m"   # green

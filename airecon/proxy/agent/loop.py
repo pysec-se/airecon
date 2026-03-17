@@ -10,6 +10,7 @@ from .session import (
     session_to_context,
     find_prior_session,
     merge_prior_findings,
+    record_tested_endpoint,
 )
 from .pipeline import PipelineEngine, PipelinePhase, _PHASE_TOOL_BUDGETS
 from .output_parser import parse_tool_output
@@ -95,6 +96,8 @@ class AgentLoop(_ValidatorMixin, _FormatterMixin,
     _DEDUP_EXEMPT_BROWSER_ACTIONS = frozenset({
         "click", "type", "press_key", "scroll_down", "scroll_up",
         "wait", "get_console_logs", "get_network_logs",
+        # Auth actions must never be deduped — re-login / MFA retry requires re-execution
+        "login_form", "handle_totp", "save_auth_state", "inject_cookies", "oauth_authorize",
     })
     # Max number of times the same CTF-local challenge can be seen before CTF
     # mode kicks in
@@ -161,6 +164,16 @@ class AgentLoop(_ValidatorMixin, _FormatterMixin,
         # the same skill file isn't injected again when the same technology
         # is re-detected in later tool outputs.
         self._loaded_tech_skill_paths: set[str] = set()
+        # Session-persistent context window — set on first VRAM crash and kept
+        # for all subsequent iterations so the same crash doesn't recur.
+        # 0 means "use config default".
+        self._adaptive_num_ctx: int = 0
+        # Total VRAM OOM crashes across the entire session — used to escalate
+        # truncation aggressiveness on each successive crash.
+        self._vram_crash_count: int = 0
+        # Output token cap — set after VRAM crash to prevent large responses
+        # from burning context and re-triggering OOM. 0 = no cap.
+        self._adaptive_num_predict_cap: int = 0
 
     async def stop(self) -> None:
         logger.warning("Stopping Agent Loop...")
@@ -224,6 +237,12 @@ class AgentLoop(_ValidatorMixin, _FormatterMixin,
             return True, msg
 
         self._executed_cmd_hashes.add(cmd_hash)
+        # Prevent unbounded memory growth over 2000-iteration sessions.
+        # When the set exceeds 5000 entries, clear it — this temporarily
+        # allows re-execution of very old commands which is acceptable.
+        if len(self._executed_cmd_hashes) > 5000:
+            self._executed_cmd_hashes.clear()
+            logger.debug("_executed_cmd_hashes pruned (>5000 entries)")
         return False, ""
 
     async def initialize(
@@ -943,12 +962,36 @@ class AgentLoop(_ValidatorMixin, _FormatterMixin,
                         )
 
                 # --- CONTEXT MANAGEMENT (adaptive interval + progressive truncation) ---
-                # Run more frequently in long sessions to prevent VRAM growth
-                _ctx_interval = 10 if self.state.iteration > 150 else 15
+                # Dynamic interval: compress more aggressively as context fills.
+                # Use session-level override if set, else fall back to config.
+                _cur_ctx_limit = self._adaptive_num_ctx or cfg.ollama_num_ctx
+                _cur_token_ratio = (
+                    self.state.token_usage.get("used", 0) / max(_cur_ctx_limit, 1)
+                )
+                if _cur_token_ratio > 0.60:
+                    _ctx_interval = 5   # very frequent when getting full
+                elif self.state.iteration > 150:
+                    _ctx_interval = 10
+                else:
+                    _ctx_interval = 15
                 if self.state.iteration % _ctx_interval == 0:
-                    # LLM-based compression first (summarizes old messages,
-                    # preserves findings)
-                    await self.state.compress_with_llm(self.ollama, keep_recent=30)
+                    # LLM compression is only safe when we have headroom.
+                    # Calling ollama.complete() when context is >65% full risks
+                    # OOM inside the compression call itself.
+                    if _cur_token_ratio < 0.65:
+                        # Use a small, safe context window for the compression
+                        # call itself so it never triggers OOM.
+                        _compress_ctx = min(8192, _cur_ctx_limit // 4)
+                        await self.state.compress_with_llm(
+                            self.ollama, keep_recent=30,
+                            num_ctx=_compress_ctx, num_predict=1024,
+                        )
+                    else:
+                        logger.info(
+                            "Skipping LLM compression (context %.0f%% full) "
+                            "— truncate-only to avoid OOM during compress",
+                            _cur_token_ratio * 100,
+                        )
                     # PIN CRITICAL FINDINGS BEFORE TRUNCATION
                     critical_context = self._build_critical_findings_context()
                     # Progressive max_messages: more aggressive as session
@@ -1016,23 +1059,59 @@ class AgentLoop(_ValidatorMixin, _FormatterMixin,
                 in_thinking_tag = False
                 _carry = ""
 
-                # Context window — full size by default; reduced to small on
-                # VRAM crash retry
-                adaptive_num_ctx = cfg.ollama_num_ctx
+                # Context window — use session-level override if a VRAM crash
+                # previously occurred, otherwise use config default.
+                adaptive_num_ctx = (
+                    self._adaptive_num_ctx
+                    if self._adaptive_num_ctx > 0
+                    else cfg.ollama_num_ctx
+                )
+                # Keep token_usage["limit"] in sync with actual context window
+                # so monitoring/UI always reflects the real limit.
+                self.state.token_usage["limit"] = adaptive_num_ctx
+
+                # ── PROACTIVE CONTEXT MONITORING ────────────────────────────
+                # If the PREVIOUS call used ≥80% of the context window, trim
+                # conversation NOW before the next call to prevent a mid-stream
+                # OOM crash.
+                _ctx_used = self.state.token_usage.get("used", 0)
+                if _ctx_used > 0 and adaptive_num_ctx > 0:
+                    _usage_ratio = _ctx_used / adaptive_num_ctx
+                    if _usage_ratio >= 0.80:
+                        logger.warning(
+                            "Proactive context trim: %.0f%% used (%d/%d tokens)",
+                            _usage_ratio * 100, _ctx_used, adaptive_num_ctx,
+                        )
+                        _critical_ctx = self._build_critical_findings_context()
+                        _proactive_trim = 50 if _usage_ratio < 0.90 else 35
+                        self.state.truncate_conversation(
+                            max_messages=_proactive_trim)
+                        if _critical_ctx:
+                            self.state.conversation.append(
+                                {"role": "system", "content": _critical_ctx}
+                            )
+                # ────────────────────────────────────────────────────────────
+
                 adaptive_temperature = self._get_iteration_temperature(cfg)
                 adaptive_num_predict = self._get_adaptive_num_predict(
                     cfg, current_phase.value if current_phase else "RECON"
                 )
+                # If a VRAM crash previously occurred, cap output tokens to
+                # prevent large responses from re-triggering OOM.
+                if self._adaptive_num_predict_cap > 0:
+                    adaptive_num_predict = min(
+                        adaptive_num_predict, self._adaptive_num_predict_cap)
 
                 # --- STREAM RECOVERY LOOP ---
-                # Up to 4 attempts total:
-                #   VRAM crash  → 1 retry (truncate + reduced ctx)
+                # Up to 6 attempts total:
+                #   VRAM crash  → up to 3 retries with escalating truncation
+                #                 (ctx and message budget shrink each time)
                 #   Connection refused → 3 retries with exponential backoff (5s/10s/20s)
                 #   Timeout          → 1 retry (already waited; model may finish faster)
                 # Any other error is fatal on first occurrence.
                 _last_chunk_data = {}  # Store last chunk to extract token info
-                _vram_retry_used = False
-                for _stream_attempt in range(4):
+                _vram_retries_this_iter = 0  # VRAM retries within this iteration
+                for _stream_attempt in range(6):
                     try:
                         async for chunk in self.ollama.chat_stream(
                             messages=self.state.conversation,
@@ -1165,36 +1244,79 @@ class AgentLoop(_ValidatorMixin, _FormatterMixin,
                             "timeout" in err_lower or "timed out" in err_lower
                         )
 
-                        if _is_vram_crash and not _vram_retry_used:
-                            # One-shot VRAM recovery: truncate + reduced ctx.
-                            _vram_retry_used = True
+                        if _is_vram_crash and _vram_retries_this_iter < 3:
+                            # Multi-level VRAM recovery — each crash reduces
+                            # context window and message budget further.
+                            # The reduced context persists for ALL future
+                            # iterations via self._adaptive_num_ctx.
+                            self._vram_crash_count += 1
+                            _vram_retries_this_iter += 1
+                            if self._vram_crash_count == 1:
+                                _new_ctx = cfg.ollama_num_ctx_small
+                                _max_msgs = 80
+                                _wait_s = 0
+                            elif self._vram_crash_count == 2:
+                                _new_ctx = max(4096, cfg.ollama_num_ctx_small // 2)
+                                _max_msgs = 50
+                                _wait_s = 5
+                            elif self._vram_crash_count == 3:
+                                _new_ctx = max(4096, cfg.ollama_num_ctx_small // 4)
+                                _max_msgs = 30
+                                _wait_s = 10
+                            else:
+                                # 4+ crashes: absolute minimum; wait for VRAM
+                                # to free (model unload/reload cycle).
+                                _new_ctx = 4096
+                                _max_msgs = 20
+                                _wait_s = 30
+                            # Persist reduced context + output cap for all
+                            # subsequent iterations to prevent recurrence.
+                            self._adaptive_num_ctx = _new_ctx
+                            adaptive_num_ctx = _new_ctx
+                            # Cap output to 1/4 of context (min 512 tokens)
+                            # — generating 32K output inside a 4K context is wasteful
+                            self._adaptive_num_predict_cap = max(512, _new_ctx // 4)
+                            adaptive_num_predict = min(
+                                adaptive_num_predict, self._adaptive_num_predict_cap)
                             logger.warning(
-                                "Ollama VRAM crash detected — auto-recovering "
-                                "(aggressive truncation + reduced context window)"
+                                "VRAM crash #%d — ctx → %d tokens, msgs → %d",
+                                self._vram_crash_count, _new_ctx, _max_msgs,
                             )
                             yield AgentEvent(
                                 type="text",
                                 data={
                                     "content": (
-                                        "\n[AUTO-RECOVERY] Ollama VRAM crash detected. "
-                                        "Truncating context and retrying with reduced "
-                                        f"context window ({cfg.ollama_num_ctx_small} tokens)...\n"
+                                        f"\n[AUTO-RECOVERY #{self._vram_crash_count}] "
+                                        "VRAM crash — reducing context to "
+                                        f"{_new_ctx} tokens, trimming to "
+                                        f"{_max_msgs} messages"
+                                        + (f", waiting {_wait_s}s..." if _wait_s else "...")
+                                        + "\n"
                                     )
                                 },
                             )
-                            self.state.truncate_conversation(max_messages=80)
+                            if _wait_s > 0:
+                                await asyncio.sleep(_wait_s)
+                            self.state.truncate_conversation(
+                                max_messages=_max_msgs)
                             recovery_ctx = self._build_recovery_state_context()
                             if recovery_ctx:
                                 self.state.conversation.append(
                                     {"role": "system", "content": recovery_ctx}
                                 )
-                            adaptive_num_ctx = cfg.ollama_num_ctx_small
+                            # Save session immediately after recovery so a
+                            # second crash doesn't lose accumulated findings.
+                            if self._session:
+                                try:
+                                    save_session(self._session)
+                                except Exception as _se:
+                                    logger.warning("Could not save session after VRAM recovery: %s", _se)
                             thinking_acc = ""
                             content_acc = ""
                             tool_calls_acc = []
                             in_thinking_tag = False
                             _carry = ""
-                            continue  # retry the stream with smaller context
+                            continue  # retry with reduced context
 
                         elif _is_conn_refused and _stream_attempt < 3:
                             # Connection refused: Ollama may be restarting after
@@ -1249,13 +1371,13 @@ class AgentLoop(_ValidatorMixin, _FormatterMixin,
                             _carry = ""
                             continue
 
-                        # Fatal: VRAM crash already retried, conn refused
-                        # exhausted, timeout exhausted, or unknown error.
+                        # Fatal: all recovery attempts exhausted.
                         if _is_vram_crash:
                             error_msg = (
-                                "Ollama crashed twice (VRAM exhausted). "
-                                "Run `systemctl restart ollama` and reduce "
-                                "`ollama_num_ctx` in config (e.g. 32768)."
+                                f"Ollama VRAM exhausted after "
+                                f"{self._vram_crash_count} recovery attempts. "
+                                "Run `systemctl restart ollama` and set "
+                                "`ollama_num_ctx` ≤ 8192 in config."
                             )
                         elif _is_conn_refused:
                             error_msg = (
@@ -2145,6 +2267,7 @@ class AgentLoop(_ValidatorMixin, _FormatterMixin,
                             "SKIP redundant execution, move to next phase or emit [TASK_COMPLETE]."
                         )
 
+                    self._record_tested_endpoint(tool_name, arguments)
                     self._append_tool_result(
                         tool_name, content_str, success, tc.get("id")
                     )
@@ -2174,6 +2297,35 @@ class AgentLoop(_ValidatorMixin, _FormatterMixin,
             )
             yield AgentEvent(type="done", data={})
 
+    # Max chars for a single tool result in conversation history.
+    # Dynamic cap: adaptive_num_ctx * ~3 chars/token, max 40 % of context.
+    # Absolute ceiling 40 000 chars (~10 K tokens) even on large models.
+    _MAX_TOOL_RESULT_CHARS: int = 40_000
+
+    def _cap_tool_result(self, content: str) -> str:
+        """Truncate a large tool result before adding it to conversation.
+
+        Keeps the first 70 % and last 10 % of the content so that both the
+        command summary and the tail (often a final summary/stats line) are
+        preserved.  Dynamic cap scales down when VRAM-crash mode is active.
+        """
+        # When context has been reduced due to crashes, scale cap proportionally
+        if self._adaptive_num_ctx > 0:
+            # ~3 chars per token; keep at most 25 % of reduced context
+            cap = max(2_000, self._adaptive_num_ctx * 3 // 4)
+        else:
+            cap = self._MAX_TOOL_RESULT_CHARS
+        if len(content) <= cap:
+            return content
+        head = int(cap * 0.70)
+        tail = int(cap * 0.10)
+        omitted = len(content) - head - tail
+        return (
+            content[:head]
+            + f"\n... [{omitted} chars omitted — use read_file to see full output] ...\n"
+            + content[-tail:]
+        )
+
     def _append_tool_result(
         self,
         tool_name: str,
@@ -2182,6 +2334,7 @@ class AgentLoop(_ValidatorMixin, _FormatterMixin,
         tool_call_id: str | None = None,
     ) -> None:
         cfg = get_config()
+        content_str = self._cap_tool_result(content_str)
         if cfg.tool_response_role.lower() == "tool":
             tool_msg: dict[str, Any] = {
                 "role": "tool",
@@ -2199,6 +2352,50 @@ class AgentLoop(_ValidatorMixin, _FormatterMixin,
                     "content": f"[SYSTEM: Tool '{tool_name}' executed {status}]\nOutput:\n{content_str}",
                 }
             )
+
+    # URL-extracting regex for _record_tested_endpoint
+    _URL_RE = re.compile(r"https?://[^\s\"']+", re.IGNORECASE)
+
+    def _record_tested_endpoint(
+        self, tool_name: str, arguments: dict[str, Any]
+    ) -> None:
+        """Extract tested URL from tool arguments and persist it to session.
+
+        Supports: execute (curl/wget/sqlmap/ffuf/nikto/etc), browser_action
+        (goto/new_tab), quick_fuzz, advanced_fuzz, deep_fuzz.
+        Silently ignores tools that don't target URLs.
+        """
+        if not self._session:
+            return
+        url: str = ""
+        method: str = "GET"
+
+        if tool_name == "execute":
+            cmd = arguments.get("command", "")
+            # Extract first URL from command string
+            m = self._URL_RE.search(cmd)
+            if m:
+                url = m.group(0).rstrip("'\"\\;,")
+            # Detect HTTP method from curl -X / --request flags
+            _method_m = re.search(
+                r"(?:-X|--request)\s+([A-Z]+)", cmd, re.IGNORECASE)
+            if _method_m:
+                method = _method_m.group(1).upper()
+            # POST implied by -d / --data flags
+            elif re.search(r"\s(?:-d|--data|--data-raw)\s", cmd):
+                method = "POST"
+
+        elif tool_name == "browser_action":
+            action = arguments.get("action", "")
+            if action in ("goto", "new_tab"):
+                url = arguments.get("url", "")
+
+        elif tool_name in ("quick_fuzz", "advanced_fuzz", "deep_fuzz",
+                           "schemathesis_fuzz"):
+            url = arguments.get("url", arguments.get("target", ""))
+
+        if url:
+            record_tested_endpoint(self._session, url, method)
 
     def get_stats(self) -> dict[str, Any]:
         return {
@@ -3379,5 +3576,20 @@ class AgentLoop(_ValidatorMixin, _FormatterMixin,
 
         if s.completed_phases:
             parts.append(f"COMPLETED PHASES: {', '.join(s.completed_phases)}")
+
+        if s.tested_endpoints:
+            # Show last 20 tested endpoints so the LLM knows what NOT to repeat
+            shown = s.tested_endpoints[-20:]
+            remainder = len(s.tested_endpoints) - len(shown)
+            ep_note = (
+                f"... and {remainder} more already tested" if remainder > 0 else ""
+            )
+            parts.append(
+                f"ALREADY TESTED ENDPOINTS ({len(s.tested_endpoints)} total"
+                + (f", showing last 20" if remainder > 0 else "")
+                + "):\n"
+                + "\n".join(f"  {ep}" for ep in shown)
+                + (f"\n  {ep_note}" if ep_note else "")
+            )
 
         return "\n".join(parts)
