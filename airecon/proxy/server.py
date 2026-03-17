@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import asyncio
-import importlib.metadata
 import json
 import logging
 from contextlib import asynccontextmanager
@@ -17,6 +16,7 @@ from pydantic import BaseModel, Field
 from sse_starlette.sse import EventSourceResponse
 
 from .agent import AgentLoop
+from airecon._version import __version__ as _version
 from .config import get_config
 from .docker import DockerEngine
 from .ollama import OllamaClient
@@ -77,11 +77,6 @@ async def lifespan(app: FastAPI):
         await engine.close()
     logger.info("AIRecon Proxy shutdown complete")
 
-
-try:
-    _version = importlib.metadata.version("airecon")
-except importlib.metadata.PackageNotFoundError:
-    _version = "0.1.5"
 
 app = FastAPI(
     title="AIRecon Proxy",

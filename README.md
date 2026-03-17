@@ -4,7 +4,7 @@
 <h4 align="center">AI-Powered Autonomous Penetration Testing Agent</h4>
 <p align="center">
   <img src="https://img.shields.io/badge/language-python-green.svg">
-  <img src="https://img.shields.io/badge/version-v0.1.5.beta-green.svg">
+  <img src="https://img.shields.io/badge/version-v0.1.6--beta-green.svg">
   <img src="https://img.shields.io/badge/python-3.12%2B-blue.svg">
   <img src="https://img.shields.io/badge/LLM-Ollama%20(local)-orange.svg">
   <a href="https://github.com/pikpikcu/airecon/blob/master/LICENSE">
