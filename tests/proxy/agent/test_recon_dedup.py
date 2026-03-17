@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import json
-import pytest
 from unittest.mock import MagicMock, patch
 
 from airecon.proxy.agent.executors import (
@@ -43,7 +42,6 @@ class TestLoadReconBins:
 
     def test_falls_back_on_missing_file(self, tmp_path):
         fallback = frozenset({"nmap"})
-        fake_path = tmp_path / "missing.json"
         with patch(
             "airecon.proxy.agent.executors.Path",
             return_value=MagicMock(

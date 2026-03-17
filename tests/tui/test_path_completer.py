@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import pytest
 from pathlib import Path
 from unittest.mock import patch
 
@@ -17,7 +16,7 @@ class TestListEntriesEmpty:
         with patch("airecon.tui.widgets.path_completer.Path") as MockPath:
             MockPath.home.return_value = tmp_path
             MockPath.side_effect = lambda p: Path(p)
-            result = _list_entries("")
+            _list_entries("")
         # We can't easily mock Path() calls inline, so test real behavior
         # by testing empty fragment falls through to home
         # Just verify function doesn't raise
