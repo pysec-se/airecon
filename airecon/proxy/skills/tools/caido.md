@@ -148,10 +148,11 @@ Note: `raw` field is base64-encoded. Decode with:
 
 ### Query requests with offset pagination (for large sets)
 ```bash
+# count returns { value, snapshot } — use count { value } not count directly
 curl -sL -X POST \
   -H "Content-Type: application/json" \
   -H "Authorization: Bearer $TOKEN" \
-  -d '{"query":"query { requestsByOffset(limit: 100, offset: 0, filter: {httpql: \"host.eq:target.com\"}) { edges { node { id method path response { statusCode length } } } count } }"}' \
+  -d '{"query":"query { requestsByOffset(limit: 100, offset: 0, filter: {httpql: \"host.eq:target.com\"}) { edges { node { id method path response { statusCode length } } } count { value } } }"}' \
   http://127.0.0.1:48080/graphql | jq '.data.requestsByOffset'
 ```
 
@@ -197,10 +198,11 @@ curl -sL -X POST \
 
 ### List pending intercepted messages
 ```bash
+# interceptMessages requires kind argument: REQUEST | RESPONSE | STREAM_WS
 curl -sL -X POST \
   -H "Content-Type: application/json" \
   -H "Authorization: Bearer $TOKEN" \
-  -d '{"query":"query { interceptMessages(first: 10) { edges { node { id ... on InterceptRequestMessage { request { id method host path } } } } } }"}' \
+  -d '{"query":"query { interceptMessages(first: 10, kind: REQUEST) { edges { node { id ... on InterceptRequestMessage { request { id method host path } } } } } }"}' \
   http://127.0.0.1:48080/graphql | jq '.data.interceptMessages'
 ```
 
@@ -287,10 +289,11 @@ curl -sL -X POST \
 
 ### List all Replay Sessions
 ```bash
+# ReplayEntry does not have a response field directly — use request { response }
 curl -sL -X POST \
   -H "Content-Type: application/json" \
   -H "Authorization: Bearer $TOKEN" \
-  -d '{"query":"query { replaySessions(first: 20) { edges { node { id name activeEntry { id response { statusCode length } } } } } }"}' \
+  -d '{"query":"query { replaySessions(first: 20) { edges { node { id name activeEntry { id request { id method host path response { statusCode length } } } } } } }"}' \
   http://127.0.0.1:48080/graphql | jq '.data.replaySessions.edges[].node'
 ```
 
@@ -480,13 +483,16 @@ curl -sL -X POST \
   http://127.0.0.1:48080/graphql | jq '.data.findings.edges[].node'
 ```
 
-### Export Findings
+### Export Findings (via list + manual export)
 ```bash
+# exportFindings mutation is not available in this Caido version.
+# Instead, list all findings and save to file:
 curl -sL -X POST \
   -H "Content-Type: application/json" \
   -H "Authorization: Bearer $TOKEN" \
-  -d '{"query":"mutation { exportFindings(input: { format: MARKDOWN }) { path } }"}' \
-  http://127.0.0.1:48080/graphql | jq '.data.exportFindings'
+  -d '{"query":"query { findings(first: 200) { edges { node { id title description reporter request { id method host path response { statusCode } } } } } }"}' \
+  http://127.0.0.1:48080/graphql | jq '.data.findings.edges[].node' \
+  > output/caido_findings.json
 ```
 
 ---
@@ -610,7 +616,7 @@ curl -sL -X POST \
 curl -sL -X POST \
   -H "Content-Type: application/json" \
   -H "Authorization: Bearer $TOKEN" \
-  -d '{"query":"query { requestsByOffset(limit: 500, offset: 0, filter: {httpql: \"host.eq:target.com\"}) { edges { node { id method host path response { statusCode length roundtripTime } createdAt } } count } }"}' \
+  -d '{"query":"query { requestsByOffset(limit: 500, offset: 0, filter: {httpql: \"host.eq:target.com\"}) { edges { node { id method host path response { statusCode length roundtripTime } createdAt } } count { value } } }"}' \
   http://127.0.0.1:48080/graphql \
   | jq '.data.requestsByOffset.edges[].node' \
   > output/caido_history_target.json
@@ -624,21 +630,21 @@ echo "Exported $(jq -s 'length' output/caido_history_target.json) requests"
 curl -sL -X POST \
   -H "Content-Type: application/json" \
   -H "Authorization: Bearer $TOKEN" \
-  -d '{"query":"query { requestsByOffset(limit: 200, filter: {httpql: \"resp.code.gte:400\"}) { edges { node { id method host path response { statusCode length } } } } }"}' \
+  -d '{"query":"query { requestsByOffset(limit: 200, offset: 0, filter: {httpql: \"resp.code.gte:400\"}) { edges { node { id method host path response { statusCode length } } } count { value } } }"}' \
   http://127.0.0.1:48080/graphql | jq '.data.requestsByOffset.edges[].node'
 
 # Find POST requests (forms, API endpoints)
 curl -sL -X POST \
   -H "Content-Type: application/json" \
   -H "Authorization: Bearer $TOKEN" \
-  -d '{"query":"query { requestsByOffset(limit: 200, filter: {httpql: \"method.eq:POST\"}) { edges { node { id method host path response { statusCode } } } } }"}' \
+  -d '{"query":"query { requestsByOffset(limit: 200, offset: 0, filter: {httpql: \"method.eq:POST\"}) { edges { node { id method host path response { statusCode } } } count { value } } }"}' \
   http://127.0.0.1:48080/graphql | jq '.data.requestsByOffset.edges[].node'
 
 # Find unauthenticated API calls
 curl -sL -X POST \
   -H "Content-Type: application/json" \
   -H "Authorization: Bearer $TOKEN" \
-  -d '{"query":"query { requestsByOffset(limit: 200, filter: {httpql: \"path.cont:\"/api/\" and resp.code.eq:200\"}) { edges { node { id method host path response { statusCode length } } } } }"}' \
+  -d '{"query":"query { requestsByOffset(limit: 200, offset: 0, filter: {httpql: \"path.cont:\\\"/api/\\\" and resp.code.eq:200\"}) { edges { node { id method host path response { statusCode length } } } count { value } } }"}' \
   http://127.0.0.1:48080/graphql | jq '.data.requestsByOffset.edges[].node'
 ```
 
