@@ -5,7 +5,42 @@ set -e
 GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
 RED='\033[0;31m'
+CYAN='\033[0;36m'
+BOLD='\033[1m'
 NC='\033[0m' # No Color
+
+# ── Detect version from pyproject.toml ──────────────────────────────────────
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+PYPROJECT="$SCRIPT_DIR/pyproject.toml"
+
+if [ -f "$PYPROJECT" ]; then
+    NEW_VERSION=$(grep -m1 '^version' "$PYPROJECT" | sed 's/version = "\(.*\)"/\1/')
+else
+    NEW_VERSION="unknown"
+fi
+
+echo -e ""
+echo -e "${CYAN}${BOLD}  ▄▖▄▖▄▖${NC}"
+echo -e "${CYAN}${BOLD}  ▌▌▐ ▙▘█▌▛▘▛▌▛▌${NC}"
+echo -e "${CYAN}${BOLD}  ▛▌▟▖▌▌▙▖▙▖▙▌▌▌${NC}"
+echo -e "${CYAN}  v${NEW_VERSION} — AI-Powered Security Reconnaissance${NC}"
+echo -e ""
+
+# ── Check currently installed version ───────────────────────────────────────
+CURRENT_VERSION=""
+if command -v airecon &> /dev/null; then
+    CURRENT_VERSION=$(airecon --version 2>/dev/null | awk '{print $NF}' || true)
+fi
+
+if [ -n "$CURRENT_VERSION" ]; then
+    if [ "$CURRENT_VERSION" = "$NEW_VERSION" ]; then
+        echo -e "${YELLOW}[!] v${CURRENT_VERSION} is already installed. Reinstalling...${NC}"
+    else
+        echo -e "${YELLOW}[!] Upgrading: v${CURRENT_VERSION} → v${NEW_VERSION}${NC}"
+    fi
+else
+    echo -e "${GREEN}[+] Installing AIRecon v${NEW_VERSION}...${NC}"
+fi
 
 echo -e "${GREEN}[+] Checking environment...${NC}"
 
@@ -101,9 +136,14 @@ if [ ! -f "$INSTALLED_BIN" ]; then
     $PYTHON_CMD -m pip show -f airecon | grep "bin/airecon" || true
 else
     echo -e "${GREEN}[+] Verified: $INSTALLED_BIN exists.${NC}"
-    # Verify exact version
-    $INSTALLED_BIN --version
-    
+    # Verify installed version matches expected
+    INSTALLED_VERSION=$($INSTALLED_BIN --version 2>/dev/null | awk '{print $NF}' || true)
+    if [ "$INSTALLED_VERSION" = "$NEW_VERSION" ]; then
+        echo -e "${GREEN}[+] Version: ${BOLD}v${INSTALLED_VERSION}${NC}${GREEN} ✓${NC}"
+    else
+        echo -e "${YELLOW}[!] Version mismatch — expected v${NEW_VERSION}, got v${INSTALLED_VERSION}${NC}"
+    fi
+
     # Check if it's in PATH
     if command -v airecon &> /dev/null; then
         echo -e "${GREEN}[+] 'airecon' is in your PATH.${NC}"
