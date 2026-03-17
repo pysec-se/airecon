@@ -662,7 +662,18 @@ def update_from_parsed_output(
     _SEVERITY_RE = re.compile(
         r"^\[(CRITICAL|HIGH|MEDIUM|LOW|INFO)\]",
         re.IGNORECASE)
-    _HTTP_STATUS_RE = re.compile(r"https?://\S+\s+\[(\d{3})\]")
+    # httpx outputs URL followed by [STATUS] bracket — handle multiple common formats:
+    #   https://host.com [200]                     (httpx -sc)
+    #   https://host.com [200] [title] [tech]      (httpx default)
+    #   https://host.com [200 OK]                  (httpx extended)
+    #   https://host.com [200,text/html,...]       (httpx -json piped)
+    _HTTP_STATUS_RE = re.compile(r"(https?://\S+?)\s+\[(\d{3})[^\]]*\]")
+    # DNS-only label prefixes that are not HTTP-probeable hosts (e.g. _dmarc, _domainkey)
+    _DNS_ONLY_PREFIX_RE = re.compile(r"^_")
+    # Private/loopback IP ranges — not valid external scan targets
+    _PRIVATE_IP_RE = re.compile(
+        r"^(10\.|172\.(1[6-9]|2\d|3[01])\.|192\.168\.|127\.|169\.254\.|::1|fd)"
+    )
 
     for item in parsed.items:
         item_stripped = item.strip()
@@ -682,12 +693,16 @@ def update_from_parsed_output(
                 session.vulnerabilities.append(new_vuln)
             continue
 
-        # 2. URL with status code (httpx-style) → live_hosts
-        status_match = _HTTP_STATUS_RE.match(item_stripped)
+        # 2. URL with HTTP status code (httpx-style output) → live_hosts.
+        # Matches: https://host [200], https://host [200 OK], https://host [200] [nginx]
+        status_match = _HTTP_STATUS_RE.search(item_stripped)
         if status_match:
-            url = _normalize_url(item_stripped.split(" [")[0].strip())
+            url = _normalize_url(status_match.group(1).rstrip(".,;:)]}>\"'"))
             if url and url not in session.live_hosts:
                 session.live_hosts.append(url)
+            # Also add to urls if not already there
+            if url and url not in session.urls:
+                session.urls.append(url)
             continue
 
         # 3. URL (plain or embedded in prefixed line) → urls collection
@@ -734,9 +749,16 @@ def update_from_parsed_output(
             continue
 
         # 6. Looks like a subdomain → subdomains
-        # Must have at least one dot, no spaces, no special chars
+        # Must have at least one dot, no spaces, no special chars.
+        # Exclude DNS-only labels (e.g. _dmarc.target.com) — these cannot be
+        # HTTP-probed. Exclude private/loopback IPs to avoid dead scan targets.
         clean = item_stripped.split()[0]  # first token only
-        if _SUBDOMAIN_RE.match(clean) and len(clean) > 4:
+        if (
+            _SUBDOMAIN_RE.match(clean)
+            and len(clean) > 4
+            and not _DNS_ONLY_PREFIX_RE.match(clean)
+            and not _PRIVATE_IP_RE.match(clean)
+        ):
             if clean not in session.subdomains:
                 session.subdomains.append(clean)
             continue

@@ -2802,7 +2802,7 @@ class AgentLoop(_ValidatorMixin, _FormatterMixin,
             ],
             PipelinePhase.COMPLETE: [],
         }
-        tactics = tactic_map.get(phase, [])[:3]
+        tactics = tactic_map.get(phase, [])[:5]
         if not tactics:
             return ""
 
@@ -2847,12 +2847,21 @@ class AgentLoop(_ValidatorMixin, _FormatterMixin,
 
         s = self._session
         if phase == PipelinePhase.RECON:
+            # defaults[0] = enumerate subdomains/hosts
             if s.subdomains or s.live_hosts:
                 self.state.mark_objective(phase.value, defaults[0], "done")
-            if s.open_ports:
+            # defaults[1] = filter to LIVE hosts (httpx/dnsx ran and populated live_hosts)
+            if s.live_hosts and len(defaults) > 1:
                 self.state.mark_objective(phase.value, defaults[1], "done")
-            if s.scan_count >= 3 or s.urls:
+            # defaults[2] = port scan live hosts
+            if s.open_ports and len(defaults) > 2:
                 self.state.mark_objective(phase.value, defaults[2], "done")
+            # defaults[3] = discover directories/URLs on live hosts
+            if s.urls and len(defaults) > 3:
+                self.state.mark_objective(phase.value, defaults[3], "done")
+            # defaults[4] = persist recon artifacts
+            if s.scan_count >= 3 and len(defaults) > 4:
+                self.state.mark_objective(phase.value, defaults[4], "done")
         elif phase == PipelinePhase.ANALYSIS:
             if s.technologies or s.urls:
                 self.state.mark_objective(phase.value, defaults[0], "done")
@@ -3531,7 +3540,7 @@ class AgentLoop(_ValidatorMixin, _FormatterMixin,
             # Subdomains found but no live_hosts yet — warn the LLM to validate first
             parts.append(
                 "WARNING: subdomains enumerated but NOT YET validated. "
-                "Run: httpx -l subdomains.txt -o live.txt -status-code "
+                "Run: httpx -l output/subdomains.txt -sc -o output/live_hosts.txt "
                 "to filter live hosts BEFORE port scanning or directory brute-force."
             )
 
