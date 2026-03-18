@@ -51,6 +51,17 @@ DEFAULT_CONFIG = {
     "ollama_enable_thinking": True,
     "ollama_supports_thinking": True,
     "ollama_supports_native_tools": True,
+    # Maximum concurrent Ollama requests from this AIRecon process.
+    # Keep 1 for stability on large models; increase only if server has headroom.
+    "ollama_max_concurrent_requests": 1,
+    # Protect the first N tokens (system prompt) from Ollama's KV-cache eviction.
+    # Set to >= system prompt token count (~8K for AIRecon) so the model never
+    # loses scope/rules due to Ollama-level truncation in long sessions.
+    "ollama_num_keep": 8192,
+    # Repeat penalty — prevents model from getting stuck in repetition loops
+    # during long recon sessions when KV cache pressure causes flat probability.
+    # 1.05 is conservative; range 1.0 (off) – 1.2 (aggressive).
+    "ollama_repeat_penalty": 1.05,
     "proxy_host": "127.0.0.1",
     "proxy_port": 3000,
     "command_timeout": 900.0,
@@ -74,8 +85,9 @@ DEFAULT_CONFIG = {
     "browser_page_load_delay": 1.0,
     # Browser action timeout in seconds (applies to each browser coroutine).
     "browser_action_timeout": 120,
-    # 60m — keep 122B model warm in VRAM across long engagements.
-    "ollama_keep_alive": "60m",
+    # -1 = keep model loaded in VRAM indefinitely (dedicated server).
+    # Use "60m" if sharing a machine with other workloads.
+    "ollama_keep_alive": "-1",
     "searxng_url": "http://localhost:8080",
     "searxng_engines": "google,bing,duckduckgo,brave,google_news,github,stackoverflow",
     "vuln_similarity_threshold": 0.7,
@@ -114,6 +126,9 @@ class Config:
     ollama_enable_thinking: bool
     ollama_supports_thinking: bool
     ollama_supports_native_tools: bool
+    ollama_max_concurrent_requests: int
+    ollama_num_keep: int
+    ollama_repeat_penalty: float
 
     # Docker sandbox
     docker_image: str
@@ -303,6 +318,9 @@ class Config:
             "ollama_num_ctx": (1024, None),
             "ollama_num_ctx_small": (1024, None),
             "ollama_num_predict": (1, None),
+            "ollama_max_concurrent_requests": (1, None),
+            "ollama_num_keep": (0, None),
+            "ollama_repeat_penalty": (1.0, 2.0),
             "browser_action_timeout": (5, None),
             "pipeline_recon_min_subdomains": (0, None),
             "pipeline_recon_min_urls": (0, None),

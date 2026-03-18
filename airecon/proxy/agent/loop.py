@@ -778,10 +778,22 @@ class AgentLoop(_ValidatorMixin, _FormatterMixin,
 
                         # Check pipeline transitions
                         if self.pipeline and self.pipeline.should_transition():
+                            _prev_phase = self.pipeline.get_current_phase()
                             new_phase = self.pipeline.transition()
                             if new_phase:
                                 pipeline_prompt = self.pipeline.get_transition_prompt(
                                     new_phase)
+                                # Compact old phase context to reclaim KV cache space.
+                                # Raw tool outputs from RECON are not needed verbatim
+                                # in ANALYSIS; summaries + session state are sufficient.
+                                self._compact_phase_context(
+                                    _prev_phase.value if _prev_phase else "RECON"
+                                )
+                                # Pin confirmed vulnerabilities before EXPLOIT so they
+                                # survive truncation and guide targeted exploitation.
+                                from airecon.proxy.agent.pipeline import PipelinePhase as _PP
+                                if new_phase == _PP.EXPLOIT:
+                                    self._inject_exploit_vuln_context()
                                 # New phase = fresh start for exploration pressure.
                                 # Without this reset, stagnation accumulated in the
                                 # previous phase inflates pressure in the new one,
@@ -1194,7 +1206,7 @@ class AgentLoop(_ValidatorMixin, _FormatterMixin,
                 # Up to 6 attempts total:
                 #   VRAM crash  → up to 3 retries with escalating truncation
                 #                 (ctx and message budget shrink each time)
-                #   Connection refused → 3 retries with exponential backoff (5s/10s/20s)
+                #   Connection refused → 4 retries with longer backoff (10s/30s/60s/120s)
                 #   Timeout          → 1 retry (already waited; model may finish faster)
                 # Any other error is fatal on first occurrence.
                 _last_chunk_data = {}  # Store last chunk to extract token info
@@ -1202,15 +1214,20 @@ class AgentLoop(_ValidatorMixin, _FormatterMixin,
                 for _stream_attempt in range(6):
                     try:
                         async for chunk in self.ollama.chat_stream(
-                            messages=self.state.conversation,
+                            messages=self._messages_for_ollama(),
                             tools=self._tools_ollama,
                             options={
                                 "num_ctx": adaptive_num_ctx,
                                 "temperature": adaptive_temperature,
                                 "num_predict": adaptive_num_predict,
+                                # Protect system prompt from Ollama KV-cache eviction
+                                "num_keep": self._cfg_int(
+                                    cfg, "ollama_num_keep", 8192),
+                                # Prevent repetition loops in long sessions
+                                "repeat_penalty": self._cfg_float(
+                                    cfg, "ollama_repeat_penalty", 1.05),
                             },
-                            think=cfg.ollama_enable_thinking
-                            and self.ollama.supports_thinking,
+                            think=self._should_use_thinking(cfg, current_phase),
                         ):
                             if hasattr(chunk, "model_dump"):
                                 chunk_data = chunk.model_dump()
@@ -1421,13 +1438,15 @@ class AgentLoop(_ValidatorMixin, _FormatterMixin,
                             _carry = ""
                             continue  # retry with reduced context
 
-                        elif _is_conn_refused and _stream_attempt < 3:
+                        elif _is_conn_refused and _stream_attempt < 4:
                             # Connection refused: Ollama may be restarting after
-                            # a crash (common with large models). Back off and
-                            # retry up to 3 times (5 s → 10 s → 20 s).
-                            wait_s = 5 * (2 ** _stream_attempt)  # 5, 10, 20
+                            # a crash or network hiccup. For large remote models
+                            # (122B) reload can take 30-90s — use longer backoff:
+                            # attempt 0→10s, 1→30s, 2→60s, 3→120s (total ~220s).
+                            _conn_waits = [10, 30, 60, 120]
+                            wait_s = _conn_waits[min(_stream_attempt, len(_conn_waits) - 1)]
                             logger.warning(
-                                "Ollama connection refused (attempt %d/3) — "
+                                "Ollama connection refused (attempt %d/4) — "
                                 "retrying in %ds",
                                 _stream_attempt + 1,
                                 wait_s,
@@ -1437,7 +1456,7 @@ class AgentLoop(_ValidatorMixin, _FormatterMixin,
                                 data={
                                     "content": (
                                         f"\n[AUTO-RECOVERY] Ollama unreachable "
-                                        f"(attempt {_stream_attempt + 1}/3). "
+                                        f"(attempt {_stream_attempt + 1}/4). "
                                         f"Retrying in {wait_s}s...\n"
                                     )
                                 },
@@ -1490,7 +1509,7 @@ class AgentLoop(_ValidatorMixin, _FormatterMixin,
                             )
                         elif _is_conn_refused:
                             error_msg = (
-                                "Cannot connect to Ollama after 3 retries "
+                                "Cannot connect to Ollama after 4 retries "
                                 "(connection refused).\n"
                                 "Fix: start Ollama with `ollama serve`."
                             )
@@ -2473,6 +2492,140 @@ class AgentLoop(_ValidatorMixin, _FormatterMixin,
     # Smaller cap = fewer OOM crashes; full output always saved to file.
     _MAX_TOOL_RESULT_CHARS: int = 15_000
 
+    def _inject_exploit_vuln_context(self) -> None:
+        """Inject a pinned vulnerability summary at the start of EXPLOIT phase.
+
+        Ensures the model has direct, unambiguous access to ALL confirmed
+        vulnerabilities from ANALYSIS — preventing loss of critical targets due
+        to context truncation. This message is prepended using the
+        protected_system bucket so it survives _enforce_char_budget().
+        """
+        if not self._session:
+            return
+
+        vulns = self._session.vulnerabilities or []
+        injection_pts = self._session.injection_points or []
+
+        if not vulns and not injection_pts:
+            logger.debug("No vulnerabilities or injection points to pin for EXPLOIT phase")
+            return
+
+        lines = ["[SYSTEM: EXPLOIT PHASE — CONFIRMED ATTACK SURFACE]",
+                 "Exploit each item below systematically. Do NOT re-discover — go straight to exploitation.\n"]
+
+        if vulns:
+            lines.append("## Confirmed Vulnerabilities:")
+            for i, v in enumerate(vulns[:25], 1):
+                title = v.get("title", "Unknown")
+                url = v.get("url") or v.get("evidence", "")
+                sev = v.get("severity", "")
+                param = v.get("parameter", "")
+                detail = f" (param: {param})" if param else ""
+                lines.append(f"  {i}. [{sev}] {title}{detail} — {url}")
+
+        if injection_pts:
+            lines.append("\n## Injection Points (test for SQLi/XSS/SSTI/SSRF):")
+            for j, ip in enumerate(injection_pts[:20], 1):
+                url = ip.get("url", "")
+                param = ip.get("parameter", "")
+                method = ip.get("method", "GET")
+                itype = ip.get("type_hint", "")
+                lines.append(f"  {j}. {method} {url} — param: {param} [{itype}]")
+
+        lines.append(
+            "\nPriority order: CRITICAL > HIGH > MEDIUM. "
+            "Use sqlmap, dalfox, nuclei, custom payloads. "
+            "Confirm each exploit with proof-of-concept output."
+        )
+
+        vuln_ctx = "\n".join(lines)
+        self.state.conversation.append({
+            "role": "system",
+            "content": vuln_ctx,
+            "_bucket": "protected_system",
+        })
+        logger.info(
+            "EXPLOIT context pinned: %d vulns + %d injection points",
+            len(vulns), len(injection_pts),
+        )
+
+    def _compact_phase_context(self, from_phase: str) -> None:
+        """Compress raw tool results from a completed phase to free KV cache space.
+
+        When transitioning (e.g. RECON→ANALYSIS), the bulk of old raw tool
+        outputs (full nmap/subfinder/httpx dumps) is no longer needed verbatim.
+        We keep the last 15 messages intact and collapse old tool output to
+        short stubs, reclaiming tens of thousands of context tokens.
+
+        Findings (vulnerabilities, structured data) are never touched — they
+        live in session state (self._session), not as raw conversation messages.
+        """
+        msgs = self.state.conversation
+        keep_recent = 15
+        cutoff = max(0, len(msgs) - keep_recent)
+        compacted_tools = 0
+        compacted_thinking = 0
+        chars_freed = 0
+
+        for i, msg in enumerate(msgs[:cutoff]):
+            role = msg.get("role")
+            content = str(msg.get("content", ""))
+
+            if role == "tool" and len(content) > 400:
+                stub = content[:200].rstrip()
+                freed = len(content) - len(stub)
+                msg["content"] = (
+                    stub
+                    + f" ...[{from_phase} phase output compacted — {freed} chars freed]"
+                )
+                chars_freed += freed
+                compacted_tools += 1
+
+            elif role == "assistant" and msg.get("thinking"):
+                thinking_len = len(str(msg["thinking"]))
+                msg.pop("thinking", None)
+                chars_freed += thinking_len
+                compacted_thinking += 1
+
+        if compacted_tools or compacted_thinking:
+            logger.info(
+                "Phase transition compaction (%s→next): %d tool msgs, "
+                "%d thinking strips, ~%d chars freed",
+                from_phase, compacted_tools, compacted_thinking, chars_freed,
+            )
+
+    def _messages_for_ollama(self) -> list[dict[str, Any]]:
+        """Return a view of the conversation with thinking stripped from old messages.
+
+        Thinking traces from previous iterations are already encoded in their
+        corresponding content/tool_calls and provide no additional value when
+        replayed to Ollama — they only consume KV cache tokens.
+
+        Strategy: keep thinking only in the LAST assistant message (most recent turn).
+        This recovers 50-200K tokens in long sessions without losing any information.
+        _enforce_char_budget() handles the stateful strip when budget is exceeded;
+        this method handles the API-call view for every iteration.
+        """
+        msgs = self.state.conversation
+        last_assistant_idx = -1
+        for i, m in enumerate(msgs):
+            if m.get("role") == "assistant":
+                last_assistant_idx = i
+
+        if last_assistant_idx == -1:
+            return list(msgs)
+
+        result = []
+        for i, msg in enumerate(msgs):
+            if (
+                msg.get("role") == "assistant"
+                and i != last_assistant_idx
+                and msg.get("thinking")
+            ):
+                msg = {k: v for k, v in msg.items() if k != "thinking"}
+            result.append(msg)
+        return result
+
     def _get_tool_result_cap(self) -> int:
         """Return per-message tool result cap scaled to current context window."""
         ctx = self._adaptive_num_ctx if self._adaptive_num_ctx > 0 else get_config().ollama_num_ctx
@@ -2521,7 +2674,9 @@ class AgentLoop(_ValidatorMixin, _FormatterMixin,
         effective_input_ctx = max(1024, num_ctx - cfg.ollama_num_predict)
         budget = effective_input_ctx * 3
         total = sum(
-            len(str(m.get("content") or "")) + len(str(m.get("tool_calls") or ""))
+            len(str(m.get("content") or ""))
+            + len(str(m.get("tool_calls") or ""))
+            + len(str(m.get("thinking") or ""))   # thinking traces count toward budget
             for m in self.state.conversation
         )
         if total <= budget:
@@ -2531,6 +2686,24 @@ class AgentLoop(_ValidatorMixin, _FormatterMixin,
             "Pre-call char budget exceeded: %d chars > %d budget (num_ctx=%d) — compressing",
             total, budget, num_ctx,
         )
+
+        # Pass 0: strip thinking from ALL assistant messages except the most recent 3.
+        # Thinking traces accumulate rapidly (1500+ tokens each) and are invisible to
+        # the old total calculation, silently overflowing the context window and causing
+        # Ollama to truncate the system prompt → hallucination / scope loss.
+        # The thinking is already captured in content/tool_calls — safe to drop from history.
+        assistant_indices = [
+            i for i, m in enumerate(self.state.conversation)
+            if m.get("role") == "assistant" and m.get("thinking")
+        ]
+        # Keep thinking only in the most recent 3 assistant turns
+        for idx in assistant_indices[:-3]:
+            thinking_len = len(str(self.state.conversation[idx].get("thinking", "")))
+            self.state.conversation[idx].pop("thinking", None)
+            total -= thinking_len
+            if total <= budget:
+                logger.info("Budget restored after thinking strip (%d msgs)", len(assistant_indices))
+                return
 
         # Pass 1: compress tool/user messages over compress_cap chars.
         # EXCEPTION: the first user message contains the original task/scope instruction
@@ -2550,7 +2723,9 @@ class AgentLoop(_ValidatorMixin, _FormatterMixin,
 
         # Recheck after pass 1
         total = sum(
-            len(str(m.get("content") or "")) for m in self.state.conversation
+            len(str(m.get("content") or ""))
+            + len(str(m.get("thinking") or ""))
+            for m in self.state.conversation
         )
         if total <= budget:
             return
@@ -2915,6 +3090,58 @@ class AgentLoop(_ValidatorMixin, _FormatterMixin,
         "advanced_fuzz", "deep_fuzz", "schemathesis_fuzz",
         "spawn_agent", "create_vulnerability_report", "code_analysis",
     })
+
+    def _should_use_thinking(
+        self, cfg: Any, current_phase: Any
+    ) -> bool:
+        """Decide whether to enable thinking for this iteration.
+
+        Thinking is expensive: ~1500 tokens and 1-3s overhead per iteration.
+        It's only needed when the model must reason deeply — not for routine
+        RECON tool calls like 'run subfinder'.
+
+        Rules:
+        - Always OFF if model/config disables it globally.
+        - Always ON in ANALYSIS and EXPLOIT (complex reasoning required).
+        - Always ON during stagnation, recovery, or repeated failures.
+        - Always ON for deep tools (advanced_fuzz, spawn_agent, etc.).
+        - RECON / REPORT routine iterations: OFF after iter 8 to save tokens.
+        """
+        if not (
+            self._cfg_bool(cfg, "ollama_enable_thinking", True)
+            and self.ollama.supports_thinking
+        ):
+            return False
+
+        # Always think for ANALYSIS and EXPLOIT
+        from airecon.proxy.agent.pipeline import PipelinePhase  # local import to avoid cycle
+        if current_phase and current_phase in (
+            PipelinePhase.ANALYSIS, PipelinePhase.EXPLOIT
+        ):
+            return True
+
+        # Always think when struggling or in recovery
+        stagnation_threshold = self._cfg_int(cfg, "agent_stagnation_threshold", 2)
+        if (
+            self._stagnation_iterations >= stagnation_threshold
+            or self._recovery_force_tool_calls > 0
+            or self._consecutive_failures >= 2
+            or self._no_tool_iterations >= 1
+            or self._watchdog_forced_calls > 0
+        ):
+            return True
+
+        # Always think for deep tools
+        last_tool = self._recent_tool_names[-1] if self._recent_tool_names else ""
+        if last_tool in self._DEEP_TOOLS:
+            return True
+
+        # RECON / REPORT: disable thinking after warm-up (iter > 8)
+        # to save ~1500 tokens per iteration on routine tool calls.
+        if self.state.iteration > 8:
+            return False
+
+        return True
 
     def _get_adaptive_num_predict(self, cfg: Any, phase: str) -> int:
         """Return an adaptive num_predict based on phase complexity and last tool.
