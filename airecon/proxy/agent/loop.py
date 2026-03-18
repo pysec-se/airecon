@@ -61,6 +61,10 @@ logger = logging.getLogger("airecon.agent")
 # counter — stagnation should only reset on real security findings.
 _MEANINGFUL_EVIDENCE_THRESHOLD = 0.65
 
+# Maximum retries for empty Ollama responses before surfacing error.
+# Each retry waits 5s × attempt (5s, 10s, 15s, 20s).
+_MAX_EMPTY_RETRIES = 4
+
 # Vulnerability tool hints used in ANALYSIS phase objective marking.
 # Loaded from tools_meta.json (single source of truth).
 _ANALYSIS_VULN_TOOLS: frozenset[str] = frozenset(
@@ -1145,8 +1149,7 @@ class AgentLoop(_ValidatorMixin, _FormatterMixin,
                 # and hallucination.
                 _ctx_used = self.state.token_usage.get("used", 0)
                 if _ctx_used > 0 and adaptive_num_ctx > 0:
-                    _num_predict_reserved = getattr(cfg, "ollama_num_predict", 32768)
-                    _effective_input_ctx = max(1024, adaptive_num_ctx - _num_predict_reserved)
+                    _effective_input_ctx = max(1024, adaptive_num_ctx - cfg.ollama_num_predict)
                     _usage_ratio = _ctx_used / _effective_input_ctx
                     if _usage_ratio >= 0.80:
                         logger.warning(
@@ -1508,7 +1511,6 @@ class AgentLoop(_ValidatorMixin, _FormatterMixin,
                     # remote server busy, transient OOM). Retry up to 4 times
                     # with increasing wait before giving up.
                     # Previously: only 1 retry → agent stopped on second empty.
-                    _MAX_EMPTY_RETRIES = 4
                     self._empty_response_retry_count = getattr(
                         self, "_empty_response_retry_count", 0
                     ) + 1
@@ -2500,8 +2502,7 @@ class AgentLoop(_ValidatorMixin, _FormatterMixin,
         At 128K ctx / 32K predict: (131072-32768)*3 = ~294K chars input budget.
         """
         cfg = get_config()
-        num_predict = getattr(cfg, "ollama_num_predict", 32768)
-        effective_input_ctx = max(1024, num_ctx - num_predict)
+        effective_input_ctx = max(1024, num_ctx - cfg.ollama_num_predict)
         budget = effective_input_ctx * 3
         total = sum(
             len(str(m.get("content") or "")) + len(str(m.get("tool_calls") or ""))
