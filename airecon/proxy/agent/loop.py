@@ -509,9 +509,17 @@ class AgentLoop(_ValidatorMixin, _FormatterMixin,
                         target=self.state.active_target)
                     self.pipeline = PipelineEngine(self._session)
                 elif self._session.target != self.state.active_target:
-                    self._session.target = self.state.active_target
-                    if self.pipeline:
-                        self.pipeline = PipelineEngine(self._session)
+                    # Target switched mid-session — create a fresh SessionData
+                    # to prevent old target's subdomains/urls/findings from
+                    # contaminating the new target's context.
+                    logger.info(
+                        "Target switched %s → %s: creating fresh SessionData",
+                        self._session.target,
+                        self.state.active_target,
+                    )
+                    self._session = SessionData(
+                        target=self.state.active_target)
+                    self.pipeline = PipelineEngine(self._session)
 
                 # Cross-session memory: pre-populate new session with findings
                 # from the most recent prior scan of the same target so the
@@ -1982,11 +1990,19 @@ class AgentLoop(_ValidatorMixin, _FormatterMixin,
                     is_parallel = False
                     if tn == "execute":
                         cmd = args.get("command", "")
-                        cmd_bin = (
-                            cmd.split()[1]
-                            if cmd.startswith("cd ")
-                            else cmd.split()[0]
-                        )
+                        cmd_parts = cmd.split()
+                        # Guard against empty command or bare "cd" with no arg
+                        if cmd_parts:
+                            try:
+                                cmd_bin = (
+                                    cmd_parts[1]
+                                    if cmd.startswith("cd ") and len(cmd_parts) > 1
+                                    else cmd_parts[0]
+                                )
+                            except IndexError:
+                                cmd_bin = ""
+                        else:
+                            cmd_bin = ""
                         cmd_bin = cmd_bin.rsplit("/", 1)[-1]
                         if cmd_bin in parallelizable_tools:
                             # Group all parallel tools under a single

@@ -451,6 +451,7 @@ def save_session(session: SessionData) -> None:
     """Save session data to disk using session_id as filename."""
     try:
         SESSIONS_DIR.mkdir(parents=True, exist_ok=True)
+        session.updated_at = datetime.now().isoformat()
         filepath = SESSIONS_DIR / f"{session.session_id}.json"
         with open(filepath, "w") as f:
             json.dump(asdict(session), f, indent=2, default=str)
@@ -478,6 +479,7 @@ def list_sessions() -> list[dict]:
                 "session_id": data.get("session_id", path.stem),
                 "target": data.get("target", ""),
                 "created_at": data.get("created_at", ""),
+                "updated_at": data.get("updated_at", ""),
                 "scan_count": data.get("scan_count", 0),
                 "subdomains": len(data.get("subdomains", [])),
                 "live_hosts": len(data.get("live_hosts", [])),
@@ -486,7 +488,10 @@ def list_sessions() -> list[dict]:
         except Exception as _e:
             logger.debug("Could not load session metadata: %s", _e)
 
-    sessions.sort(key=lambda s: s["created_at"], reverse=True)
+    sessions.sort(
+        key=lambda s: s.get("updated_at") or s.get("created_at", ""),
+        reverse=True,
+    )
     return sessions
 
 
