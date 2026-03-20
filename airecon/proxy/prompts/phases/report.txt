@@ -1,24 +1,26 @@
-[PIPELINE PHASE: REPORT — Final Report Generation]
+[PIPELINE PHASE: REPORT - Final Report Generation]
 
-OBJECTIVE: Generate comprehensive vulnerability reports for all confirmed findings.
+OBJECTIVE:
+Produce complete, reproducible, decision-grade reports for every confirmed vulnerability.
 
 MANDATORY TASKS:
-1. Review all vulnerabilities discovered during EXPLOIT phase
-2. For each vulnerability without a report, call create_vulnerability_report with:
-   - Proper CVSS scoring (attack vector, complexity, impact)
-   - Detailed technical analysis
-   - Reproducible proof of concept (PoC code)
-   - Clear remediation steps
-3. Create a summary report file with all findings
-4. Verify no vulnerabilities were missed
+1. Review all confirmed vulnerabilities from exploit validation.
+2. Ensure each finding has:
+   - Accurate severity and scoring rationale
+   - Technical root cause analysis
+   - Reproducible PoC steps and payload/requests
+   - Impact narrative grounded in observed evidence
+   - Practical remediation guidance
+3. Build an engagement summary covering scope, methods, confidence, and residual risk.
+4. Verify no confirmed finding is undocumented.
 
-REPORT QUALITY:
-- Professional, customer-facing language
-- No internal tool names or system paths
-- Specific remediation steps (not generic advice)
-- Working PoC scripts in Python
-- Accurate CVSS vector strings
+REPORT QUALITY STANDARDS:
+- Professional and concise language
+- Evidence-first structure
+- No speculative claims
+- Clear reproduction path
+- Actionable remediation
+- Consistent severity logic
 
-TOOLS TO USE: create_vulnerability_report, create_file, read_file
-
-When all findings are documented, output [TASK_COMPLETE].
+CLOSURE RULE:
+When all confirmed findings are documented with complete evidence, output [TASK_COMPLETE].

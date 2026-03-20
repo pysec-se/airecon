@@ -41,9 +41,12 @@ DEFAULT_CONFIG = {
     # 2400s — 122B parameter inference takes longer than smaller models.
     "ollama_timeout": 2400.0,
     # 131072 = full 128K context window supported by Qwen3.5:122b.
+    # WARNING: KV cache at 131K ctx ≈ 31 GB extra VRAM for 122B model.
+    # Lower to 32768 if VRAM crashes occur frequently.
     "ollama_num_ctx": 131072,
-    # 65536 = 64K for secondary/summary calls (compression, tool summaries).
-    "ollama_num_ctx_small": 65536,
+    # 32768 = 32K — used for CTF mode and summary calls to cap KV cache VRAM.
+    # KV cache at 32K ctx ≈ 8 GB (vs 31 GB at 131K) — 4x reduction.
+    "ollama_num_ctx_small": 32768,
     # Low temperature keeps reasoning deterministic and reduces hallucination.
     "ollama_temperature": 0.15,
     # 32768 tokens for deep thinking + detailed tool-call responses.
@@ -87,7 +90,9 @@ DEFAULT_CONFIG = {
     "browser_action_timeout": 120,
     # -1 = keep model loaded in VRAM indefinitely (dedicated server).
     # Use "60m" if sharing a machine with other workloads.
-    "ollama_keep_alive": "-1",
+    # Must be int (-1, 0) or a duration string with unit ("60m", "1h").
+    # The bare string "-1" is invalid — Ollama rejects it with HTTP 400.
+    "ollama_keep_alive": -1,
     "searxng_url": "http://localhost:8080",
     "searxng_engines": "google,bing,duckduckgo,brave,google_news,github,stackoverflow",
     "vuln_similarity_threshold": 0.7,
@@ -161,7 +166,8 @@ class Config:
     browser_action_timeout: int
 
     # Ollama model keep_alive (how long to keep model in VRAM)
-    ollama_keep_alive: str
+    # int: -1 = infinite, 0 = unload immediately; str must include unit ("60m")
+    ollama_keep_alive: int | str
 
     # SearXNG self-hosted search (leave empty to use DuckDuckGo fallback)
     searxng_url: str

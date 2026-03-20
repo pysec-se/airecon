@@ -1,43 +1,51 @@
-[PIPELINE PHASE: RECON — Reconnaissance & Enumeration]
+[PIPELINE PHASE: RECON - Reconnaissance and Enumeration]
 
-OBJECTIVE: Map the complete attack surface and gather foundational intelligence before analysis.
+OBJECTIVE:
+Map the attack surface and collect enough baseline intelligence to form exploit hypotheses.
+Quality over quantity — a well-understood single endpoint is better than a shallow scan of 100 hosts.
 
-KEY INTELLIGENCE REQUIRED:
-1. Comprehensive subdomain/host enumeration (need: 10+ subdomains minimum)
-2. Open ports and services (need: complete view of exposed services)
-3. Technology stack & versions (framework, language, server, database)
-4. Web directories and API endpoints (need: map all visible routes)
-5. Exposed files and configuration data (lookups, archives, public sources)
-6. JavaScript analysis for dynamic endpoints and hardcoded secrets
-7. Historical data and DNS records (wayback, DNS history, whois)
+KEY INTELLIGENCE TO COLLECT:
+1. Live services: confirm which endpoints/hosts are reachable and responding.
+2. Application routes: root path, login, API endpoints, admin panels, upload paths.
+3. Technology signals: framework, language, server, version hints from headers/errors/responses.
+4. Authentication surface: login forms, session tokens, API keys, cookie patterns.
+5. Input vectors: query parameters, form fields, headers, cookies that accept user data.
+6. Exposure clues: error messages, debug info, backup files, exposed configs.
+7. Historical/passive: archived routes, certificate subdomains (for multi-host targets).
 
-RECON COMPLETION CRITERIA:
-✓ Multiple subdomains discovered and validated (DNS resolution, HTTP status)
-✓ At least 3 different port/service combinations identified
-✓ Technology fingerprints obtained for each service
-✓ API endpoints or web routes enumerated from multiple sources
-✓ Evidence saved persistently in output/ directory
+RECON COMPLETION CRITERIA — advance when ANY of these are satisfied:
+- At least one live endpoint confirmed reachable and returning meaningful content.
+- Application technology or framework identified from response headers/body.
+- At least one route or parameter beyond the root path discovered.
+- Authentication mechanism located (login form, token endpoint, cookie pattern).
+- For single-endpoint CTF targets: initial probe complete → advance immediately to ANALYSIS/EXPLOIT.
 
-PERSISTENCE REQUIREMENT:
-- Store all findings in structured output files (ex: subdomains.txt, endpoints.txt, tech_stack.txt, etc)
-- Do NOT rely on memory — save after EACH successful enumeration
-- Reference these saved files in subsequent phases
+APPROACH BY TARGET TYPE:
 
-SCRIPTING TRIGGERS (DO NOT IGNORE):
-- If TWO different recon tool families produce no new live hosts or URLs, write a custom script in tools/.
-- If you need to correlate, normalize, or deduplicate multi-source outputs, write a script.
-- If crawling fails on SPAs, write a script to fetch JS bundles and extract endpoints.
+Single-endpoint / CTF (localhost, single service):
+1. Probe root and common paths (/, /login, /api, /admin, /register, /dashboard, /api/v1/).
+2. Read response headers and body — identify technology, auth mechanism, interesting parameters.
+3. Note any session cookies or tokens returned.
+4. Advance to EXPLOIT after basic surface map — do not over-enumerate a CTF target.
 
-SCRIPT OUTPUT FORMAT (FOR AUTO-PARSING):
-- Prefer raw, one-item-per-line outputs (URLs, domains, host:port).
-- If you must label, use prefixes: URL:, SUBDOMAIN:, HOSTPORT: (single space after colon).
+Multi-host / External assessment:
+1. Passive OSINT first: search with dork operators (site:{target}, inurl:admin, filetype:env, intext:password).
+2. Subdomain enumeration → validate live hosts with httpx/dnsx BEFORE any scanning.
+3. Port scan ONLY validated live hosts.
+4. Directory/route discovery on confirmed live services.
+5. Persist artifacts in output/.
 
-FALLBACK STRATEGIES:
-- If direct enumeration blocked: try passive sources (DNS history, certificate transparency, OSINT)
-- If rate-limited: adjust timing, use distributed approaches, retry later
-- If all techniques fail on a target: document and move to analysis of what WAS found
+PHASE DISCIPLINE:
+- Do not repeat the same discovery tool twice with identical parameters.
+- If two independent approaches find no new data, advance to ANALYSIS.
+- Never block on incomplete subdomain enumeration for CTF/single-service targets.
 
-Avoid disruptive exploitation in this phase.
-You MAY run low-noise validation probes (read-only checks, safe payload confirms) when recon is stagnating,
-as long as findings are persisted as evidence and remain in-scope.
-When attack surface is adequately mapped, transition to ANALYSIS.
+<capability_spotlight>
+SPECIALIZED CAPABILITIES FOR THIS PHASE:
+- Passive OSINT: search with dork operators before any active scanning.
+  Effective dorks: site:{target}, inurl:admin, filetype:env, filetype:sql, filetype:bak,
+  intitle:"index of", intext:password, intext:secret.
+- Historical intelligence: archive crawling (Wayback Machine) for forgotten endpoints.
+- Certificate transparency: crt.sh for subdomain enumeration on external targets.
+- Proxy workflow: set scope → route traffic → enumerate sitemap before active scanning.
+</capability_spotlight>

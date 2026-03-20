@@ -259,7 +259,11 @@
         "ghauri": "sqlmap",
         "nikto": "nikto",
         "dalfox": "dalfox",
-        "wpscan": "wpscan"
+        "wpscan": "wpscan",
+        "hydra": "hydra",
+        "medusa": "hydra",
+        "msfconsole": "metasploit",
+        "msfdb": "metasploit"
     },
     "analysis_phase_vuln_tools": [
         "sqlmap", "dalfox", "nuclei", "xsser", "ffuf", "wfuzz", "nikto"

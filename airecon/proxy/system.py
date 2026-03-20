@@ -300,18 +300,41 @@ _PHASE_SKILL_DIRECTORIES: dict[str, set[str]] = {
     "COMPLETE": set(),
 }
 
+# Skills that are ALWAYS injected when entering a phase, regardless of
+# keyword matches. These ensure the LLM always has foundational knowledge
+# for the current phase even when the user message contains no relevant keywords
+# (e.g. "scan example.com" has no dorking/semgrep keywords).
+# Guaranteed skills load FIRST; keyword-matched skills fill remaining slots.
+_PHASE_ENTRY_SKILLS: dict[str, list[str]] = {
+    "RECON": [
+        "reconnaissance/dorking.md",
+        "reconnaissance/full_recon.md",
+    ],
+    "ANALYSIS": [
+        "tools/semgrep.md",
+        "vulnerabilities/api_testing.md",
+        # JS analysis auto-loaded for all ANALYSIS phases — modern web apps expose
+        # API routes, secrets, and hidden endpoints inside JS bundles.
+        "reconnaissance/javascript_analysis.md",
+    ],
+    "EXPLOIT": [
+        "tools/advanced_fuzzing.md",
+    ],
+    "REPORT": [],
+}
+
 
 def auto_load_skills_for_message(
     user_message: str, phase: str = ""
 ) -> tuple[str, list[str]]:
     """Auto-detect relevant skills from user message and return their content.
 
-    Skills are ranked by keyword match count so the most relevant ones are
-    always loaded first. Ties are broken alphabetically for stable ordering.
-    Limit is 4 to avoid context explosion — always the top-4 most relevant.
+    Phase-guaranteed skills (_PHASE_ENTRY_SKILLS) always load first so the LLM
+    has foundational knowledge even when the user message has no relevant keywords.
+    Keyword-matched skills fill the remaining slots (up to 4 total).
 
-    When `phase` is provided, skills in the preferred directories for that
-    phase receive a +2 score bonus to promote phase-appropriate content.
+    Phase-aware boost: skills in preferred directories for the active phase
+    receive +2 score bonus to promote phase-appropriate content.
 
     Returns a tuple of (skill_context_string, list_of_loaded_skill_names).
     """
@@ -327,9 +350,6 @@ def auto_load_skills_for_message(
     for keyword, skill_path in _SKILL_KEYWORDS.items():
         if _keyword_matches_message(keyword, msg_lower):
             skill_scores[skill_path] = skill_scores.get(skill_path, 0) + 1
-
-    if not skill_scores:
-        return "", []
 
     # Phase-aware boost: preferred-directory skills get +2 bonus.
     # Only applied if there are already keyword hits (no zero-score injection).
@@ -348,27 +368,53 @@ def auto_load_skills_for_message(
         key=lambda s: (-skill_scores[s], s),
     )
 
+    # Phase-guaranteed skills load first (foundational knowledge for the phase),
+    # keyword-matched skills fill remaining budget slots.
+    # Budget: guaranteed always load; keyword fills max(2, 4 - len(guaranteed)).
+    guaranteed = _PHASE_ENTRY_SKILLS.get(phase.upper(), []) if phase else []
+    keyword_slots = max(2, 4 - len(guaranteed))
+
     parts: list[str] = []
     loaded_names: list[str] = []
-    for skill_rel in sorted_skills[:4]:
+    loaded_paths: set[str] = set()
+
+    def _load_skill(skill_rel: str) -> bool:
+        if skill_rel in loaded_paths:
+            return False
         skill_file = skills_dir / skill_rel
-        if skill_file.exists():
-            try:
-                content = skill_file.read_text(
-                    encoding="utf-8", errors="replace")
-                # Tool reference docs and reconnaissance skills get a higher
-                # budget
-                limit = 20000 if (skill_rel.startswith(
-                    "tools/") or skill_rel.startswith("reconnaissance/")) else 4000
-                if len(content) > limit:
-                    content = (
-                        content[:limit]
-                        + f"\n... (truncated at {limit} chars, use read_file for full content: {skill_file.absolute().as_posix()})"
-                    )
-                parts.append(f"[AUTO-LOADED SKILL: {skill_rel}]\n{content}")
-                loaded_names.append(skill_file.stem)
-            except Exception:  # nosec B110 - skill loading is best-effort
-                pass
+        if not skill_file.exists():
+            return False
+        try:
+            content = skill_file.read_text(encoding="utf-8", errors="replace")
+            # Tool reference docs and reconnaissance skills get a higher budget
+            limit = 20000 if (
+                skill_rel.startswith("tools/")
+                or skill_rel.startswith("reconnaissance/")
+            ) else 4000
+            if len(content) > limit:
+                content = (
+                    content[:limit]
+                    + f"\n... (truncated at {limit} chars, use read_file for"
+                    f" full content: {skill_file.absolute().as_posix()})"
+                )
+            parts.append(f"[AUTO-LOADED SKILL: {skill_rel}]\n{content}")
+            loaded_names.append(skill_file.stem)
+            loaded_paths.add(skill_rel)
+            return True
+        except Exception:  # nosec B110 - skill loading is best-effort
+            return False
+
+    # Load guaranteed phase skills first
+    for skill_rel in guaranteed:
+        _load_skill(skill_rel)
+
+    # Fill remaining slots with top keyword-matched skills
+    keyword_count = 0
+    for skill_rel in sorted_skills:
+        if keyword_count >= keyword_slots:
+            break
+        if _load_skill(skill_rel):
+            keyword_count += 1
 
     if not parts:
         return "", []
@@ -376,7 +422,7 @@ def auto_load_skills_for_message(
     return (
         "[SYSTEM: RELEVANT SKILLS AUTO-LOADED based on your request]\n"
         + "\n---\n".join(parts),
-        loaded_names
+        loaded_names,
     )
 
 

@@ -144,6 +144,24 @@ class TestEnforceCharBudget:
             "instead of (num_ctx - num_predict), missing the hallucination fix"
         )
 
+    def test_budget_uses_runtime_num_predict_when_provided(self):
+        """Runtime adaptive num_predict should drive the budget when provided."""
+        num_ctx = 10_000
+        tool_result = "x" * 22_000
+        loop = self._build_loop_with_conversation([
+            {"role": "system", "content": "You are AIRecon."},
+            {"role": "user", "content": "pentest target.com"},
+            {"role": "tool", "name": "execute", "content": tool_result},
+        ])
+
+        # Set tools_ollama = [] so tools overhead = 0, isolating the num_predict effect.
+        # Explicit runtime reservation = 1000 → budget = (10000 - 1000 - 0) * 3 = 27k chars
+        # (tool output 22k should remain uncompressed).
+        loop._tools_ollama = []
+        loop._enforce_char_budget(num_ctx=num_ctx, num_predict=1_000)
+        tool_msg = next(m for m in loop.state.conversation if m.get("role") == "tool")
+        assert tool_msg["content"] == tool_result
+
 
 # ── 1b. watchdog_forced_calls resets after successful tool calls ─────
 

@@ -1,62 +1,70 @@
-[PIPELINE PHASE: ANALYSIS — Vulnerability Discovery & Prioritization]
+[PIPELINE PHASE: ANALYSIS - Vulnerability Discovery and Prioritization]
 
-OBJECTIVE: Systematically identify potential vulnerabilities and rank by exploitability.
+OBJECTIVE:
+Systematically identify plausible vulnerabilities and rank them by exploitability and business impact.
 
-ANALYSIS FRAMEWORK (execute in order):
+ANALYSIS FRAMEWORK:
 
-1. TECHNOLOGY STACK ASSESSMENT
-   - Identify framework (Django/Spring/Express/Laravel/ASP.NET/etc)
-   - Identify language (Python/Java/JavaScript/PHP/etc)
-   - Identify database (PostgreSQL/MySQL/MongoDB/SQL Server/etc)
-   - NOTE: Technology determines which vulnerability classes are relevant
-     ├─ Django → CSRF, template injection, ORM injection
-     ├─ Spring → Spring Expression Language (SpEL), JWT manipulation
-     ├─ Express → Prototype pollution, NoSQL injection
-     └─ PHP → file inclusion, serialization, type juggling
+1. TECHNOLOGY AND ARCHITECTURE MODEL
+- Infer framework, language/runtime, storage model, and trust boundaries.
+- Map where user input crosses security boundaries.
+- Use observed evidence, not assumptions.
 
 2. ATTACK SURFACE CLASSIFICATION
-   - Categorize endpoints: authentication, API, admin, public, internal
-   - Categorize input types: URL params, body, headers, cookies, files
-   - Identify which endpoints handle sensitive operations (data access, state changes)
-   - Priority = high-impact operations on high-exposure endpoints
+- Classify endpoints by function: auth, data, admin, workflow, integration, upload.
+- Classify input vectors: query, body, header, cookie, file, message payload.
+- Prioritize high-impact operations and state-changing paths.
 
-3. VULNERABILITY HYPOTHESIS GENERATION
-   - For each endpoint + input combination, assess injection risk:
-     • SQL-like patterns (database-backed endpoints) → SQLi/NoSQL injection candidate
-     • User input in template/rendering → XSS/SSTI candidate
-     • URL/file parameters → Path traversal/LFI candidate
-     • External service calls → SSRF candidate
-     • Authentication logic → Bypass/credential stuffing/JWT attacks
-     • Object references → IDOR/BOLA candidate
-   - If hypothesis requires many variations (IDs, roles, auth states), WRITE A SCRIPT in tools/
-     to automate the test and output one candidate per line for parsing.
+3. REQUEST/STATE CORRELATION
+- Review captured request history for hidden parameters and role-dependent behavior.
+- Compare authenticated vs unauthenticated behavior.
+- Track identifiers that indicate object-level access control risk.
 
-4. INFORMATION DISCLOSURE & MISCONFIG REVIEW
-   - Source maps, error messages, comments in JavaScript/HTML
-   - Exposed .env, .git, backups, debug endpoints
-   - Security headers (CSP, X-Frame-Options, HSTS)
-   - CORS configuration
-   - Default credentials (admin panels, databases)
+4. VULNERABILITY HYPOTHESIS GENERATION
+- For each endpoint + input pair, generate concrete exploit hypotheses.
+- Focus on injection, authorization, authentication, deserialization, and business logic abuse.
+- When variation space is large, create scripts to test systematically and reproducibly.
 
-5. KNOWN CVE ASSESSMENT
-   - For identified technology versions, check for known public exploits
-   - Assess likelihood: patched? Still exploitable? (exploit-db, NVD, MITRE)
-   - Only report if target version is vulnerable
+5. MISCONFIGURATION AND DISCLOSURE REVIEW
+- Evaluate error handling, debug exposure, metadata leakage, and unsafe defaults.
+- Evaluate transport/session/header policies that could enable chaining.
+- Flag only issues with realistic abuse potential.
 
-6. PRIORITIZATION MATRIX
-   Rank identified vulnerabilities by:
-   - Impact: Data breach > Auth bypass > Info disclosure > Config exposure
-   - Likelihood: Confirmed pattern > Suspected > Theoretical
-   - Effort: Low complexity < High complexity
-   - Filter: Only vulnerabilities with Medium+ impact + High likelihood → EXPLOIT phase
+6. VERSION AND PUBLIC WEAKNESS CORRELATION
+- Correlate observed version evidence with known weakness classes.
+- Distinguish likely exploitable vs likely patched behavior.
+- Treat version-only claims as unconfirmed until behavior validates risk.
+
+7. PRIORITIZATION MATRIX
+Rank candidates by:
+- Impact potential
+- Exploit likelihood
+- Reproducibility confidence
+- Chaining potential
 
 ANALYSIS QUALITY GATES:
-✓ Minimum 3-5 exploitation candidates identified OR
-✓ Clear attack path documented (even if low-likelihood) OR
-✓ Technology has known public exploits with clear PoC
-✓ All high-impact endpoints analyzed
+- Multiple high-confidence exploit candidates identified, or
+- A clear and testable attack path documented, and
+- High-impact endpoints reviewed with evidence
 
-Prefer analysis-first, but do not become passive.
-You MAY run targeted low-impact validation checks to confirm hypotheses (single-request probes,
-safe payload reflection checks, controlled auth logic tests) when needed to reduce uncertainty.
-When exploitation candidates are identified and ranked with evidence, transition to EXPLOIT.
+PHASE DISCIPLINE:
+- Analysis-first is mandatory, but avoid passive over-analysis.
+- Use low-risk validation probes where needed to reduce uncertainty.
+- Transition when exploit hypotheses are evidence-backed and prioritized.
+
+<capability_spotlight>
+SPECIALIZED CAPABILITIES FOR THIS PHASE:
+- Static analysis (SAST): If source code, a Git repository, or a downloadable package
+  is accessible, run SAST (Semgrep) BEFORE manual testing. It finds hardcoded secrets,
+  injection sinks, unsafe deserialization, and logic flaws faster than manual review.
+  Trigger: any public /source, /.git, NPM package, GitHub link, or cloneable repo.
+- Correlation engine: Cross-reference ALL technology fingerprints + port exposures +
+  discovered paths with known vulnerability classes BEFORE generating hypotheses.
+  Example: nginx + PHP + port 3306 open → test SQLi + LFI + phpMyAdmin exposure.
+- Parameter discovery: Run parameter mining on ALL confirmed endpoints before any
+  injection testing — hidden parameters are the most commonly missed attack surface.
+  Even well-known endpoints often have undocumented admin/debug parameters.
+- Proxy history mining: Mine captured HTTP traffic for auth tokens, session patterns,
+  role-dependent responses, IDOR candidates, and undocumented internal endpoints.
+  Captured traffic is often richer than active discovery alone.
+</capability_spotlight>

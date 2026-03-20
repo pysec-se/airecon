@@ -68,6 +68,7 @@ DEFAULT_PHASES: dict[PipelinePhase, PhaseConfig] = {
         recommended_tools=[
             "execute", "web_search", "browser_action", "create_file",
             "read_file", "list_files",
+            "caido_set_scope", "caido_sitemap", "caido_list_requests",
         ],
         transition_criteria=[
             "subdomains_discovered",      # session.subdomains is non-empty
@@ -85,6 +86,7 @@ DEFAULT_PHASES: dict[PipelinePhase, PhaseConfig] = {
         recommended_tools=[
             "execute", "browser_action", "code_analysis", "web_search",
             "read_file", "create_file",
+            "caido_list_requests", "caido_send_request", "caido_sitemap",
         ],
         transition_criteria=[
             "urls_collected",             # session.urls is non-empty
@@ -153,10 +155,10 @@ _PHASE_TOOL_BUDGETS: dict[str, dict[str, int]] = {
 # One-line skill directory hints injected into the phase prompt so the LLM
 # knows which skill categories are relevant for the active phase.
 _PHASE_SKILL_HINTS: dict[str, str] = {
-    "RECON": "Phase skills: reconnaissance/, tools/nmap.md, tools/nuclei.md, protocols/",
-    "ANALYSIS": "Phase skills: vulnerabilities/, frameworks/, technologies/",
-    "EXPLOIT": "Phase skills: payloads/, vulnerabilities/, postexploit/, tools/",
-    "REPORT": "Use create_vulnerability_report for all confirmed findings.",
+    "RECON": "Phase skills: reconnaissance/, protocols/, tools/",
+    "ANALYSIS": "Phase skills: vulnerabilities/, frameworks/, technologies/, protocols/",
+    "EXPLOIT": "Phase skills: payloads/, vulnerabilities/, postexploit/, frameworks/",
+    "REPORT": "Phase skills: reporting/, vulnerabilities/, remediation/",
 }
 
 
@@ -210,11 +212,10 @@ class PipelineEngine:
         config = DEFAULT_PHASES.get(phase)
         if not config:
             return ""
-        tools = ", ".join(config.recommended_tools)
         return (
             f"[PIPELINE PHASE: {phase.value}]\n"
             f"Objective: {config.objective}\n"
-            f"Recommended tools: {tools}\n"
+            "Use the most suitable available capabilities for this phase objective.\n"
             f"Complete this phase thoroughly before moving to the next."
         )
 
@@ -272,16 +273,28 @@ class PipelineEngine:
 
         # Soft timeout: if RECON has gone on too long, force transition regardless
         # of depth criteria to prevent infinite loops on difficult targets.
-        # Guard: only force if we have *some* data (at least URLs or ports or
-        # subdomains).  If the target is completely unreachable we still
-        # transition — but we log a warning so the operator can investigate.
+        # Guard: live_hosts_validated is still mandatory — even on timeout we
+        # must have confirmed at least one live host to produce meaningful ANALYSIS.
+        # Exception: if target is completely unreachable (no data at all), allow
+        # transition with a warning so the operator can investigate.
         if (current == PipelinePhase.RECON
                 and iterations_in_phase >= self._recon_soft_timeout):
+            met_criteria = self._evaluate_criteria(current)
+            has_live_hosts = "live_hosts_validated" in met_criteria
             has_any_data = bool(
                 getattr(self.session, "urls", [])
                 or getattr(self.session, "open_ports", {})
                 or getattr(self.session, "subdomains", [])
+                or getattr(self.session, "live_hosts", [])
             )
+            if not has_live_hosts and has_any_data:
+                logger.warning(
+                    "RECON soft timeout (%d iter) but live_hosts_validated not met — "
+                    "agent must run httpx/dnsx to confirm live hosts before ANALYSIS. "
+                    "Blocking transition.",
+                    iterations_in_phase,
+                )
+                return False
             if not has_any_data:
                 logger.warning(
                     "RECON soft timeout (%d iter) with NO data collected — "
@@ -298,6 +311,11 @@ class PipelineEngine:
 
         met_criteria = self._evaluate_criteria(current)
         total = len(config.transition_criteria)
+
+        # RECON gate: live_hosts_validated is MANDATORY — ANALYSIS on dead hosts is useless.
+        # Without confirmed live hosts, the model will hallucinate findings or scan /dev/null.
+        if current == PipelinePhase.RECON and "live_hosts_validated" not in met_criteria:
+            return False
 
         # Transition when at least 60% of criteria are met
         return len(met_criteria) >= max(1, int(total * 0.6))
@@ -332,9 +350,10 @@ class PipelineEngine:
                     )
             except Exception as _e:
                 logger.debug("Could not check workspace artifacts: %s", _e)
-            # Fallback: require at least 5 tool executions (not just 3) to avoid
-            # trivially satisfying RECON completion via failed calls alone.
-            if _has_output_files or getattr(session, "scan_count", 0) >= 5:
+            # Only count as artifacts_saved when real output files exist on disk.
+            # scan_count fallback removed — failed/empty calls inflate the count
+            # without producing usable data, causing premature ANALYSIS transition.
+            if _has_output_files:
                 met.append("recon_artifacts_saved")
             # Depth checks: require minimum subdomain and URL discovery
             if len(getattr(session, "subdomains", [])) >= self._recon_min_subdomains:
@@ -420,10 +439,11 @@ class PipelineEngine:
         if self._ctf_mode:
             return (
                 "[CTF MODE ACTIVE]\n"
-                "Objective: FIND THE FLAG. Format: FLAG{...} or similar.\n"
-                "Check tool history — do NOT repeat commands already executed.\n"
-                "If stuck: try a different vector, not the same command again.\n"
-                "When flag found: call create_vulnerability_report immediately."
+                "Objective: find the exact runtime flag value from the target.\n"
+                "Placeholder values like FLAG{...} are INVALID.\n"
+                "Use short direct actions; avoid long generated scripts unless strictly necessary.\n"
+                "Do not repeat the same strategy more than twice without new evidence.\n"
+                "When a concrete flag is found, return it immediately with minimal proof."
             )
 
         config = DEFAULT_PHASES.get(current)
@@ -491,11 +511,9 @@ class PipelineEngine:
         config = DEFAULT_PHASES.get(new_phase)
         if not config:
             return ""
-
-        tools = ", ".join(config.recommended_tools)
         return (
             f"\n[PIPELINE TRANSITION → {new_phase.value}]\n"
             f"Phase objective: {config.objective}\n"
-            f"Recommended tools for this phase: {tools}\n"
+            "Use capabilities that maximize evidence quality for this phase.\n"
             f"You are now in the {new_phase.value} phase. Focus on the objective above.\n"
         )

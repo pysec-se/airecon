@@ -670,8 +670,22 @@ class _ExecutorMixin:
                     f"Evidence: {r.evidence}"
                     for r in results
                 ]
+                # Build stdout with [SEVERITY] prefix so session extractor
+                # can capture findings into session.vulnerabilities.
+                stdout_lines = []
+                for r in results:
+                    sev = r.severity.upper()
+                    stdout_lines.append(
+                        f"[{sev}] {r.vuln_type.upper()} on param '{r.parameter}'"
+                        f" at {r.target}"
+                    )
+                    stdout_lines.append(
+                        f"Payload: {r.payload} | Conf: {r.confidence:.2f}"
+                    )
+                    stdout_lines.append(f"Evidence: {r.evidence}")
                 res_dict = {
                     "success": True,
+                    "stdout": "\n".join(stdout_lines),
                     "findings": findings_list,
                     "total": len(findings_list)}
 
@@ -1675,13 +1689,29 @@ class _ExecutorMixin:
                 languages=languages,
             )
 
+            findings_capped = result.get("findings", [])[:50]
+            # Build stdout with [SEVERITY] prefix so session extractor
+            # can capture findings into session.vulnerabilities.
+            _stdout_lines: list[str] = []
+            for _f in findings_capped:
+                _sev = str(_f.get("severity", "MEDIUM")).upper()
+                _rule = _f.get("rule_id", "unknown")
+                _msg = _f.get("message", "")
+                _file = _f.get("file", "")
+                _line = _f.get("start_line", "?")
+                _code = _f.get("code_snippet", "")
+                _stdout_lines.append(f"[{_sev}] {_rule}: {_msg}")
+                if _file:
+                    _stdout_lines.append(f"  File: {_file}:{_line}")
+                if _code:
+                    _stdout_lines.append(f"  Code: {_code}")
             res_dict = {
                 "success": True,
                 "summary": result.get("summary", ""),
                 "total": result.get("total", 0),
-                # Cap at 50 findings
-                "findings": result.get("findings", [])[:50],
+                "findings": findings_capped,
                 "errors": result.get("errors", []),
+                "stdout": "\n".join(_stdout_lines),
             }
 
             # Save output

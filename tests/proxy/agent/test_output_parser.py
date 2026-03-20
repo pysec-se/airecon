@@ -1,5 +1,9 @@
 import json
-from airecon.proxy.agent.output_parser import parse_tool_output, detect_tool
+from airecon.proxy.agent.output_parser import (
+    parse_tool_output,
+    detect_tool,
+    _parse_metasploit,
+)
 
 
 def test_detect_tool():
@@ -110,3 +114,16 @@ def test_detect_tool_with_timeout_env_options():
     assert detect_tool("timeout --signal=KILL 30 nmap -sV example.com") == "nmap"
     assert detect_tool("env -i FOO=1 BAR=2 httpx -u https://example.com") == "httpx"
     assert detect_tool("/usr/bin/sudo /usr/bin/nuclei -u https://example.com") == "nuclei"
+
+
+def test_parse_metasploit_ignores_negative_vulnerable_claims():
+    output = "\n".join(
+        [
+            "[+] Target is NOT vulnerable to CVE-2024-1234",
+            "[+] Meterpreter session opened (10.10.14.2:4444 -> 10.10.10.10:9999)",
+        ]
+    )
+    parsed = _parse_metasploit(output)
+    assert parsed.total_count == 1
+    assert any("meterpreter session opened" in item.lower() for item in parsed.items)
+    assert all("not vulnerable" not in item.lower() for item in parsed.items)

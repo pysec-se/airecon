@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
+import threading
 from typing import Any, AsyncIterator
 
 import ollama
@@ -62,6 +64,10 @@ def _detect_model_capabilities_from_show(
 
 class OllamaClient:
     """Wrapper around the official ollama.AsyncClient."""
+    # Shared per-loop request gates keyed by (loop_id, host, model):
+    # prevents concurrent large-model inference spikes from parallel subagents.
+    _request_gate_lock = threading.Lock()
+    _request_gates: dict[tuple[int, str, str], tuple[int, asyncio.Semaphore]] = {}
 
     def __init__(self, base_url: str | None = None,
                  model: str | None = None) -> None:
@@ -107,6 +113,31 @@ class OllamaClient:
         )
         self._client = ollama.AsyncClient(
             host=host, timeout=cfg.ollama_timeout)
+
+    async def _get_request_gate(self) -> asyncio.Semaphore:
+        """Return a shared semaphore that bounds concurrent Ollama requests."""
+        cfg = get_config()
+        limit = max(
+            1,
+            int(getattr(cfg, "ollama_max_concurrent_requests", 1)),
+        )
+        loop_id = id(asyncio.get_running_loop())
+        key = (loop_id, self._host, self.model)
+
+        with self._request_gate_lock:
+            cached = self._request_gates.get(key)
+            if cached is None or cached[0] != limit:
+                gate = asyncio.Semaphore(limit)
+                self._request_gates[key] = (limit, gate)
+                logger.info(
+                    "Ollama concurrency gate initialized for %s (%s): %d",
+                    self.model,
+                    self._host,
+                    limit,
+                )
+            else:
+                gate = cached[1]
+        return gate
 
     def _detect_capabilities(self) -> tuple[bool, bool] | None:
         """Detect model capabilities via Ollama `show` metadata.
@@ -170,45 +201,45 @@ class OllamaClient:
         Returns the assistant message content as a plain string.
         Retries up to max_retries times with exponential backoff on transient errors.
         """
-        import asyncio
-
         max_retries = max(0, max_retries)
-        for attempt in range(max_retries + 1):
-            try:
-                kwargs: dict[str, Any] = {
-                    "model": self.model,
-                    "messages": messages,
-                    "stream": False,
-                    "keep_alive": get_config().ollama_keep_alive,
-                }
-                if options:
-                    kwargs["options"] = options
-                response = await self._client.chat(**kwargs)
-                if hasattr(response, "message"):
-                    return response.message.content or ""
-                if isinstance(response, dict):
-                    return response.get("message", {}).get("content", "")
-                return ""
+        gate = await self._get_request_gate()
+        async with gate:
+            for attempt in range(max_retries + 1):
+                try:
+                    kwargs: dict[str, Any] = {
+                        "model": self.model,
+                        "messages": messages,
+                        "stream": False,
+                        "keep_alive": get_config().ollama_keep_alive,
+                    }
+                    if options:
+                        kwargs["options"] = options
+                    response = await self._client.chat(**kwargs)
+                    if hasattr(response, "message"):
+                        return response.message.content or ""
+                    if isinstance(response, dict):
+                        return response.get("message", {}).get("content", "")
+                    return ""
 
-            except Exception as e:
-                err_str = str(e).lower()
-                is_transient = any(
-                    k in err_str
-                    for k in (
-                        "connection reset", "connection refused", "eof",
-                        "broken pipe", "timeout", "timed out",
-                        "network", "connection error",
+                except Exception as e:
+                    err_str = str(e).lower()
+                    is_transient = any(
+                        k in err_str
+                        for k in (
+                            "connection reset", "connection refused", "eof",
+                            "broken pipe", "timeout", "timed out",
+                            "network", "connection error",
+                        )
                     )
-                )
-                if is_transient and attempt < max_retries:
-                    wait = 2 ** (attempt + 1)  # 2s, 4s, 8s
-                    logger.warning(
-                        f"Transient Ollama error in complete() (attempt "
-                        f"{attempt + 1}/{max_retries + 1}), retrying in {wait}s: {e}"
-                    )
-                    await asyncio.sleep(wait)
-                    continue
-                raise
+                    if is_transient and attempt < max_retries:
+                        wait = 2 ** (attempt + 1)  # 2s, 4s, 8s
+                        logger.warning(
+                            f"Transient Ollama error in complete() (attempt "
+                            f"{attempt + 1}/{max_retries + 1}), retrying in {wait}s: {e}"
+                        )
+                        await asyncio.sleep(wait)
+                        continue
+                    raise
         return ""  # unreachable in practice — all non-transient errors raise above
 
     async def chat_stream(
@@ -224,8 +255,6 @@ class OllamaClient:
         Returns the raw chunk object from Ollama SDK.
         Retries up to max_retries times on transient connection errors.
         """
-        import asyncio
-
         kwargs: dict[str, Any] = {
             "model": self.model,
             "messages": messages,
@@ -239,61 +268,63 @@ class OllamaClient:
         if options:
             kwargs["options"] = options
 
-        for attempt in range(max_retries + 1):
-            try:
-                async for chunk in await self._client.chat(**kwargs):
-                    yield chunk
-                return
+        gate = await self._get_request_gate()
+        async with gate:
+            for attempt in range(max_retries + 1):
+                try:
+                    async for chunk in await self._client.chat(**kwargs):
+                        yield chunk
+                    return
 
-            except ollama.ResponseError as e:
-                err_str = str(e.error)
-                if (
-                    "invalid character '<'" in err_str
-                    or "failed to parse JSON" in err_str
-                ):
-                    # HTML response = Ollama crashed or OOM — not retryable
-                    raise ollama.ResponseError(
-                        "Ollama returned an HTML error page instead of JSON. "
-                        "This usually means Ollama crashed or ran out of memory. "
-                        "Try: `systemctl restart ollama` or reduce `ollama_num_ctx` in config.",
-                        status_code=e.status_code,
+                except ollama.ResponseError as e:
+                    err_str = str(e.error)
+                    if (
+                        "invalid character '<'" in err_str
+                        or "failed to parse JSON" in err_str
+                    ):
+                        # HTML response = Ollama crashed or OOM — not retryable
+                        raise ollama.ResponseError(
+                            "Ollama returned an HTML error page instead of JSON. "
+                            "This usually means Ollama crashed or ran out of memory. "
+                            "Try: `systemctl restart ollama` or reduce `ollama_num_ctx` in config.",
+                            status_code=e.status_code,
+                        )
+                    # Other ResponseErrors (model loading, transient) → retry
+                    if attempt < max_retries:
+                        wait = 2 ** (attempt + 1)  # 2s, 4s, 8s
+                        logger.warning(
+                            f"Ollama ResponseError (attempt {attempt + 1}/{max_retries + 1}), "
+                            f"retrying in {wait}s: {e.error}"
+                        )
+                        await asyncio.sleep(wait)
+                        continue
+                    logger.error(
+                        f"Ollama ResponseError after {max_retries + 1} attempts: {e.error}"
                     )
-                # Other ResponseErrors (model loading, transient) → retry
-                if attempt < max_retries:
-                    wait = 2 ** (attempt + 1)  # 2s, 4s, 8s
-                    logger.warning(
-                        f"Ollama ResponseError (attempt {attempt + 1}/{max_retries + 1}), "
-                        f"retrying in {wait}s: {e.error}"
-                    )
-                    await asyncio.sleep(wait)
-                    continue
-                logger.error(
-                    f"Ollama ResponseError after {max_retries + 1} attempts: {e.error}"
-                )
-                raise
+                    raise
 
-            except Exception as e:
-                err_str = str(e).lower()
-                is_transient = any(
-                    k in err_str
-                    for k in (
-                        "connection reset",
-                        "connection refused",
-                        "eof",
-                        "broken pipe",
-                        "timeout",
-                        "timed out",
-                        "network",
-                        "connection error",
+                except Exception as e:
+                    err_str = str(e).lower()
+                    is_transient = any(
+                        k in err_str
+                        for k in (
+                            "connection reset",
+                            "connection refused",
+                            "eof",
+                            "broken pipe",
+                            "timeout",
+                            "timed out",
+                            "network",
+                            "connection error",
+                        )
                     )
-                )
-                if is_transient and attempt < max_retries:
-                    wait = 2 ** (attempt + 1)  # 2s, 4s, 8s
-                    logger.warning(
-                        f"Transient Ollama error (attempt {attempt + 1}/{max_retries + 1}), "
-                        f"retrying in {wait}s: {e}"
-                    )
-                    await asyncio.sleep(wait)
-                    continue
-                logger.exception(f"Unexpected SDK error: {e}")
-                raise
+                    if is_transient and attempt < max_retries:
+                        wait = 2 ** (attempt + 1)  # 2s, 4s, 8s
+                        logger.warning(
+                            f"Transient Ollama error (attempt {attempt + 1}/{max_retries + 1}), "
+                            f"retrying in {wait}s: {e}"
+                        )
+                        await asyncio.sleep(wait)
+                        continue
+                    logger.exception(f"Unexpected SDK error: {e}")
+                    raise
