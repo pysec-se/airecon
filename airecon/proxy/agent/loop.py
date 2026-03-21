@@ -208,12 +208,118 @@ class AgentLoop(_ValidatorMixin, _FormatterMixin,
         # Output token cap — set after VRAM crash to prevent large responses
         # from burning context and re-triggering OOM. 0 = no cap.
         self._adaptive_num_predict_cap: int = 0
+        # Async token snapshot persistence (coalesced) to avoid blocking the
+        # main event loop on every completion.
+        self._token_snapshot_task: asyncio.Task[None] | None = None
+        self._token_snapshot_resave_requested: bool = False
 
     async def stop(self) -> None:
         logger.warning("Stopping Agent Loop...")
         self._stop_requested = True
         if self.engine:
             await self.engine.force_stop()
+        if self._token_snapshot_task and not self._token_snapshot_task.done():
+            self._token_snapshot_resave_requested = True
+            try:
+                await asyncio.wait_for(
+                    asyncio.shield(self._token_snapshot_task),
+                    timeout=2.0,
+                )
+            except Exception:
+                logger.debug("Token snapshot flush skipped during stop.")
+
+    def _sync_token_usage_from_session(self) -> None:
+        """Hydrate state token counters from current persisted session."""
+        if not self._session:
+            return
+        usage = self.state.token_usage
+        usage["cumulative"] = int(getattr(self._session, "token_total", 0) or 0)
+        usage["cumulative_prompt"] = int(
+            getattr(self._session, "token_prompt_total", 0) or 0
+        )
+        usage["cumulative_completion"] = int(
+            getattr(self._session, "token_completion_total", 0) or 0
+        )
+        usage["used"] = 0
+        usage["last_prompt"] = 0
+        usage["last_completion"] = 0
+
+    def _sync_token_usage_to_session(self) -> None:
+        """Persist token counters into session so restart/recovery keeps totals."""
+        if not self._session:
+            return
+        usage = self.state.token_usage
+        self._session.token_total = int(usage.get("cumulative", 0) or 0)
+        self._session.token_prompt_total = int(
+            usage.get("cumulative_prompt", 0) or 0
+        )
+        self._session.token_completion_total = int(
+            usage.get("cumulative_completion", 0) or 0
+        )
+        self._session.token_last_used = int(usage.get("used", 0) or 0)
+
+    def _schedule_token_usage_snapshot_save(self) -> None:
+        """Persist token snapshot asynchronously while coalescing bursts."""
+        session = self._session
+        if not session or not session.target:
+            return
+
+        if self._token_snapshot_task and not self._token_snapshot_task.done():
+            self._token_snapshot_resave_requested = True
+            return
+
+        self._token_snapshot_resave_requested = False
+
+        async def _save_worker(initial_session: SessionData) -> None:
+            session_to_save: SessionData | None = initial_session
+            try:
+                while session_to_save and session_to_save.target:
+                    try:
+                        await asyncio.to_thread(save_session, session_to_save)
+                    except Exception as exc:
+                        logger.debug(
+                            "Failed to persist token usage snapshot: %s",
+                            exc,
+                        )
+                    if not self._token_snapshot_resave_requested:
+                        break
+                    self._token_snapshot_resave_requested = False
+                    session_to_save = self._session
+            finally:
+                self._token_snapshot_task = None
+
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            try:
+                save_session(session)
+            except Exception as exc:
+                logger.debug("Failed to persist token usage snapshot: %s", exc)
+            return
+
+        self._token_snapshot_task = loop.create_task(_save_worker(session))
+
+    def _record_token_usage(self, prompt_tokens: int, completion_tokens: int) -> None:
+        """Record latest usage and accumulate session totals."""
+        prompt_tokens = max(0, int(prompt_tokens or 0))
+        completion_tokens = max(0, int(completion_tokens or 0))
+        total_tokens = prompt_tokens + completion_tokens
+        if total_tokens <= 0:
+            return
+
+        usage = self.state.token_usage
+        usage["used"] = total_tokens
+        usage["last_prompt"] = prompt_tokens
+        usage["last_completion"] = completion_tokens
+        usage["cumulative"] = int(usage.get("cumulative", 0) or 0) + total_tokens
+        usage["cumulative_prompt"] = int(
+            usage.get("cumulative_prompt", 0) or 0
+        ) + prompt_tokens
+        usage["cumulative_completion"] = int(
+            usage.get("cumulative_completion", 0) or 0
+        ) + completion_tokens
+        self._sync_token_usage_to_session()
+        self._schedule_token_usage_snapshot_save()
 
     # ------------------------------------------------------------------
     # Anti-repeat guard (Priority 2)
@@ -378,12 +484,20 @@ class AgentLoop(_ValidatorMixin, _FormatterMixin,
         else:
             self._session = SessionData(target="")
             logger.info(f"Created new session {self._session.session_id}")
+        self._sync_token_usage_from_session()
 
         self.pipeline = PipelineEngine(self._session)
         if self._ctf_mode and self.pipeline:
             self.pipeline.set_ctf_mode(True)
 
     def reset(self) -> None:
+        # Cancel any in-flight token snapshot from the old session.
+        # reset() is sync, so we call cancel() (schedules CancelledError on the
+        # task) rather than awaiting — the task's finally block will still run.
+        if self._token_snapshot_task and not self._token_snapshot_task.done():
+            self._token_snapshot_task.cancel()
+        self._token_snapshot_task = None
+        self._token_snapshot_resave_requested = False
         self.state = AgentState()
         if self._initial_messages:
             self.state.conversation = list(self._initial_messages)
@@ -549,6 +663,7 @@ class AgentLoop(_ValidatorMixin, _FormatterMixin,
                 if not self._session:
                     self._session = SessionData(
                         target=self.state.active_target)
+                    self._sync_token_usage_from_session()
                     self.pipeline = PipelineEngine(self._session)
                     if self._ctf_mode and self.pipeline:
                         self.pipeline.set_ctf_mode(True)
@@ -563,6 +678,7 @@ class AgentLoop(_ValidatorMixin, _FormatterMixin,
                     )
                     self._session = SessionData(
                         target=self.state.active_target)
+                    self._sync_token_usage_from_session()
                     self.pipeline = PipelineEngine(self._session)
                     if self._ctf_mode and self.pipeline:
                         self.pipeline.set_ctf_mode(True)
@@ -1514,11 +1630,16 @@ class AgentLoop(_ValidatorMixin, _FormatterMixin,
                                 "eval_count", 0)  # tokens generated
                             prompt_eval_count = _last_chunk_data.get(
                                 "prompt_eval_count", 0)  # tokens in prompt
-                            total_tokens = eval_count + prompt_eval_count
-                            if total_tokens > 0:
-                                self.state.token_usage["used"] = total_tokens
-                                logger.debug(
-                                    f"Token usage: prompt={prompt_eval_count}, generated={eval_count}, total={total_tokens}")
+                            self._record_token_usage(
+                                prompt_tokens=prompt_eval_count,
+                                completion_tokens=eval_count,
+                            )
+                            logger.debug(
+                                "Token usage: prompt=%d, generated=%d, total=%d, cumulative=%d",
+                                prompt_eval_count, eval_count,
+                                prompt_eval_count + eval_count,
+                                self.state.token_usage.get("cumulative", 0),
+                            )
 
                         break  # stream completed — exit retry loop
                     except Exception as stream_err:
@@ -2490,6 +2611,7 @@ class AgentLoop(_ValidatorMixin, _FormatterMixin,
                                 "result_preview": f"VALIDATION ERROR: {arg_error}",
                                 "output_file": None,
                                 "tool_counts": self.state.tool_counts,
+                                "token_usage": dict(self.state.token_usage),
                             },
                         )
                         self._consecutive_failures += 1
@@ -2511,6 +2633,7 @@ class AgentLoop(_ValidatorMixin, _FormatterMixin,
                             "result_preview": self._truncate_result(result),
                             "output_file": output_file,
                             "tool_counts": self.state.tool_counts,
+                            "token_usage": dict(self.state.token_usage),
                         },
                     )
                     self._track_tool_usage(tool_name, arguments)
@@ -3055,9 +3178,9 @@ class AgentLoop(_ValidatorMixin, _FormatterMixin,
     def get_stats(self) -> dict[str, Any]:
         return {
             "message_count": len(self.state.conversation),
-            "tool_counts": self.state.tool_counts,
-            "token_usage": self.state.token_usage,
-            "skills_used": self.state.skills_used,
+            "tool_counts": dict(self.state.tool_counts),
+            "token_usage": dict(self.state.token_usage),
+            "skills_used": list(self.state.skills_used),
         }
 
     def _extract_tool_calls_from_text(

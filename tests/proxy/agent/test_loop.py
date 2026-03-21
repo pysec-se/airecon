@@ -1,6 +1,7 @@
 import pytest
 from unittest.mock import AsyncMock, patch, MagicMock
 from airecon.proxy.agent.loop import AgentLoop
+from airecon.proxy.agent.session import SessionData
 
 
 @pytest.fixture
@@ -285,3 +286,24 @@ class TestReportObjectiveTracking:
             output_file=None,
         )
         assert self._status(agent_loop, defaults[0]) == "pending"
+
+
+def test_sync_token_usage_from_session_keeps_cumulative_resets_used(agent_loop):
+    agent_loop._session = SessionData(target="example.com")
+    agent_loop._session.token_total = 1_234_567
+    agent_loop._session.token_prompt_total = 900_000
+    agent_loop._session.token_completion_total = 334_567
+    agent_loop._session.token_last_used = 48_000
+
+    agent_loop.state.token_usage["used"] = 777
+    agent_loop.state.token_usage["last_prompt"] = 333
+    agent_loop.state.token_usage["last_completion"] = 444
+
+    agent_loop._sync_token_usage_from_session()
+
+    assert agent_loop.state.token_usage["cumulative"] == 1_234_567
+    assert agent_loop.state.token_usage["cumulative_prompt"] == 900_000
+    assert agent_loop.state.token_usage["cumulative_completion"] == 334_567
+    assert agent_loop.state.token_usage["used"] == 0
+    assert agent_loop.state.token_usage["last_prompt"] == 0
+    assert agent_loop.state.token_usage["last_completion"] == 0

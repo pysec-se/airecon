@@ -43,7 +43,16 @@ class AgentState:
     tool_counts: dict[str, int] = field(
         default_factory=lambda: {"exec": 0, "total": 0, "subagents": 0})
     token_usage: dict[str, int] = field(
-        default_factory=lambda: {"used": 0, "limit": 65536})
+        default_factory=lambda: {
+            "used": 0,
+            "limit": 65536,
+            "cumulative": 0,
+            "cumulative_prompt": 0,
+            "cumulative_completion": 0,
+            "last_prompt": 0,
+            "last_completion": 0,
+        }
+    )
     skills_used: list[str] = field(default_factory=list)
     planned_tools: list[str] = field(
         default_factory=list

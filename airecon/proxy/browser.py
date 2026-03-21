@@ -364,7 +364,19 @@ class BrowserInstance:
         except ValueError as e:
             raise ValueError(
                 f"Invalid coordinate format: {coordinate}. Use 'x,y'") from e
+        # Bounds validation to prevent clicks outside viewport.
+        # The lower bound (0 <=) also covers negative coordinates.
         page = self.pages[tab_id]
+        viewport = page.viewport_size or {"width": 1920, "height": 1080}
+        max_x = viewport.get("width", 1920) * 2  # Allow scroll overflow
+        max_y = viewport.get("height", 1080) * 2
+
+        if not (0 <= x <= max_x and 0 <= y <= max_y):
+            raise ValueError(
+                f"Coordinates ({x}, {y}) out of bounds. "
+                f"Max allowed: ({max_x}, {max_y}). "
+                f"Current viewport: {viewport.get('width', 1920)}x{viewport.get('height', 1080)}"
+            )
         await page.mouse.click(x, y)
         return await self._get_page_state(tab_id)
 
@@ -637,7 +649,19 @@ class BrowserInstance:
         except ValueError as e:
             raise ValueError(
                 f"Invalid coordinate format: {coordinate}. Use 'x,y'") from e
+        # Bounds validation to prevent hovers outside viewport.
+        # The lower bound (0 <=) also covers negative coordinates.
         page = self.pages[tab_id]
+        viewport = page.viewport_size or {"width": 1920, "height": 1080}
+        max_x = viewport.get("width", 1920) * 2  # Allow scroll overflow
+        max_y = viewport.get("height", 1080) * 2
+
+        if not (0 <= x <= max_x and 0 <= y <= max_y):
+            raise ValueError(
+                f"Coordinates ({x}, {y}) out of bounds. "
+                f"Max allowed: ({max_x}, {max_y}). "
+                f"Current viewport: {viewport.get('width', 1920)}x{viewport.get('height', 1080)}"
+            )
         await page.mouse.move(x, y)
         return await self._get_page_state(tab_id)
 

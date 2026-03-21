@@ -62,6 +62,7 @@ class DockerEngine:
             None  # track running exec
         )
         self._proc_lock = asyncio.Lock()  # Protect _current_proc access
+        self._active_procs: set[asyncio.subprocess.Process] = set()
 
     # ── Public properties ──
 
@@ -210,6 +211,30 @@ class DockerEngine:
             )
             await proc.wait()
 
+    # ── Process tracking helpers ──
+
+    async def _register_proc(
+        self, proc: asyncio.subprocess.Process
+    ) -> None:
+        """Track active subprocesses for race-free force-stop."""
+        async with self._proc_lock:
+            self._active_procs.add(proc)
+            self._current_proc = proc
+            if len(self._active_procs) > 1:
+                logger.warning(
+                    "Concurrent execution detected: %d active processes.",
+                    len(self._active_procs),
+                )
+
+    async def _unregister_proc(
+        self, proc: asyncio.subprocess.Process
+    ) -> None:
+        """Remove subprocess from tracking after completion/cancel/timeout."""
+        async with self._proc_lock:
+            self._active_procs.discard(proc)
+            if self._current_proc is proc:
+                self._current_proc = next(iter(self._active_procs), None)
+
     # ── Command Execution ──
 
     async def execute(
@@ -311,9 +336,7 @@ class DockerEngine:
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
             )
-            # Use lock to safely set _current_proc
-            async with self._proc_lock:
-                self._current_proc = proc  # track for force_stop()
+            await self._register_proc(proc)
 
             stdout_chunks = []
             stderr_chunks = []
@@ -346,9 +369,7 @@ class DockerEngine:
                     timeout=timeout,
                 )
             finally:
-                # Clear _current_proc after done (with lock)
-                async with self._proc_lock:
-                    self._current_proc = None
+                await self._unregister_proc(proc)
 
             stdout_str = "".join(stdout_chunks)
             stderr_str = "".join(stderr_chunks)
@@ -375,11 +396,11 @@ class DockerEngine:
         except asyncio.CancelledError:
             # force_stop() cancelled us — clean up proc
             try:
-                async with self._proc_lock:
-                    if self._current_proc:
-                        self._current_proc.kill()
-                        await self._current_proc.wait()
-                        self._current_proc = None
+                if proc is not None and proc.returncode is None:
+                    proc.kill()
+                    await proc.wait()
+                if proc is not None:
+                    await self._unregister_proc(proc)
             except Exception as _e:
                 logger.debug("Could not cancel process: %s", _e)
             return {
@@ -396,6 +417,8 @@ class DockerEngine:
                 if proc is not None:
                     proc.kill()
                     await proc.wait()
+                if proc is not None:
+                    await self._unregister_proc(proc)
             except Exception as _e:
                 logger.debug("Could not kill timed-out process: %s", _e)
             # Kill only THIS command's process tree via AIRECON_JOB_ID env marker.
@@ -489,16 +512,25 @@ class DockerEngine:
 
     async def force_stop(self) -> None:
         """Force stop all running commands in the container and the local proc."""
-        # 1. Kill the Python-side asyncio subprocess immediately
-        # Use lock to safely read _current_proc (avoids TOCTOU race with execute())
+        # 1. Kill all Python-side asyncio subprocesses immediately
         async with self._proc_lock:
-            proc = self._current_proc
+            procs = list(self._active_procs)
+            self._active_procs.clear()
             self._current_proc = None
 
-        if proc:
+        for proc in procs:
             try:
-                proc.kill()
-                await asyncio.wait_for(proc.wait(), timeout=2.0)
+                if proc.returncode is None:
+                    proc.kill()
+                    await asyncio.wait_for(proc.wait(), timeout=2.0)
+                    logger.info("Killed running process in force_stop()")
+                else:
+                    logger.debug(
+                        "Process already completed (returncode=%d), skip kill",
+                        proc.returncode,
+                    )
+            except ProcessLookupError:
+                logger.debug("Process already terminated, nothing to kill")
             except Exception as _e:
                 logger.debug("Could not kill cancelled process: %s", _e)
 

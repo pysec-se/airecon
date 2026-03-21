@@ -321,7 +321,7 @@ class AIReconApp(App):
                     exec_used = tool_counts.get("exec", 0)
                     subagents = tool_counts.get("subagents", 0)
                     token_info = agent_stats.get("token_usage", {})
-                    tokens_used = token_info.get("used", 0)
+                    tokens_used = token_info.get("cumulative", token_info.get("used", 0))
                     tokens_limit = token_info.get("limit", 65536)
                     skills_info = agent_stats.get("skills_used", [])
 
@@ -415,7 +415,7 @@ class AIReconApp(App):
                     exec_used = tool_counts.get("exec", 0)
                     subagents = tool_counts.get("subagents", 0) + self._file_agents_running
                     token_info = data.get("agent", {}).get("token_usage", {})
-                    tokens_used = token_info.get("used", 0)
+                    tokens_used = token_info.get("cumulative", token_info.get("used", 0))
                     tokens_limit = token_info.get("limit", 65536)
                     skills_info = data.get("agent", {}).get("skills_used", [])
                     caido_data = data.get("agent", {}).get("caido", {})
@@ -948,7 +948,7 @@ class AIReconApp(App):
 
                                 if _ti:
                                     status_update_kwargs["tokens"] = _ti.get(
-                                        "used", 0)
+                                        "cumulative", _ti.get("used", 0))
                                     status_update_kwargs["token_limit"] = _ti.get(
                                         "limit", 65536)
 

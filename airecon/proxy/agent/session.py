@@ -8,6 +8,7 @@ Storage: ~/.airecon/sessions/<session_id>.json
 
 from __future__ import annotations
 
+import ast
 import json
 import logging
 import re
@@ -16,7 +17,7 @@ import uuid
 from dataclasses import dataclass, field, asdict
 from datetime import datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, Iterable, TypeVar
 from urllib.parse import parse_qsl, urlencode, urlparse, urlunparse
 
 from .output_parser import ParsedOutput
@@ -24,6 +25,118 @@ from .output_parser import ParsedOutput
 logger = logging.getLogger("airecon.agent.session")
 
 SESSIONS_DIR = Path.home() / ".airecon" / "sessions"
+
+# ---------------------------------------------------------------------------
+# Memory limits for bounded collections
+# ---------------------------------------------------------------------------
+_MAX_SUBDOMAINS = 10000
+_MAX_LIVE_HOSTS = 5000
+_MAX_URLS = 50000
+_MAX_VULNERABILITIES = 1000
+_MAX_ATTACK_CHAINS = 100
+_MAX_INJECTION_POINTS = 5000
+_MAX_AUTH_COOKIES = 100
+_MAX_AUTH_TOKENS = 50
+_MAX_TESTED_ENDPOINTS = 500
+_MAX_TOOLS_RUN = 1000
+_MAX_CORRELATION_SUGGESTIONS = 200
+_MAX_COMPLETED_PHASES = 10
+
+T = TypeVar("T")
+
+
+class BoundedList(list[T]):
+    """List with max length that drops oldest entries first."""
+
+    __slots__ = ("maxlen",)
+
+    def __init__(self, values: Iterable[T] = (), maxlen: int | None = None) -> None:
+        self.maxlen = maxlen
+        super().__init__(values)
+        self._trim()
+
+    def _trim(self) -> None:
+        if self.maxlen is not None and self.maxlen >= 0 and len(self) > self.maxlen:
+            del self[: len(self) - self.maxlen]
+
+    def append(self, value: T) -> None:
+        super().append(value)
+        self._trim()
+
+    def extend(self, values: Iterable[T]) -> None:
+        super().extend(values)
+        self._trim()
+
+    def insert(self, index: int, value: T) -> None:
+        super().insert(index, value)
+        self._trim()
+
+    def __iadd__(self, values: Iterable[T]):  # type: ignore[override]
+        result = super().__iadd__(values)
+        self._trim()
+        return result
+
+    def __setitem__(self, key, value):  # type: ignore[override]
+        super().__setitem__(key, value)
+        self._trim()
+
+
+_DEQUE_SERIALIZED_RE = re.compile(
+    r"""^deque\((\[[\s\S]*\])(?:,\s*maxlen=\d+)?\)$"""
+)
+
+
+def _coerce_sequence_field(
+    value: Any,
+    *,
+    field_name: str,
+    maxlen: int,
+) -> BoundedList[Any]:
+    """Normalize session collection fields from list/deque/legacy-string to BoundedList."""
+    if isinstance(value, BoundedList):
+        return BoundedList(value, maxlen=maxlen)
+    if value is None:
+        return BoundedList(maxlen=maxlen)
+    if isinstance(value, list):
+        return BoundedList(value, maxlen=maxlen)
+    if isinstance(value, tuple):
+        return BoundedList(list(value), maxlen=maxlen)
+    if isinstance(value, str):
+        text = value.strip()
+        m = _DEQUE_SERIALIZED_RE.match(text)
+        if m:
+            text = m.group(1)
+        try:
+            parsed = ast.literal_eval(text)
+            if isinstance(parsed, list):
+                return BoundedList(parsed, maxlen=maxlen)
+            if isinstance(parsed, tuple):
+                return BoundedList(list(parsed), maxlen=maxlen)
+        except Exception:
+            logger.warning(
+                "Failed to parse legacy %s field value; resetting to empty.",
+                field_name,
+            )
+        return BoundedList(maxlen=maxlen)
+    try:
+        return BoundedList(list(value), maxlen=maxlen)
+    except Exception:
+        logger.warning(
+            "Unsupported %s field type %s; resetting to empty.",
+            field_name,
+            type(value).__name__,
+        )
+        return BoundedList(maxlen=maxlen)
+
+
+def _coerce_non_negative_int(value: Any, default: int = 0) -> int:
+    """Parse integer values safely and clamp negative numbers."""
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError):
+        return default
+    return parsed if parsed >= 0 else default
+
 
 # ---------------------------------------------------------------------------
 # Injection point extraction
@@ -325,28 +438,34 @@ class SessionData:
     target: str = ""
 
     # Findings
-    subdomains: list[str] = field(default_factory=list)
-    live_hosts: list[str] = field(default_factory=list)
+    subdomains: list[str] = field(default_factory=lambda: BoundedList(maxlen=_MAX_SUBDOMAINS))
+    live_hosts: list[str] = field(default_factory=lambda: BoundedList(maxlen=_MAX_LIVE_HOSTS))
     open_ports: dict[str, list[int]] = field(default_factory=dict)
-    urls: list[str] = field(default_factory=list)
+    urls: list[str] = field(default_factory=lambda: BoundedList(maxlen=_MAX_URLS))
     technologies: dict[str, str] = field(default_factory=dict)
-    vulnerabilities: list[dict[str, Any]] = field(default_factory=list)
-    attack_chains: list[dict[str, Any]] = field(default_factory=list)
-    completed_phases: list[str] = field(default_factory=list)
+    vulnerabilities: list[dict[str, Any]] = field(default_factory=lambda: BoundedList(maxlen=_MAX_VULNERABILITIES))
+    attack_chains: list[dict[str, Any]] = field(default_factory=lambda: BoundedList(maxlen=_MAX_ATTACK_CHAINS))
+    completed_phases: list[str] = field(default_factory=lambda: BoundedList(maxlen=_MAX_COMPLETED_PHASES))
     current_phase: str = "RECON"
-    tools_run: list[str] = field(default_factory=list)
+    tools_run: list[str] = field(default_factory=lambda: BoundedList(maxlen=_MAX_TOOLS_RUN))
     scan_count: int = 0
     created_at: str = ""
     updated_at: str = ""
+
+    # Token accounting (session cumulative)
+    token_total: int = 0
+    token_prompt_total: int = 0
+    token_completion_total: int = 0
+    token_last_used: int = 0
 
     # Injection points discovered during ANALYSIS phase.
     # Each entry: {url, parameter, method, value_sample, type_hint}
     # Populated automatically from URLs by update_from_parsed_output().
     # The EXPLOIT phase uses this list to target specific parameters.
-    injection_points: list[dict[str, Any]] = field(default_factory=list)
+    injection_points: list[dict[str, Any]] = field(default_factory=lambda: BoundedList(maxlen=_MAX_INJECTION_POINTS))
 
     # Browser auth state (persisted so re-runs skip re-login)
-    auth_cookies: list[dict[str, Any]] = field(default_factory=list)
+    auth_cookies: list[dict[str, Any]] = field(default_factory=lambda: BoundedList(maxlen=_MAX_AUTH_COOKIES))
     auth_tokens: dict[str, str] = field(default_factory=dict)
     auth_type: str = ""  # "form", "totp", "oauth", "cookie"
 
@@ -354,7 +473,7 @@ class SessionData:
     # Key format: "<url>||<parameter>||<method>" — exact dedup to prevent
     # re-testing the same (url, param, method) triple across iterations.
     # Populated by loop.py after execute/quick_fuzz/advanced_fuzz tool calls.
-    tested_injection_points: list[str] = field(default_factory=list)
+    tested_injection_points: list[str] = field(default_factory=lambda: BoundedList(maxlen=_MAX_TESTED_ENDPOINTS * 2))
     # Transient flag: True after prior-session findings have been merged this run.
     # Stored in JSON so it survives a session reload and prevents duplicate merges.
     _prior_merged: bool = field(default=False)
@@ -364,39 +483,73 @@ class SessionData:
     # correlation engine doesn't repeat the same hints every 10 iterations.
     # Format: "<type>:<key>" e.g. "port:80", "technology:wordpress",
     # "expert_test:idor_hotspot", "attack_chain:XSS → CSRF"
-    suggested_correlations: list[str] = field(default_factory=list)
+    suggested_correlations: list[str] = field(default_factory=lambda: BoundedList(maxlen=_MAX_CORRELATION_SUGGESTIONS))
 
     # Endpoints that have been actively tested this session.
     # Format: "METHOD url" e.g. "GET https://example.com/api/users"
     # Capped at 500 entries (LRU — oldest dropped first).
     # Persisted to disk so the LLM never re-tests the same endpoint after
     # a crash or extreme context truncation.
-    tested_endpoints: list[str] = field(default_factory=list)
+    tested_endpoints: list[str] = field(default_factory=lambda: BoundedList(maxlen=_MAX_TESTED_ENDPOINTS))
 
     def __post_init__(self) -> None:
         if not self.session_id:
             self.session_id = generate_session_id()
         if not self.created_at:
             self.created_at = datetime.now().isoformat()
+        self.prune_old_data()
 
-
-_MAX_TESTED_ENDPOINTS = 500
+    def prune_old_data(self) -> None:
+        """Coerce all collection fields to BoundedList and clamp token fields."""
+        self.subdomains = _coerce_sequence_field(
+            self.subdomains, field_name="subdomains", maxlen=_MAX_SUBDOMAINS)
+        self.live_hosts = _coerce_sequence_field(
+            self.live_hosts, field_name="live_hosts", maxlen=_MAX_LIVE_HOSTS)
+        self.urls = _coerce_sequence_field(
+            self.urls, field_name="urls", maxlen=_MAX_URLS)
+        self.vulnerabilities = _coerce_sequence_field(
+            self.vulnerabilities, field_name="vulnerabilities", maxlen=_MAX_VULNERABILITIES)
+        self.attack_chains = _coerce_sequence_field(
+            self.attack_chains, field_name="attack_chains", maxlen=_MAX_ATTACK_CHAINS)
+        self.completed_phases = _coerce_sequence_field(
+            self.completed_phases, field_name="completed_phases", maxlen=_MAX_COMPLETED_PHASES)
+        self.tools_run = _coerce_sequence_field(
+            self.tools_run, field_name="tools_run", maxlen=_MAX_TOOLS_RUN)
+        self.injection_points = _coerce_sequence_field(
+            self.injection_points, field_name="injection_points", maxlen=_MAX_INJECTION_POINTS)
+        self.auth_cookies = _coerce_sequence_field(
+            self.auth_cookies, field_name="auth_cookies", maxlen=_MAX_AUTH_COOKIES)
+        self.tested_injection_points = _coerce_sequence_field(
+            self.tested_injection_points, field_name="tested_injection_points",
+            maxlen=_MAX_TESTED_ENDPOINTS * 2)
+        self.suggested_correlations = _coerce_sequence_field(
+            self.suggested_correlations, field_name="suggested_correlations",
+            maxlen=_MAX_CORRELATION_SUGGESTIONS)
+        self.tested_endpoints = _coerce_sequence_field(
+            self.tested_endpoints, field_name="tested_endpoints", maxlen=_MAX_TESTED_ENDPOINTS)
+        # Trim auth_tokens dict
+        if isinstance(self.auth_tokens, dict) and len(self.auth_tokens) > _MAX_AUTH_TOKENS:
+            keys = list(self.auth_tokens.keys())
+            for k in keys[:-_MAX_AUTH_TOKENS]:
+                del self.auth_tokens[k]
+        # Clamp token accounting fields
+        self.token_total = _coerce_non_negative_int(self.token_total)
+        self.token_prompt_total = _coerce_non_negative_int(self.token_prompt_total)
+        self.token_completion_total = _coerce_non_negative_int(self.token_completion_total)
+        self.token_last_used = _coerce_non_negative_int(self.token_last_used)
 
 
 def record_tested_endpoint(session: SessionData, url: str, method: str = "GET") -> None:
     """Record a URL as tested so it survives context truncation and crashes.
 
-    Normalises to "METHOD URL" format and deduplicates.  When the list
-    exceeds the cap, the oldest entries are dropped (LRU).
+    Normalises to "METHOD URL" format and deduplicates.  BoundedList handles
+    the capacity cap automatically (oldest entries dropped first).
     """
     if not url or not url.strip():
         return
     key = f"{method.upper()} {url.strip()}"
     if key not in session.tested_endpoints:
         session.tested_endpoints.append(key)
-        if len(session.tested_endpoints) > _MAX_TESTED_ENDPOINTS:
-            # Drop oldest entries to stay within cap
-            session.tested_endpoints = session.tested_endpoints[-_MAX_TESTED_ENDPOINTS:]
 
 
 def load_session(session_id: str) -> SessionData | None:
@@ -414,28 +567,56 @@ def load_session(session_id: str) -> SessionData | None:
         session = SessionData(
             session_id=data.get("session_id", session_id),
             target=data.get("target", ""),
-            subdomains=data.get("subdomains", []),
-            live_hosts=data.get("live_hosts", []),
+            subdomains=_coerce_sequence_field(
+                data.get("subdomains", []), field_name="subdomains", maxlen=_MAX_SUBDOMAINS),
+            live_hosts=_coerce_sequence_field(
+                data.get("live_hosts", []), field_name="live_hosts", maxlen=_MAX_LIVE_HOSTS),
             open_ports=data.get("open_ports", {}),
-            urls=data.get("urls", []),
+            urls=_coerce_sequence_field(
+                data.get("urls", []), field_name="urls", maxlen=_MAX_URLS),
             technologies=data.get("technologies", {}),
-            vulnerabilities=data.get("vulnerabilities", []),
-            attack_chains=data.get("attack_chains", []),
-            completed_phases=data.get("completed_phases", []),
+            vulnerabilities=_coerce_sequence_field(
+                data.get("vulnerabilities", []), field_name="vulnerabilities",
+                maxlen=_MAX_VULNERABILITIES),
+            attack_chains=_coerce_sequence_field(
+                data.get("attack_chains", []), field_name="attack_chains",
+                maxlen=_MAX_ATTACK_CHAINS),
+            completed_phases=_coerce_sequence_field(
+                data.get("completed_phases", []), field_name="completed_phases",
+                maxlen=_MAX_COMPLETED_PHASES),
             current_phase=data.get("current_phase", "RECON"),
-            tools_run=data.get("tools_run", []),
+            tools_run=_coerce_sequence_field(
+                data.get("tools_run", []), field_name="tools_run", maxlen=_MAX_TOOLS_RUN),
             scan_count=data.get("scan_count", 0),
             created_at=data.get("created_at", ""),
             updated_at=data.get("updated_at", ""),
-            injection_points=data.get("injection_points", []),
-            auth_cookies=data.get("auth_cookies", []),
+            token_total=_coerce_non_negative_int(data.get("token_total", 0)),
+            token_prompt_total=_coerce_non_negative_int(data.get("token_prompt_total", 0)),
+            token_completion_total=_coerce_non_negative_int(
+                data.get("token_completion_total", 0)),
+            token_last_used=_coerce_non_negative_int(data.get("token_last_used", 0)),
+            injection_points=_coerce_sequence_field(
+                data.get("injection_points", []), field_name="injection_points",
+                maxlen=_MAX_INJECTION_POINTS),
+            auth_cookies=_coerce_sequence_field(
+                data.get("auth_cookies", []), field_name="auth_cookies",
+                maxlen=_MAX_AUTH_COOKIES),
             auth_tokens=data.get("auth_tokens", {}),
             auth_type=data.get("auth_type", ""),
-            tested_injection_points=data.get("tested_injection_points", []),
-            suggested_correlations=data.get("suggested_correlations", []),
-            tested_endpoints=data.get("tested_endpoints", []),
+            tested_injection_points=_coerce_sequence_field(
+                data.get("tested_injection_points", []),
+                field_name="tested_injection_points",
+                maxlen=_MAX_TESTED_ENDPOINTS * 2),
+            suggested_correlations=_coerce_sequence_field(
+                data.get("suggested_correlations", []),
+                field_name="suggested_correlations",
+                maxlen=_MAX_CORRELATION_SUGGESTIONS),
+            tested_endpoints=_coerce_sequence_field(
+                data.get("tested_endpoints", []), field_name="tested_endpoints",
+                maxlen=_MAX_TESTED_ENDPOINTS),
             _prior_merged=data.get("_prior_merged", False),
         )
+        session.prune_old_data()
         logger.info(
             f"Loaded session {session_id} (target={session.target}): "
             f"{len(session.subdomains)} subs, {len(session.live_hosts)} live, "
@@ -460,11 +641,22 @@ def save_session(session: SessionData) -> None:
         )
         return
     try:
+        session.prune_old_data()
         SESSIONS_DIR.mkdir(parents=True, exist_ok=True)
         session.updated_at = datetime.now().isoformat()
         filepath = SESSIONS_DIR / f"{session.session_id}.json"
+        payload = asdict(session)
+        # Convert BoundedList fields to plain list for JSON serialization
+        _bounded_fields = (
+            "subdomains", "live_hosts", "urls", "vulnerabilities",
+            "attack_chains", "completed_phases", "tools_run",
+            "injection_points", "auth_cookies", "tested_injection_points",
+            "suggested_correlations", "tested_endpoints",
+        )
+        for key in _bounded_fields:
+            payload[key] = list(payload.get(key, []))
         with open(filepath, "w") as f:
-            json.dump(asdict(session), f, indent=2, default=str)
+            json.dump(payload, f, indent=2, default=str)
         logger.info(
             f"Saved session {session.session_id} (target={session.target})"
         )

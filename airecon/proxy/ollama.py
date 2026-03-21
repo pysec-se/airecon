@@ -200,6 +200,7 @@ class OllamaClient:
 
         Returns the assistant message content as a plain string.
         Retries up to max_retries times with exponential backoff on transient errors.
+        Raises RuntimeError if Ollama returns an unexpected response format after all retries.
         """
         max_retries = max(0, max_retries)
         gate = await self._get_request_gate()
@@ -215,12 +216,33 @@ class OllamaClient:
                     if options:
                         kwargs["options"] = options
                     response = await self._client.chat(**kwargs)
-                    if hasattr(response, "message"):
-                        return response.message.content or ""
-                    if isinstance(response, dict):
-                        return response.get("message", {}).get("content", "")
-                    return ""
 
+                    # Extract content with explicit validation
+                    content = None
+                    if hasattr(response, "message") and response.message is not None:
+                        content = response.message.content
+                    elif isinstance(response, dict):
+                        content = response.get("message", {}).get("content")
+
+                    if content is None:
+                        logger.warning(
+                            "Ollama returned unexpected response format: %r. "
+                            "Response: %r. Attempt %d/%d",
+                            type(response), response, attempt + 1, max_retries + 1
+                        )
+                        if attempt < max_retries:
+                            wait = 2 ** (attempt + 1)
+                            await asyncio.sleep(wait)
+                            continue
+                        raise RuntimeError(
+                            f"Invalid Ollama response format: {type(response)}. "
+                            f"Expected response with 'message.content' attribute or dict with 'message.content' key."
+                        )
+
+                    return content or ""
+
+                except RuntimeError:
+                    raise
                 except Exception as e:
                     err_str = str(e).lower()
                     is_transient = any(
@@ -240,7 +262,7 @@ class OllamaClient:
                         await asyncio.sleep(wait)
                         continue
                     raise
-        return ""  # unreachable in practice — all non-transient errors raise above
+        raise RuntimeError("Unexpected code path in complete()")
 
     async def chat_stream(
         self,
