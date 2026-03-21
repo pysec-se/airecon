@@ -168,7 +168,7 @@ class AIReconApp(App):
         # Push startup screen — status polling starts only after it dismisses
         from .startup import StartupScreen
 
-        def _on_startup_done(success: bool) -> None:
+        def _on_startup_done(success: bool | None) -> None:
             self._status_task = asyncio.create_task(self._poll_services())
 
         self.push_screen(
@@ -1344,7 +1344,7 @@ class AIReconApp(App):
 
     def action_request_quit(self) -> None:
         """Show confirmation dialog before quitting."""
-        def _on_dismiss(confirmed: bool) -> None:
+        def _on_dismiss(confirmed: bool | None) -> None:
             if confirmed:
                 self.run_worker(self.action_quit(), exclusive=True)
         self.push_screen(QuitConfirmScreen(), _on_dismiss)

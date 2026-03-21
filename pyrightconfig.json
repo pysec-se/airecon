@@ -3,5 +3,7 @@
     "typeCheckingMode": "basic",
     "reportMissingModuleSource": "none",
     "reportAttributeAccessIssue": "none",
-    "reportGeneralTypeIssues": "none"
+    "reportGeneralTypeIssues": "none",
+    "reportMissingImports": "none",
+    "exclude": ["tests/", "benchmark/"]
 }
