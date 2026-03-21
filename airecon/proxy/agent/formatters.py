@@ -137,7 +137,11 @@ class _FormatterMixin:
         success: bool,
         command: str = "",
     ) -> str:
-        MAX_TOTAL = 12000  # Large enough to include JavaScript at the bottom of HTML pages
+        # CTF mode: tight cap at 1000 chars per tool output — aligns with the
+        # 1500-char per-message cap in _get_tool_result_cap() so the two passes
+        # don't fight each other, and keeps the rolling window under budget.
+        _ctf = getattr(self, "_ctf_mode", False)
+        MAX_TOTAL = 1000 if _ctf else 12000
 
         if not success:
             error_msg = result.get("error", "") or ""
@@ -239,6 +243,31 @@ class _FormatterMixin:
                     "DO NOT invent results."
                 )
 
+            # Strip HTML before parsing — raw HTML floods context with tag soup.
+            # Applied early so both structured parser and raw fallback get clean text.
+            _stdout_head = stdout[:400].lower()
+            _is_html = (
+                "<!doctype html" in _stdout_head
+                or ("<html" in _stdout_head and "<head" in _stdout_head)
+                or ("<html" in _stdout_head and "<body" in _stdout_head)
+            )
+            if _is_html:
+                # Remove script/style blocks (no useful pentest info)
+                stdout = re.sub(
+                    r"<(script|style)[^>]*>.*?</(script|style)>",
+                    " ",
+                    stdout,
+                    flags=re.DOTALL | re.IGNORECASE,
+                )
+                # Strip all remaining HTML tags
+                stdout = re.sub(r"<[^>]+>", " ", stdout)
+                # Collapse whitespace and keep non-empty lines
+                stdout = "\n".join(
+                    ln.strip()
+                    for ln in re.sub(r"[ \t]+", " ", stdout).splitlines()
+                    if ln.strip()
+                )
+
             # Try structured parsing first
             parsed = parse_tool_output(command, stdout)
             if parsed and parsed.total_count > 0:
@@ -263,15 +292,17 @@ class _FormatterMixin:
                     body += "\n\n[SECURITY CONTEXT — act on these]\n" + "\n".join(hints)
                 return body
 
-            # Fallback: raw truncation
+            # Fallback: raw truncation (HTML already stripped above if applicable)
             lines = stdout.strip().split("\n")
             total = len(lines)
-            if total > 100:
-                head = "\n".join(lines[:60])
-                tail = "\n".join(lines[-15:])
+            # Use tighter head/tail in CTF mode to minimise context usage.
+            _head_n, _tail_n = (30, 5) if _ctf else (60, 15)
+            if total > (_head_n + _tail_n):
+                head = "\n".join(lines[:_head_n])
+                tail = "\n".join(lines[-_tail_n:])
                 body = (
                     f"{head}\n\n"
-                    f"... [{total - 75} more lines] ...\n\n"
+                    f"... [{total - _head_n - _tail_n} more lines] ...\n\n"
                     f"{tail}\n\n"
                     f"TOTAL OUTPUT: {total} lines. Full output saved to file."
                 )

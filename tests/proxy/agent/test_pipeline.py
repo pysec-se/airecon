@@ -22,9 +22,11 @@ def test_should_not_transition_without_criteria(empty_pipeline):
 
 
 def test_transition_recon_to_analysis(empty_pipeline):
-    # Fulfill criteria for RECON -> ANALYSIS (3/5 criteria = 60%+):
-    # subdomains_discovered, ports_scanned, url_discovery_met
+    # Fulfill criteria for RECON -> ANALYSIS — live_hosts_validated is now
+    # MANDATORY, so we must include a live host alongside other criteria.
+    # subdomains_discovered + live_hosts_validated + ports_scanned + url_discovery_met = 4/6
     empty_pipeline.session.subdomains = ["app.example.com"]
+    empty_pipeline.session.live_hosts = ["https://app.example.com"]   # MANDATORY
     empty_pipeline.session.open_ports = {"app.example.com": [80, 443]}
     empty_pipeline.session.urls = ["https://app.example.com/login"]
 
@@ -38,8 +40,9 @@ def test_transition_recon_to_analysis(empty_pipeline):
 
 def test_transition_cooldown_prevent_immediate_jump():
     session = SessionData(target="example.com")
-    # All criteria instantly met for both RECON and ANALYSIS
+    # All criteria met including mandatory live_hosts_validated
     session.subdomains = ["app.example.com"]
+    session.live_hosts = ["https://app.example.com"]   # MANDATORY
     session.open_ports = {"app.example.com": [443]}
     session.urls = ["https://app.example.com"]
     session.technologies = {"nginx": "1.18"}
@@ -130,16 +133,22 @@ def test_url_discovery_met_criterion():
 
 
 def test_depth_not_met_but_60pct_still_transitions():
-    """3/5 criteria (60%) still satisfies transition threshold even without depth criteria."""
+    """4/6 criteria (67%) satisfies transition threshold.
+
+    live_hosts_validated is now MANDATORY — without it, transition is blocked
+    regardless of other criteria. This test verifies that when live_hosts
+    IS present, the 60% threshold still works for remaining criteria.
+    """
     session = SessionData(target="test.com")
-    session.subdomains = ["sub.test.com"]          # subdomains_discovered ✓
-    session.open_ports = {"test.com": [443]}       # ports_scanned ✓
-    session.scan_count = 5                         # recon_artifacts_saved ✓
+    session.subdomains = ["sub.test.com"]            # subdomains_discovered ✓
+    session.live_hosts = ["https://sub.test.com"]    # live_hosts_validated ✓ (MANDATORY)
+    session.open_ports = {"test.com": [443]}         # ports_scanned ✓
+    session.urls = ["https://sub.test.com/"]         # url_discovery_met ✓
+    # recon_artifacts_saved ✗ (no output files, scan_count fallback removed)
     # subdomain_depth_met ✗ (only 1, needs 3)
-    # url_discovery_met ✗ (no URLs)
 
     engine = _make_engine(session)
-    # 3/5 = 60% → threshold is max(1, int(5*0.6)) = 3 → should transition
+    # 4/6 = 67% → threshold is max(1, int(6*0.6)) = 3 → should transition
     assert engine.should_transition() is True
 
 
@@ -153,6 +162,33 @@ def test_soft_timeout_forces_transition():
     engine._phase_entry_iteration = 0
     engine._current_iteration = 31  # > soft_timeout=30
 
+    assert engine.should_transition() is True
+
+
+def test_soft_timeout_with_data_but_no_live_hosts_blocks_transition():
+    """Soft-timeout must not bypass mandatory live_hosts_validated when data exists."""
+    session = SessionData(target="test.com")
+    session.subdomains = ["api.test.com"]  # has data
+
+    engine = _make_engine(session)
+    engine._recon_soft_timeout = 30
+    engine._phase_entry_iteration = 0
+    engine._current_iteration = 40
+
+    assert engine.should_transition() is False
+
+
+def test_soft_timeout_with_live_hosts_counts_as_data():
+    """live_hosts must count as collected data in soft-timeout guard logic."""
+    session = SessionData(target="test.com")
+    session.live_hosts = ["https://api.test.com"]
+
+    engine = _make_engine(session)
+    engine._recon_soft_timeout = 30
+    engine._phase_entry_iteration = 0
+    engine._current_iteration = 40
+
+    # No misleading "NO data" branch; timeout transition remains allowed.
     assert engine.should_transition() is True
 
 

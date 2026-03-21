@@ -9,9 +9,11 @@ from __future__ import annotations
 import json
 import logging
 import re
+from pathlib import Path
 import defusedxml.ElementTree as ET
 from xml.etree.ElementTree import ParseError as XMLParseError  # nosec B405 - only importing exception class, not a parser
 from dataclasses import dataclass, field
+from typing import Any
 
 from .command_parse import extract_primary_binary
 
@@ -40,36 +42,35 @@ MAX_ITEMS = 100
 MAX_RAW_FALLBACK = 3000
 
 
+def _load_tool_patterns() -> list[tuple[re.Pattern[str], str]]:
+    """Load tool binary → parser type mappings from data/tools_meta.json.
+
+    Falls back to an empty list (triggers generic parser for all tools)
+    if the JSON file is unavailable.
+    """
+    try:
+        path = Path(__file__).resolve().parent.parent / "data" / "tools_meta.json"
+        data = json.loads(path.read_text(encoding="utf-8"))
+        patterns = data.get("output_parser_tool_patterns", {})
+        return [
+            (re.compile(rf"\b{re.escape(binary)}\b"), parser_type)
+            for binary, parser_type in patterns.items()
+            if binary and parser_type
+        ]
+    except Exception as exc:
+        logger.warning(
+            "Could not load output_parser_tool_patterns from tools_meta.json: %s — "
+            "tool detection disabled, generic parser will be used for all tools.",
+            exc,
+        )
+        return []
+
+
 # ── Tool Detection ──────────────────────────────────────────────────
 
-# Map of tool binary names → parser function name
-_TOOL_PATTERNS: list[tuple[re.Pattern, str]] = [
-    (re.compile(r"\bnmap\b"), "nmap"),
-    (re.compile(r"\bnuclei\b"), "nuclei"),
-    (re.compile(r"\bsubfinder\b"), "subfinder"),
-    (re.compile(r"\bamass\b"), "subfinder"),       # same line-based format
-    (re.compile(r"\bassetfinder\b"), "subfinder"),
-    (re.compile(r"\bfindomain\b"), "subfinder"),
-    (re.compile(r"\bhttpx\b"), "httpx"),
-    (re.compile(r"\bkatana\b"), "url_list"),
-    (re.compile(r"\bgospider\b"), "url_list"),
-    (re.compile(r"\bwaybackurls\b"), "url_list"),
-    (re.compile(r"\bgau\b"), "url_list"),
-    (re.compile(r"\bffuf\b"), "ffuf"),
-    (re.compile(r"\bnaabu\b"), "naabu"),
-    (re.compile(r"\bdnsx\b"), "dnsx"),
-    (re.compile(r"\bwhatweb\b"), "whatweb"),
-    (re.compile(r"\bdig\b"), "dig"),
-    (re.compile(r"\bwfuzz\b"), "ffuf"),            # similar format
-    (re.compile(r"\bdirsearch\b"), "url_list"),
-    (re.compile(r"\bferoxbuster\b"), "url_list"),
-    (re.compile(r"\bgobuster\b"), "url_list"),
-    (re.compile(r"\bsqlmap\b"), "sqlmap"),
-    (re.compile(r"\bghauri\b"), "sqlmap"),        # same finding format
-    (re.compile(r"\bnikto\b"), "nikto"),
-    (re.compile(r"\bdalfox\b"), "dalfox"),
-    (re.compile(r"\bwpscan\b"), "wpscan"),
-]
+# Map of tool binary names → parser type. Loaded from tools_meta.json
+# (single source of truth). Each entry: (compiled regex, parser_type_name).
+_TOOL_PATTERNS: list[tuple[re.Pattern[str], str]] = _load_tool_patterns()
 
 
 def detect_tool(command: str) -> str | None:
@@ -97,24 +98,7 @@ def parse_tool_output(command: str, stdout: str) -> ParsedOutput | None:
 
     tool = detect_tool(command)
 
-    parsers = {
-        "nmap": _parse_nmap,
-        "nuclei": _parse_nuclei,
-        "subfinder": _parse_line_list,
-        "httpx": _parse_httpx,
-        "url_list": _parse_line_list,
-        "ffuf": _parse_ffuf,
-        "naabu": _parse_naabu,
-        "sqlmap": _parse_sqlmap,
-        "nikto": _parse_nikto,
-        "dalfox": _parse_dalfox,
-        "wpscan": _parse_wpscan,
-        "dnsx": _parse_line_list,
-        "whatweb": _parse_whatweb,
-        "dig": _parse_line_list,
-    }
-
-    parser_fn = parsers.get(tool) if tool else None
+    parser_fn = _PARSERS.get(tool) if tool else None
     if parser_fn:
         try:
             result = parser_fn(stdout)
@@ -1037,3 +1021,114 @@ def _parse_generic_lines(lines: list[str]) -> ParsedOutput:
         raw_truncated="" if len(
             unique) <= MAX_ITEMS else "\n".join(lines[-10:]),
     )
+
+
+def _parse_hydra(stdout: str) -> ParsedOutput:
+    """Parse hydra/medusa output — extract credential findings."""
+    findings: list[str] = []
+
+    for line in stdout.split("\n"):
+        line = line.strip()
+        if not line:
+            continue
+        # Hydra format: "[22][ssh] host: 1.2.3.4   login: admin   password: 123456"
+        if re.match(r"\[\d+\]\[", line) and ("login:" in line or "password:" in line):
+            findings.append(f"[HIGH] Credential found: {line}")
+        # Medusa format: "ACCOUNT FOUND: [ssh] Host: 1.2.3.4 User: admin Password: 123"
+        elif re.match(r"ACCOUNT FOUND:", line, re.IGNORECASE):
+            findings.append(f"[HIGH] Credential found: {line}")
+        # "[DATA] ... valid passwords ... or status lines"
+        elif line.startswith("[DATA]") and "valid" in line.lower():
+            findings.append(f"[MEDIUM] {line}")
+
+    if not findings:
+        return ParsedOutput(
+            tool="hydra",
+            summary="hydra: no credentials found",
+            items=[],
+            total_count=0,
+            raw_truncated=stdout[:MAX_RAW_FALLBACK],
+        )
+    return ParsedOutput(
+        tool="hydra",
+        summary=f"hydra: {len(findings)} credential(s) found",
+        items=findings[:MAX_ITEMS],
+        total_count=len(findings),
+    )
+
+
+def _parse_metasploit(stdout: str) -> ParsedOutput:
+    """Parse metasploit/msfconsole output — extract exploitation results."""
+    findings: list[str] = []
+    _NEGATIVE_RE = re.compile(
+        r"\b(?:"
+        r"not\s+vulnerable(?:\s+to)?"
+        r"|not\s+affected"
+        r"|unaffected"
+        r"|not\s+impacted"
+        r"|no\s+vulnerabilit(?:y|ies)"
+        r"|not\s+exploitable"
+        r"|already\s+patched"
+        r"|fully\s+patched"
+        r"|fixed\s+in"
+        r"|patch\s+available"
+        r")\b",
+        re.IGNORECASE,
+    )
+
+    for line in stdout.split("\n"):
+        line = line.strip()
+        if not line:
+            continue
+        if _NEGATIVE_RE.search(line):
+            continue
+        # "[+] host - Vulnerable to ..." or "[+] Meterpreter session ..."
+        if line.startswith("[+]") and any(
+            kw in line.lower()
+            for kw in ("vulnerable", "session opened", "shell", "meterpreter",
+                       "exploit succeeded", "access granted", "root")
+        ):
+            findings.append(f"[HIGH] {line}")
+        # "[*] ... found ..."
+        elif line.startswith("[*]") and "found" in line.lower():
+            findings.append(f"[MEDIUM] {line}")
+
+    if not findings:
+        return ParsedOutput(
+            tool="metasploit",
+            summary="metasploit: no exploitation results",
+            items=[],
+            total_count=0,
+            raw_truncated=stdout[:MAX_RAW_FALLBACK],
+        )
+    return ParsedOutput(
+        tool="metasploit",
+        summary=f"metasploit: {len(findings)} result(s)",
+        items=findings[:MAX_ITEMS],
+        total_count=len(findings),
+    )
+
+
+# ── Parser Registry ──────────────────────────────────────────────────
+
+# Maps parser type names (from output_parser_tool_patterns in tools_meta.json)
+# to their corresponding parser functions. This dict is logic (name→function
+# binding), not data, so it lives in Python rather than JSON.
+_PARSERS: dict[str, Any] = {
+    "nmap": _parse_nmap,
+    "nuclei": _parse_nuclei,
+    "subfinder": _parse_line_list,
+    "httpx": _parse_httpx,
+    "url_list": _parse_line_list,
+    "ffuf": _parse_ffuf,
+    "naabu": _parse_naabu,
+    "sqlmap": _parse_sqlmap,
+    "nikto": _parse_nikto,
+    "dalfox": _parse_dalfox,
+    "wpscan": _parse_wpscan,
+    "dnsx": _parse_line_list,
+    "whatweb": _parse_whatweb,
+    "dig": _parse_line_list,
+    "hydra": _parse_hydra,
+    "metasploit": _parse_metasploit,
+}

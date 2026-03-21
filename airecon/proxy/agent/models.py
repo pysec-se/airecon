@@ -351,26 +351,39 @@ class AgentState:
             "[SYSTEM: PHASE GATE",
             "[SYSTEM: AGGRESSIVE EXPLORATION",
             "[SYSTEM: QUALITY SCOREBOARD",
+        )
+        # These prefixes carry recovery/orientation state that must survive
+        # across truncations — never collapse them to a single message.
+        PROTECTED_PREFIXES = (
             "[SYSTEM: RECOVERY STATE",
+            "[SYSTEM: PINNED CONTEXT",
+            "[SYSTEM: RECOVERY MODE",
         )
 
         core_system: list[dict] = []
         ephemeral_system: list[dict] = []
+        protected_system: list[dict] = []
         other_messages: list[dict] = []
 
         for msg in self.conversation:
             if msg.get("role") == "system":
                 content = msg.get("content", "")
-                if any(content.startswith(p) for p in EPHEMERAL_PREFIXES):
+                if any(content.startswith(p) for p in PROTECTED_PREFIXES):
+                    protected_system.append(msg)
+                elif any(content.startswith(p) for p in EPHEMERAL_PREFIXES):
                     ephemeral_system.append(msg)
                 else:
                     core_system.append(msg)
             else:
                 other_messages.append(msg)
 
-        # Collapse ephemeral messages to most recent only
+        # Collapse ephemeral messages to most recent only (they're regenerated
+        # each iteration). Protected messages are kept in full.
         if ephemeral_system:
             ephemeral_system = [ephemeral_system[-1]]
+        # Keep at most the 2 most recent protected messages to bound context.
+        if len(protected_system) > 2:
+            protected_system = protected_system[-2:]
 
         # STEP 1: Compress verbose tool results in older messages
         # Keep last 20 messages uncompressed, compress older ones
@@ -418,9 +431,9 @@ class AgentState:
                 m for m in other_messages if id(m) not in dropped_text_ids
             ]
 
-        budget = max_messages - len(core_system) - len(ephemeral_system)
+        budget = max_messages - len(core_system) - len(ephemeral_system) - len(protected_system)
         if len(other_messages) <= budget:
-            self.conversation = core_system + ephemeral_system + other_messages
+            self.conversation = core_system + ephemeral_system + protected_system + other_messages
             logger.info(
                 f"Truncated (compressed + text-drop): {len(self.conversation)} messages"
             )
@@ -465,7 +478,7 @@ class AgentState:
 
         rebuilt = must_keep + \
             ([separator] if dropped_count > 0 else []) + trimmed
-        self.conversation = core_system + ephemeral_system + rebuilt
+        self.conversation = core_system + ephemeral_system + protected_system + rebuilt
         logger.info(
             f"Truncated (pair-preserving): {len(self.conversation)} messages "
             f"(dropped {dropped_count} older messages)"

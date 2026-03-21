@@ -448,9 +448,20 @@ def load_session(session_id: str) -> SessionData | None:
 
 
 def save_session(session: SessionData) -> None:
-    """Save session data to disk using session_id as filename."""
+    """Save session data to disk using session_id as filename.
+
+    Sessions without a target are never persisted — they are throwaway
+    placeholders created by subagents, file-analyze mini-agents, and the
+    initial AgentLoop state before a target is established.
+    """
+    if not session.target:
+        logger.debug(
+            "Skipping save for session %s — no target set", session.session_id
+        )
+        return
     try:
         SESSIONS_DIR.mkdir(parents=True, exist_ok=True)
+        session.updated_at = datetime.now().isoformat()
         filepath = SESSIONS_DIR / f"{session.session_id}.json"
         with open(filepath, "w") as f:
             json.dump(asdict(session), f, indent=2, default=str)
@@ -474,10 +485,18 @@ def list_sessions() -> list[dict]:
         try:
             with open(path, "r") as f:
                 data = json.load(f)
+            target = data.get("target", "")
+            # Skip sessions that have no target — placeholder sessions from
+            # subagents, mini-agents, and pre-target init.
+            # NOTE: list_sessions is a read-only operation; no file deletion here.
+            # Use cleanup_empty_sessions() for explicit maintenance.
+            if not target:
+                continue
             sessions.append({
                 "session_id": data.get("session_id", path.stem),
-                "target": data.get("target", ""),
+                "target": target,
                 "created_at": data.get("created_at", ""),
+                "updated_at": data.get("updated_at", ""),
                 "scan_count": data.get("scan_count", 0),
                 "subdomains": len(data.get("subdomains", [])),
                 "live_hosts": len(data.get("live_hosts", [])),
@@ -486,8 +505,35 @@ def list_sessions() -> list[dict]:
         except Exception as _e:
             logger.debug("Could not load session metadata: %s", _e)
 
-    sessions.sort(key=lambda s: s["created_at"], reverse=True)
+    sessions.sort(
+        key=lambda s: s.get("updated_at") or s.get("created_at", ""),
+        reverse=True,
+    )
     return sessions
+
+
+def cleanup_empty_sessions() -> int:
+    """Delete session files that have no target (placeholder/subagent sessions).
+
+    This is an explicit maintenance operation — intentionally separate from
+    list_sessions() to avoid silent data loss during normal listing.
+
+    Returns the number of files deleted.
+    """
+    if not SESSIONS_DIR.exists():
+        return 0
+    deleted = 0
+    for path in SESSIONS_DIR.glob("*.json"):
+        try:
+            with open(path, "r") as f:
+                data = json.load(f)
+            if not data.get("target"):
+                path.unlink()
+                logger.info("Cleaned up empty session: %s", path.name)
+                deleted += 1
+        except Exception as _e:
+            logger.debug("cleanup_empty_sessions: could not process %s: %s", path.name, _e)
+    return deleted
 
 
 def find_prior_session(target: str) -> SessionData | None:
@@ -659,8 +705,46 @@ def update_from_parsed_output(
     #   "| 80/tcp  open  http"          (nmap script block with pipe prefix)
     #   "  443/tcp filtered https"      (leading whitespace variants)
     _PORT_PROTO_RE = re.compile(r"(?:^|[|\s])(\d+)/(tcp|udp)\s+(open|filtered)")
+    # Set-Cookie header detection for cookie-based injection point capture.
+    # Handles both plain HTTP response lines and curl -v verbose format (< prefix).
+    _SET_COOKIE_RE = re.compile(
+        r"^(?:<\s*)?[Ss]et-[Cc]ookie:\s*([A-Za-z0-9_\-\.]+)=([^;\r\n]*)",
+        re.IGNORECASE,
+    )
+    # Extract URL from shell command so cookie injection points are linked to endpoint.
+    _CMD_URL_RE = re.compile(r"https?://\S+")
     _SEVERITY_RE = re.compile(
         r"^\[(CRITICAL|HIGH|MEDIUM|LOW|INFO)\]",
+        re.IGNORECASE)
+    # Secondary vulnerability patterns for tools without dedicated parsers:
+    # catches metasploit [+] success, CVE IDs in context, "vulnerable to" patterns.
+    #
+    # IMPORTANT: avoid broad "not" filtering. Phrases like "not authenticated"
+    # are often valid vulnerabilities (auth bypass), while phrases such as
+    # "not vulnerable" should be excluded.
+    _NEGATIVE_VULN_PHRASE_RE = re.compile(
+        r"\b(?:"
+        r"not\s+vulnerable(?:\s+to)?"
+        r"|not\s+affected"
+        r"|unaffected"
+        r"|not\s+impacted"
+        r"|no\s+impact"
+        r"|no\s+vulnerabilit(?:y|ies)"
+        r"|no\s+exploit(?:ation)?"
+        r"|not\s+exploitable"
+        r"|false\s+positive"
+        r"|already\s+patched"
+        r"|fully\s+patched"
+        r"|fixed\s+in"
+        r"|patch\s+available"
+        r")\b",
+        re.IGNORECASE,
+    )
+    _VULN_PATTERN_RE = re.compile(
+        r"^\[\+\].{0,120}(vulnerab|exploit|session opened|shell|meterpreter|"
+        r"access granted|credentials? found|credential found)|"
+        r"CVE-\d{4}-\d{4,7}.{0,80}(vulnerab|exploit|found|\baffected\b|\bimpacted\b)|"
+        r"^(VULN|VULNERABLE|EXPLOIT|PWNED)\s*[:!]",
         re.IGNORECASE)
     # httpx outputs URL followed by [STATUS] bracket — handle multiple common formats:
     #   https://host.com [200]                     (httpx -sc)
@@ -674,6 +758,12 @@ def update_from_parsed_output(
     _PRIVATE_IP_RE = re.compile(
         r"^(10\.|172\.(1[6-9]|2\d|3[01])\.|192\.168\.|127\.|169\.254\.|::1|fd)"
     )
+    # Custom script output prefixes — normalize "URL: https://...", "SUBDOMAIN=host", etc.
+    # so script output is auto-parsed into the session without manual post-processing.
+    _SCRIPT_PREFIX_RE = re.compile(
+        r"^(url|endpoint|link|host|domain|subdomain|live|target|asset|hostport)\s*[:=]\s*(\S+)",
+        re.IGNORECASE,
+    )
 
     for item in parsed.items:
         item_stripped = item.strip()
@@ -682,16 +772,14 @@ def update_from_parsed_output(
         # Normalize common script output prefixes (e.g., "URL: https://...",
         # "SUBDOMAIN=api.example.com") so custom scripts integrate with
         # session parsing.
-        prefix_match = re.match(
-            r"^(url|endpoint|link|host|domain|subdomain|live|target|asset|hostport)\s*[:=]\s*(\S+)",
-            item_stripped,
-            re.IGNORECASE,
-        )
+        prefix_match = _SCRIPT_PREFIX_RE.match(item_stripped)
         if prefix_match:
             item_stripped = prefix_match.group(2).strip()
 
         # 1. Severity-tagged finding → vulnerability
         if _SEVERITY_RE.match(item_stripped):
+            if _NEGATIVE_VULN_PHRASE_RE.search(item_stripped):
+                continue
             new_vuln = {
                 "finding": item_stripped,
                 "source": tool_key,
@@ -700,6 +788,21 @@ def update_from_parsed_output(
             # Check for duplicates before adding
             if not _is_duplicate_vulnerability(
                     new_vuln, session.vulnerabilities):
+                session.vulnerabilities.append(new_vuln)
+            continue
+
+        # 1b. Secondary vuln patterns — tools without dedicated parsers:
+        # metasploit [+] success, CVE findings, explicit VULN:/EXPLOIT: prefixes.
+        if (
+            _VULN_PATTERN_RE.search(item_stripped)
+            and not _NEGATIVE_VULN_PHRASE_RE.search(item_stripped)
+        ):
+            new_vuln = {
+                "finding": item_stripped,
+                "source": tool_key,
+                "timestamp": datetime.now().isoformat(),
+            }
+            if not _is_duplicate_vulnerability(new_vuln, session.vulnerabilities):
                 session.vulnerabilities.append(new_vuln)
             continue
 
@@ -758,6 +861,36 @@ def update_from_parsed_output(
                     session.open_ports[session.target].append(port)
             continue
 
+        # 5b. Set-Cookie response header → cookie injection point.
+        # Captures session tokens and auth cookies from curl -v / HTTP tool output
+        # so the agent knows what cookie parameters can be manipulated.
+        cookie_m = _SET_COOKIE_RE.match(item_stripped)
+        if cookie_m:
+            cookie_name = cookie_m.group(1).strip()
+            cookie_value = cookie_m.group(2).strip()[:50]
+            # Link cookie to the endpoint URL from the shell command if available.
+            _cmd_url_m = _CMD_URL_RE.search(command)
+            _cookie_url: str | None = None
+            if _cmd_url_m:
+                try:
+                    _raw_url = _cmd_url_m.group(0).rstrip(".,;:)]}>\"'")
+                    _pu = urlparse(_raw_url)
+                    _cookie_url = urlunparse((
+                        _pu.scheme.lower(), _pu.netloc.lower(),
+                        _pu.path.rstrip("/") or "/", "", "", "",
+                    ))
+                except Exception:
+                    pass
+            if _cookie_url and cookie_name:
+                _merge_injection_points(session.injection_points, [{
+                    "url": _cookie_url,
+                    "parameter": f"cookie/{cookie_name}",
+                    "method": "GET",
+                    "value_sample": cookie_value,
+                    "type_hint": "COOKIE_PARAM",
+                }])
+            continue
+
         # 6. Looks like a subdomain → subdomains
         # Must have at least one dot, no spaces, no special chars.
         # Exclude DNS-only labels (e.g. _dmarc.target.com) — these cannot be
@@ -782,8 +915,35 @@ def session_to_context(session: SessionData) -> str:
     """Format session data as a context string for injection into conversation."""
     target_label = session.target or "unknown target"
     parts = [
-        f"[SYSTEM: PREVIOUS SESSION DATA — Session {session.session_id} for {target_label}]"
+        f"[SYSTEM: RESUMED SESSION — {session.session_id} for {target_label}]",
+        "YOU ARE RESUMING A PREVIOUS SESSION. The data below was already collected.",
     ]
+
+    # Build explicit skip-list FIRST so LLM sees it before phase prompts override behaviour.
+    skip_items: list[str] = []
+    if session.subdomains:
+        skip_items.append(
+            f"Subdomain enumeration — {len(session.subdomains)} already found"
+        )
+    if session.live_hosts:
+        skip_items.append(
+            f"Live host validation — {len(session.live_hosts)} already confirmed"
+        )
+    if session.open_ports:
+        total_ports = sum(len(p) for p in session.open_ports.values())
+        skip_items.append(f"Port scanning — {total_ports} open ports already recorded")
+    if session.urls:
+        skip_items.append(f"URL/route discovery — {len(session.urls)} already collected")
+
+    if skip_items:
+        parts.append(
+            "DO NOT REDO the following (already complete):\n"
+            + "\n".join(f"  ✓ {item}" for item in skip_items)
+        )
+        parts.append(
+            "Focus ONLY on what is MISSING or UNTESTED based on the data below."
+        )
+
     parts.append(f"Session created: {session.created_at}")
     parts.append(
         f"Tools previously run: {', '.join(session.tools_run) if session.tools_run else 'none'}"

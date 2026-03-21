@@ -22,7 +22,7 @@ def agent_loop(mocker):
 
 @pytest.mark.asyncio
 async def test_agent_initialization(agent_loop, mocker):
-    mocker.patch('airecon.proxy.system.get_system_prompt',
+    mocker.patch('airecon.proxy.agent.loop.get_system_prompt',
                  return_value="You are AIRecon.")
 
     await agent_loop.initialize(target="test.com", user_message="scan test.com")
@@ -196,3 +196,92 @@ class TestExtractShellCommandCandidate:
     def test_no_bash_block_returns_none(self, agent_loop):
         result = self._extract(agent_loop, "just some plain text with no commands")
         assert result is None
+
+
+# ---------------------------------------------------------------------------
+# REPORT phase objective tracking
+# Verifies that _update_objectives_from_tool marks REPORT objectives done
+# via multiple trigger paths, not just create_vulnerability_report tool.
+# ---------------------------------------------------------------------------
+
+class TestReportObjectiveTracking:
+    """Unit tests for REPORT phase objective completion logic."""
+
+    def _setup(self, agent_loop):
+        from airecon.proxy.agent.pipeline import PipelinePhase
+        defaults = agent_loop._PHASE_OBJECTIVES["REPORT"]
+        agent_loop.state.ensure_phase_objectives("REPORT", defaults)
+        return PipelinePhase.REPORT, defaults
+
+    def _call(self, agent_loop, phase, tool_name, result, output_file=None):
+        agent_loop._update_objectives_from_tool(
+            phase=phase,
+            tool_name=tool_name,
+            arguments={},
+            success=True,
+            result=result,
+            output_file=output_file,
+        )
+
+    def _status(self, agent_loop, title):
+        for obj in agent_loop.state.objective_queue:
+            if obj.get("title") == title:
+                return obj.get("status")
+        return None
+
+    def test_create_vulnerability_report_tool_marks_objectives(self, agent_loop):
+        """Calling create_vulnerability_report must mark obj 0 and 1 done."""
+        phase, defaults = self._setup(agent_loop)
+        self._call(agent_loop, phase, "create_vulnerability_report", {})
+        assert self._status(agent_loop, defaults[0]) == "done"
+        assert self._status(agent_loop, defaults[1]) == "done"
+
+    def test_report_content_in_result_marks_objectives(self, agent_loop):
+        """Result containing 'vulnerability report' keyword triggers objectives."""
+        phase, defaults = self._setup(agent_loop)
+        result = {"stdout": "vulnerability report written to output/report.md"}
+        self._call(agent_loop, phase, "execute", result)
+        assert self._status(agent_loop, defaults[0]) == "done"
+        assert self._status(agent_loop, defaults[1]) == "done"
+
+    def test_cvss_in_result_marks_objectives(self, agent_loop):
+        """Result containing CVSS score notation triggers objectives."""
+        phase, defaults = self._setup(agent_loop)
+        result = {"stdout": "CVE-2024-1234 | CVSS: 9.8 | severity: critical"}
+        self._call(agent_loop, phase, "execute", result)
+        assert self._status(agent_loop, defaults[0]) == "done"
+        assert self._status(agent_loop, defaults[1]) == "done"
+
+    def test_report_output_file_name_marks_objectives(self, agent_loop):
+        """output_file path containing 'report' triggers objectives."""
+        phase, defaults = self._setup(agent_loop)
+        self._call(agent_loop, phase, "create_file", {}, output_file="output/vuln_report.md")
+        assert self._status(agent_loop, defaults[0]) == "done"
+        assert self._status(agent_loop, defaults[1]) == "done"
+
+    def test_generic_output_without_report_content_does_not_mark(self, agent_loop):
+        """Plain execute output with no report keywords must NOT mark obj 0/1."""
+        phase, defaults = self._setup(agent_loop)
+        result = {"stdout": "nmap scan complete, 3 ports open"}
+        self._call(agent_loop, phase, "execute", result)
+        assert self._status(agent_loop, defaults[0]) == "pending"
+        assert self._status(agent_loop, defaults[1]) == "pending"
+
+    def test_output_in_output_dir_marks_obj2(self, agent_loop):
+        """Any output_file starting with output/ marks objective 2."""
+        phase, defaults = self._setup(agent_loop)
+        self._call(agent_loop, phase, "create_file", {}, output_file="output/notes.txt")
+        assert self._status(agent_loop, defaults[2]) == "done"
+
+    def test_failed_tool_call_marks_nothing(self, agent_loop):
+        """A failed tool call (success=False) must not update any objectives."""
+        phase, defaults = self._setup(agent_loop)
+        agent_loop._update_objectives_from_tool(
+            phase=phase,
+            tool_name="create_vulnerability_report",
+            arguments={},
+            success=False,
+            result={},
+            output_file=None,
+        )
+        assert self._status(agent_loop, defaults[0]) == "pending"

@@ -9,6 +9,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import shutil
+import uuid
 from pathlib import Path
 from typing import Any, Callable
 
@@ -291,6 +292,17 @@ class DockerEngine:
             command,
         ]
 
+        # Per-execution job token so timeout can kill only THIS process group
+        # without affecting sibling parallel tool executions.
+        # We add a unique env var to the docker exec so we can identify the
+        # process tree via /proc/<pid>/environ on timeout.
+        _pid_token = uuid.uuid4().hex[:12]
+        _job_env = f"AIRECON_JOB_ID={_pid_token}"
+        # Insert -e AIRECON_JOB_ID=<token> before the container name
+        container_idx = cmd.index(self._container_name)
+        cmd.insert(container_idx, _job_env)
+        cmd.insert(container_idx, "-e")
+
         proc: asyncio.subprocess.Process | None = None
         try:
             proc = await asyncio.create_subprocess_exec(
@@ -386,21 +398,32 @@ class DockerEngine:
                     await proc.wait()
             except Exception as _e:
                 logger.debug("Could not kill timed-out process: %s", _e)
-            # Also kill container-side processes to prevent zombies
+            # Kill only THIS command's process tree via AIRECON_JOB_ID env marker.
+            # Using targeted kill avoids terminating sibling parallel tool
+            # executions that pkill -u pentester would otherwise wipe out.
             try:
+                kill_cmd = (
+                    # Find PIDs whose /proc/environ contains our unique job token,
+                    # then kill each one and its entire process group.
+                    f"for pid in $(grep -rlZ '{_job_env}' /proc/*/environ 2>/dev/null "
+                    f"| sed 's|/proc/||;s|/environ||'); do "
+                    f"  kill -KILL -- -\"$pid\" 2>/dev/null; "
+                    f"  kill -KILL \"$pid\" 2>/dev/null; "
+                    f"done"
+                )
                 kill_proc = await asyncio.create_subprocess_exec(
                     "docker",
                     "exec",
                     self._container_name,
                     "bash",
                     "-c",
-                    "pkill -KILL -u pentester 2>/dev/null; true",
+                    kill_cmd,
                     stdout=asyncio.subprocess.DEVNULL,
                     stderr=asyncio.subprocess.DEVNULL,
                 )
                 await asyncio.wait_for(kill_proc.wait(), timeout=3.0)
             except Exception as _e:
-                logger.debug("Could not kill container-side processes: %s", _e)
+                logger.debug("Could not kill container-side job processes: %s", _e)
             return {
                 "success": False,
                 "error": f"Command timed out after {timeout}s: {command[:100]}",

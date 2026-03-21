@@ -5,6 +5,7 @@ import json
 import logging
 import os
 import re
+import shlex
 import time
 from datetime import datetime
 from pathlib import Path
@@ -62,6 +63,35 @@ _RECON_PORT_SCAN_BINS: frozenset[str] = _load_recon_bins(
     "port_scan",
     frozenset({"nmap", "masscan", "naabu", "rustscan"}),
 )
+
+def _load_tool_flag_conflicts() -> dict[str, tuple[list[str], str]]:
+    """Load tool flag conflict rules from data/tools_meta.json.
+
+    Keeps tool metadata in the JSON file as the single source of truth,
+    avoiding hardcoded tool names and flags in Python code.
+    """
+    try:
+        path = Path(__file__).resolve().parent.parent / "data" / "tools_meta.json"
+        data = json.loads(path.read_text(encoding="utf-8"))
+        raw = data.get("tool_flag_conflicts", {})
+        return {
+            tool: (entry["flags"], entry["correct_tool"])
+            for tool, entry in raw.items()
+            if isinstance(entry.get("flags"), list) and entry.get("correct_tool")
+        }
+    except Exception as exc:
+        logger.warning(
+            "Could not load tool_flag_conflicts from tools_meta.json: %s — "
+            "flag conflict detection disabled. Check that data/tools_meta.json exists.",
+            exc,
+        )
+        return {}
+
+
+# Flags that belong to a specific tool but are sometimes written by LLMs
+# on the wrong binary. Loaded from tools_meta.json (single source of truth).
+# Key: binary that received wrong flags → (wrong_flags, correct_binary)
+_TOOL_FLAG_CONFLICTS: dict[str, tuple[list[str], str]] = _load_tool_flag_conflicts()
 
 
 class _ExecutorMixin:
@@ -640,8 +670,22 @@ class _ExecutorMixin:
                     f"Evidence: {r.evidence}"
                     for r in results
                 ]
+                # Build stdout with [SEVERITY] prefix so session extractor
+                # can capture findings into session.vulnerabilities.
+                stdout_lines = []
+                for r in results:
+                    sev = r.severity.upper()
+                    stdout_lines.append(
+                        f"[{sev}] {r.vuln_type.upper()} on param '{r.parameter}'"
+                        f" at {r.target}"
+                    )
+                    stdout_lines.append(
+                        f"Payload: {r.payload} | Conf: {r.confidence:.2f}"
+                    )
+                    stdout_lines.append(f"Evidence: {r.evidence}")
                 res_dict = {
                     "success": True,
+                    "stdout": "\n".join(stdout_lines),
                     "findings": findings_list,
                     "total": len(findings_list)}
 
@@ -1645,13 +1689,29 @@ class _ExecutorMixin:
                 languages=languages,
             )
 
+            findings_capped = result.get("findings", [])[:50]
+            # Build stdout with [SEVERITY] prefix so session extractor
+            # can capture findings into session.vulnerabilities.
+            _stdout_lines: list[str] = []
+            for _f in findings_capped:
+                _sev = str(_f.get("severity", "MEDIUM")).upper()
+                _rule = _f.get("rule_id", "unknown")
+                _msg = _f.get("message", "")
+                _file = _f.get("file", "")
+                _line = _f.get("start_line", "?")
+                _code = _f.get("code_snippet", "")
+                _stdout_lines.append(f"[{_sev}] {_rule}: {_msg}")
+                if _file:
+                    _stdout_lines.append(f"  File: {_file}:{_line}")
+                if _code:
+                    _stdout_lines.append(f"  Code: {_code}")
             res_dict = {
                 "success": True,
                 "summary": result.get("summary", ""),
                 "total": result.get("total", 0),
-                # Cap at 50 findings
-                "findings": result.get("findings", [])[:50],
+                "findings": findings_capped,
                 "errors": result.get("errors", []),
+                "stdout": "\n".join(_stdout_lines),
             }
 
             # Save output
@@ -2023,6 +2083,39 @@ class _ExecutorMixin:
 
         if tool_name == "execute":
             cmd = arguments.get("command", "")
+            if not cmd or not cmd.strip():
+                return False, 0.0, {
+                    "success": False,
+                    "error": (
+                        "Tool call error: 'command' argument is required and cannot be empty. "
+                        "Example: {\"name\": \"execute\", \"arguments\": {\"command\": \"nmap -sV target.com\"}}"
+                    ),
+                }, None
+            # Detect common tool-mixing hallucinations before executing.
+            # Example: LLM writes "curl -sc -title -tech-detect ..." (httpx flags on curl).
+            # Catch and reject with a correction hint instead of running a broken command.
+            cmd_stripped = cmd.strip()
+            _first_token = cmd_stripped.split()[0] if cmd_stripped.split() else ""
+            if _first_token in _TOOL_FLAG_CONFLICTS:
+                _conflict_flags, _correct_tool = _TOOL_FLAG_CONFLICTS[_first_token]
+                # Use token-based matching (not substring) to avoid false positives
+                # from URLs or data values that happen to contain flag-like strings.
+                # e.g. `curl "https://api.example.com?status-code=200"` must NOT trigger.
+                try:
+                    _cmd_tokens = set(shlex.split(cmd_stripped))
+                except ValueError:
+                    _cmd_tokens = set(cmd_stripped.split())
+                _found = [f for f in _conflict_flags if f in _cmd_tokens]
+                if _found:
+                    return False, 0.0, {
+                        "success": False,
+                        "error": (
+                            f"Command rejected: '{_first_token}' was used with flags that "
+                            f"belong to '{_correct_tool}': {_found}. "
+                            f"Replace '{_first_token}' with '{_correct_tool}' and retry. "
+                            f"Example: {cmd_stripped.replace(_first_token, _correct_tool, 1)}"
+                        ),
+                    }, None
             if self.state.active_target and cmd and not cmd.strip(
             ).startswith("cd "):
                 workspace_dir = f"/workspace/{self.state.active_target}"
@@ -2064,8 +2157,8 @@ class _ExecutorMixin:
         # Inject a helpful hint for common bash escaping errors (single quotes
         # inside single quotes)
         if not success:
-            err_msg = result.get("error") or result.get("stderr") or ""
-            if "unexpected EOF while looking for matching `''" in str(err_msg):
+            err_msg = str(result.get("error") or result.get("stderr") or "")
+            if "unexpected EOF while looking for matching `''" in err_msg:
                 hint = (
                     "\n\n[SYSTEM HINT]: Bash syntax error! You cannot escape a single quote inside a single-quoted string "
                     "(e.g., 'don\\'t' is invalid). To use a single quote inside a single-quoted string, close the quote, "
@@ -2076,6 +2169,28 @@ class _ExecutorMixin:
                     result["error"] = str(result["error"]) + hint
                 if "stderr" in result and result["stderr"]:
                     result["stderr"] = str(result["stderr"]) + hint
+
+            # Inject hint for type errors — LLM passed wrong argument type
+            elif "int() argument" in err_msg or "invalid literal for int" in err_msg:
+                result["error"] = (
+                    err_msg
+                    + "\n[SYSTEM HINT]: A numeric argument was given a non-numeric value. "
+                    "Check that integer fields (e.g. port, limit, count) are actual numbers, not strings."
+                )
+            # Hint for missing required keys
+            elif "required" in err_msg.lower() and "argument" in err_msg.lower():
+                result["error"] = (
+                    err_msg
+                    + f"\n[SYSTEM HINT]: The tool '{tool_name}' is missing a required argument. "
+                    "Re-read the tool definition and include all required fields."
+                )
+            # Hint for NoneType / attribute errors — usually wrong arg type or missing value
+            elif "NoneType" in err_msg or "'NoneType' object has no attribute" in err_msg:
+                result["error"] = (
+                    err_msg
+                    + f"\n[SYSTEM HINT]: A None value was passed where a string/dict was expected for tool '{tool_name}'. "
+                    "Check that all arguments are non-null and the correct type."
+                )
 
         duration = time.time() - start_time
 

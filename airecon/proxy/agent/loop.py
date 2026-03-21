@@ -11,13 +11,19 @@ from .session import (
     find_prior_session,
     merge_prior_findings,
     record_tested_endpoint,
+    get_untested_injection_points,
 )
 from .pipeline import PipelineEngine, PipelinePhase, _PHASE_TOOL_BUDGETS
 from .output_parser import parse_tool_output
 from .models import AgentEvent, AgentState, MAX_TOOL_ITERATIONS
 from .formatters import _FormatterMixin
 from .executors import _ExecutorMixin, _RECON_PORT_SCAN_BINS
-from ..system import auto_load_skills_for_message, auto_load_skills_for_technologies
+from ..system import (
+    auto_load_skills_for_message,
+    auto_load_skills_for_technologies,
+    get_system_prompt,
+    _is_ctf_target,
+)
 from .file_reference import (
     parse_refs, strip_refs, resolve_ref,
     build_injection_message, workspace_name_for_ref,
@@ -26,11 +32,15 @@ from ..ollama import OllamaClient
 from ..docker import DockerEngine
 from ..config import get_config, get_workspace_root
 from typing import Any, AsyncIterator
+from urllib.parse import urlparse
 import re
 import logging
-
 import asyncio
 import json
+import hashlib
+import os
+import shlex
+import warnings
 from pathlib import Path
 
 _tools_meta_path = Path(__file__).parent.parent / "data" / "tools_meta.json"
@@ -38,7 +48,6 @@ try:
     with open(_tools_meta_path, "r") as f:
         _TOOLS_META = json.load(f)
 except (OSError, json.JSONDecodeError) as _e:
-    import warnings
     warnings.warn(f"tools_meta.json unavailable ({_e}); tool catalog features disabled.")
     _TOOLS_META = {}
 
@@ -51,6 +60,24 @@ logger = logging.getLogger("airecon.agent")
 # Low-confidence traces (e.g., execute command log at 0.55) must NOT reset stagnation
 # counter — stagnation should only reset on real security findings.
 _MEANINGFUL_EVIDENCE_THRESHOLD = 0.65
+
+# Maximum retries for empty Ollama responses before surfacing error.
+# Each retry waits 5s × attempt (5s, 10s, 15s, 20s).
+_MAX_EMPTY_RETRIES = 4
+
+# Vulnerability tool hints used in ANALYSIS phase objective marking.
+# Loaded from tools_meta.json (single source of truth).
+_ANALYSIS_VULN_TOOLS: frozenset[str] = frozenset(
+    _TOOLS_META.get("analysis_phase_vuln_tools", [])
+)
+
+# Safe command prefixes for watchdog shell-command extraction.
+# Built from tools_meta.json at import time; never hardcoded in Python.
+_watchdog_prefixes = _TOOLS_META.get("watchdog_safe_command_prefixes", [])
+_WATCHDOG_COMMAND_PREFIX_RE: re.Pattern[str] = re.compile(
+    r"^(?:" + "|".join(re.escape(p) for p in _watchdog_prefixes) + r")\b",
+    re.IGNORECASE,
+) if _watchdog_prefixes else re.compile(r"(?!)")
 
 
 class AgentLoop(_ValidatorMixin, _FormatterMixin,
@@ -116,9 +143,11 @@ class AgentLoop(_ValidatorMixin, _FormatterMixin,
             "Correlate findings into exploit candidates",
         ],
         "EXPLOIT": [
-            "Validate exploitability with real tool output",
-            "Capture PoC evidence and affected assets",
-            "Avoid duplicate commands and pivot when blocked",
+            "Enumerate all application routes: /, /login, /api, /admin, /register, /dashboard, /api/v1/",
+            "Test authentication: try default/common credentials, enumerate valid usernames",
+            "Test authorization: modify session cookies, tokens, or IDs to access other accounts (IDOR)",
+            "Test injection vectors: SQLi, XSS, SSTI, command injection on ALL discovered inputs",
+            "Extract flags, sensitive data, or unauthorized capability from confirmed vulnerabilities",
         ],
         "REPORT": [
             "Create vulnerability reports for confirmed findings",
@@ -150,7 +179,7 @@ class AgentLoop(_ValidatorMixin, _FormatterMixin,
         self._recent_tool_names: list[str] = []
         self._last_evidence_count: int = 0
         self._watchdog_forced_calls: int = 0
-        self._empty_response_retried: bool = False
+        self._empty_response_retry_count: int = 0
         # When set, force the next response(s) to include a tool call after
         # recovery events (VRAM crash/timeout). Prevents text-only hallucinations.
         self._recovery_force_tool_calls: int = 0
@@ -200,8 +229,6 @@ class AgentLoop(_ValidatorMixin, _FormatterMixin,
         tool invocation; exempt tools and interactive browser actions bypass
         the check entirely.
         """
-        import hashlib
-
         # Exempt: stateful / side-effect tools that must always run
         if tool_name in self._DEDUP_EXEMPT_TOOLS:
             return False, ""
@@ -226,7 +253,15 @@ class AgentLoop(_ValidatorMixin, _FormatterMixin,
         except (TypeError, ValueError):
             canonical = str(args)
 
-        raw = f"{tool_name}:{canonical}"
+        # Include current phase in the hash so the same command can be re-run
+        # when the pipeline transitions (e.g. RECON → ANALYSIS → EXPLOIT).
+        # Without phase context, legitimate retests (e.g. re-running sqlmap
+        # after auth changes in EXPLOIT) are incorrectly blocked.
+        try:
+            _phase_ctx = self._get_current_phase().value
+        except Exception:
+            _phase_ctx = "unknown"
+        raw = f"{_phase_ctx}:{tool_name}:{canonical}"
         cmd_hash = hashlib.md5(  # nosec B324 - non-security dedup hash
             raw.encode(
                 "utf-8",
@@ -255,9 +290,8 @@ class AgentLoop(_ValidatorMixin, _FormatterMixin,
         target: str | None = None,
         user_message: str | None = None,
     ) -> None:
-        from ..system import get_system_prompt as _gsp, _is_ctf_target
         self.state.conversation = [
-            {"role": "system", "content": _gsp(
+            {"role": "system", "content": get_system_prompt(
                 target=target, user_message=user_message)}
         ]
         # Detect CTF mode early so process_message can apply iteration cap
@@ -265,9 +299,15 @@ class AgentLoop(_ValidatorMixin, _FormatterMixin,
             self._ctf_mode = True
             if self._override_max_iterations is None:
                 self._override_max_iterations = self._CTF_MAX_ITERATIONS
+            # Use smaller context window in CTF mode to prevent VRAM OOM.
+            # KV cache for qwen3.5:122b @ 131072 ctx ≈ 31 GB extra VRAM.
+            # ollama_num_ctx_small (default 32768) cuts that to ~8 GB.
+            _ctf_cfg = get_config()
+            if self._adaptive_num_ctx == 0:
+                self._adaptive_num_ctx = _ctf_cfg.ollama_num_ctx_small
             logger.info(
-                f"CTF mode activated for target={target!r} "
-                f"— max iterations capped at {self._CTF_MAX_ITERATIONS}"
+                "CTF mode activated for target=%r — ctx=%d, max_iterations=%d",
+                target, self._adaptive_num_ctx, self._CTF_MAX_ITERATIONS,
             )
         engine_tools = await self.engine.discover_tools()
         self._tools_ollama = self.engine.tools_to_ollama_format(engine_tools)
@@ -275,6 +315,27 @@ class AgentLoop(_ValidatorMixin, _FormatterMixin,
         if self.engine:
             self.state.add_message(
                 "system", "[SYSTEM: EXECUTE_COMMAND_AVAILABLE=yes]")
+
+        # Probe Caido availability — non-blocking (5s timeout, returns None if down).
+        # This gives the model a binary signal it can act on immediately, mirroring
+        # the EXECUTE_COMMAND_AVAILABLE pattern.
+        from ..caido_client import CaidoClient
+        _caido_token = await CaidoClient._get_token()
+        if _caido_token:
+            self.state.add_message(
+                "system",
+                "[SYSTEM: CAIDO_PROXY=available port=48080] "
+                "Caido web proxy is running. MANDATORY first step: call caido_set_scope "
+                "to limit capture to the target. Then use caido_sitemap and "
+                "caido_list_requests during RECON/ANALYSIS to enumerate proxy-captured "
+                "paths and HTTP history."
+            )
+        else:
+            self.state.add_message(
+                "system",
+                "[SYSTEM: CAIDO_PROXY=unavailable] "
+                "Caido is not running — do NOT call caido_* tools."
+            )
 
         if self._tools_ollama is None:
             self._tools_ollama = []
@@ -306,8 +367,7 @@ class AgentLoop(_ValidatorMixin, _FormatterMixin,
         # Initialize session: load from env var ID if provided, otherwise
         # create fresh.  Subagents always get a fresh session so they never
         # load or overwrite the parent agent's persisted session data.
-        import os as _os
-        _session_id = _os.environ.get("AIRECON_SESSION_ID") if not self._is_subagent else None
+        _session_id = os.environ.get("AIRECON_SESSION_ID") if not self._is_subagent else None
         if _session_id:
             self._session = load_session(_session_id) or SessionData(
                 session_id=_session_id, target=""
@@ -337,6 +397,8 @@ class AgentLoop(_ValidatorMixin, _FormatterMixin,
         # Create a new session on reset (keeps the old one on disk)
         self._session = SessionData(target="")
         self.pipeline = PipelineEngine(self._session)
+        if self._ctf_mode and self.pipeline:
+            self.pipeline.set_ctf_mode(True)
 
     def _skill_phase_for_message_start(self) -> str:
         """Return phase hint for initial skill auto-loading on user message."""
@@ -375,16 +437,18 @@ class AgentLoop(_ValidatorMixin, _FormatterMixin,
                 # (or the user's follow-up) contained security terms like
                 # "flag", "challenge", or "benchmark" during a normal recon.
                 if not self._ctf_mode and extracted_target:
-                    from ..system import _is_ctf_target
                     if _is_ctf_target(extracted_target, user_message=None):
                         self._ctf_mode = True
                         if self._override_max_iterations is None:
                             self._override_max_iterations = self._CTF_MAX_ITERATIONS
                         if self.pipeline:
                             self.pipeline.set_ctf_mode(True)
+                        # Reduce context window to prevent VRAM OOM mid-session
+                        if self._adaptive_num_ctx == 0:
+                            self._adaptive_num_ctx = cfg.ollama_num_ctx_small
                         logger.info(
-                            "CTF mode activated mid-session for target=%r",
-                            extracted_target,
+                            "CTF mode activated mid-session for target=%r — ctx=%d",
+                            extracted_target, self._adaptive_num_ctx,
                         )
 
             if extracted_target:
@@ -486,10 +550,22 @@ class AgentLoop(_ValidatorMixin, _FormatterMixin,
                     self._session = SessionData(
                         target=self.state.active_target)
                     self.pipeline = PipelineEngine(self._session)
+                    if self._ctf_mode and self.pipeline:
+                        self.pipeline.set_ctf_mode(True)
                 elif self._session.target != self.state.active_target:
-                    self._session.target = self.state.active_target
-                    if self.pipeline:
-                        self.pipeline = PipelineEngine(self._session)
+                    # Target switched mid-session — create a fresh SessionData
+                    # to prevent old target's subdomains/urls/findings from
+                    # contaminating the new target's context.
+                    logger.info(
+                        "Target switched %s → %s: creating fresh SessionData",
+                        self._session.target,
+                        self.state.active_target,
+                    )
+                    self._session = SessionData(
+                        target=self.state.active_target)
+                    self.pipeline = PipelineEngine(self._session)
+                    if self._ctf_mode and self.pipeline:
+                        self.pipeline.set_ctf_mode(True)
 
                 # Cross-session memory: pre-populate new session with findings
                 # from the most recent prior scan of the same target so the
@@ -530,6 +606,42 @@ class AgentLoop(_ValidatorMixin, _FormatterMixin,
                             "content": session_ctx,
                         }
                     )
+                    # Pre-mark phase objectives as done based on existing session
+                    # data so the LLM knows which RECON/ANALYSIS steps are already
+                    # complete and doesn't repeat them.
+                    if self.pipeline:
+                        _resumed_phase = self.pipeline.get_current_phase()
+                        self._sync_phase_objectives(_resumed_phase)
+                        self._update_objectives_from_session(_resumed_phase)
+
+            # Ensure a compact, pinned target context is always present so the
+            # model never loses the primary target during long sessions.
+            self.state.conversation = [
+                msg
+                for msg in self.state.conversation
+                if not (
+                    msg.get("role") == "system"
+                    and msg.get("content", "").startswith("[SYSTEM: PINNED CONTEXT]")
+                )
+            ]
+            if self.state.active_target:
+                phase_hint = ""
+                try:
+                    if self.pipeline:
+                        phase_hint = self.pipeline.get_current_phase().value
+                except Exception:
+                    phase_hint = ""
+                pin_lines = [
+                    "[SYSTEM: PINNED CONTEXT]",
+                    f"TARGET: {self.state.active_target}",
+                ]
+                if phase_hint:
+                    pin_lines.append(f"PHASE: {phase_hint}")
+                pin_lines.append("Do not change target unless the user explicitly asks.")
+                pin_lines.append("Use session summary and critical findings as the source of truth.")
+                self.state.conversation.append(
+                    {"role": "system", "content": "\n".join(pin_lines)}
+                )
 
             # Ensure a compact, pinned target context is always present so the
             # model never loses the primary target during long sessions.
@@ -619,7 +731,7 @@ class AgentLoop(_ValidatorMixin, _FormatterMixin,
                 if e.get("confidence", 0) >= _MEANINGFUL_EVIDENCE_THRESHOLD
             )
             self._watchdog_forced_calls = 0
-            self._empty_response_retried = False
+            self._empty_response_retry_count = 0
             # NOTE: Do NOT clear _executed_tool_counts here — dedup must persist
             # across messages within the same session. It is only cleared in
             # reset().
@@ -637,11 +749,18 @@ class AgentLoop(_ValidatorMixin, _FormatterMixin,
                 self._sync_phase_objectives(current_phase)
                 self._update_objectives_from_session(current_phase)
 
-                if (
-                    self.state.iteration == 1
-                    or self.state.iteration % 3 == 0
-                    or self._no_tool_iterations >= 1
-                ):
+                # Inject objective focus + quality scoreboard:
+                # - CTF mode: only when genuinely stuck (no_tool_iterations >= 2)
+                #   to avoid flooding thinking models with system noise every iteration.
+                # - Normal mode: every 10 iterations or when stuck.
+                _focus_trigger = (
+                    self._no_tool_iterations >= 2
+                    or (not self._ctf_mode and (
+                        self.state.iteration == 1
+                        or self.state.iteration % 10 == 0
+                    ))
+                )
+                if _focus_trigger:
                     self.state.conversation = [
                         msg
                         for msg in self.state.conversation
@@ -659,18 +778,20 @@ class AgentLoop(_ValidatorMixin, _FormatterMixin,
                             {"role": "system", "content": focus_ctx}
                         )
 
-                    self.state.conversation = [
-                        msg
-                        for msg in self.state.conversation
-                        if not msg.get("content", "").startswith(
-                            "[SYSTEM: QUALITY SCOREBOARD"
-                        )
-                    ]
-                    quality_ctx = self._build_quality_scoreboard(current_phase)
-                    if quality_ctx:
-                        self.state.conversation.append(
-                            {"role": "system", "content": quality_ctx}
-                        )
+                    # Quality scoreboard: skip in CTF mode entirely (noise vs value).
+                    if not self._ctf_mode:
+                        self.state.conversation = [
+                            msg
+                            for msg in self.state.conversation
+                            if not msg.get("content", "").startswith(
+                                "[SYSTEM: QUALITY SCOREBOARD"
+                            )
+                        ]
+                        quality_ctx = self._build_quality_scoreboard(current_phase)
+                        if quality_ctx:
+                            self.state.conversation.append(
+                                {"role": "system", "content": quality_ctx}
+                            )
 
                 explore_ctx = self._build_exploration_directive(current_phase)
                 if explore_ctx:
@@ -686,7 +807,7 @@ class AgentLoop(_ValidatorMixin, _FormatterMixin,
                     )
 
                 # --- PLANNING INJECTION (iteration 1 only) ---
-                if self.state.iteration == 1:
+                if self.state.iteration == 1 and not self._ctf_mode:
                     self.state.conversation.append(
                         {
                             "role": "system",
@@ -703,6 +824,8 @@ class AgentLoop(_ValidatorMixin, _FormatterMixin,
                 # --- PLAN REVISION (every N iterations from config) ---
                 revision_interval = cfg.agent_plan_revision_interval
                 if (
+                    not self._ctf_mode
+                    and
                     revision_interval > 0
                     and self.state.iteration > 1
                     and self.state.iteration % revision_interval == 0
@@ -748,10 +871,22 @@ class AgentLoop(_ValidatorMixin, _FormatterMixin,
 
                         # Check pipeline transitions
                         if self.pipeline and self.pipeline.should_transition():
+                            _prev_phase = self.pipeline.get_current_phase()
                             new_phase = self.pipeline.transition()
                             if new_phase:
                                 pipeline_prompt = self.pipeline.get_transition_prompt(
                                     new_phase)
+                                # Compact old phase context to reclaim KV cache space.
+                                # Raw tool outputs from RECON are not needed verbatim
+                                # in ANALYSIS; summaries + session state are sufficient.
+                                self._compact_phase_context(
+                                    _prev_phase.value if _prev_phase else "RECON"
+                                )
+                                # Pin confirmed vulnerabilities before EXPLOIT so they
+                                # survive truncation and guide targeted exploitation.
+                                from airecon.proxy.agent.pipeline import PipelinePhase as _PP
+                                if new_phase == _PP.EXPLOIT:
+                                    self._inject_exploit_vuln_context()
                                 # New phase = fresh start for exploration pressure.
                                 # Without this reset, stagnation accumulated in the
                                 # previous phase inflates pressure in the new one,
@@ -764,12 +899,47 @@ class AgentLoop(_ValidatorMixin, _FormatterMixin,
                         elif self.pipeline:
                             pipeline_prompt = "\n" + self.pipeline.get_phase_prompt()
 
-                        # Full session context injected to prevent "lost in the middle"
-                        # context degradation in long runs. Includes actual finding data
-                        # (subdomain list, host list, port map, tech stack, vuln titles)
-                        # so the LLM doesn't need to recall from early
-                        # conversation turns.
-                        session_info = "\n" + session_to_context(s)
+                        # In CTF mode keep checkpoint context compact to avoid
+                        # token bloat and long-script loops. Include recent tool
+                        # commands so the agent remembers what it already tried.
+                        if self._ctf_mode:
+                            _ctf_recent: list[str] = []
+                            for _te in list(self.state.tool_history)[-6:]:
+                                _cmd = ""
+                                if getattr(_te, "tool_name", "") == "execute":
+                                    _cmd = str(
+                                        (_te.arguments or {}).get("command", "")
+                                    )[:80]
+                                elif getattr(_te, "tool_name", ""):
+                                    _cmd = _te.tool_name
+                                if _cmd:
+                                    _rc = (
+                                        (_te.result or {}).get("exit_code", "?")
+                                        if isinstance(getattr(_te, "result", None), dict)
+                                        else "?"
+                                    )
+                                    _ctf_recent.append(f"rc={_rc}: {_cmd}")
+                            _tried_str = (
+                                " | recent: " + "; ".join(_ctf_recent)
+                                if _ctf_recent
+                                else ""
+                            )
+                            session_info = (
+                                "\n[CTF SESSION SUMMARY] "
+                                f"urls={len(s.urls)} "
+                                f"live_hosts={len(s.live_hosts)} "
+                                f"injection_points={len(s.injection_points)} "
+                                f"vulns={len(s.vulnerabilities)} "
+                                f"tools={len(s.tools_run)}"
+                                f"{_tried_str}"
+                            )
+                        else:
+                            # Full session context injected to prevent "lost in the middle"
+                            # context degradation in long runs. Includes actual finding data
+                            # (subdomain list, host list, port map, tech stack, vuln titles)
+                            # so the LLM doesn't need to recall from early
+                            # conversation turns.
+                            session_info = "\n" + session_to_context(s)
 
                     self.state.conversation.append(
                         {
@@ -785,6 +955,57 @@ class AgentLoop(_ValidatorMixin, _FormatterMixin,
                             ),
                         }
                     )
+
+                # --- CTF MILESTONE SELF-AUDIT (at 33% and 66% of max iterations) ---
+                # Forces the agent to reflect on what attack surfaces remain
+                # unexplored — purely introspective, no vulnerability hints.
+                if self._ctf_mode:
+                    _max_itr = self._override_max_iterations or self._CTF_MAX_ITERATIONS
+                    _m33 = max(5, _max_itr // 3)
+                    _m66 = max(10, (_max_itr * 2) // 3)
+                    if self.state.iteration in (_m33, _m66):
+                        _pct = 33 if self.state.iteration == _m33 else 66
+                        # _executed_tool_counts keys are (tool_name, phase) tuples
+                        _tool_names_used = sorted({
+                            k[0] for k in self._executed_tool_counts
+                        })
+                        _tools_str = (
+                            ", ".join(_tool_names_used) if _tool_names_used else "none yet"
+                        )
+                        _recent_cmds: list[str] = []
+                        for _te in list(self.state.tool_history)[-10:]:
+                            if getattr(_te, "tool_name", "") == "execute":
+                                _c = str((_te.arguments or {}).get("command", ""))[:100]
+                                if _c:
+                                    _recent_cmds.append(_c)
+                        _recent_str = (
+                            "\nRecent commands: " + " | ".join(_recent_cmds[-5:])
+                            if _recent_cmds
+                            else ""
+                        )
+                        self.state.conversation.append(
+                            {
+                                "role": "system",
+                                "content": (
+                                    f"[SYSTEM: CTF STRATEGY AUDIT — {_pct}% of budget used]\n"
+                                    f"Tools used so far: {_tools_str}"
+                                    f"{_recent_str}\n"
+                                    "Self-audit required:\n"
+                                    "1. What attack surfaces / vulnerability classes have you NOT tested yet?\n"
+                                    "2. What authentication mechanisms exist that you haven't probed?\n"
+                                    "3. What data flows or state-changing endpoints are unexplored?\n"
+                                    "4. Are there any cookie values, session tokens, or API responses you haven't analyzed?\n"
+                                    "Based on your self-audit, pivot to the most promising UNTESTED attack class immediately. "
+                                    "Reply with a tool call."
+                                ),
+                            }
+                        )
+                        logger.debug(
+                            "CTF milestone self-audit injected at iteration %d (%d%% of %d)",
+                            self.state.iteration,
+                            _pct,
+                            _max_itr,
+                        )
 
                 # --- EVALUATION CHECKPOINT (every 10 iterations) ---
                 # Heavier: adds correlation, vuln chaining, expert testing
@@ -995,12 +1216,26 @@ class AgentLoop(_ValidatorMixin, _FormatterMixin,
                             }
                         )
 
+                # --- PERIODIC SESSION CHECKPOINT ---
+                # Save session every 5 iterations so a crash never loses more
+                # than ~5 iterations of work. Tool-execution saves (line ~2340)
+                # already cover normal flow; this is the safety net for the
+                # gap between tool executions (thinking, planning iterations).
+                if self._session and self.state.iteration % 5 == 0:
+                    save_session(self._session)
+
                 # --- CONTEXT MANAGEMENT (adaptive interval + progressive truncation) ---
                 # Dynamic interval: compress more aggressively as context fills.
                 # Use session-level override if set, else fall back to config.
                 _cur_ctx_limit = self._adaptive_num_ctx or cfg.ollama_num_ctx
+                _cur_num_predict = self._get_iteration_num_predict(
+                    cfg, current_phase, _cur_ctx_limit
+                )
+                # Use effective input limit (subtract output reservation) so the
+                # compression interval reacts correctly before Ollama truncates.
+                _cur_effective_ctx = max(1024, _cur_ctx_limit - _cur_num_predict)
                 _cur_token_ratio = (
-                    self.state.token_usage.get("used", 0) / max(_cur_ctx_limit, 1)
+                    self.state.token_usage.get("used", 0) / max(_cur_effective_ctx, 1)
                 )
                 if _cur_token_ratio > 0.60:
                     _ctx_interval = 5   # very frequent when getting full
@@ -1105,19 +1340,38 @@ class AgentLoop(_ValidatorMixin, _FormatterMixin,
                 self.state.token_usage["limit"] = adaptive_num_ctx
 
                 # ── PROACTIVE CONTEXT MONITORING ────────────────────────────
-                # If the PREVIOUS call used ≥80% of the context window, trim
-                # conversation NOW before the next call to prevent a mid-stream
-                # OOM crash.
+                # If the conversation is approaching the effective INPUT limit,
+                # trim NOW before the next call to prevent Ollama silently
+                # truncating the system prompt/task mid-stream.
+                #
+                # Ollama KV cache = input tokens + output tokens ≤ num_ctx.
+                # Effective input space = num_ctx - num_predict.
+                # When input > effective limit, Ollama discards the oldest
+                # tokens (system prompt first) causing silent scope/context loss
+                # and hallucination.
                 _ctx_used = self.state.token_usage.get("used", 0)
                 if _ctx_used > 0 and adaptive_num_ctx > 0:
-                    _usage_ratio = _ctx_used / adaptive_num_ctx
-                    if _usage_ratio >= 0.80:
+                    _iter_num_predict = self._get_iteration_num_predict(
+                        cfg, current_phase, adaptive_num_ctx
+                    )
+                    _effective_input_ctx = max(
+                        1024, adaptive_num_ctx - _iter_num_predict
+                    )
+                    _usage_ratio = _ctx_used / _effective_input_ctx
+                    # CTF mode: trim earlier (65%) and more aggressively to
+                    # prevent the 103-114% overflow seen in logs.
+                    _trim_threshold = 0.65 if self._ctf_mode else 0.80
+                    if _usage_ratio >= _trim_threshold:
                         logger.warning(
                             "Proactive context trim: %.0f%% used (%d/%d tokens)",
                             _usage_ratio * 100, _ctx_used, adaptive_num_ctx,
                         )
                         _critical_ctx = self._build_critical_findings_context()
-                        _proactive_trim = 50 if _usage_ratio < 0.90 else 35
+                        if self._ctf_mode:
+                            # CTF: drop to 10-15 messages — keep recent work only
+                            _proactive_trim = 10 if _usage_ratio >= 0.80 else 15
+                        else:
+                            _proactive_trim = 50 if _usage_ratio < 0.90 else 35
                         self.state.truncate_conversation(
                             max_messages=_proactive_trim)
                         if _critical_ctx:
@@ -1127,20 +1381,24 @@ class AgentLoop(_ValidatorMixin, _FormatterMixin,
                 # ────────────────────────────────────────────────────────────
 
                 adaptive_temperature = self._get_iteration_temperature(cfg)
-                adaptive_num_predict = self._get_adaptive_num_predict(
-                    cfg, current_phase.value if current_phase else "RECON"
+                adaptive_num_predict = self._get_iteration_num_predict(
+                    cfg, current_phase, adaptive_num_ctx
                 )
-                # If a VRAM crash previously occurred, cap output tokens to
-                # prevent large responses from re-triggering OOM.
-                if self._adaptive_num_predict_cap > 0:
-                    adaptive_num_predict = min(
-                        adaptive_num_predict, self._adaptive_num_predict_cap)
+
+                # HARD PRE-CALL GUARD: compress conversation if total chars
+                # exceed the token budget (1 token ≈ 3 chars).  This runs
+                # every iteration and catches large tool outputs that
+                # message-count truncation misses.
+                self._enforce_char_budget(
+                    num_ctx=adaptive_num_ctx,
+                    num_predict=adaptive_num_predict,
+                )
 
                 # --- STREAM RECOVERY LOOP ---
                 # Up to 6 attempts total:
                 #   VRAM crash  → up to 3 retries with escalating truncation
                 #                 (ctx and message budget shrink each time)
-                #   Connection refused → 3 retries with exponential backoff (5s/10s/20s)
+                #   Connection refused → 4 retries with longer backoff (10s/30s/60s/120s)
                 #   Timeout          → 1 retry (already waited; model may finish faster)
                 # Any other error is fatal on first occurrence.
                 _last_chunk_data = {}  # Store last chunk to extract token info
@@ -1148,15 +1406,20 @@ class AgentLoop(_ValidatorMixin, _FormatterMixin,
                 for _stream_attempt in range(6):
                     try:
                         async for chunk in self.ollama.chat_stream(
-                            messages=self.state.conversation,
+                            messages=self._messages_for_ollama(),
                             tools=self._tools_ollama,
                             options={
                                 "num_ctx": adaptive_num_ctx,
                                 "temperature": adaptive_temperature,
                                 "num_predict": adaptive_num_predict,
+                                # Protect system prompt from Ollama KV-cache eviction
+                                "num_keep": self._cfg_int(
+                                    cfg, "ollama_num_keep", 8192),
+                                # Prevent repetition loops in long sessions
+                                "repeat_penalty": self._cfg_float(
+                                    cfg, "ollama_repeat_penalty", 1.05),
                             },
-                            think=cfg.ollama_enable_thinking
-                            and self.ollama.supports_thinking,
+                            think=self._should_use_thinking(cfg, current_phase),
                         ):
                             if hasattr(chunk, "model_dump"):
                                 chunk_data = chunk.model_dump()
@@ -1310,8 +1573,10 @@ class AgentLoop(_ValidatorMixin, _FormatterMixin,
                             # Cap output to 1/4 of context (min 512 tokens)
                             # — generating 32K output inside a 4K context is wasteful
                             self._adaptive_num_predict_cap = max(512, _new_ctx // 4)
-                            adaptive_num_predict = min(
-                                adaptive_num_predict, self._adaptive_num_predict_cap)
+                            adaptive_num_predict = self._fit_num_predict_to_ctx(
+                                min(adaptive_num_predict, self._adaptive_num_predict_cap),
+                                _new_ctx,
+                            )
                             logger.warning(
                                 "VRAM crash #%d — ctx → %d tokens, msgs → %d",
                                 self._vram_crash_count, _new_ctx, _max_msgs,
@@ -1367,13 +1632,15 @@ class AgentLoop(_ValidatorMixin, _FormatterMixin,
                             _carry = ""
                             continue  # retry with reduced context
 
-                        elif _is_conn_refused and _stream_attempt < 3:
+                        elif _is_conn_refused and _stream_attempt < 4:
                             # Connection refused: Ollama may be restarting after
-                            # a crash (common with large models). Back off and
-                            # retry up to 3 times (5 s → 10 s → 20 s).
-                            wait_s = 5 * (2 ** _stream_attempt)  # 5, 10, 20
+                            # a crash or network hiccup. For large remote models
+                            # (122B) reload can take 30-90s — use longer backoff:
+                            # attempt 0→10s, 1→30s, 2→60s, 3→120s (total ~220s).
+                            _conn_waits = [10, 30, 60, 120]
+                            wait_s = _conn_waits[min(_stream_attempt, len(_conn_waits) - 1)]
                             logger.warning(
-                                "Ollama connection refused (attempt %d/3) — "
+                                "Ollama connection refused (attempt %d/4) — "
                                 "retrying in %ds",
                                 _stream_attempt + 1,
                                 wait_s,
@@ -1383,7 +1650,7 @@ class AgentLoop(_ValidatorMixin, _FormatterMixin,
                                 data={
                                     "content": (
                                         f"\n[AUTO-RECOVERY] Ollama unreachable "
-                                        f"(attempt {_stream_attempt + 1}/3). "
+                                        f"(attempt {_stream_attempt + 1}/4). "
                                         f"Retrying in {wait_s}s...\n"
                                     )
                                 },
@@ -1436,7 +1703,7 @@ class AgentLoop(_ValidatorMixin, _FormatterMixin,
                             )
                         elif _is_conn_refused:
                             error_msg = (
-                                "Cannot connect to Ollama after 3 retries "
+                                "Cannot connect to Ollama after 4 retries "
                                 "(connection refused).\n"
                                 "Fix: start Ollama with `ollama serve`."
                             )
@@ -1461,35 +1728,78 @@ class AgentLoop(_ValidatorMixin, _FormatterMixin,
                         return
 
                 if not content_acc and not tool_calls_acc and not thinking_acc:
-                    # Empty response can be a transient Ollama glitch —
-                    # retry once before giving up.
-                    if not getattr(self, "_empty_response_retried", False):
-                        self._empty_response_retried = True
+                    # Empty response = transient Ollama glitch (network hiccup,
+                    # remote server busy, transient OOM). Retry up to 4 times
+                    # with increasing wait before giving up.
+                    # Previously: only 1 retry → agent stopped on second empty.
+                    self._empty_response_retry_count = getattr(
+                        self, "_empty_response_retry_count", 0
+                    ) + 1
+                    if self._empty_response_retry_count <= _MAX_EMPTY_RETRIES:
+                        _wait = min(5 * self._empty_response_retry_count, 20)
                         logger.warning(
-                            "Empty response from Ollama (iteration=%d) — "
-                            "retrying once",
+                            "Empty response from Ollama (iteration=%d, attempt=%d/%d) — "
+                            "waiting %ds then retrying",
                             self.state.iteration,
+                            self._empty_response_retry_count,
+                            _MAX_EMPTY_RETRIES,
+                            _wait,
                         )
+                        # On attempt 3: compact conversation history to recover
+                        # from context-overflow-induced empty responses. Keep
+                        # system messages and the most recent exchanges; drop
+                        # old tool results that inflate the context.
+                        if self._empty_response_retry_count == 3:
+                            _sys_msgs = [
+                                m for m in self.state.conversation
+                                if m.get("role") == "system"
+                            ][:5]
+                            _recent_msgs = [
+                                m for m in self.state.conversation
+                                if m.get("role") != "system"
+                            ][-20:]
+                            _before = len(self.state.conversation)
+                            self.state.conversation = _sys_msgs + _recent_msgs
+                            logger.warning(
+                                "Empty response retry 3: compacted conversation "
+                                "%d → %d messages to reduce context size",
+                                _before, len(self.state.conversation),
+                            )
                         yield AgentEvent(
                             type="text",
                             data={
                                 "content": (
-                                    "\n[AUTO-RECOVERY] Empty response from model. "
-                                    "Retrying...\n"
+                                    f"\n[AUTO-RECOVERY] Empty response from model "
+                                    f"(attempt {self._empty_response_retry_count}/{_MAX_EMPTY_RETRIES}). "
+                                    f"Waiting {_wait}s and retrying...\n"
                                 )
                             },
                         )
+                        await asyncio.sleep(_wait)
                         self._recovery_force_tool_calls = max(
                             self._recovery_force_tool_calls, 1
                         )
                         continue  # re-enter the while loop (new iteration)
-                    self._empty_response_retried = False
+                    # All retries exhausted — surface error but preserve session
+                    self._empty_response_retry_count = 0
+                    if self._session:
+                        save_session(self._session)
                     yield AgentEvent(
-                        type="error", data={"message": "Empty response from model."}
+                        type="error",
+                        data={
+                            "message": (
+                                "Empty response from model after 4 retries. "
+                                "Possible causes: (1) Ollama OOM — try restarting Ollama or "
+                                "reducing ollama_num_ctx in config; "
+                                "(2) Model not loaded — run `ollama run <model>` first; "
+                                "(3) Context too large — reduce conversation history. "
+                                "Session state has been saved — you can resume."
+                            )
+                        },
                     )
                     yield AgentEvent(type="done", data={})
                     return
-                self._empty_response_retried = False
+                self._empty_response_retry_count = 0
 
                 # --- RESPONSE QUALITY GATE ---
                 combined_response = content_acc + " " + thinking_acc
@@ -1584,7 +1894,7 @@ class AgentLoop(_ValidatorMixin, _FormatterMixin,
                             "content": (
                                 "[SYSTEM: MANDATORY TOOL CALL - EXPLOIT PHASE]\n"
                                 "A vulnerability was found. You MUST now prove it works:\n"
-                                "1. Call execute, browser_action, or quick_fuzz\n"
+                                "1. Use a command execution, browser, or fuzzing tool\n"
                                 "2. Show the actual response/output as evidence\n"
                                 "3. DO NOT write analysis-only text\n"
                                 "TOOL EXECUTION IS MANDATORY. Do not skip this step."
@@ -1665,9 +1975,9 @@ class AgentLoop(_ValidatorMixin, _FormatterMixin,
                                 f"responses without calling any tool.\n"
                                 f"Current phase: {current_phase_name}\n"
                                 f"You MUST call a tool NOW:\n"
-                                f"- RECON phase: use execute (nmap, ffuf, httpx, etc.)\n"
-                                f"- ANALYSIS phase: use execute or browser_action\n"
-                                f"- EXPLOIT phase: use execute, quick_fuzz, or browser_action\n"
+                                f"- RECON phase: use a command execution tool (nmap, ffuf, httpx, etc.)\n"
+                                f"- ANALYSIS phase: use a command execution or browser tool\n"
+                                f"- EXPLOIT phase: use a command execution, fuzzing, or browser tool\n"
                                 f"Do NOT plan or describe — EXECUTE."
                             ),
                         })
@@ -1746,15 +2056,13 @@ class AgentLoop(_ValidatorMixin, _FormatterMixin,
                     # In active recon sessions, do NOT stop on text-only hallucinations.
                     # Force another iteration so the model must produce real tool calls.
                     _force_tool_mode = bool(self.state.active_target)
-                    _retry_text_only = (
-                        _force_tool_mode
-                        and (
-                            has_fake_cmd_block
-                            or has_hallucination_risk
-                            or self._no_tool_iterations >= 2
-                            or self._recovery_force_tool_calls > 0
-                        )
-                    )
+                    # Always retry text-only responses when there is an active recon
+                    # target — the first text-only response must never be treated as a
+                    # "final answer" during live recon.  The extra conditions
+                    # (has_fake_cmd_block, _no_tool_iterations >= 2, etc.) were too
+                    # narrow: they let the first plain-text LLM response escape the
+                    # retry path and halt the agent prematurely.
+                    _retry_text_only = _force_tool_mode
                     if _retry_text_only:
                         _max_text_only_retries = max(
                             3,
@@ -1766,7 +2074,26 @@ class AgentLoop(_ValidatorMixin, _FormatterMixin,
                                 thinking_acc=thinking_acc,
                                 phase=current_phase,
                             )
-                            if watchdog_call and self._watchdog_forced_calls < 3:
+                            if self._watchdog_forced_calls >= 3:
+                                # Exhausted all watchdog attempts — abort.
+                                msg = (
+                                    "Model is stuck in text-only mode and watchdog recovery failed. "
+                                    "Stopping to avoid infinite loop. "
+                                    "Try restarting the model/session and rerun."
+                                )
+                                logger.error(
+                                    "Text-only loop abort: active_target=%r no_tool_iters=%d forced_calls=%d",
+                                    self.state.active_target,
+                                    self._no_tool_iterations,
+                                    self._watchdog_forced_calls,
+                                )
+                                if self._session:
+                                    save_session(self._session)
+                                yield AgentEvent(type="error", data={"message": msg})
+                                yield AgentEvent(type="done", data={})
+                                return
+                            elif watchdog_call:
+                                # Watchdog extracted a command — inject it.
                                 self._watchdog_forced_calls += 1
                                 tool_calls_acc = [watchdog_call]
                                 self._no_tool_iterations = 0
@@ -1790,22 +2117,29 @@ class AgentLoop(_ValidatorMixin, _FormatterMixin,
                                     watchdog_call.get("function", {}).get("name", ""),
                                 )
                             else:
-                                msg = (
-                                    "Model is stuck in text-only mode and watchdog recovery failed. "
-                                    "Stopping to avoid infinite loop. "
-                                    "Try restarting the model/session and rerun."
-                                )
-                                logger.error(
-                                    "Text-only loop abort: active_target=%r no_tool_iters=%d forced_calls=%d",
+                                # Watchdog couldn't extract a command from text
+                                # (no recognizable binary pattern found).
+                                # Inject a stronger nudge instead of aborting —
+                                # do NOT consume a watchdog token since no call was made.
+                                logger.warning(
+                                    "Watchdog: no command found in text — injecting recovery nudge "
+                                    "(target=%r, phase=%s, no_tool_iters=%d)",
                                     self.state.active_target,
-                                    self._no_tool_iterations,
-                                    self._watchdog_forced_calls,
+                                    current_phase.value,
+                                    self._no_tool_iterations,  # log BEFORE reset
                                 )
-                                if self._session:
-                                    save_session(self._session)
-                                yield AgentEvent(type="error", data={"message": msg})
-                                yield AgentEvent(type="done", data={})
-                                return
+                                self._no_tool_iterations = 0
+                                self.state.conversation.append(
+                                    {
+                                        "role": "system",
+                                        "content": (
+                                            "[SYSTEM: RECOVERY — TOOL CALL REQUIRED]\n"
+                                            "You produced text-only output. No executable command was found.\n"
+                                            "You MUST respond with a tool_call NOW. Do not write analysis text.\n"
+                                            "Call 'execute' with a concrete shell command relevant to your current objective."
+                                        ),
+                                    }
+                                )
 
                         if not tool_calls_acc:
                             self.state.conversation.append(
@@ -1815,7 +2149,7 @@ class AgentLoop(_ValidatorMixin, _FormatterMixin,
                                         "[SYSTEM: RETRY REQUIRED — TOOL CALL MISSING]\n"
                                         "Do NOT continue with text analysis.\n"
                                         "You MUST call at least one real tool now "
-                                        "(execute, browser_action, quick_fuzz, read_file, etc.).\n"
+                                        "(command execution, browser, fuzzing, or file reading).\n"
                                         "Respond with tool_call only."
                                     ),
                                 }
@@ -1850,6 +2184,10 @@ class AgentLoop(_ValidatorMixin, _FormatterMixin,
                 if tool_calls_acc:
                     self._no_tool_iterations = 0
                     self._recovery_force_tool_calls = 0
+                    # Reset watchdog counter on successful tool call: the model
+                    # recovered, so the 3-token budget is restored for future
+                    # text-only episodes in the same session.
+                    self._watchdog_forced_calls = 0
 
                 if not content_acc.strip():
                     tool_names_str = ", ".join(
@@ -1888,11 +2226,19 @@ class AgentLoop(_ValidatorMixin, _FormatterMixin,
                     is_parallel = False
                     if tn == "execute":
                         cmd = args.get("command", "")
-                        cmd_bin = (
-                            cmd.split()[1]
-                            if cmd.startswith("cd ")
-                            else cmd.split()[0]
-                        )
+                        cmd_parts = cmd.split()
+                        # Guard against empty command or bare "cd" with no arg
+                        if cmd_parts:
+                            try:
+                                cmd_bin = (
+                                    cmd_parts[1]
+                                    if cmd.startswith("cd ") and len(cmd_parts) > 1
+                                    else cmd_parts[0]
+                                )
+                            except IndexError:
+                                cmd_bin = ""
+                        else:
+                            cmd_bin = ""
                         cmd_bin = cmd_bin.rsplit("/", 1)[-1]
                         if cmd_bin in parallelizable_tools:
                             # Group all parallel tools under a single
@@ -2167,7 +2513,7 @@ class AgentLoop(_ValidatorMixin, _FormatterMixin,
                             "tool_counts": self.state.tool_counts,
                         },
                     )
-                    self._track_tool_usage(tool_name)
+                    self._track_tool_usage(tool_name, arguments)
 
                     if success:
                         self._consecutive_failures = 0
@@ -2176,8 +2522,9 @@ class AgentLoop(_ValidatorMixin, _FormatterMixin,
                         self._consecutive_failures += 1
 
                     raw_command = (
-                        arguments.get(
-                            "command", "") if tool_name == "execute" else ""
+                        arguments.get("command", "")
+                        if tool_name == "execute"
+                        else tool_name
                     )
                     content_str = self._smart_format_tool_result(
                         tool_name, result, success, raw_command
@@ -2208,7 +2555,12 @@ class AgentLoop(_ValidatorMixin, _FormatterMixin,
                         )
 
                     # Update session with parsed tool output
-                    if success and tool_name == "execute" and self._session:
+                    # Include browser_action, quick_fuzz, code_analysis so
+                    # their [SEVERITY]-tagged stdout lines populate session.vulnerabilities.
+                    _SESSION_UPDATE_TOOLS = (
+                        "execute", "browser_action", "quick_fuzz", "code_analysis"
+                    )
+                    if success and tool_name in _SESSION_UPDATE_TOOLS and self._session:
                         stdout = (
                             result.get(
                                 "stdout", "") or result.get(
@@ -2358,23 +2710,165 @@ class AgentLoop(_ValidatorMixin, _FormatterMixin,
             yield AgentEvent(type="done", data={})
 
     # Max chars for a single tool result in conversation history.
-    # Dynamic cap: adaptive_num_ctx * ~3 chars/token, max 40 % of context.
-    # Absolute ceiling 40 000 chars (~10 K tokens) even on large models.
-    _MAX_TOOL_RESULT_CHARS: int = 40_000
+    # Scales down with context window size: 8% of num_ctx * 3 chars/token,
+    # floored at 3000 chars, ceiling at 15000 chars (~4K tokens).
+    # Smaller cap = fewer OOM crashes; full output always saved to file.
+    _MAX_TOOL_RESULT_CHARS: int = 15_000
+
+    def _inject_exploit_vuln_context(self) -> None:
+        """Inject a pinned vulnerability summary at the start of EXPLOIT phase.
+
+        Ensures the model has direct, unambiguous access to ALL confirmed
+        vulnerabilities from ANALYSIS — preventing loss of critical targets due
+        to context truncation. This message is prepended using the
+        protected_system bucket so it survives _enforce_char_budget().
+        """
+        if not self._session:
+            return
+
+        vulns = self._session.vulnerabilities or []
+        injection_pts = self._session.injection_points or []
+
+        if not vulns and not injection_pts:
+            logger.debug("No vulnerabilities or injection points to pin for EXPLOIT phase")
+            return
+
+        lines = ["[SYSTEM: EXPLOIT PHASE — CONFIRMED ATTACK SURFACE]",
+                 "Exploit each item below systematically. Do NOT re-discover — go straight to exploitation.\n"]
+
+        if vulns:
+            lines.append("## Confirmed Vulnerabilities:")
+            for i, v in enumerate(vulns[:25], 1):
+                title = v.get("title", "Unknown")
+                url = v.get("url") or v.get("evidence", "")
+                sev = v.get("severity", "")
+                param = v.get("parameter", "")
+                detail = f" (param: {param})" if param else ""
+                lines.append(f"  {i}. [{sev}] {title}{detail} — {url}")
+
+        if injection_pts:
+            lines.append("\n## Injection Points (test for SQLi/XSS/SSTI/SSRF):")
+            for j, ip in enumerate(injection_pts[:20], 1):
+                url = ip.get("url", "")
+                param = ip.get("parameter", "")
+                method = ip.get("method", "GET")
+                itype = ip.get("type_hint", "")
+                lines.append(f"  {j}. {method} {url} — param: {param} [{itype}]")
+
+        lines.append(
+            "\nPriority order: CRITICAL > HIGH > MEDIUM. "
+            "Use sqlmap, dalfox, nuclei, custom payloads. "
+            "Confirm each exploit with proof-of-concept output."
+        )
+
+        vuln_ctx = "\n".join(lines)
+        self.state.conversation.append({
+            "role": "system",
+            "content": vuln_ctx,
+            "_bucket": "protected_system",
+        })
+        logger.info(
+            "EXPLOIT context pinned: %d vulns + %d injection points",
+            len(vulns), len(injection_pts),
+        )
+
+    def _compact_phase_context(self, from_phase: str) -> None:
+        """Compress raw tool results from a completed phase to free KV cache space.
+
+        When transitioning (e.g. RECON→ANALYSIS), the bulk of old raw tool
+        outputs (full nmap/subfinder/httpx dumps) is no longer needed verbatim.
+        We keep the last 15 messages intact and collapse old tool output to
+        short stubs, reclaiming tens of thousands of context tokens.
+
+        Findings (vulnerabilities, structured data) are never touched — they
+        live in session state (self._session), not as raw conversation messages.
+        """
+        msgs = self.state.conversation
+        keep_recent = 15
+        cutoff = max(0, len(msgs) - keep_recent)
+        compacted_tools = 0
+        compacted_thinking = 0
+        chars_freed = 0
+
+        for i, msg in enumerate(msgs[:cutoff]):
+            role = msg.get("role")
+            content = str(msg.get("content", ""))
+
+            if role == "tool" and len(content) > 400:
+                stub = content[:200].rstrip()
+                freed = len(content) - len(stub)
+                msg["content"] = (
+                    stub
+                    + f" ...[{from_phase} phase output compacted — {freed} chars freed]"
+                )
+                chars_freed += freed
+                compacted_tools += 1
+
+            elif role == "assistant" and msg.get("thinking"):
+                thinking_len = len(str(msg["thinking"]))
+                msg.pop("thinking", None)
+                chars_freed += thinking_len
+                compacted_thinking += 1
+
+        if compacted_tools or compacted_thinking:
+            logger.info(
+                "Phase transition compaction (%s→next): %d tool msgs, "
+                "%d thinking strips, ~%d chars freed",
+                from_phase, compacted_tools, compacted_thinking, chars_freed,
+            )
+
+    def _messages_for_ollama(self) -> list[dict[str, Any]]:
+        """Return a view of the conversation with thinking stripped from old messages.
+
+        Thinking traces from previous iterations are already encoded in their
+        corresponding content/tool_calls and provide no additional value when
+        replayed to Ollama — they only consume KV cache tokens.
+
+        Strategy: keep thinking only in the LAST assistant message (most recent turn).
+        This recovers 50-200K tokens in long sessions without losing any information.
+        _enforce_char_budget() handles the stateful strip when budget is exceeded;
+        this method handles the API-call view for every iteration.
+        """
+        msgs = self.state.conversation
+        last_assistant_idx = -1
+        for i, m in enumerate(msgs):
+            if m.get("role") == "assistant":
+                last_assistant_idx = i
+
+        if last_assistant_idx == -1:
+            return list(msgs)
+
+        result = []
+        for i, msg in enumerate(msgs):
+            if (
+                msg.get("role") == "assistant"
+                and i != last_assistant_idx
+                and msg.get("thinking")
+            ):
+                msg = {k: v for k, v in msg.items() if k != "thinking"}
+            result.append(msg)
+        return result
+
+    def _get_tool_result_cap(self) -> int:
+        """Return per-message tool result cap scaled to current context window."""
+        # CTF mode: hard cap at 1500 chars — each tool result must be tiny so
+        # the rolling conversation window can hold 15-20 results without overflow.
+        if self._ctf_mode:
+            return 1500
+        ctx = self._adaptive_num_ctx if self._adaptive_num_ctx > 0 else get_config().ollama_num_ctx
+        # 8% of estimated token budget in chars (1 token ≈ 3 chars)
+        # With 128K ctx: 128000 * 0.08 * 3 = ~30K → capped at 15K
+        cap = max(3_000, min(self._MAX_TOOL_RESULT_CHARS, int(ctx * 0.08 * 3)))
+        return cap
 
     def _cap_tool_result(self, content: str) -> str:
         """Truncate a large tool result before adding it to conversation.
 
         Keeps the first 70 % and last 10 % of the content so that both the
         command summary and the tail (often a final summary/stats line) are
-        preserved.  Dynamic cap scales down when VRAM-crash mode is active.
+        preserved.  Cap scales down when VRAM-crash mode is active.
         """
-        # When context has been reduced due to crashes, scale cap proportionally
-        if self._adaptive_num_ctx > 0:
-            # ~3 chars per token; keep at most 25 % of reduced context
-            cap = max(2_000, self._adaptive_num_ctx * 3 // 4)
-        else:
-            cap = self._MAX_TOOL_RESULT_CHARS
+        cap = self._get_tool_result_cap()
         if len(content) <= cap:
             return content
         head = int(cap * 0.70)
@@ -2384,6 +2878,107 @@ class AgentLoop(_ValidatorMixin, _FormatterMixin,
             content[:head]
             + f"\n... [{omitted} chars omitted — use read_file to see full output] ...\n"
             + content[-tail:]
+        )
+
+    def _enforce_char_budget(
+        self, num_ctx: int, num_predict: int | None = None
+    ) -> None:
+        """Hard pre-call guard: compress conversation if total chars exceed token budget.
+
+        Runs before every Ollama call. Prevents OOM from large tool outputs
+        accumulating across iterations even after message-count truncation.
+
+        Ollama's num_ctx is the TOTAL KV cache for both input AND output tokens.
+        The effective input budget = num_ctx - num_predict. Using the full num_ctx
+        as the budget causes silent context truncation by Ollama when the input
+        exceeds (num_ctx - num_predict), stripping the system prompt and causing
+        hallucination. We subtract the output reservation to trigger compression
+        before Ollama does its own (destructive) truncation.
+
+        Budget = (num_ctx - num_predict) * 3 chars (1 token ≈ 3 chars).
+        At 128K ctx / 32K predict: (131072-32768)*3 = ~294K chars input budget.
+        """
+        cfg = get_config()
+        effective_predict = (
+            self._fit_num_predict_to_ctx(num_predict, num_ctx)
+            if num_predict is not None
+            else self._fit_num_predict_to_ctx(
+                getattr(cfg, "ollama_num_predict", 32768), num_ctx
+            )
+        )
+        # Reserve tokens for tool definitions sent in the API call.
+        # With 20 tools × ~250 tokens avg = ~5000 tokens not visible in
+        # conversation messages but counted by Ollama toward the KV cache.
+        _tools_count = len(self._tools_ollama) if self._tools_ollama is not None else 20
+        _tools_overhead = _tools_count * 250
+        effective_input_ctx = max(1024, num_ctx - effective_predict - _tools_overhead)
+        budget = effective_input_ctx * 3
+        total = sum(
+            len(str(m.get("content") or ""))
+            + len(str(m.get("tool_calls") or ""))
+            + len(str(m.get("thinking") or ""))   # thinking traces count toward budget
+            for m in self.state.conversation
+        )
+        if total <= budget:
+            return
+
+        logger.warning(
+            "Pre-call char budget exceeded: %d chars > %d budget (num_ctx=%d) — compressing",
+            total, budget, num_ctx,
+        )
+
+        # Pass 0: strip thinking from ALL assistant messages except the most recent 3.
+        # Thinking traces accumulate rapidly (1500+ tokens each) and are invisible to
+        # the old total calculation, silently overflowing the context window and causing
+        # Ollama to truncate the system prompt → hallucination / scope loss.
+        # The thinking is already captured in content/tool_calls — safe to drop from history.
+        assistant_indices = [
+            i for i, m in enumerate(self.state.conversation)
+            if m.get("role") == "assistant" and m.get("thinking")
+        ]
+        # Keep thinking only in the most recent 3 assistant turns
+        for idx in assistant_indices[:-3]:
+            thinking_len = len(str(self.state.conversation[idx].get("thinking", "")))
+            self.state.conversation[idx].pop("thinking", None)
+            total -= thinking_len
+            if total <= budget:
+                logger.info("Budget restored after thinking strip (%d msgs)", len(assistant_indices))
+                return
+
+        # Pass 1: compress tool/user messages over compress_cap chars.
+        # EXCEPTION: the first user message contains the original task/scope instruction
+        # (e.g. "pentest target.com"). Never compress it — trimming it causes scope loss
+        # and out-of-scope behavior on the next LLM call.
+        compress_cap = max(300, budget // max(1, len(self.state.conversation)))
+        first_user_seen = False
+        for msg in self.state.conversation:
+            role = msg.get("role")
+            if role == "user" and not first_user_seen:
+                first_user_seen = True
+                continue  # protect original task message
+            if role in ("tool", "user"):
+                content = str(msg.get("content", ""))
+                if len(content) > compress_cap:
+                    msg["content"] = content[:compress_cap] + f"...[hard-trimmed {len(content)} chars]"
+
+        # Recheck after pass 1
+        total = sum(
+            len(str(m.get("content") or ""))
+            + len(str(m.get("thinking") or ""))
+            for m in self.state.conversation
+        )
+        if total <= budget:
+            return
+
+        # Pass 2: drop oldest non-critical messages until we fit.
+        # CTF mode: drop aggressively to 8 messages — the agent needs a clean
+        # window more than it needs full history. Normal: drop to half.
+        _min_msgs = 8 if self._ctf_mode else 15
+        target_msgs = max(_min_msgs, len(self.state.conversation) // (3 if self._ctf_mode else 2))
+        self.state.truncate_conversation(max_messages=target_msgs)
+        logger.warning(
+            "Pre-call char budget: after truncation → %d messages",
+            len(self.state.conversation),
         )
 
     def _append_tool_result(
@@ -2600,7 +3195,6 @@ class AgentLoop(_ValidatorMixin, _FormatterMixin,
 
         Returns (relative_path_str, full_Path) or (None, None) if not found.
         """
-        import shlex
         cmd = arguments.get("command", "")
         if not cmd or not self.state.active_target:
             return None, None
@@ -2729,6 +3323,34 @@ class AgentLoop(_ValidatorMixin, _FormatterMixin,
         except Exception:
             return default
 
+    @staticmethod
+    def _fit_num_predict_to_ctx(num_predict: int, num_ctx: int) -> int:
+        """Clamp output reservation to fit inside the active context window.
+
+        Ensures we always keep meaningful prompt/input space and avoids
+        pathological settings (e.g. num_predict ~= num_ctx) that trigger
+        aggressive truncation and unstable model behavior.
+        """
+        _ctx = max(1024, int(num_ctx))
+        _requested = max(256, int(num_predict))
+        _prompt_reserve = 1024 if _ctx >= 4096 else max(256, _ctx // 4)
+        _max_by_prompt = max(256, _ctx - _prompt_reserve)
+        _max_by_ratio = max(512, int(_ctx * 0.40))
+        return max(256, min(_requested, _max_by_prompt, _max_by_ratio))
+
+    def _get_iteration_num_predict(
+        self, cfg: Any, current_phase: Any, num_ctx: int
+    ) -> int:
+        """Compute the real num_predict used this iteration.
+
+        Combines phase/tool adaptivity, crash-time cap, and context-fit guardrails.
+        """
+        _phase_name = current_phase.value if current_phase else "RECON"
+        _requested = self._get_adaptive_num_predict(cfg, _phase_name)
+        if self._adaptive_num_predict_cap > 0:
+            _requested = min(_requested, self._adaptive_num_predict_cap)
+        return self._fit_num_predict_to_ctx(_requested, num_ctx)
+
     # Tools that need minimal reasoning — reduce token budget to speed up iteration.
     _SHALLOW_TOOLS: frozenset[str] = frozenset({
         "list_files", "read_file", "create_file", "get_console_logs",
@@ -2740,30 +3362,107 @@ class AgentLoop(_ValidatorMixin, _FormatterMixin,
         "spawn_agent", "create_vulnerability_report", "code_analysis",
     })
 
+    def _should_use_thinking(
+        self, cfg: Any, current_phase: Any
+    ) -> bool:
+        """Decide whether to enable thinking for this iteration.
+
+        Thinking is expensive: ~1500 tokens and 1-3s overhead per iteration.
+        It's only needed when the model must reason deeply — not for routine
+        RECON tool calls like 'run subfinder'.
+
+        Rules:
+        - Always OFF if model/config disables it globally.
+        - Always ON in ANALYSIS and EXPLOIT (complex reasoning required).
+        - Always ON during stagnation, recovery, or repeated failures.
+        - Always ON for deep tools (advanced_fuzz, spawn_agent, etc.).
+        - RECON / REPORT routine iterations: OFF after iter 8 to save tokens.
+        """
+        if not (
+            self._cfg_bool(cfg, "ollama_enable_thinking", True)
+            and self.ollama.supports_thinking
+        ):
+            return False
+
+        stagnation_threshold = self._cfg_int(cfg, "agent_stagnation_threshold", 2)
+        _is_struggling = (
+            self._stagnation_iterations >= stagnation_threshold
+            or self._recovery_force_tool_calls > 0
+            or self._consecutive_failures >= 2
+            or self._no_tool_iterations >= 1
+            or self._watchdog_forced_calls > 0
+        )
+
+        # CTF mode: thinking is expensive VRAM-wise on 122B models.
+        # Only think when genuinely stuck or at periodic checkpoints (every 5 iter).
+        # Routine CTF iterations (curl, read, enumerate) do not need deep reasoning.
+        if self._ctf_mode:
+            if _is_struggling:
+                return True
+            last_tool = self._recent_tool_names[-1] if self._recent_tool_names else ""
+            if last_tool in self._DEEP_TOOLS:
+                return True
+            # Periodic thinking every 5 iterations to reassess strategy
+            return self.state.iteration % 5 == 0
+
+        # Normal mode: always think for ANALYSIS and EXPLOIT
+        from airecon.proxy.agent.pipeline import PipelinePhase  # local import to avoid cycle
+        if current_phase and current_phase in (
+            PipelinePhase.ANALYSIS, PipelinePhase.EXPLOIT
+        ):
+            return True
+
+        # Always think when struggling or in recovery
+        if _is_struggling:
+            return True
+
+        # Always think for deep tools
+        last_tool = self._recent_tool_names[-1] if self._recent_tool_names else ""
+        if last_tool in self._DEEP_TOOLS:
+            return True
+
+        # RECON / REPORT: disable thinking after warm-up (iter > 8)
+        # to save tokens per iteration on routine tool calls.
+        if self.state.iteration > 8:
+            return False
+
+        return True
+
     def _get_adaptive_num_predict(self, cfg: Any, phase: str) -> int:
         """Return an adaptive num_predict based on phase complexity and last tool.
 
-        SHALLOW (fast iteration):  8 192 tokens   — file ops, listing, log reads
-        MEDIUM  (default):        16 384 tokens   — recon, analysis tasks
-        DEEP    (max reasoning):  cfg value        — exploit dev, reporting, stagnation
+        SHALLOW (fast iteration):  4 096 tokens   — file ops, listing, log reads
+        MEDIUM  (default):         8 192 tokens   — recon, analysis tasks
+        DEEP    (max reasoning):  16 384 tokens   — exploit dev, reporting, stagnation
+        CTF mode caps at 8 192 to prevent thinking-block VRAM explosion.
         """
         base = self._cfg_int(cfg, "ollama_num_predict", 32768)
         last_tool = self._recent_tool_names[-1] if self._recent_tool_names else ""
-
-        # Always use full budget when stagnating or in exploit/report phase
         stagnation_threshold = self._cfg_int(cfg, "agent_stagnation_threshold", 2)
+
+        # CTF mode: cap tightly — each iteration must be fast and lean.
+        # Large thinking blocks in EXPLOIT phase are the primary VRAM killer.
+        if self._ctf_mode:
+            if (
+                self._stagnation_iterations >= stagnation_threshold
+                or self._consecutive_failures >= 2
+            ):
+                return min(base, 8192)   # deep think only when truly stuck
+            return min(base, 4096)       # routine CTF iteration: minimal budget
+
+        # Normal mode: tiered budget
         if (
             self._stagnation_iterations >= stagnation_threshold
             or phase in ("EXPLOIT", "REPORT")
             or last_tool in self._DEEP_TOOLS
         ):
-            return base  # full thinking budget
+            return min(base, 16384)   # deep — capped to prevent VRAM OOM
 
         if last_tool in self._SHALLOW_TOOLS:
-            return min(base, 8192)  # shallow: fast
+            return min(base, 4096)    # shallow: fast
 
         # ANALYSIS or RECON with non-trivial tools — medium budget
-        return min(base, 16384)
+        return min(base, 8192)
 
     def _get_iteration_temperature(self, cfg: Any) -> float:
         base_temp = self._cfg_float(cfg, "ollama_temperature", 0.15)
@@ -2781,8 +3480,27 @@ class AgentLoop(_ValidatorMixin, _FormatterMixin,
             return max(base_temp, exploration_temp)
         return base_temp
 
-    def _track_tool_usage(self, tool_name: str) -> None:
-        self._recent_tool_names.append(tool_name)
+    def _track_tool_usage(
+        self, tool_name: str, arguments: dict | None = None
+    ) -> None:
+        # In CTF mode, track command-level diversity for execute tools.
+        # All shell commands go through the "execute" tool, so tracking only
+        # tool_name gives same_tool_streak=always-high even when the agent is
+        # genuinely using curl, python3, for-loops, sqlmap, etc.
+        # We use the primary binary name (first token after `cd ... &&`) as the
+        # diversity unit so the exploration directive only fires when the agent
+        # truly repeats the same binary — not just `execute`.
+        track_as = tool_name
+        if self._ctf_mode and tool_name == "execute" and arguments:
+            cmd = str(arguments.get("command", "")).strip()
+            # Strip common `cd /workspace/... &&` prefix
+            _ws_prefix = re.sub(r"^cd\s+\S+\s*&&\s*", "", cmd).strip()
+            # First token of the remaining command = binary name
+            _binary = _ws_prefix.split()[0] if _ws_prefix else ""
+            # Normalise shell built-ins and generic wrappers to "execute"
+            if _binary and _binary not in ("cd", "echo", "export", "source", ".", "for", "while", "if"):
+                track_as = _binary
+        self._recent_tool_names.append(track_as)
         cfg = get_config()
         window = max(3, self._cfg_int(cfg, "agent_tool_diversity_window", 8))
         if len(self._recent_tool_names) > window:
@@ -2827,8 +3545,7 @@ class AgentLoop(_ValidatorMixin, _FormatterMixin,
         unique_recent = len(set(recent)) if recent else 0
 
         should_push = (
-            self.state.iteration <= 2
-            or self._stagnation_iterations >= stagnation_threshold
+            self._stagnation_iterations >= stagnation_threshold
             or self._consecutive_failures >= 2
             or self._no_tool_iterations >= 1
             or same_tool_streak >= max_same_streak
@@ -2844,18 +3561,30 @@ class AgentLoop(_ValidatorMixin, _FormatterMixin,
                 "Switch discovery families: DNS → HTTP fingerprint (httpx) → content discovery (ffuf/ferox).",
                 "Prioritize unusual assets on LIVE hosts: admin panels, legacy paths, debug endpoints.",
                 "If two tool families stall with no new data, write a custom script in tools/ to correlate outputs or extract endpoints.",
+                # Capability reminders — surface underused features during stagnation
+                "No passive OSINT yet? Use search with dork operators: site:{target} filetype:env, inurl:admin, intitle:\"index of\", intext:password — finds exposed configs faster than active scanning.",
+                "No proxy data yet? Set scope and route traffic through proxy capture before active scanning — sitemap and history are richer than brute-force.",
+                "No CT log / archive data yet? Search crt.sh and Wayback Machine for subdomains and forgotten endpoints not in current DNS.",
             ],
             PipelinePhase.ANALYSIS: [
                 "Mutate parameters aggressively (encoding, type confusion, boundary values).",
                 "Correlate endpoints, auth flows, and object IDs for privilege paths.",
                 "Generate at least one non-obvious hypothesis and test it immediately.",
                 "If testing requires many variants (IDs/roles/auth states), write a script to automate and log results.",
+                # Capability reminders
+                "Source code or repository accessible? Run static analysis (SAST/Semgrep) NOW — finds injection sinks and hardcoded secrets faster than manual testing.",
+                "No parameter discovery done yet? Run parameter mining on ALL confirmed endpoints — hidden params are the most commonly missed attack surface.",
+                "Mine proxy HTTP history for undocumented endpoints, auth token patterns, and IDOR candidates before generating more hypotheses.",
             ],
             PipelinePhase.EXPLOIT: [
                 "Rotate payload families every failed attempt (SQLi -> SSTI -> auth logic).",
                 "Prefer impact proof over scanner output: state change, data access, or privilege gain.",
                 "Chain medium findings into one higher-impact attack path.",
                 "When exploitation is multi-step, write a PoC script in tools/ instead of manual repetition.",
+                # Capability reminders
+                "Stalling on injection? Use native multi-vector fuzzing (chain-aware, dedup) instead of repeating raw curl/ffuf — it covers more payload classes per iteration.",
+                "JavaScript-heavy target? Switch to browser automation for DOM-based XSS, CSRF token capture, OAuth flows, and client-side logic that curl cannot reach.",
+                "High-value complex finding? Spawn a specialist subagent for up to 100 focused iterations instead of diluting the main session.",
             ],
             PipelinePhase.REPORT: [
                 "Convert strongest evidence into reproducible PoC steps with exact inputs.",
@@ -2978,11 +3707,7 @@ class AgentLoop(_ValidatorMixin, _FormatterMixin,
         elif phase == PipelinePhase.ANALYSIS:
             if tool_name in ("execute", "read_file", "browser_action", "web_search"):
                 self.state.mark_objective(phase.value, defaults[0], "done")
-            if cmd and any(
-                hint in cmd for hint in (
-                    "sqlmap", "dalfox", "nuclei", "xsser", "ffuf", "wfuzz", "nikto"
-                )
-            ):
+            if cmd and any(hint in cmd for hint in _ANALYSIS_VULN_TOOLS):
                 self.state.mark_objective(phase.value, defaults[1], "done")
             if self.state.evidence_log:
                 self.state.mark_objective(phase.value, defaults[2], "done")
@@ -3000,7 +3725,20 @@ class AgentLoop(_ValidatorMixin, _FormatterMixin,
                 self.state.mark_objective(phase.value, defaults[2], "done")
 
         elif phase == PipelinePhase.REPORT:
-            if tool_name == "create_vulnerability_report":
+            result_text = self._extract_result_text(result)
+            _is_report_tool = tool_name == "create_vulnerability_report"
+            _has_report_content = bool(re.search(
+                r"\b(vulnerability report|executive summary|CVSS|severity[:\s]|"
+                r"remediation|proof.of.concept|PoC|report generated|report written|"
+                r"risk rating|findings? documented)\b",
+                result_text,
+                re.IGNORECASE,
+            ))
+            _is_report_output = bool(
+                output_file
+                and re.search(r"report|finding|vuln", output_file, re.IGNORECASE)
+            )
+            if _is_report_tool or _has_report_content or _is_report_output:
                 self.state.mark_objective(phase.value, defaults[0], "done")
                 self.state.mark_objective(phase.value, defaults[1], "done")
             if output_file and output_file.startswith("output/"):
@@ -3223,15 +3961,6 @@ class AgentLoop(_ValidatorMixin, _FormatterMixin,
         thinking_acc: str = "",
     ) -> str | None:
         """Extract a safe shell command from hallucinated text/code blocks."""
-        command_prefix_re = re.compile(
-            r"^(?:"
-            r"nmap|naabu|masscan|httpx|ffuf|dirsearch|gobuster|katana|hakrawler|"
-            r"subfinder|amass|assetfinder|wpscan|nikto|sqlmap|ghauri|dalfox|"
-            r"curl|wget|python|python3|bash|sh|ls|cat|find|grep|echo"
-            r")\b",
-            re.IGNORECASE,
-        )
-
         def _safe(cmd: str) -> str | None:
             cleaned = cmd.strip().lstrip("$").strip()
             if not cleaned:
@@ -3269,7 +3998,7 @@ class AgentLoop(_ValidatorMixin, _FormatterMixin,
                     continue
                 line = line.lstrip("-*0123456789. ").strip()
                 if not found_first:
-                    if not command_prefix_re.match(line.lstrip("$")):
+                    if not _WATCHDOG_COMMAND_PREFIX_RE.match(line.lstrip("$")):
                         continue
                     found_first = True
                 picked.append(line.rstrip("\\").strip())
@@ -3306,7 +4035,7 @@ class AgentLoop(_ValidatorMixin, _FormatterMixin,
             candidates.append(line.lstrip("$").strip())
 
             for candidate_line in candidates:
-                if command_prefix_re.match(candidate_line):
+                if _WATCHDOG_COMMAND_PREFIX_RE.match(candidate_line):
                     safe = _safe(candidate_line)
                     if safe:
                         return safe
@@ -3380,8 +4109,26 @@ class AgentLoop(_ValidatorMixin, _FormatterMixin,
                 },
             }
 
-        # RECON or unknown phase: list output files to remind the model what
-        # has already been discovered.
+        # RECON or unknown phase: run httpx probe to gather live target data.
+        # Use execute (not list_files) so the call goes through engine.execute_tool()
+        # and is recorded in the mock engine's call_log during benchmark runs.
+        if active_target:
+            _scheme = "https" if "https" in active_target else "http"
+            _host = active_target.replace("https://", "").replace("http://", "").split("/")[0]
+            return {
+                "id": f"watchdog_execute_{self.state.iteration}",
+                "type": "function",
+                "function": {
+                    "name": "execute",
+                    "arguments": {
+                        "command": (
+                            f"httpx -u {_scheme}://{_host} "
+                            "-title -tech-detect -status-code -follow-redirects 2>/dev/null || "
+                            f"curl -sk -I {_scheme}://{_host}/ | head -20"
+                        )
+                    },
+                },
+            }
         return {
             "id": f"watchdog_list_files_{self.state.iteration}",
             "type": "function",
@@ -3516,30 +4263,49 @@ class AgentLoop(_ValidatorMixin, _FormatterMixin,
             ),
         ]
 
-        pending, _completed, evidence = self.state.get_phase_context(
-            phase.value, max_objectives=3, max_evidence=3, filter_evidence_by_phase=False
+        # Show more context to help the LLM resume correctly after a crash.
+        pending, completed, evidence = self.state.get_phase_context(
+            phase.value, max_objectives=5, max_evidence=6, filter_evidence_by_phase=False
         )
         if pending:
-            lines.append("Top pending objectives:")
+            lines.append("Pending objectives:")
             for obj in pending:
                 lines.append(f"- {obj.get('title', '')}")
+        if completed:
+            lines.append(f"Completed objectives ({len(completed)} total):")
+            for obj in completed[:3]:
+                lines.append(f"  ✓ {obj.get('title', '')}")
 
-        recent_tools = [
-            t for t in reversed(self.state.tool_history)
-            if t.status == "success"
-        ][:2]
+        # Include last few tool calls WITH args so LLM knows what was being run.
+        recent_tools = list(reversed(self.state.tool_history))[:5]
         if recent_tools:
-            lines.append("Recent successful tools:")
+            lines.append("Recent tool calls (newest first):")
             for entry in recent_tools:
-                lines.append(f"- {entry.tool_name}")
+                status_icon = "✓" if entry.status == "success" else "✗"
+                args_hint = ""
+                args = getattr(entry, "arguments", None) or {}
+                if isinstance(args, dict):
+                    # Show the most informative arg: command > url > query > first key
+                    for key in ("command", "url", "query", "action", "target"):
+                        if key in args:
+                            val = str(args[key])[:80]
+                            args_hint = f" [{key}={val}]"
+                            break
+                    if not args_hint and args:
+                        first_key = next(iter(args))
+                        args_hint = f" [{first_key}={str(args[first_key])[:60]}]"
+                lines.append(f"  {status_icon} {entry.tool_name}{args_hint}")
 
         if evidence:
             lines.append("Recent evidence:")
             for ev in evidence:
-                lines.append(f"- [{ev.get('source_tool', 'tool')}] {ev.get('summary', '')}")
+                lines.append(f"- [{ev.get('source_tool', 'tool')}] {ev.get('summary', '')[:120]}")
 
         lines.append(
             "MANDATORY: first response after recovery must include at least one tool_call."
+        )
+        lines.append(
+            "Resume from the last failed/pending step above — do not restart from scratch."
         )
         return "\n".join(lines)
 
@@ -3628,7 +4394,6 @@ class AgentLoop(_ValidatorMixin, _FormatterMixin,
         # Injection points: show untested first so they don't get lost after
         # context truncation — these are the highest-priority attack surface.
         if s.injection_points:
-            from .session import get_untested_injection_points
             untested = get_untested_injection_points(s)
             all_ips = s.injection_points
             tested_count = len(all_ips) - len(untested)
@@ -3636,8 +4401,7 @@ class AgentLoop(_ValidatorMixin, _FormatterMixin,
             show = untested[:8] if untested else all_ips[:8]
             ip_lines: list[str] = []
             for pt in show:
-                from urllib.parse import urlparse as _urlparse
-                path = _urlparse(pt.get("url", "")).path or pt.get("url", "")
+                path = urlparse(pt.get("url", "")).path or pt.get("url", "")
                 ip_lines.append(
                     f"  [{pt.get('type_hint','?')}] {pt.get('parameter','?')} @ {path}"
                 )
