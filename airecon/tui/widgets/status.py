@@ -160,14 +160,14 @@ class StatusBar(Horizontal):
         ollama: str | None = None,
         docker: str | None = None,
         model: str | None = None,
-        tokens: int | None = None,
-        token_limit: int | None = None,
-        tools: int | None = None,
-        exec_used: int | None = None,
-        subagents: int | None = None,
+        tokens: int | str | None = None,
+        token_limit: int | str | None = None,
+        tools: int | str | None = None,
+        exec_used: int | str | None = None,
+        subagents: int | str | None = None,
         skills: list[str] | None = None,
         caido_active: bool | None = None,
-        caido_findings: int | None = None,
+        caido_findings: int | str | None = None,
     ) -> None:
         if ollama is not None:
             self.ollama_status = ollama
