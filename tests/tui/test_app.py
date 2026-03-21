@@ -1,5 +1,5 @@
 import pytest
-from unittest.mock import patch, MagicMock, AsyncMock
+from unittest.mock import patch, MagicMock
 from airecon.tui.app import AIReconApp, QuitConfirmScreen
 from airecon.tui.startup import StartupScreen, _write_config_value
 from airecon.tui.widgets.input import CommandInput
@@ -272,7 +272,6 @@ async def test_startup_screen_session_label_shown():
 def test_write_config_value_creates_file(tmp_path):
     """_write_config_value should write key into ~/.airecon/config.json."""
     import json as _json
-    import pathlib
 
     airecon_dir = tmp_path / ".airecon"
     airecon_dir.mkdir()
