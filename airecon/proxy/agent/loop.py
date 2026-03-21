@@ -1,47 +1,52 @@
 from __future__ import annotations
-from .workspace import _WorkspaceMixin
-from .validators import _ValidatorMixin, has_dangerous_patterns
-from .tool_defs import get_tool_definitions
-from .session import (
-    SessionData,
-    load_session,
-    save_session,
-    update_from_parsed_output,
-    session_to_context,
-    find_prior_session,
-    merge_prior_findings,
-    record_tested_endpoint,
-    get_untested_injection_points,
-)
-from .pipeline import PipelineEngine, PipelinePhase, _PHASE_TOOL_BUDGETS
-from .output_parser import parse_tool_output
-from .models import AgentEvent, AgentState, MAX_TOOL_ITERATIONS
-from .formatters import _FormatterMixin
-from .executors import _ExecutorMixin, _RECON_PORT_SCAN_BINS
-from ..system import (
-    auto_load_skills_for_message,
-    auto_load_skills_for_technologies,
-    get_system_prompt,
-    _is_ctf_target,
-)
-from .file_reference import (
-    parse_refs, strip_refs, resolve_ref,
-    build_injection_message, workspace_name_for_ref,
-)
-from ..ollama import OllamaClient
-from ..docker import DockerEngine
-from ..config import get_config, get_workspace_root
-from typing import Any, AsyncIterator
-from urllib.parse import urlparse
-import re
-import logging
+
 import asyncio
-import json
 import hashlib
+import json
+import logging
 import os
+import re
 import shlex
 import warnings
 from pathlib import Path
+from typing import Any, AsyncIterator
+from urllib.parse import urlparse
+
+from ..config import get_config, get_workspace_root
+from ..docker import DockerEngine
+from ..ollama import OllamaClient
+from ..system import (
+    _is_ctf_target,
+    auto_load_skills_for_message,
+    auto_load_skills_for_technologies,
+    get_system_prompt,
+)
+from .executors import _RECON_PORT_SCAN_BINS, _ExecutorMixin
+from .file_reference import (
+    build_injection_message,
+    parse_refs,
+    resolve_ref,
+    strip_refs,
+    workspace_name_for_ref,
+)
+from .formatters import _FormatterMixin
+from .models import MAX_TOOL_ITERATIONS, AgentEvent, AgentState
+from .output_parser import parse_tool_output
+from .pipeline import _PHASE_TOOL_BUDGETS, PipelineEngine, PipelinePhase
+from .session import (
+    SessionData,
+    find_prior_session,
+    get_untested_injection_points,
+    load_session,
+    merge_prior_findings,
+    record_tested_endpoint,
+    save_session,
+    session_to_context,
+    update_from_parsed_output,
+)
+from .tool_defs import get_tool_definitions
+from .validators import _ValidatorMixin, has_dangerous_patterns
+from .workspace import _WorkspaceMixin
 
 _tools_meta_path = Path(__file__).parent.parent / "data" / "tools_meta.json"
 try:
@@ -131,11 +136,11 @@ class AgentLoop(_ValidatorMixin, _FormatterMixin,
     _CTF_MAX_ITERATIONS = 150
     _PHASE_OBJECTIVES: dict[str, list[str]] = {
         "RECON": [
-            "Enumerate subdomains/hosts (subfinder, amass, etc.)",
-            "Filter to LIVE hosts only — run httpx/dnsx on subdomain list before anything else",
-            "Port scan and fingerprint ONLY the live validated hosts",
-            "Discover directories and URLs on confirmed live hosts",
-            "Persist recon artifacts in output/ files",
+            "Enumerate subdomains/hosts (passive sources first, then active validation)",
+            "Filter to LIVE hosts only — validate with HTTP probing before any scanning",
+            "Port scan and fingerprint ONLY the validated live hosts (two-pass: discover ports, then enrich with service detection)",
+            "Crawl and map all endpoints, routes, and parameters on confirmed live services",
+            "Persist all recon artifacts to output/ files for downstream tools to consume",
         ],
         "ANALYSIS": [
             "Map technologies, endpoints, and parameters",
@@ -225,6 +230,16 @@ class AgentLoop(_ValidatorMixin, _FormatterMixin,
                     asyncio.shield(self._token_snapshot_task),
                     timeout=2.0,
                 )
+            except asyncio.TimeoutError:
+                # Shield prevented cancellation — cancel explicitly so the
+                # infinite _save_worker loop does not run as an orphan task
+                # holding file handles after process shutdown.
+                logger.debug("Token snapshot flush timed out — cancelling task.")
+                self._token_snapshot_task.cancel()
+                try:
+                    await self._token_snapshot_task
+                except (asyncio.CancelledError, Exception):
+                    pass
             except Exception:
                 logger.debug("Token snapshot flush skipped during stop.")
 
@@ -461,7 +476,7 @@ class AgentLoop(_ValidatorMixin, _FormatterMixin,
                 if t["function"]["name"] not in self._blocked_tools
             ]
 
-        logger.info(f"Agent initialized with {len(self._tools_ollama)} tools")
+        logger.info("Agent initialized with %d tools", len(self._tools_ollama))
 
         tool_names = [t["function"]["name"] for t in self._tools_ollama]
         self.state.add_message(
@@ -478,12 +493,10 @@ class AgentLoop(_ValidatorMixin, _FormatterMixin,
             self._session = load_session(_session_id) or SessionData(
                 session_id=_session_id, target=""
             )
-            logger.info(
-                f"Loaded session {_session_id} (target={self._session.target})"
-            )
+            logger.info("Loaded session %s (target=%s)", _session_id, self._session.target)
         else:
             self._session = SessionData(target="")
-            logger.info(f"Created new session {self._session.session_id}")
+            logger.info("Created new session %s", self._session.session_id)
         self._sync_token_usage_from_session()
 
         self.pipeline = PipelineEngine(self._session)
@@ -603,7 +616,7 @@ class AgentLoop(_ValidatorMixin, _FormatterMixin,
                 and extracted_target.lower() in _msg_lower
             )
             if cfg.deep_recon_autostart and _is_simple_target_msg:
-                logger.info(f"Auto-starting deep recon for {extracted_target}")
+                logger.info("Auto-starting deep recon for %s", extracted_target)
                 user_message = (
                     f"Perform a comprehensive full deep recon and "
                     f"vulnerability scan on {extracted_target}. "
@@ -729,35 +742,6 @@ class AgentLoop(_ValidatorMixin, _FormatterMixin,
                         _resumed_phase = self.pipeline.get_current_phase()
                         self._sync_phase_objectives(_resumed_phase)
                         self._update_objectives_from_session(_resumed_phase)
-
-            # Ensure a compact, pinned target context is always present so the
-            # model never loses the primary target during long sessions.
-            self.state.conversation = [
-                msg
-                for msg in self.state.conversation
-                if not (
-                    msg.get("role") == "system"
-                    and msg.get("content", "").startswith("[SYSTEM: PINNED CONTEXT]")
-                )
-            ]
-            if self.state.active_target:
-                phase_hint = ""
-                try:
-                    if self.pipeline:
-                        phase_hint = self.pipeline.get_current_phase().value
-                except Exception:
-                    phase_hint = ""
-                pin_lines = [
-                    "[SYSTEM: PINNED CONTEXT]",
-                    f"TARGET: {self.state.active_target}",
-                ]
-                if phase_hint:
-                    pin_lines.append(f"PHASE: {phase_hint}")
-                pin_lines.append("Do not change target unless the user explicitly asks.")
-                pin_lines.append("Use session summary and critical findings as the source of truth.")
-                self.state.conversation.append(
-                    {"role": "system", "content": "\n".join(pin_lines)}
-                )
 
             # Ensure a compact, pinned target context is always present so the
             # model never loses the primary target during long sessions.
@@ -930,7 +914,7 @@ class AgentLoop(_ValidatorMixin, _FormatterMixin,
                             "content": (
                                 "[SYSTEM: MANDATORY PLANNING STEP]\n"
                                 "Write a brief, goal-oriented plan for your engagement.\n"
-                                "Immediately execute the first step of Phase 1 (Manual scripts, curl, OSINT) AFTER outputting your plan. Do not wait."
+                                "Immediately execute the first step of Phase 1 (initial recon, scripts, OSINT) AFTER outputting your plan. Do not wait."
                             ),
                         }
                     )
@@ -1000,7 +984,9 @@ class AgentLoop(_ValidatorMixin, _FormatterMixin,
                                 )
                                 # Pin confirmed vulnerabilities before EXPLOIT so they
                                 # survive truncation and guide targeted exploitation.
-                                from airecon.proxy.agent.pipeline import PipelinePhase as _PP
+                                from airecon.proxy.agent.pipeline import (
+                                    PipelinePhase as _PP,
+                                )
                                 if new_phase == _PP.EXPLOIT:
                                     self._inject_exploit_vuln_context()
                                 # New phase = fresh start for exploration pressure.
@@ -1136,7 +1122,9 @@ class AgentLoop(_ValidatorMixin, _FormatterMixin,
 
                         # OUTPUT CORRELATION ENGINE
                         if s.open_ports or s.technologies or s.injection_points:
-                            from ..correlation import run_correlation  # lazy – avoids circular import
+                            from ..correlation import (
+                                run_correlation,  # lazy – avoids circular import
+                            )
                             correlations = run_correlation(s)
                             if correlations:
                                 corr_lines = [
@@ -1843,7 +1831,7 @@ class AgentLoop(_ValidatorMixin, _FormatterMixin,
                             )
                         else:
                             error_msg = f"Model connection error: {err_str}"
-                        logger.error(f"Ollama stream error: {stream_err}")
+                        logger.error("Ollama stream error: %s", stream_err)
                         yield AgentEvent(type="error", data={"message": error_msg})
                         yield AgentEvent(type="done", data={})
                         return
@@ -2095,11 +2083,7 @@ class AgentLoop(_ValidatorMixin, _FormatterMixin,
                                 f"You have provided {self._no_tool_iterations} consecutive "
                                 f"responses without calling any tool.\n"
                                 f"Current phase: {current_phase_name}\n"
-                                f"You MUST call a tool NOW:\n"
-                                f"- RECON phase: use a command execution tool (nmap, ffuf, httpx, etc.)\n"
-                                f"- ANALYSIS phase: use a command execution or browser tool\n"
-                                f"- EXPLOIT phase: use a command execution, fuzzing, or browser tool\n"
-                                f"Do NOT plan or describe — EXECUTE."
+                                f"You MUST call a tool NOW. Do NOT plan or describe — EXECUTE."
                             ),
                         })
                         # Discard the planning text — do not add to conversation history
@@ -2238,16 +2222,18 @@ class AgentLoop(_ValidatorMixin, _FormatterMixin,
                                     watchdog_call.get("function", {}).get("name", ""),
                                 )
                             else:
-                                # Watchdog couldn't extract a command from text
-                                # (no recognizable binary pattern found).
-                                # Inject a stronger nudge instead of aborting —
-                                # do NOT consume a watchdog token since no call was made.
+                                # Watchdog returned None — no extractable command.
+                                # Inject a recovery nudge and increment the counter
+                                # so the abort guard fires after 3 total attempts
+                                # (mix of forced calls and nudges).
+                                self._watchdog_forced_calls += 1
                                 logger.warning(
-                                    "Watchdog: no command found in text — injecting recovery nudge "
-                                    "(target=%r, phase=%s, no_tool_iters=%d)",
+                                    "Watchdog: no command found — injecting recovery nudge "
+                                    "(target=%r, phase=%s, no_tool_iters=%d, forced_calls=%d)",
                                     self.state.active_target,
                                     current_phase.value,
                                     self._no_tool_iterations,  # log BEFORE reset
+                                    self._watchdog_forced_calls,
                                 )
                                 self._no_tool_iterations = 0
                                 self.state.conversation.append(
@@ -2255,9 +2241,9 @@ class AgentLoop(_ValidatorMixin, _FormatterMixin,
                                         "role": "system",
                                         "content": (
                                             "[SYSTEM: RECOVERY — TOOL CALL REQUIRED]\n"
-                                            "You produced text-only output. No executable command was found.\n"
+                                            "You produced text-only output but no tool was called.\n"
                                             "You MUST respond with a tool_call NOW. Do not write analysis text.\n"
-                                            "Call 'execute' with a concrete shell command relevant to your current objective."
+                                            "Review your current objective and call the most appropriate tool."
                                         ),
                                     }
                                 )
@@ -2387,8 +2373,7 @@ class AgentLoop(_ValidatorMixin, _FormatterMixin,
                     # validation/execution.
                     is_dup, dup_msg = self._is_duplicate_command(tn, args)
                     if is_dup:
-                        logger.info(
-                            f"Anti-repeat guard blocked duplicate: {tn}")
+                        logger.info("Anti-repeat guard blocked duplicate: %s", tn)
                         return (
                             idx, tc, tn, args,
                             True,   # treat as "success" so it is included in context
@@ -2462,9 +2447,17 @@ class AgentLoop(_ValidatorMixin, _FormatterMixin,
                             for idx, tc, args in group_tasks
                         ]
                         results = await asyncio.gather(*tasks, return_exceptions=True)
-                        for res in results:
+                        for (idx, tc, args), res in zip(group_tasks, results):
                             if isinstance(res, Exception):
-                                logger.error(f"Parallel tool error: {res}")
+                                logger.error("Parallel tool error: %s", res)
+                                # Inject synthetic error result so tool_end event
+                                # is always emitted — prevents TUI spinner hang.
+                                tn = tc["function"]["name"]
+                                all_results[idx] = (
+                                    idx, tc, tn, args, False, 0.0,
+                                    {"success": False, "error": str(res)},
+                                    None, False,
+                                )
                             else:
                                 all_results[res[0]] = res
                     else:
@@ -2612,6 +2605,17 @@ class AgentLoop(_ValidatorMixin, _FormatterMixin,
                                 "output_file": None,
                                 "tool_counts": self.state.tool_counts,
                                 "token_usage": dict(self.state.token_usage),
+                                "skills_used": list(self.state.skills_used),
+                                "caido": {
+                                    "active": (
+                                        self.state.tool_counts.get("caido_send_request", 0)
+                                        + self.state.tool_counts.get("caido_automate", 0)
+                                    ) > 0,
+                                    "findings_count": (
+                                        self.state.tool_counts.get("caido_send_request", 0)
+                                        + self.state.tool_counts.get("caido_automate", 0)
+                                    ),
+                                },
                             },
                         )
                         self._consecutive_failures += 1
@@ -2634,6 +2638,17 @@ class AgentLoop(_ValidatorMixin, _FormatterMixin,
                             "output_file": output_file,
                             "tool_counts": self.state.tool_counts,
                             "token_usage": dict(self.state.token_usage),
+                            "skills_used": list(self.state.skills_used),
+                            "caido": {
+                                "active": (
+                                    self.state.tool_counts.get("caido_send_request", 0)
+                                    + self.state.tool_counts.get("caido_automate", 0)
+                                ) > 0,
+                                "findings_count": (
+                                    self.state.tool_counts.get("caido_send_request", 0)
+                                    + self.state.tool_counts.get("caido_automate", 0)
+                                ),
+                            },
                         },
                     )
                     self._track_tool_usage(tool_name, arguments)
@@ -2784,12 +2799,7 @@ class AgentLoop(_ValidatorMixin, _FormatterMixin,
                                     f"\n\n[SYSTEM: PLANNED TOOLS NOT EXECUTED!]\n"
                                     "You PLANNED to use these tools but haven't executed them: "
                                     f"{', '.join(unexecuted)}\n"
-                                    f"You MUST execute these tools now before moving to the next phase!\n"
-                                    f"Examples:\n"
-                                    f"- For 'sqlmap': sqlmap -u 'URL' --batch --level=5 --risk=3\n"
-                                    f"- For 'nuclei': nuclei -l output/urls.txt -severity critical,high\n"
-                                    f"- For 'browser_action': browser_action action='goto' url='https://target'\n"
-                                    f"DO NOT skip tools you planned to use!"
+                                    "You MUST call these tools now before moving to the next phase!"
                                 )
 
                         content_str += (
@@ -2880,8 +2890,7 @@ class AgentLoop(_ValidatorMixin, _FormatterMixin,
 
         lines.append(
             "\nPriority order: CRITICAL > HIGH > MEDIUM. "
-            "Use sqlmap, dalfox, nuclei, custom payloads. "
-            "Confirm each exploit with proof-of-concept output."
+            "Confirm each exploit with proof-of-concept output showing actual impact."
         )
 
         vuln_ctx = "\n".join(lines)
@@ -3176,11 +3185,17 @@ class AgentLoop(_ValidatorMixin, _FormatterMixin,
             record_tested_endpoint(self._session, url, method)
 
     def get_stats(self) -> dict[str, Any]:
+        _caido_sends = self.state.tool_counts.get("caido_send_request", 0)
+        _caido_autos = self.state.tool_counts.get("caido_automate", 0)
         return {
             "message_count": len(self.state.conversation),
             "tool_counts": dict(self.state.tool_counts),
             "token_usage": dict(self.state.token_usage),
             "skills_used": list(self.state.skills_used),
+            "caido": {
+                "active": (_caido_sends + _caido_autos) > 0,
+                "findings_count": _caido_sends + _caido_autos,
+            },
         }
 
     def _extract_tool_calls_from_text(
@@ -3246,7 +3261,7 @@ class AgentLoop(_ValidatorMixin, _FormatterMixin,
         )
 
         if tc_name and tc_name in registered_tools:
-            logger.info(f"[fallback] Extracted tool_call: {tc_name}")
+            logger.info("[fallback] Extracted tool_call: %s", tc_name)
             return {"function": {"name": tc_name, "arguments": tc_args}}
         return None
 
@@ -3364,12 +3379,9 @@ class AgentLoop(_ValidatorMixin, _FormatterMixin,
         try:
             old_lines = full_path.read_text(errors="ignore").splitlines()
             self._pending_output_merges[str(full_path)] = old_lines
-            logger.info(
-                f"Saved {len(old_lines)} existing lines from '{output_file}' for post-run merge"
-            )
+            logger.info("Saved %d existing lines from '%s' for post-run merge", len(old_lines), output_file)
         except Exception as e:
-            logger.warning(
-                f"Could not save old content of '{output_file}' for merge: {e}")
+            logger.warning("Could not save old content of '%s' for merge: %s", output_file, e)
 
     def _apply_output_merge(
             self, arguments: dict[str, Any], success: bool) -> None:
@@ -3392,11 +3404,11 @@ class AgentLoop(_ValidatorMixin, _FormatterMixin,
             merged = sorted(old_set | new_set)
             full_path.write_text("\n".join(merged) + "\n", encoding="utf-8")
             logger.info(
-                f"Merged '{output_file}': {len(added)} new entries added, "
-                f"{len(merged)} total lines (sorted)"
+                "Merged '%s': %d new entries added, %d total lines (sorted)",
+                output_file, len(added), len(merged),
             )
         except Exception as e:
-            logger.warning(f"Failed to merge output file '{output_file}': {e}")
+            logger.warning("Failed to merge output file '%s': %s", output_file, e)
 
     # Tool alternative suggestions for smart retry
     _TOOL_ALTERNATIVES: dict[str, str] = _TOOLS_META.get(
@@ -3529,7 +3541,9 @@ class AgentLoop(_ValidatorMixin, _FormatterMixin,
             return self.state.iteration % 5 == 0
 
         # Normal mode: always think for ANALYSIS and EXPLOIT
-        from airecon.proxy.agent.pipeline import PipelinePhase  # local import to avoid cycle
+        from airecon.proxy.agent.pipeline import (
+            PipelinePhase,  # local import to avoid cycle
+        )
         if current_phase and current_phase in (
             PipelinePhase.ANALYSIS, PipelinePhase.EXPLOIT
         ):
@@ -3678,36 +3692,30 @@ class AgentLoop(_ValidatorMixin, _FormatterMixin,
 
         tactic_map: dict[PipelinePhase, list[str]] = {
             PipelinePhase.RECON: [
-                "If you have subdomains but no live_hosts yet: run httpx NOW to filter alive hosts.",
-                "Never port-scan or directory-brute-force a host that hasn't been validated alive first.",
-                "Workflow: enumerate subdomains → httpx filter → port scan live hosts → dir/URL discovery.",
-                "Switch discovery families: DNS → HTTP fingerprint (httpx) → content discovery (ffuf/ferox).",
-                "Prioritize unusual assets on LIVE hosts: admin panels, legacy paths, debug endpoints.",
-                "If two tool families stall with no new data, write a custom script in tools/ to correlate outputs or extract endpoints.",
-                # Capability reminders — surface underused features during stagnation
-                "No passive OSINT yet? Use search with dork operators: site:{target} filetype:env, inurl:admin, intitle:\"index of\", intext:password — finds exposed configs faster than active scanning.",
-                "No proxy data yet? Set scope and route traffic through proxy capture before active scanning — sitemap and history are richer than brute-force.",
-                "No CT log / archive data yet? Search crt.sh and Wayback Machine for subdomains and forgotten endpoints not in current DNS.",
+                "Never scan a host that hasn't been validated alive first — validate before any active enumeration.",
+                "Breadth-first: map the full attack surface before going deep on any single target.",
+                "Switch discovery families when stalled: passive OSINT → active probing → content discovery → parameter mining.",
+                "If tool output isn't advancing coverage, write a custom script in tools/ to correlate or extract from existing artifacts.",
+                "No passive intelligence yet? Use search with dork operators to find exposed configs, forgotten endpoints, and certificate subdomains.",
+                "No proxy data yet? Set scope and route traffic through proxy capture before active scanning.",
+                "Check archived sources (certificate logs, web archives) for subdomains and endpoints not in current DNS.",
             ],
             PipelinePhase.ANALYSIS: [
                 "Mutate parameters aggressively (encoding, type confusion, boundary values).",
-                "Correlate endpoints, auth flows, and object IDs for privilege paths.",
+                "Correlate endpoints, auth flows, and object IDs for privilege escalation paths.",
                 "Generate at least one non-obvious hypothesis and test it immediately.",
-                "If testing requires many variants (IDs/roles/auth states), write a script to automate and log results.",
-                # Capability reminders
-                "Source code or repository accessible? Run static analysis (SAST/Semgrep) NOW — finds injection sinks and hardcoded secrets faster than manual testing.",
-                "No parameter discovery done yet? Run parameter mining on ALL confirmed endpoints — hidden params are the most commonly missed attack surface.",
-                "Mine proxy HTTP history for undocumented endpoints, auth token patterns, and IDOR candidates before generating more hypotheses.",
+                "If testing requires many variants (IDs/roles/auth states), write a script to automate and log all results.",
+                "Source code or repository accessible? Run static analysis now — finds injection sinks and hardcoded secrets faster than manual testing.",
+                "Run parameter discovery on ALL confirmed endpoints — hidden params are the most commonly missed attack surface.",
+                "Mine proxy HTTP history for undocumented endpoints, auth token patterns, and IDOR candidates.",
             ],
             PipelinePhase.EXPLOIT: [
-                "Rotate payload families every failed attempt (SQLi -> SSTI -> auth logic).",
+                "Rotate payload families every failed attempt — change the attack class, not just the payload.",
                 "Prefer impact proof over scanner output: state change, data access, or privilege gain.",
                 "Chain medium findings into one higher-impact attack path.",
                 "When exploitation is multi-step, write a PoC script in tools/ instead of manual repetition.",
-                # Capability reminders
-                "Stalling on injection? Use native multi-vector fuzzing (chain-aware, dedup) instead of repeating raw curl/ffuf — it covers more payload classes per iteration.",
-                "JavaScript-heavy target? Switch to browser automation for DOM-based XSS, CSRF token capture, OAuth flows, and client-side logic that curl cannot reach.",
-                "High-value complex finding? Spawn a specialist subagent for up to 100 focused iterations instead of diluting the main session.",
+                "JavaScript-heavy target? Switch to browser automation for DOM-based attacks, OAuth flows, and client-side logic.",
+                "High-value complex finding? Spawn a specialist subagent for focused iterations instead of diluting the main session.",
             ],
             PipelinePhase.REPORT: [
                 "Convert strongest evidence into reproducible PoC steps with exact inputs.",
@@ -3732,7 +3740,7 @@ class AgentLoop(_ValidatorMixin, _FormatterMixin,
 
         if same_tool_streak >= max_same_streak:
             lines.append(
-                "MANDATORY: switch to a different tool family on the next action."
+                "[Suggestion]: Consider switching to a different tool family to break the current pattern."
             )
         if self._no_tool_iterations >= 1:
             lines.append("MANDATORY: reply with tool_call, not planning text.")
@@ -4170,12 +4178,13 @@ class AgentLoop(_ValidatorMixin, _FormatterMixin,
         content_acc: str,
         thinking_acc: str,
         phase: PipelinePhase,
-    ) -> dict[str, Any]:
-        """Build a deterministic fallback tool_call when model is text-only.
+    ) -> dict[str, Any] | None:
+        """Build a fallback tool_call when model is stuck in text-only mode.
 
         Priority:
-        1. Extract an actual shell command the LLM wrote in text.
-        2. Phase-aware smart fallback — something useful, not just list_files.
+        1. Extract an actual shell command the LLM wrote in text → execute it.
+        2. No extractable command → return None so the caller injects a recovery
+           nudge and lets the model choose the next tool itself.
         """
         candidate_cmd = self._extract_shell_command_candidate(
             content_acc=content_acc,
@@ -4191,75 +4200,12 @@ class AgentLoop(_ValidatorMixin, _FormatterMixin,
                 },
             }
 
-        # Phase-aware fallback — pick the most productive action per phase.
-        active_target = self.state.active_target or ""
-
-        if phase == PipelinePhase.EXPLOIT and active_target:
-            # In EXPLOIT, quick_fuzz is far more valuable than listing files.
-            # Use https:// scheme; quick_fuzz handles non-responsive targets
-            # gracefully.
-            return {
-                "id": f"watchdog_fuzz_{self.state.iteration}",
-                "type": "function",
-                "function": {
-                    "name": "quick_fuzz",
-                    "arguments": {"target": f"https://{active_target}"},
-                },
-            }
-
-        if phase == PipelinePhase.ANALYSIS and active_target:
-            # In ANALYSIS, a web_search on the target can surface new attack
-            # surface that the LLM was trying to research via text.
-            return {
-                "id": f"watchdog_search_{self.state.iteration}",
-                "type": "function",
-                "function": {
-                    "name": "web_search",
-                    "arguments": {
-                        "query": f"site:{active_target} OR \"{active_target}\" vulnerability",
-                        "max_results": 5,
-                    },
-                },
-            }
-
-        if phase == PipelinePhase.REPORT:
-            return {
-                "id": f"watchdog_list_files_{self.state.iteration}",
-                "type": "function",
-                "function": {
-                    "name": "list_files",
-                    "arguments": {"path": "vulnerabilities"},
-                },
-            }
-
-        # RECON or unknown phase: run httpx probe to gather live target data.
-        # Use execute (not list_files) so the call goes through engine.execute_tool()
-        # and is recorded in the mock engine's call_log during benchmark runs.
-        if active_target:
-            _scheme = "https" if "https" in active_target else "http"
-            _host = active_target.replace("https://", "").replace("http://", "").split("/")[0]
-            return {
-                "id": f"watchdog_execute_{self.state.iteration}",
-                "type": "function",
-                "function": {
-                    "name": "execute",
-                    "arguments": {
-                        "command": (
-                            f"httpx -u {_scheme}://{_host} "
-                            "-title -tech-detect -status-code -follow-redirects 2>/dev/null || "
-                            f"curl -sk -I {_scheme}://{_host}/ | head -20"
-                        )
-                    },
-                },
-            }
-        return {
-            "id": f"watchdog_list_files_{self.state.iteration}",
-            "type": "function",
-            "function": {
-                "name": "list_files",
-                "arguments": {"path": "output"},
-            },
-        }
+        # No extractable command — return None so the caller injects a recovery
+        # nudge and lets the model choose the next tool itself.  Hardcoding a
+        # phase-specific tool here takes decision-making away from the LLM; the
+        # nudge path (see caller) is sufficient to break text-only loops while
+        # still leaving tool selection to the model.
+        return None
 
     def _compute_quality_scores(self) -> dict[str, Any]:
         """Compute lightweight quality scores for finding confidence tracking."""

@@ -23,6 +23,22 @@ logger = logging.getLogger("airecon.agent.pipeline")
 
 _PROMPTS_DIR = Path(__file__).parent.parent / "prompts" / "phases"
 
+# Load tool-agnostic phase hints from tools_meta.json so tool names stay out of Python code.
+try:
+    import json as _json
+    _tools_meta = _json.loads(
+        (Path(__file__).parent.parent / "data" / "tools_meta.json").read_text(encoding="utf-8")
+    )
+    _recon_hints: dict[str, str] = _tools_meta.get("recon_phase_hints", {})
+except Exception:
+    _recon_hints = {}
+
+_LIVE_HOST_HINT: str = _recon_hints.get(
+    "live_host_validation",
+    "CRITICAL: After subdomain enumeration, ALWAYS validate which hosts are alive before "
+    "port scanning or directory brute-force. Never scan dead/unresolved hosts.",
+)
+
 
 class PipelinePhase(Enum):
     """Ordered phases of the security testing pipeline."""
@@ -62,8 +78,7 @@ DEFAULT_PHASES: dict[PipelinePhase, PhaseConfig] = {
         max_iterations=500,
         objective=(
             "Enumerate attack surface: subdomains, open ports, directories, technologies, endpoints. "
-            "CRITICAL: After subdomain enumeration, ALWAYS run httpx/dnsx to validate which hosts "
-            "are alive BEFORE port scanning or directory brute-force. Never scan dead/unresolved hosts."
+            + _LIVE_HOST_HINT
         ),
         recommended_tools=[
             "execute", "web_search", "browser_action", "create_file",
@@ -72,7 +87,7 @@ DEFAULT_PHASES: dict[PipelinePhase, PhaseConfig] = {
         ],
         transition_criteria=[
             "subdomains_discovered",      # session.subdomains is non-empty
-            "live_hosts_validated",       # session.live_hosts is non-empty (httpx/dnsx ran)
+            "live_hosts_validated",       # session.live_hosts is non-empty (host probing ran)
             "ports_scanned",              # session.open_ports is non-empty
             "recon_artifacts_saved",      # output/ directory has files
             "subdomain_depth_met",        # >= pipeline_recon_min_subdomains discovered
@@ -202,9 +217,7 @@ class PipelineEngine:
                 else:
                     self._phase_prompts[phase] = self._default_prompt(phase)
             except Exception as e:
-                logger.warning(
-                    f"Failed to load phase prompt for {phase.value}: {e}"
-                )
+                logger.warning("Failed to load phase prompt for %s: %s", phase.value, e)
                 self._phase_prompts[phase] = self._default_prompt(phase)
 
     def _default_prompt(self, phase: PipelinePhase) -> str:
@@ -231,7 +244,7 @@ class PipelineEngine:
         """Set the current phase in session state."""
         self.session.current_phase = phase.value
         self._phase_entry_iteration = self._current_iteration
-        logger.info(f"Pipeline phase set to: {phase.value}")
+        logger.info("Pipeline phase set to: %s", phase.value)
 
     def set_ctf_mode(self, enabled: bool = True) -> None:
         """Activate CTF/benchmark mode.
@@ -290,8 +303,7 @@ class PipelineEngine:
             if not has_live_hosts and has_any_data:
                 logger.warning(
                     "RECON soft timeout (%d iter) but live_hosts_validated not met — "
-                    "agent must run httpx/dnsx to confirm live hosts before ANALYSIS. "
-                    "Blocking transition.",
+                    "agent must validate live hosts before ANALYSIS. Blocking transition.",
                     iterations_in_phase,
                 )
                 return False
@@ -328,7 +340,7 @@ class PipelineEngine:
         if phase == PipelinePhase.RECON:
             if getattr(session, "subdomains", []):
                 met.append("subdomains_discovered")
-            # live_hosts_validated: agent ran httpx/dnsx and confirmed at least one host responds.
+            # live_hosts_validated: agent ran host probing and confirmed at least one host responds.
             # This forces the agent to filter dead subdomains before proceeding.
             if getattr(session, "live_hosts", []):
                 met.append("live_hosts_validated")
@@ -407,8 +419,7 @@ class PipelineEngine:
 
         # Validate current phase has met minimum criteria (skipped on timeout bypass)
         if not _soft_timeout_bypass and not self._evaluate_criteria(current):
-            logger.warning(
-                f"Attempted transition from {current.value} without meeting criteria")
+            logger.warning("Attempted transition from %s without meeting criteria", current.value)
             return current
 
         # Mark current phase as completed
@@ -425,8 +436,7 @@ class PipelineEngine:
         self.set_phase(next_phase)
         # Reset cooldown timer for the new phase
         self._phase_entry_iteration = self._current_iteration
-        logger.info(
-            f"Pipeline transition: {current.value} → {next_phase.value}")
+        logger.info("Pipeline transition: %s → %s", current.value, next_phase.value)
         return next_phase
 
     def get_phase_prompt(self) -> str:

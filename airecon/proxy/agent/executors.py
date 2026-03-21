@@ -17,9 +17,9 @@ from ..config import get_config, get_workspace_root
 from ..filesystem import create_file, list_files, read_file
 from ..reporting import create_vulnerability_report
 from ..web_search import web_search
+from .command_parse import extract_primary_binary
 from .models import ToolExecution
 from .session import _is_duplicate_vulnerability
-from .command_parse import extract_primary_binary
 
 if TYPE_CHECKING:
     from ..docker import DockerEngine
@@ -27,6 +27,21 @@ if TYPE_CHECKING:
     from .session import SessionData
 
 logger = logging.getLogger("airecon.agent")
+
+# ---------------------------------------------------------------------------
+# Specialist prompts — loaded from data/tools_meta.json["specialist_prompts"].
+# Tool names live in JSON, not in Python code.
+# ---------------------------------------------------------------------------
+def _load_specialist_prefixes() -> dict[str, str]:
+    try:
+        path = Path(__file__).resolve().parent.parent / "data" / "tools_meta.json"
+        return json.loads(path.read_text(encoding="utf-8")).get("specialist_prompts", {})
+    except Exception as exc:
+        logger.warning("Could not load specialist_prompts from tools_meta.json: %s", exc)
+        return {}
+
+
+_SPECIALIST_PREFIXES: dict[str, str] = _load_specialist_prefixes()
 
 # ---------------------------------------------------------------------------
 # Magic numbers extracted to constants for maintainability
@@ -133,8 +148,9 @@ class _ExecutorMixin:
     def _is_recon_phase_repeat_blocked(self, tool_name: str, arguments: dict[str, Any], count: int) -> bool:
         """Return True if a repeated recon execute command should be blocked.
 
-        Recon enumeration binaries are blocked after first successful execution
-        in RECON phase to avoid low-value loops (e.g. subfinder rerun spam).
+        Recon enumeration binaries (subfinder, nmap…) are blocked after the
+        first successful run in RECON phase only. Template scanners are
+        unrestricted — tool selection is left to the LLM via prompt guidance.
         """
         if tool_name != "execute" or count < 1:
             return False
@@ -160,14 +176,12 @@ class _ExecutorMixin:
         self._last_output_file = None
 
         args_key = self._normalize_args_for_dedup(tool_name, arguments)
-        allow_repeat = arguments.get("action") in [
-            "wait", "scroll_down", "scroll_up", "get_console_logs", "get_network_logs", "execute_js",
-            "goto", "click", "type", "press_key",
-            # Auth actions may legitimately be called multiple times (e.g. re-login)
-            "login_form", "inject_cookies", "handle_totp",
-        ]
+        # browser_action is inherently stateful — the same action (launch, goto, screenshot,
+        # close, etc.) produces different results at different points in the test workflow.
+        # Dedup does not apply; loop prevention is handled by MAX_TOOL_ITERATIONS.
+        allow_repeat = True  # noqa: SIM210
 
-        if not allow_repeat:
+        if not allow_repeat:  # pragma: no cover — kept for future per-action opt-in
             count = self._executed_tool_counts.get(
                 args_key, 0)
             limit = get_config().agent_repeat_tool_call_limit
@@ -216,8 +230,7 @@ class _ExecutorMixin:
                                 url=arguments["url"]
                             )
                     except Exception as e:
-                        logger.warning(
-                            f"Failed to auto-inject session cookies: {e}")
+                        logger.warning("Failed to auto-inject session cookies: %s", e)
 
             success = not (isinstance(result, dict) and "error" in result)
             if not success and isinstance(result, dict) and "error" in result:
@@ -346,8 +359,7 @@ class _ExecutorMixin:
                             self._last_output_file = saved_path
 
                     except Exception as _e:
-                        logger.warning(
-                            f"Failed to auto-save browser result: {_e}")
+                        logger.warning("Failed to auto-save browser result: %s", _e)
 
             try:
                 self._save_tool_output(tool_name, arguments, result)
@@ -356,7 +368,7 @@ class _ExecutorMixin:
         except Exception as e:
             success = False
             result = {"success": False, "error": str(e)}
-            logger.error(f"Browser tool exec error: {e}")
+            logger.error("Browser tool exec error: %s", e)
 
         duration = time.time() - start_time
 
@@ -471,7 +483,7 @@ class _ExecutorMixin:
         except Exception as e:
             success = False
             result = {"success": False, "error": str(e)}
-            logger.error(f"Filesystem tool exec error: {e}")
+            logger.error("Filesystem tool exec error: %s", e)
 
         duration = time.time() - start_time
 
@@ -510,7 +522,7 @@ class _ExecutorMixin:
         except Exception as e:
             success = False
             result = {"success": False, "error": str(e)}
-            logger.error(f"Web search tool error: {e}")
+            logger.error("Web search tool error: %s", e)
 
         duration = time.time() - start_time
 
@@ -544,7 +556,7 @@ class _ExecutorMixin:
                     + f"\n\n[Auto-saved to {saved_path}]"
                 )
             except Exception as e:
-                logger.warning(f"Failed to auto-save dork results: {e}")
+                logger.warning("Failed to auto-save dork results: %s", e)
 
         self.state.tool_history.append(
             ToolExecution(
@@ -602,7 +614,7 @@ class _ExecutorMixin:
         except Exception as e:
             success = False
             result = {"success": False, "error": str(e)}
-            logger.error(f"Reporting tool exec error: {e}")
+            logger.error("Reporting tool exec error: %s", e)
 
         duration = time.time() - start_time
         self.state.tool_history.append(
@@ -664,7 +676,7 @@ class _ExecutorMixin:
                 logger.debug("Could not save tool output: %s", _e)
             success = True
         except Exception as e:
-            logger.error(f"Fuzzer error: {e}")
+            logger.error("Fuzzer error: %s", e)
             res_dict = {"success": False, "error": str(e)}
             success = False
 
@@ -735,7 +747,7 @@ class _ExecutorMixin:
                 logger.debug("Could not save tool output: %s", _e)
             success = True
         except Exception as e:
-            logger.error(f"quick_fuzz error: {e}")
+            logger.error("quick_fuzz error: %s", e)
             res_dict = {"success": False, "error": str(e)}
             success = False
 
@@ -792,7 +804,7 @@ class _ExecutorMixin:
                 logger.debug("Could not save tool output: %s", _e)
             success = True
         except Exception as e:
-            logger.error(f"deep_fuzz error: {e}")
+            logger.error("deep_fuzz error: %s", e)
             res_dict = {"success": False, "error": str(e)}
             success = False
 
@@ -853,7 +865,7 @@ class _ExecutorMixin:
                 logger.debug("Could not save tool output: %s", _e)
             success = True
         except Exception as e:
-            logger.error(f"generate_wordlist error: {e}")
+            logger.error("generate_wordlist error: %s", e)
             res_dict = {"success": False, "error": str(e)}
             success = False
 
@@ -899,7 +911,7 @@ class _ExecutorMixin:
                 logger.debug("Could not save tool output: %s", _e)
             success = True
         except Exception as e:
-            logger.error(f"Subagent runner error: {e}")
+            logger.error("Subagent runner error: %s", e)
             res_dict = {"success": False, "error": str(e)}
             success = False
 
@@ -980,7 +992,7 @@ class _ExecutorMixin:
                     "total": len(requests)}
                 success = True
         except Exception as e:
-            logger.error(f"caido_list_requests error: {e}")
+            logger.error("caido_list_requests error: %s", e)
             res_dict = {"success": False, "error": str(e)}
             success = False
 
@@ -1002,11 +1014,22 @@ class _ExecutorMixin:
         self._last_output_file = None
         start_time = time.time()
 
-        request_id = arguments.get("request_id", "")
-        raw_http = arguments.get("raw_http", "")
-        host = arguments.get("host", "")
-        port = int(arguments.get("port", 443))
-        is_tls = bool(arguments.get("is_tls", True))
+        request_id = self._str_arg(arguments, "request_id")
+        raw_http = self._str_arg(arguments, "raw_http")
+        # Strip protocol prefix if LLM passes full URL instead of bare host
+        host = self._str_arg(arguments, "host").removeprefix("https://").removeprefix("http://").rstrip("/")
+        # is_tls: handle both real bool and string "false"/"true" from LLM
+        _is_tls_raw = arguments.get("is_tls", True)
+        if isinstance(_is_tls_raw, str):
+            is_tls = _is_tls_raw.lower() not in ("false", "0", "no", "")
+        else:
+            is_tls = bool(_is_tls_raw)
+        # Default port: 443 for TLS, 80 for plain — respect explicit override
+        _port_raw = arguments.get("port")
+        try:
+            port = int(_port_raw) if _port_raw is not None else (443 if is_tls else 80)
+        except (TypeError, ValueError):
+            port = 443 if is_tls else 80
 
         try:
             async with asyncio.timeout(60):
@@ -1060,7 +1083,7 @@ class _ExecutorMixin:
                 "error": "Caido did not respond within 60 seconds"}
             success = False
         except Exception as e:
-            logger.error(f"caido_send_request error: {e}")
+            logger.error("caido_send_request error: %s", e)
             res_dict = {"success": False, "error": str(e)}
             success = False
 
@@ -1082,10 +1105,18 @@ class _ExecutorMixin:
         self._last_output_file = None
         start_time = time.time()
 
-        raw_http = arguments.get("raw_http", "")
-        host = arguments.get("host", "")
-        port = int(arguments.get("port", 443))
-        is_tls = bool(arguments.get("is_tls", True))
+        raw_http = self._str_arg(arguments, "raw_http")
+        host = self._str_arg(arguments, "host").removeprefix("https://").removeprefix("http://").rstrip("/")
+        _is_tls_raw = arguments.get("is_tls", True)
+        if isinstance(_is_tls_raw, str):
+            is_tls = _is_tls_raw.lower() not in ("false", "0", "no", "")
+        else:
+            is_tls = bool(_is_tls_raw)
+        _port_raw = arguments.get("port")
+        try:
+            port = int(_port_raw) if _port_raw is not None else (443 if is_tls else 80)
+        except (TypeError, ValueError):
+            port = 443 if is_tls else 80
         payloads = arguments.get("payloads", [])
         workers = min(int(arguments.get("workers", 10)), 50)
 
@@ -1186,7 +1217,7 @@ class _ExecutorMixin:
                 "error": "Caido did not respond within 90 seconds"}
             success = False
         except Exception as e:
-            logger.error(f"caido_automate error: {e}")
+            logger.error("caido_automate error: %s", e)
             # Clean up session if task was never started
             if task_id is None:
                 await _cleanup_orphan_session()
@@ -1268,7 +1299,7 @@ class _ExecutorMixin:
                     "total": len(findings)}
                 success = True
         except Exception as e:
-            logger.error(f"caido_get_findings error: {e}")
+            logger.error("caido_get_findings error: %s", e)
             res_dict = {"success": False, "error": str(e)}
             success = False
 
@@ -1380,7 +1411,7 @@ class _ExecutorMixin:
                 }
                 success = True
         except Exception as e:
-            logger.error(f"caido_set_scope error: {e}")
+            logger.error("caido_set_scope error: %s", e)
             res_dict = {"success": False, "error": str(e)}
             success = False
 
@@ -1570,7 +1601,7 @@ class _ExecutorMixin:
                 success = False
 
         except Exception as e:
-            logger.error(f"caido_intercept error: {e}")
+            logger.error("caido_intercept error: %s", e)
             res_dict = {"success": False, "error": str(e)}
             success = False
 
@@ -1686,7 +1717,7 @@ class _ExecutorMixin:
                     success = True
 
         except Exception as e:
-            logger.error(f"caido_sitemap error: {e}")
+            logger.error("caido_sitemap error: %s", e)
             res_dict = {"success": False, "error": str(e)}
             success = False
 
@@ -1712,14 +1743,18 @@ class _ExecutorMixin:
         self._last_output_file = None
         start_time = time.time()
 
-        target_path = arguments.get("target_path", ".")
+        target_path = self._str_arg(arguments, "target_path") or "."
         rules = arguments.get("rules") or None
         languages = arguments.get("languages") or None
 
-        # Resolve path relative to target workspace
+        # Resolve and validate path — guard against ../traversal escaping /workspace
         active_target = self.state.active_target or "unknown"
-        if not target_path.startswith("/"):
-            target_path = f"/workspace/{active_target}/{target_path}"
+        from .validators import validate_target_path  # local import — no circular dep
+        _base = "/workspace" if target_path.startswith("/") else f"/workspace/{active_target}"
+        _ok, _resolved = validate_target_path(target_path, _base)
+        if not _ok:
+            return False, 0.0, {"success": False, "error": f"Invalid target_path: {_resolved}"}, None
+        target_path = str(_resolved)
 
         try:
             result = await run_code_analysis(
@@ -1761,7 +1796,7 @@ class _ExecutorMixin:
                 logger.debug("Could not save tool output: %s", _e)
             success = True
         except Exception as e:
-            logger.error(f"code_analysis error: {e}")
+            logger.error("code_analysis error: %s", e)
             res_dict = {"success": False, "error": str(e)}
             success = False
 
@@ -1789,11 +1824,14 @@ class _ExecutorMixin:
         self._last_output_file = None
         start_time = time.time()
 
-        schema_url = arguments.get("schema_url", "").strip()
-        base_url = arguments.get("base_url", "").strip()
-        auth_header = arguments.get("auth_header", "").strip()
+        schema_url = self._str_arg(arguments, "schema_url").strip()
+        base_url = self._str_arg(arguments, "base_url").strip()
+        auth_header = self._str_arg(arguments, "auth_header").strip()
         checks = arguments.get("checks") or []
-        max_examples = int(arguments.get("max_examples") or 30)
+        try:
+            max_examples = int(arguments.get("max_examples") or 30)
+        except (TypeError, ValueError):
+            max_examples = 30
 
         if not schema_url:
             return False, 0.0, {"success": False,
@@ -1821,7 +1859,7 @@ class _ExecutorMixin:
         output_file = shlex.quote(f"/workspace/{active_target}/output/schemathesis_results.txt")
         joined_cmd = " ".join(cmd_parts)
         full_cmd = (
-            f"cd {workspace_dir} && pip install -q schemathesis 2>/dev/null; "
+            f"cd {workspace_dir} && "
             f"{joined_cmd} 2>&1 | tee {output_file}"
         )
 
@@ -1837,7 +1875,8 @@ class _ExecutorMixin:
             # or explicit exec error). Schemathesis normally prints "ERROR:"
             # level lines for individual test cases — those are NOT failures.
             exec_error = exec_result.get("error") or exec_result.get("stderr") or ""
-            success = bool(stdout.strip()) or not bool(exec_error)
+            engine_ok = bool(exec_result.get("success", True))
+            success = engine_ok and (bool(stdout.strip()) or not bool(exec_error))
 
             # Parse summary line counts
             violations = stdout.count("FAILED") + \
@@ -1858,7 +1897,7 @@ class _ExecutorMixin:
             except Exception as _e:
                 logger.debug("Could not save tool output: %s", _e)
         except Exception as e:
-            logger.error(f"schemathesis_fuzz error: {e}")
+            logger.error("schemathesis_fuzz error: %s", e)
             res_dict = {"success": False, "error": str(e)}
             success = False
 
@@ -1895,48 +1934,8 @@ class _ExecutorMixin:
         specialist = _RAW_SPECIALIST.lower().strip() if _RAW_SPECIALIST.lower(
         ).strip() in _VALID_SPECIALISTS else "exploit"
 
-        _SPECIALIST_PREFIXES: dict[str, str] = {
-            "sqli": (
-                "Focus EXCLUSIVELY on SQL injection. Test all input parameters for "
-                "error-based, blind time-based, and UNION-based SQLi. "
-                "Use manual payloads first, then sqlmap to confirm."
-            ),
-            "xss": (
-                "Focus EXCLUSIVELY on Cross-Site Scripting (XSS). Test all input "
-                "reflection points for stored, reflected, and DOM-based XSS. "
-                "Use dalfox for automated scanning after manual confirmation."
-            ),
-            "ssrf": (
-                "Focus EXCLUSIVELY on SSRF. Test all URL/redirect/callback parameters. "
-                "Try AWS metadata (169.254.169.254), internal hosts (127.0.0.1, localhost), "
-                "and protocol wrappers (file://, gopher://, dict://)."
-            ),
-            "lfi": (
-                "Focus EXCLUSIVELY on LFI and Path Traversal. Test all file/path/include "
-                "parameters with traversal sequences (../), null bytes, and encoding variants."
-            ),
-            "recon": (
-                "Perform deep reconnaissance ONLY. Enumerate subdomains, open ports, "
-                "directories, and JavaScript files. Map all endpoints and parameters. "
-                "Do NOT attempt exploitation."
-            ),
-            "exploit": (
-                "Test and exploit all discovered input parameters. Use all available "
-                "fuzzing and scanning tools. Focus on achieving impact."
-            ),
-            "analyzer": (
-                "Focus EXCLUSIVELY on source code and configuration analysis. "
-                "Use code_analysis tool to run Semgrep scans. Review application "
-                "logic, authentication flows, and data handling patterns. "
-                "Look for hardcoded secrets, insecure crypto, and logic flaws."
-            ),
-            "reporter": (
-                "Focus EXCLUSIVELY on generating comprehensive vulnerability reports. "
-                "Review all findings from the session and create detailed "
-                "create_vulnerability_report entries for each confirmed issue. "
-                "Include proper CVSS scores, PoC scripts, and remediation steps."
-            ),
-        }
+        # Specialist prompts loaded from prompts/specialists/*.txt at module level.
+        # Tool names belong in text files, not in Python code — see _SPECIALIST_PREFIXES.
 
         prompt = (
             f"[SUBAGENT — Specialist: {specialist.upper()}]\n"
@@ -1954,8 +1953,8 @@ class _ExecutorMixin:
             # `ollama show` network call on every spawn_agent invocation.
             parent_ollama = getattr(self, "ollama", None)
             if parent_ollama is None:
-                from ..ollama import OllamaClient
                 from ..config import get_config
+                from ..ollama import OllamaClient
                 parent_ollama = OllamaClient(model=get_config().ollama_model)
 
             # Subagent uses same engine as parent
@@ -2040,7 +2039,7 @@ class _ExecutorMixin:
             }
             success = True
         except Exception as e:
-            logger.error(f"spawn_agent error: {e}")
+            logger.error("spawn_agent error: %s", e)
             res_dict = {"success": False, "error": str(e)}
             success = False
 
@@ -2172,7 +2171,7 @@ class _ExecutorMixin:
                     "success": False,
                     "error": (
                         "Tool call error: 'command' argument is required and cannot be empty. "
-                        "Example: {\"name\": \"execute\", \"arguments\": {\"command\": \"nmap -sV target.com\"}}"
+                        "Example: {\"name\": \"execute\", \"arguments\": {\"command\": \"ls -la /workspace\"}}"
                     ),
                 }, None
             if len(cmd) > _MAX_COMMAND_LENGTH:
@@ -2226,9 +2225,7 @@ class _ExecutorMixin:
                 # inside the container are valid and stripping them breaks
                 # multi-path commands.
                 arguments["command"] = f"cd {workspace_dir} && {cmd}"
-                logger.info(
-                    f"Enforced workspace context: {arguments['command']}"
-                )
+                logger.info("Enforced workspace context: %s", arguments["command"])
 
         start_time = time.time()
         output_file: str | None = None
@@ -2244,7 +2241,7 @@ class _ExecutorMixin:
         except Exception as e:
             success = False
             result = {"success": False, "error": str(e)}
-            logger.error(f"Tool exec error: {e}")
+            logger.error("Tool exec error: %s", e)
 
         # Inject a helpful hint for common bash escaping errors (single quotes
         # inside single quotes)
