@@ -57,6 +57,34 @@ class StatusBar(Horizontal):
         yield Label(id="status-skills")
         yield Label(id="status-caido-exec")
 
+    def _format_token_count(self, tokens: int) -> str:
+        """Format token count using compact units (k/M/B)."""
+        if tokens >= 1_000_000_000:
+            return f"{tokens / 1_000_000_000:.3f}B"
+        if tokens >= 1_000_000:
+            return f"{tokens / 1_000_000:.3f}M"
+        if tokens >= 1_000:
+            return f"{tokens / 1_000:.3f}k"
+        return str(tokens)
+
+    @staticmethod
+    def _to_non_negative_int(value: object, default: int = 0) -> int:
+        """Coerce UI numeric input to int safely."""
+        try:
+            parsed = int(value)  # type: ignore[arg-type]
+        except (TypeError, ValueError):
+            return default
+        return parsed if parsed >= 0 else default
+
+    @staticmethod
+    def _token_color_for_cumulative(tokens: int) -> str:
+        """Color scale tuned for cumulative token display."""
+        if tokens < 1_000_000:
+            return "#00d4aa"
+        if tokens < 5_000_000:
+            return "#f59e0b"
+        return "#ef4444"
+
     def on_mount(self) -> None:
         self._update_display()
 
@@ -76,19 +104,15 @@ class StatusBar(Horizontal):
             docker_dot = "●" if self.docker_status == "online" else "○"
             docker_color = "#00d4aa" if self.docker_status == "online" else "#ef4444"
 
-            token_thousands = self.token_count / 1000.0
-            if self.token_count < 20000:
-                token_color = "#00d4aa"
-            elif self.token_count < 50000:
-                token_color = "#f59e0b"
-            else:
-                token_color = "#ef4444"
+            token_count = self._to_non_negative_int(self.token_count)
+            token_label = self._format_token_count(token_count)
+            token_color = self._token_color_for_cumulative(token_count)
 
             metrics_text = (
                 f" [{ollama_color}]{ollama_dot}[/] Ollama  "
                 f"[{docker_color}]{docker_dot}[/] Docker  "
                 f"│ [#8b949e]Model:[/] [#00d4aa]{self.model_name}[/]"
-                f"  │ [#8b949e]Token:[/] [{token_color}]{token_thousands:.3f}k[/]"
+                f"  │ [#8b949e]Token:[/] [{token_color}]{token_label}[/]"
             )
             self.query_one("#status-metrics", Label).update(metrics_text)
 
@@ -152,19 +176,19 @@ class StatusBar(Horizontal):
         if model is not None:
             self.model_name = model
         if tokens is not None:
-            self.token_count = tokens
+            self.token_count = self._to_non_negative_int(tokens)
         if token_limit is not None:
-            self.token_limit = token_limit
+            self.token_limit = self._to_non_negative_int(token_limit, default=65536)
         if exec_used is not None:
-            self.exec_used = exec_used
+            self.exec_used = self._to_non_negative_int(exec_used)
         if subagents is not None:
-            self.subagents_spawned = subagents
+            self.subagents_spawned = self._to_non_negative_int(subagents)
         if skills is not None:
             self.skills_used = skills
         if caido_active is not None:
             self.caido_active = caido_active
         if caido_findings is not None:
-            self.caido_findings = caido_findings
+            self.caido_findings = self._to_non_negative_int(caido_findings)
 
 
 class SkillsModal(ModalScreen):

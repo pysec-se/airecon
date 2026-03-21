@@ -75,3 +75,25 @@ async def test_status_bar_updates():
 
         exec_content = str(status_bar.query_one("#status-caido-exec").render())
         assert "5" in exec_content
+
+
+def test_status_bar_formats_million_tokens():
+    status_bar = StatusBar()
+    assert status_bar._format_token_count(1_250_000).endswith("M")
+
+
+def test_status_bar_set_status_coerces_numeric_fields():
+    status_bar = StatusBar()
+    status_bar.set_status(
+        tokens="1000000",
+        token_limit="65536",
+        exec_used="7",
+        subagents="2",
+        caido_findings="9",
+    )
+
+    assert status_bar.token_count == 1_000_000
+    assert status_bar.token_limit == 65_536
+    assert status_bar.exec_used == 7
+    assert status_bar.subagents_spawned == 2
+    assert status_bar.caido_findings == 9

@@ -1023,6 +1023,92 @@ def _parse_generic_lines(lines: list[str]) -> ParsedOutput:
     )
 
 
+def _parse_hydra(stdout: str) -> ParsedOutput:
+    """Parse hydra/medusa output — extract credential findings."""
+    findings: list[str] = []
+
+    for line in stdout.split("\n"):
+        line = line.strip()
+        if not line:
+            continue
+        # Hydra format: "[22][ssh] host: 1.2.3.4   login: admin   password: 123456"
+        if re.match(r"\[\d+\]\[", line) and ("login:" in line or "password:" in line):
+            findings.append(f"[HIGH] Credential found: {line}")
+        # Medusa format: "ACCOUNT FOUND: [ssh] Host: 1.2.3.4 User: admin Password: 123"
+        elif re.match(r"ACCOUNT FOUND:", line, re.IGNORECASE):
+            findings.append(f"[HIGH] Credential found: {line}")
+        # "[DATA] ... valid passwords ... or status lines"
+        elif line.startswith("[DATA]") and "valid" in line.lower():
+            findings.append(f"[MEDIUM] {line}")
+
+    if not findings:
+        return ParsedOutput(
+            tool="hydra",
+            summary="hydra: no credentials found",
+            items=[],
+            total_count=0,
+            raw_truncated=stdout[:MAX_RAW_FALLBACK],
+        )
+    return ParsedOutput(
+        tool="hydra",
+        summary=f"hydra: {len(findings)} credential(s) found",
+        items=findings[:MAX_ITEMS],
+        total_count=len(findings),
+    )
+
+
+def _parse_metasploit(stdout: str) -> ParsedOutput:
+    """Parse metasploit/msfconsole output — extract exploitation results."""
+    findings: list[str] = []
+    _NEGATIVE_RE = re.compile(
+        r"\b(?:"
+        r"not\s+vulnerable(?:\s+to)?"
+        r"|not\s+affected"
+        r"|unaffected"
+        r"|not\s+impacted"
+        r"|no\s+vulnerabilit(?:y|ies)"
+        r"|not\s+exploitable"
+        r"|already\s+patched"
+        r"|fully\s+patched"
+        r"|fixed\s+in"
+        r"|patch\s+available"
+        r")\b",
+        re.IGNORECASE,
+    )
+
+    for line in stdout.split("\n"):
+        line = line.strip()
+        if not line:
+            continue
+        if _NEGATIVE_RE.search(line):
+            continue
+        # "[+] host - Vulnerable to ..." or "[+] Meterpreter session ..."
+        if line.startswith("[+]") and any(
+            kw in line.lower()
+            for kw in ("vulnerable", "session opened", "shell", "meterpreter",
+                       "exploit succeeded", "access granted", "root")
+        ):
+            findings.append(f"[HIGH] {line}")
+        # "[*] ... found ..."
+        elif line.startswith("[*]") and "found" in line.lower():
+            findings.append(f"[MEDIUM] {line}")
+
+    if not findings:
+        return ParsedOutput(
+            tool="metasploit",
+            summary="metasploit: no exploitation results",
+            items=[],
+            total_count=0,
+            raw_truncated=stdout[:MAX_RAW_FALLBACK],
+        )
+    return ParsedOutput(
+        tool="metasploit",
+        summary=f"metasploit: {len(findings)} result(s)",
+        items=findings[:MAX_ITEMS],
+        total_count=len(findings),
+    )
+
+
 # ── Parser Registry ──────────────────────────────────────────────────
 
 # Maps parser type names (from output_parser_tool_patterns in tools_meta.json)
@@ -1043,4 +1129,6 @@ _PARSERS: dict[str, Any] = {
     "dnsx": _parse_line_list,
     "whatweb": _parse_whatweb,
     "dig": _parse_line_list,
+    "hydra": _parse_hydra,
+    "metasploit": _parse_metasploit,
 }

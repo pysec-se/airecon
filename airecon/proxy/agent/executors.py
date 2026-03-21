@@ -28,6 +28,27 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger("airecon.agent")
 
+# ---------------------------------------------------------------------------
+# Magic numbers extracted to constants for maintainability
+# ---------------------------------------------------------------------------
+_RESULT_TRUNCATION_THRESHOLD = 10000
+_READ_FILE_CONTENT_TRUNCATION_THRESHOLD = 2000
+_MAX_COMMAND_LENGTH = 20_000
+# Report file name patterns to block in create_file (matched against basename only)
+_REPORT_FILE_PATTERNS = (
+    "final_report", "report", "vuln", "vulnerability", "finding",
+    "assessment", "security_report", "pentest_report", "summary_report",
+)
+
+
+def _safe_non_negative_int(value: Any) -> int:
+    """Coerce value to non-negative int; returns 0 on failure or negative input."""
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError):
+        return 0
+    return parsed if parsed >= 0 else 0
+
 
 def _load_recon_bins(category: str, fallback: frozenset[str]) -> frozenset[str]:
     """Load a recon binary list from data/tools_meta.json by category name.
@@ -341,7 +362,7 @@ class _ExecutorMixin:
 
         history_result = result
         if success and self._last_output_file and len(
-                str(result)) > 10000:
+                str(result)) > _RESULT_TRUNCATION_THRESHOLD:
             history_result = {
                 "success": True,
                 "result": f"<Result truncated. Full output in {self._last_output_file}>",
@@ -399,6 +420,25 @@ class _ExecutorMixin:
             arguments["path"] = path_arg
 
             if tool_name == "create_file":
+                # Match against the basename only to avoid false positives on
+                # parent directory names like "reports/notes.md".
+                # Exempt skill files (path contains "skills/") since those are
+                # instruction documents, not vulnerability reports.
+                _raw_path = str(arguments.get("path", "")).strip()
+                _is_skill_file = "skills/" in _raw_path.replace("\\", "/")
+                basename_lower = Path(_raw_path).name.lower()
+                if (
+                    not _is_skill_file
+                    and basename_lower.endswith(".md")
+                    and any(token in basename_lower for token in _REPORT_FILE_PATTERNS)
+                ):
+                    return False, 0.0, {
+                        "success": False,
+                        "error": (
+                            "BLOCKED: Writing vulnerability findings to markdown is forbidden. "
+                            "Use create_vulnerability_report for confirmed findings."
+                        ),
+                    }, None
                 result = await asyncio.to_thread(create_file, **arguments)
             elif tool_name == "read_file":
                 path_arg_clean = arguments.get("path", "")
@@ -438,7 +478,7 @@ class _ExecutorMixin:
         history_result = result
         if tool_name == "read_file" and success:
             content = result.get("result", "")
-            if len(content) > 2000:
+            if len(content) > _READ_FILE_CONTENT_TRUNCATION_THRESHOLD:
                 history_result = {
                     "success": True,
                     "result": f"<File content loaded ({len(content)} chars). Truncated in history.>",
@@ -670,8 +710,22 @@ class _ExecutorMixin:
                     f"Evidence: {r.evidence}"
                     for r in results
                 ]
+                # Build stdout with [SEVERITY] prefix so session extractor
+                # can capture findings into session.vulnerabilities.
+                stdout_lines = []
+                for r in results:
+                    sev = r.severity.upper()
+                    stdout_lines.append(
+                        f"[{sev}] {r.vuln_type.upper()} on param '{r.parameter}'"
+                        f" at {r.target}"
+                    )
+                    stdout_lines.append(
+                        f"Payload: {r.payload} | Conf: {r.confidence:.2f}"
+                    )
+                    stdout_lines.append(f"Evidence: {r.evidence}")
                 res_dict = {
                     "success": True,
+                    "stdout": "\n".join(stdout_lines),
                     "findings": findings_list,
                     "total": len(findings_list)}
 
@@ -1675,13 +1729,29 @@ class _ExecutorMixin:
                 languages=languages,
             )
 
+            findings_capped = result.get("findings", [])[:50]
+            # Build stdout with [SEVERITY] prefix so session extractor
+            # can capture findings into session.vulnerabilities.
+            _stdout_lines: list[str] = []
+            for _f in findings_capped:
+                _sev = str(_f.get("severity", "MEDIUM")).upper()
+                _rule = _f.get("rule_id", "unknown")
+                _msg = _f.get("message", "")
+                _file = _f.get("file", "")
+                _line = _f.get("start_line", "?")
+                _code = _f.get("code_snippet", "")
+                _stdout_lines.append(f"[{_sev}] {_rule}: {_msg}")
+                if _file:
+                    _stdout_lines.append(f"  File: {_file}:{_line}")
+                if _code:
+                    _stdout_lines.append(f"  Code: {_code}")
             res_dict = {
                 "success": True,
                 "summary": result.get("summary", ""),
                 "total": result.get("total", 0),
-                # Cap at 50 findings
-                "findings": result.get("findings", [])[:50],
+                "findings": findings_capped,
                 "errors": result.get("errors", []),
+                "stdout": "\n".join(_stdout_lines),
             }
 
             # Save output
@@ -1902,6 +1972,49 @@ class _ExecutorMixin:
             async for _ in agent.process_message(prompt):
                 _sub_iters += 1
 
+            _raw_sub_usage = getattr(getattr(agent, "state", None), "token_usage", {})
+            sub_token_usage = dict(_raw_sub_usage) if isinstance(_raw_sub_usage, dict) else {}
+            sub_total = _safe_non_negative_int(
+                sub_token_usage.get("cumulative", sub_token_usage.get("used", 0))
+            )
+            sub_prompt_total = _safe_non_negative_int(
+                sub_token_usage.get("cumulative_prompt", sub_token_usage.get("last_prompt", 0))
+            )
+            sub_completion_total = _safe_non_negative_int(
+                sub_token_usage.get("cumulative_completion", sub_token_usage.get("last_completion", 0))
+            )
+            if sub_total > 0:
+                state_token_usage = getattr(self.state, "token_usage", None)
+                if not isinstance(state_token_usage, dict):
+                    state_token_usage = {}
+                    try:
+                        self.state.token_usage = state_token_usage
+                    except Exception:
+                        pass
+                state_token_usage["cumulative"] = _safe_non_negative_int(
+                    state_token_usage.get("cumulative", 0)
+                ) + sub_total
+                state_token_usage["cumulative_prompt"] = _safe_non_negative_int(
+                    state_token_usage.get("cumulative_prompt", 0)
+                ) + sub_prompt_total
+                state_token_usage["cumulative_completion"] = _safe_non_negative_int(
+                    state_token_usage.get("cumulative_completion", 0)
+                ) + sub_completion_total
+                parent_session = getattr(self, "_session", None)
+                if parent_session is not None:
+                    parent_session.token_total = _safe_non_negative_int(
+                        state_token_usage.get("cumulative", 0)
+                    )
+                    parent_session.token_prompt_total = _safe_non_negative_int(
+                        state_token_usage.get("cumulative_prompt", 0)
+                    )
+                    parent_session.token_completion_total = _safe_non_negative_int(
+                        state_token_usage.get("cumulative_completion", 0)
+                    )
+                    parent_session.token_last_used = _safe_non_negative_int(
+                        state_token_usage.get("used", 0)
+                    )
+
             findings: list[str] = []
             if agent._session:
                 findings = [
@@ -1923,6 +2036,7 @@ class _ExecutorMixin:
                 "findings": findings,
                 "total": len(findings),
                 "iterations": _sub_iters,
+                "token_usage": sub_token_usage,
             }
             success = True
         except Exception as e:
@@ -2061,6 +2175,14 @@ class _ExecutorMixin:
                         "Example: {\"name\": \"execute\", \"arguments\": {\"command\": \"nmap -sV target.com\"}}"
                     ),
                 }, None
+            if len(cmd) > _MAX_COMMAND_LENGTH:
+                return False, 0.0, {
+                    "success": False,
+                    "error": (
+                        f"Command rejected: length {len(cmd)} exceeds "
+                        f"maximum {_MAX_COMMAND_LENGTH} characters."
+                    ),
+                }, None
             # Detect common tool-mixing hallucinations before executing.
             # Example: LLM writes "curl -sc -title -tech-detect ..." (httpx flags on curl).
             # Catch and reject with a correction hint instead of running a broken command.
@@ -2165,7 +2287,7 @@ class _ExecutorMixin:
         duration = time.time() - start_time
 
         history_result = result
-        if success and output_file and len(str(result)) > 10000:
+        if success and output_file and len(str(result)) > _RESULT_TRUNCATION_THRESHOLD:
             history_result = {
                 "success": True,
                 "result": f"<Result truncated. Full output in {output_file}>",

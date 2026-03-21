@@ -112,3 +112,65 @@ def test_update_from_parsed_output_extracts_embedded_url(mock_session):
     )
     update_from_parsed_output(mock_session, parsed)
     assert "https://embedded.example.com/app.js" in mock_session.urls
+
+
+def test_update_from_parsed_output_vuln_pattern_ignores_negative_phrase(mock_session):
+    parsed = ParsedOutput(
+        tool="metasploit",
+        summary="Metasploit output",
+        items=["[+] Target is NOT vulnerable to CVE-2024-1234"],
+    )
+    update_from_parsed_output(mock_session, parsed)
+    assert len(mock_session.vulnerabilities) == 0
+
+
+def test_update_from_parsed_output_severity_vuln_ignores_negative_phrase(mock_session):
+    parsed = ParsedOutput(
+        tool="metasploit",
+        summary="Metasploit output",
+        items=["[HIGH] Target is NOT vulnerable to CVE-2024-1234"],
+    )
+    update_from_parsed_output(mock_session, parsed)
+    assert len(mock_session.vulnerabilities) == 0
+
+
+def test_update_from_parsed_output_vuln_pattern_ignores_cve_unaffected(mock_session):
+    parsed = ParsedOutput(
+        tool="metasploit",
+        summary="Metasploit output",
+        items=["CVE-2024-1234 target is unaffected by this issue"],
+    )
+    update_from_parsed_output(mock_session, parsed)
+    assert len(mock_session.vulnerabilities) == 0
+
+
+def test_update_from_parsed_output_vuln_pattern_ignores_cve_not_affected(mock_session):
+    parsed = ParsedOutput(
+        tool="metasploit",
+        summary="Metasploit output",
+        items=["CVE-2024-1234 host not affected on patched branch"],
+    )
+    update_from_parsed_output(mock_session, parsed)
+    assert len(mock_session.vulnerabilities) == 0
+
+
+def test_update_from_parsed_output_vuln_pattern_keeps_not_authenticated_signal(mock_session):
+    parsed = ParsedOutput(
+        tool="metasploit",
+        summary="Metasploit output",
+        items=["[+] Target vulnerable: endpoint not authenticated (auth bypass)"],
+    )
+    update_from_parsed_output(mock_session, parsed)
+    assert len(mock_session.vulnerabilities) == 1
+    assert "not authenticated" in mock_session.vulnerabilities[0]["finding"].lower()
+
+
+def test_update_from_parsed_output_vuln_pattern_keeps_not_patched_signal(mock_session):
+    parsed = ParsedOutput(
+        tool="metasploit",
+        summary="Metasploit output",
+        items=["[+] Vulnerable to SQLi but not patched in latest release"],
+    )
+    update_from_parsed_output(mock_session, parsed)
+    assert len(mock_session.vulnerabilities) == 1
+    assert "not patched" in mock_session.vulnerabilities[0]["finding"].lower()

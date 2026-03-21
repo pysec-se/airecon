@@ -148,7 +148,7 @@ class AIReconApp(App):
 
     def _tick_recon_spinner(self) -> None:
         """Advance spinner animation frame when LLM is active."""
-        if not self._processing:
+        if not self._processing and not self._file_agents_running:
             return
         self._recon_frame = (self._recon_frame + 1) % len(self._SPINNER_CHARS)
         try:
@@ -321,7 +321,7 @@ class AIReconApp(App):
                     exec_used = tool_counts.get("exec", 0)
                     subagents = tool_counts.get("subagents", 0)
                     token_info = agent_stats.get("token_usage", {})
-                    tokens_used = token_info.get("used", 0)
+                    tokens_used = token_info.get("cumulative", token_info.get("used", 0))
                     tokens_limit = token_info.get("limit", 65536)
                     skills_info = agent_stats.get("skills_used", [])
 
@@ -415,7 +415,7 @@ class AIReconApp(App):
                     exec_used = tool_counts.get("exec", 0)
                     subagents = tool_counts.get("subagents", 0) + self._file_agents_running
                     token_info = data.get("agent", {}).get("token_usage", {})
-                    tokens_used = token_info.get("used", 0)
+                    tokens_used = token_info.get("cumulative", token_info.get("used", 0))
                     tokens_limit = token_info.get("limit", 65536)
                     skills_info = data.get("agent", {}).get("skills_used", [])
                     caido_data = data.get("agent", {}).get("caido", {})
@@ -948,7 +948,7 @@ class AIReconApp(App):
 
                                 if _ti:
                                     status_update_kwargs["tokens"] = _ti.get(
-                                        "used", 0)
+                                        "cumulative", _ti.get("used", 0))
                                     status_update_kwargs["token_limit"] = _ti.get(
                                         "limit", 65536)
 
@@ -1026,8 +1026,9 @@ class AIReconApp(App):
                 chat.end_thinking()
             except Exception:  # nosec B110 - cleanup is best-effort
                 pass
-            # Hide recon spinner
-            self._hide_recon_spinner()
+            # Hide recon spinner only when no file-analysis subagents are still active
+            if not self._file_agents_running:
+                self._hide_recon_spinner()
             logger.debug("Stream worker finished")
 
     async def _stream_file_analysis(
@@ -1045,6 +1046,7 @@ class AIReconApp(App):
         # Mount the collapsible block and update status bar
         chat.add_subagent_block(agent_id, task)
         self._file_agents_running += 1
+        self._show_recon_spinner()
         try:
             self.query_one("#status-bar", StatusBar).subagents_spawned += 1
         except Exception:  # nosec B110 - best-effort
@@ -1130,6 +1132,9 @@ class AIReconApp(App):
         finally:
             chat.subagent_finish(agent_id, success)
             self._file_agents_running = max(0, self._file_agents_running - 1)
+            # Hide spinner only when no other agent is active
+            if not self._processing and not self._file_agents_running:
+                self._hide_recon_spinner()
             try:
                 status_bar = self.query_one("#status-bar", StatusBar)
                 status_bar.subagents_spawned = max(

@@ -53,19 +53,26 @@ def test_skill_phase_boost_exploit_score_logic():
 
 
 def test_skill_phase_no_boost_zero_hits(mocker):
-    """Skills with 0 keyword hits should NOT be boosted even in preferred directory."""
+    """Skills with 0 keyword hits should NOT be boosted into keyword slots.
+
+    However, _PHASE_ENTRY_SKILLS guarantees load even with zero keyword hits —
+    that is the whole point of the guarantee. Only keyword-matched skills are
+    suppressed when there are no hits.
+    """
     fake_keywords = {
         "xss": "payloads/xss.md",
     }
     mocker.patch("airecon.proxy.system._SKILL_KEYWORDS", fake_keywords)
 
-    # Message has NO keywords matching payloads/sqli.md (which is in EXPLOIT preferred)
-    # sqli.md should NOT appear despite being in preferred dir
+    # Message has NO keywords — skill_scores is empty, so "xss" keyword never fires.
+    # EXPLOIT phase has one guaranteed skill: tools/advanced_fuzzing.md
+    # That skill loads via the guarantee path regardless of keyword hits.
     ctx, loaded = auto_load_skills_for_message("totally unrelated message", phase="EXPLOIT")
 
-    # With no keyword hits, skill_scores is empty → early return → no skills loaded
-    assert ctx == ""
-    assert loaded == []
+    # The keyword-only skill (xss.md) must NOT be loaded (zero hits, no keyword match).
+    assert "xss" not in loaded
+    # Guaranteed skill (advanced_fuzzing) may load if the file exists on disk.
+    # We do NOT assert ctx == "" because guaranteed skills bypass the zero-hit guard.
 
 
 def test_skill_phase_report_no_boost(mocker):

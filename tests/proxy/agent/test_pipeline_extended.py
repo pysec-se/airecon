@@ -31,8 +31,10 @@ def _fast_forward(engine, iterations=15):
 
 class TestAnalysisPhaseTransitions:
     def test_recon_to_analysis_transition(self):
+        # live_hosts_validated is now MANDATORY for RECON→ANALYSIS transition
         session = _make_session(
             subdomains=["api.example.com"],
+            live_hosts=["https://api.example.com"],
             open_ports={"example.com": [80]},
             scan_count=5,
         )
@@ -288,8 +290,10 @@ class TestCooldownGuard:
         assert engine.should_transition() is False
 
     def test_can_transition_after_cooldown(self):
+        # live_hosts_validated is now MANDATORY for RECON→ANALYSIS transition
         session = _make_session(
             subdomains=["api.example.com"],
+            live_hosts=["https://api.example.com"],
             open_ports={"example.com": [80]},
             scan_count=10,
         )

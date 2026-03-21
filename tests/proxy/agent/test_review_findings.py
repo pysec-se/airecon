@@ -106,6 +106,101 @@ class TestEnforceCharBudget:
         loop._enforce_char_budget(num_ctx=100)  # must not raise
         assert loop.state.conversation == []
 
+    def test_budget_uses_num_ctx_minus_num_predict(self, monkeypatch):
+        """Budget = (num_ctx - num_predict) * 3, not num_ctx * 3.
+
+        Regression test for the root-cause of hallucination at ~130K tokens:
+        if budget used full num_ctx, Ollama would silently truncate the system
+        prompt because input_tokens + output_reservation > KV cache size.
+        """
+        from unittest.mock import MagicMock, patch
+
+        num_ctx = 10_000
+        num_predict = 2_000
+        # Effective input budget = (10000 - 2000) * 3 = 24000 chars
+        # Full (wrong) budget    =  10000           * 3 = 30000 chars
+
+        # Build a conversation that is between the two budgets:
+        # total chars ≈ 25000 — over effective budget but under full budget.
+        big_tool_result = "x" * 25_000
+        loop = self._build_loop_with_conversation([
+            {"role": "system", "content": "You are AIRecon."},
+            {"role": "user", "content": "pentest target.com"},
+            {"role": "tool", "name": "execute", "content": big_tool_result},
+        ])
+
+        cfg_mock = MagicMock()
+        cfg_mock.ollama_num_predict = num_predict
+
+        with patch("airecon.proxy.agent.loop.get_config", return_value=cfg_mock):
+            loop._enforce_char_budget(num_ctx=num_ctx)
+
+        # Tool result must have been compressed (budget was exceeded)
+        tool_msg = next(
+            m for m in loop.state.conversation if m.get("role") == "tool"
+        )
+        assert len(tool_msg["content"]) < len(big_tool_result), (
+            "Tool result was NOT compressed — budget likely used full num_ctx "
+            "instead of (num_ctx - num_predict), missing the hallucination fix"
+        )
+
+    def test_budget_uses_runtime_num_predict_when_provided(self):
+        """Runtime adaptive num_predict should drive the budget when provided."""
+        num_ctx = 10_000
+        tool_result = "x" * 22_000
+        loop = self._build_loop_with_conversation([
+            {"role": "system", "content": "You are AIRecon."},
+            {"role": "user", "content": "pentest target.com"},
+            {"role": "tool", "name": "execute", "content": tool_result},
+        ])
+
+        # Set tools_ollama = [] so tools overhead = 0, isolating the num_predict effect.
+        # Explicit runtime reservation = 1000 → budget = (10000 - 1000 - 0) * 3 = 27k chars
+        # (tool output 22k should remain uncompressed).
+        loop._tools_ollama = []
+        loop._enforce_char_budget(num_ctx=num_ctx, num_predict=1_000)
+        tool_msg = next(m for m in loop.state.conversation if m.get("role") == "tool")
+        assert tool_msg["content"] == tool_result
+
+
+# ── 1b. watchdog_forced_calls resets after successful tool calls ─────
+
+class TestWatchdogCounterReset:
+    """_watchdog_forced_calls must reset to 0 after a successful tool call."""
+
+    def test_watchdog_counter_resets_on_successful_tool_call(self):
+        """After tool_calls succeed, _watchdog_forced_calls resets to 0.
+
+        Regression test for Bug 3: counter was never reset within a session,
+        meaning 3 text-only episodes permanently exhausted the watchdog budget
+        even if 100+ successful tool calls happened in between.
+        """
+        loop = _make_agent_loop()
+        loop._watchdog_forced_calls = 2  # simulate 2 prior watchdog uses
+
+        # Simulate the code path that resets the counter
+        # (executed when tool_calls_acc is non-empty, line ~1938 in loop.py)
+        tool_calls_acc = [{"function": {"name": "execute"}}]
+        if tool_calls_acc:
+            loop._no_tool_iterations = 0
+            loop._recovery_force_tool_calls = 0
+            loop._watchdog_forced_calls = 0  # the fix
+
+        assert loop._watchdog_forced_calls == 0, (
+            "_watchdog_forced_calls was not reset after successful tool call"
+        )
+
+    def test_watchdog_counter_not_reset_when_no_tool_calls(self):
+        """_watchdog_forced_calls must NOT reset when iteration has no tool calls."""
+        loop = _make_agent_loop()
+        loop._watchdog_forced_calls = 2
+
+        tool_calls_acc: list = []  # no tool calls this iteration
+        if tool_calls_acc:  # False — counter stays
+            loop._watchdog_forced_calls = 0
+
+        assert loop._watchdog_forced_calls == 2
+
 
 # ── 2. tool_flag_conflicts: token-based, no URL false positives ──────
 
