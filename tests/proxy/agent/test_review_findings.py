@@ -11,7 +11,6 @@ import json
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
-import pytest
 
 
 # ── Helpers ──────────────────────────────────────────────────────────
@@ -282,7 +281,7 @@ class TestOutputParserToolPatterns:
 
     def test_tool_patterns_loaded_from_json(self):
         """_TOOL_PATTERNS must contain entries from tools_meta.json."""
-        from airecon.proxy.agent.output_parser import _TOOL_PATTERNS, detect_tool
+        from airecon.proxy.agent.output_parser import _TOOL_PATTERNS
 
         assert len(_TOOL_PATTERNS) > 0, (
             "_TOOL_PATTERNS is empty — tools_meta.json may be missing or malformed"

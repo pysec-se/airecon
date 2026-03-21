@@ -7,7 +7,6 @@
 """
 from __future__ import annotations
 
-import pytest
 from airecon.proxy.agent.output_parser import parse_tool_output
 from airecon.proxy.agent.session import (
     SessionData,

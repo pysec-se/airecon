@@ -559,7 +559,7 @@ class AgentLoop(_ValidatorMixin, _FormatterMixin,
                             self.pipeline.set_ctf_mode(True)
                         # Reduce context window to prevent VRAM OOM mid-session
                         if self._adaptive_num_ctx == 0:
-                            self._adaptive_num_ctx = cfg.ollama_num_ctx_small
+                            self._adaptive_num_ctx = get_config().ollama_num_ctx_small
                         logger.info(
                             "CTF mode activated mid-session for target=%r — ctx=%d",
                             extracted_target, self._adaptive_num_ctx,
@@ -4554,7 +4554,7 @@ class AgentLoop(_ValidatorMixin, _FormatterMixin,
             )
             parts.append(
                 f"ALREADY TESTED ENDPOINTS ({len(s.tested_endpoints)} total"
-                + (f", showing last 20" if remainder > 0 else "")
+                + (", showing last 20" if remainder > 0 else "")
                 + "):\n"
                 + "\n".join(f"  {ep}" for ep in shown)
                 + (f"\n  {ep_note}" if ep_note else "")

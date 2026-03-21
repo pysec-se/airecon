@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import pytest
 from airecon.proxy.agent.command_parse import extract_primary_binary
 
 
