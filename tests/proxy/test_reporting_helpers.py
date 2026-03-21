@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import pytest
 from airecon.proxy.reporting import (
     _sanitize_target_name,
     _extract_target_token,
