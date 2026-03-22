@@ -96,7 +96,7 @@ def test_agent_state_evidence_dedup_and_focus_context():
     assert len(state.evidence_log) == 1
 
     context = state.build_focus_context("ANALYSIS")
-    assert "OBJECTIVE FOCUS" in context
+    assert "<objective_focus" in context  # XML format
     assert "Map technologies" in context
     assert "CVE-2024-1234" in context
 

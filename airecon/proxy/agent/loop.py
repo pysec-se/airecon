@@ -186,6 +186,9 @@ class AgentLoop(_ValidatorMixin, _FormatterMixin,
         self._last_evidence_count: int = 0
         self._watchdog_forced_calls: int = 0
         self._empty_response_retry_count: int = 0
+        # Mentor supervision: counts individual tool executions since last
+        # mentor analysis injection (throttle: every 3 tools OR HIGH/CRITICAL).
+        self._mentor_tool_call_count: int = 0
         # When set, force the next response(s) to include a tool call after
         # recovery events (VRAM crash/timeout). Prevents text-only hallucinations.
         self._recovery_force_tool_calls: int = 0
@@ -273,6 +276,16 @@ class AgentLoop(_ValidatorMixin, _FormatterMixin,
             usage.get("cumulative_completion", 0) or 0
         )
         self._session.token_last_used = int(usage.get("used", 0) or 0)
+
+    def _has_scan_work(self) -> bool:
+        """Return True if the current session has done actual scanning work.
+
+        Prevents empty sessions (user asked a question containing a domain
+        name but no tools were ever run) from being written to disk.
+        """
+        if not self._session:
+            return False
+        return self._session.scan_count > 0 or bool(self.state.evidence_log)
 
     def _schedule_token_usage_snapshot_save(self) -> None:
         """Persist token snapshot asynchronously while coalescing bursts."""
@@ -628,11 +641,14 @@ class AgentLoop(_ValidatorMixin, _FormatterMixin,
                 "[SYSTEM: WORKSPACE",
                 "[SYSTEM: ACTIVE_TARGET",
                 "[SYSTEM: ADDITIONAL_TARGETS",
-                "[SYSTEM: OBJECTIVE FOCUS",
+                "[SYSTEM: OBJECTIVE FOCUS",  # legacy
+                "<objective_focus",           # XML format
                 "[SYSTEM: PHASE GATE",
                 "[SYSTEM: AGGRESSIVE EXPLORATION",
                 "[SYSTEM: QUALITY SCOREBOARD",
                 "[SYSTEM: RECOVERY STATE",
+                "<reflector ",               # XML reflector
+                "<mentor_analysis>",         # XML mentor
             )
             self.state.conversation = [
                 msg
@@ -824,6 +840,7 @@ class AgentLoop(_ValidatorMixin, _FormatterMixin,
             self.state.warnings_sent = False
             self._stop_requested = False
             self._consecutive_failures = 0
+            self._mentor_tool_call_count = 0
             self._no_tool_iterations = 0
             self._stagnation_iterations = 0
             self._recent_tool_names = []
@@ -865,8 +882,9 @@ class AgentLoop(_ValidatorMixin, _FormatterMixin,
                     self.state.conversation = [
                         msg
                         for msg in self.state.conversation
-                        if not msg.get("content", "").startswith(
-                            "[SYSTEM: OBJECTIVE FOCUS"
+                        if not (
+                            msg.get("content", "").startswith("[SYSTEM: OBJECTIVE FOCUS")
+                            or msg.get("content", "").startswith("<objective_focus")
                         )
                     ]
                     focus_ctx = self.state.build_focus_context(
@@ -1326,8 +1344,8 @@ class AgentLoop(_ValidatorMixin, _FormatterMixin,
                 # than ~5 iterations of work. Tool-execution saves (line ~2340)
                 # already cover normal flow; this is the safety net for the
                 # gap between tool executions (thinking, planning iterations).
-                if self._session and self.state.iteration % 5 == 0:
-                    save_session(self._session)
+                if self.state.iteration % 5 == 0 and self._has_scan_work():
+                    save_session(self._session)  # type: ignore[arg-type]
 
                 # --- CONTEXT MANAGEMENT (adaptive interval + progressive truncation) ---
                 # Dynamic interval: compress more aggressively as context fills.
@@ -2153,9 +2171,9 @@ class AgentLoop(_ValidatorMixin, _FormatterMixin,
                     if _has_task_complete:
                         logger.info(
                             "Agent emitted [TASK_COMPLETE] — stopping.")
-                        # Save session on explicit completion
-                        if self._session:
-                            save_session(self._session)
+                        # Only save if actual scanning work was done
+                        if self._has_scan_work():
+                            save_session(self._session)  # type: ignore[arg-type]
                         yield AgentEvent(type="done", data={})
                         return
 
@@ -2174,7 +2192,33 @@ class AgentLoop(_ValidatorMixin, _FormatterMixin,
                             3,
                             int(getattr(cfg, "agent_missing_tool_retry_limit", 2)) + 1,
                         )
-                        if self._no_tool_iterations >= _max_text_only_retries:
+                        # --- REFLECTOR PHASE (iterations 1-2) ---
+                        # Targeted XML-structured correction before watchdog.
+                        # Uses _no_tool_iterations directly as attempt number
+                        # so the counter is always in sync — no separate counter.
+                        # Inspired by PentAGI's Reflector agent pattern.
+                        _reflector_max = 2
+                        if self._no_tool_iterations <= _reflector_max:
+                            reflector_msg = self._build_reflector_message(
+                                content_acc=content_acc,
+                                attempt=self._no_tool_iterations,
+                                phase=current_phase,
+                            )
+                            # Remove previous reflector message to avoid accumulation
+                            self.state.conversation = [
+                                m for m in self.state.conversation
+                                if not m.get("content", "").startswith("<reflector ")
+                            ]
+                            self.state.conversation.append(
+                                {"role": "system", "content": reflector_msg}
+                            )
+                            logger.info(
+                                "Reflector attempt %d (phase=%s)",
+                                self._no_tool_iterations,
+                                current_phase.value,
+                            )
+                        # --- WATCHDOG PHASE (iterations 3+) ---
+                        elif self._no_tool_iterations >= _max_text_only_retries:
                             watchdog_call = self._build_watchdog_tool_call(
                                 content_acc=content_acc,
                                 thinking_acc=thinking_acc,
@@ -2193,8 +2237,8 @@ class AgentLoop(_ValidatorMixin, _FormatterMixin,
                                     self._no_tool_iterations,
                                     self._watchdog_forced_calls,
                                 )
-                                if self._session:
-                                    save_session(self._session)
+                                if self._has_scan_work():
+                                    save_session(self._session)  # type: ignore[arg-type]
                                 yield AgentEvent(type="error", data={"message": msg})
                                 yield AgentEvent(type="done", data={})
                                 return
@@ -2224,16 +2268,13 @@ class AgentLoop(_ValidatorMixin, _FormatterMixin,
                                 )
                             else:
                                 # Watchdog returned None — no extractable command.
-                                # Inject a recovery nudge and increment the counter
-                                # so the abort guard fires after 3 total attempts
-                                # (mix of forced calls and nudges).
                                 self._watchdog_forced_calls += 1
                                 logger.warning(
                                     "Watchdog: no command found — injecting recovery nudge "
                                     "(target=%r, phase=%s, no_tool_iters=%d, forced_calls=%d)",
                                     self.state.active_target,
                                     current_phase.value,
-                                    self._no_tool_iterations,  # log BEFORE reset
+                                    self._no_tool_iterations,
                                     self._watchdog_forced_calls,
                                 )
                                 self._no_tool_iterations = 0
@@ -2817,8 +2858,42 @@ class AgentLoop(_ValidatorMixin, _FormatterMixin,
                     self._append_tool_result(
                         tool_name, content_str, success, tc.get("id")
                     )
+                    # Count per-tool (not per-iteration) for mentor throttling.
+                    self._mentor_tool_call_count += 1
 
                 self._refresh_exploration_state()
+
+                # --- MENTOR SUPERVISION ---
+                # Inject a post-tool analysis after high-value findings
+                # (ANALYSIS/EXPLOIT phase only, throttled to every 3 tool calls
+                # OR on any HIGH/CRITICAL severity finding).
+                # Guard: only fires when tools actually ran this iteration.
+                # Inspired by PentAGI's Mentor Supervision system.
+                _mentor_phases = {"ANALYSIS", "EXPLOIT"}
+                _in_mentor_phase = current_phase.value.upper() in _mentor_phases
+                if all_results and _in_mentor_phase and self.state.evidence_log:
+                    # Use last tool name from the processed batch (always defined).
+                    _mentor_tool_name = all_results[max(all_results.keys())][2]
+                    _last_ev = self.state.evidence_log[-1]
+                    _last_sev = int(_last_ev.get("severity", 1))
+                    _trigger_mentor = (
+                        _last_sev >= 4  # any HIGH/CRITICAL finding
+                        or self._mentor_tool_call_count % 3 == 0
+                    )
+                    if _trigger_mentor:
+                        mentor_msg = self._build_mentor_analysis(
+                            current_phase=current_phase,
+                            tool_name=_mentor_tool_name,
+                            evidence_added=True,
+                        )
+                        # Replace previous mentor message to avoid accumulation
+                        self.state.conversation = [
+                            m for m in self.state.conversation
+                            if not m.get("content", "").startswith("<mentor_analysis")
+                        ]
+                        self.state.conversation.append(
+                            {"role": "system", "content": mentor_msg}
+                        )
 
                 # Persist session state incrementally after every tool
                 # execution
@@ -4211,6 +4286,136 @@ class AgentLoop(_ValidatorMixin, _FormatterMixin,
                         return safe
 
         return None
+
+    def _reflector_infer_tool_hint(self, content_lower: str) -> str:
+        """Return a tool call hint derived from the LLM's own text and the
+        known tool registry — never hardcodes specific tool names or commands.
+
+        Strategy (in order):
+        1. Scan known tool names from _tools_ollama and return the first one
+           mentioned in the LLM's text as a generic call stub.
+        2. Fall back to a phase-agnostic generic stub so the LLM knows the
+           expected call format without being steered toward a specific tool.
+        """
+        if self._tools_ollama:
+            for tool_def in self._tools_ollama:
+                name = str(tool_def.get("function", {}).get("name", ""))
+                if name and name.lower() in content_lower:
+                    return f"{name}({{...}})"
+        return 'execute({"command": "<command>"})'
+
+    def _build_reflector_message(
+        self,
+        content_acc: str,
+        attempt: int,
+        phase: PipelinePhase,
+    ) -> str:
+        """Build a targeted XML-structured correction for text-only LLM responses.
+
+        Two escalation levels before watchdog takes over:
+          attempt=1 — gentle reminder with a specific tool suggestion
+          attempt=2 — firm warning, explicit format requirement
+        Inspired by PentAGI's Reflector agent pattern.
+        """
+        phase_str = phase.value
+        content_lower = content_acc.lower()
+
+        # Dynamically infer tool hint from LLM text + known tool registry.
+        # No hardcoded tool names — source of truth is _tools_ollama (data/tools.json).
+        tool_hint = self._reflector_infer_tool_hint(content_lower)
+
+        if attempt == 1:
+            issue = "You responded with analysis text but did not call any tool."
+            action = (
+                f"Call a tool NOW to continue the assessment. "
+                f"Based on your analysis, try: {tool_hint}"
+            )
+        else:
+            issue = (
+                f"REFLECTOR (attempt {attempt}): Text-only response received again. "
+                "No tool call was made."
+            )
+            action = (
+                f"You MUST include a tool_call in your response — no more text planning. "
+                f"Execute immediately: {tool_hint}"
+            )
+
+        return (
+            f'<reflector phase="{phase_str}" attempt="{attempt}">\n'
+            f"  <issue>{issue}</issue>\n"
+            f"  <required_action>{action}</required_action>\n"
+            f"  <escalation_warning>Watchdog auto-execution activates after"
+            f" {max(3, self._no_tool_iterations + 1)} uncorrected iterations."
+            f" Avoid it by calling a tool now.</escalation_warning>\n"
+            f"</reflector>"
+        )
+
+    def _build_mentor_analysis(
+        self,
+        current_phase: PipelinePhase,
+        tool_name: str,
+        evidence_added: bool,
+    ) -> str:
+        """Build a post-tool XML mentor analysis block.
+
+        Injected after high-value tool results to guide the LLM toward the
+        best next action. Rule-based (no extra LLM call) — derived from the
+        current evidence log and pending objectives.
+        Inspired by PentAGI's Mentor Supervision system.
+        """
+        phase_str = current_phase.value
+        pending, _, recent_evidence = self.state.get_phase_context(
+            phase_str, max_objectives=3, max_evidence=3
+        )
+
+        # Build progress assessment
+        total_ev = len(self.state.evidence_log)
+        phase_ev = sum(
+            1 for e in self.state.evidence_log
+            if str(e.get("phase", "")).upper() == phase_str.upper()
+        )
+        high_sev = sum(
+            1 for e in self.state.evidence_log
+            if int(e.get("severity", 1)) >= 4
+        )
+
+        progress_parts = [f"{phase_ev} evidence item(s) in {phase_str} phase"]
+        if high_sev:
+            progress_parts.append(f"{high_sev} HIGH/CRITICAL finding(s) confirmed")
+        progress = ", ".join(progress_parts) + "."
+
+        # Latest finding summary
+        latest_summary = ""
+        if recent_evidence:
+            ev = recent_evidence[0]
+            sev = int(ev.get("severity", 1))
+            sev_label = {5: "CRITICAL", 4: "HIGH", 3: "MEDIUM", 2: "LOW"}.get(sev, "INFO")
+            latest_summary = f"Latest: [{sev_label}] {ev.get('summary', '')[:120]}"
+
+        # Identify issues and next steps from pending objectives
+        if pending:
+            next_obj = pending[0].get("title", "")
+            next_steps = f"Next objective: {next_obj}"
+        else:
+            next_steps = (
+                "All objectives for this phase appear complete. "
+                "Consider transitioning to the next phase or deepening current findings."
+            )
+
+        # Identify potential issues
+        issues = ""
+        if total_ev == 0:
+            issues = "No evidence collected yet — surface mapping incomplete."
+        elif high_sev == 0 and phase_str.upper() in ("ANALYSIS", "EXPLOIT"):
+            issues = "No HIGH/CRITICAL findings yet — increase test depth or pivot attack vector."
+
+        lines = [f"<mentor_analysis phase=\"{phase_str}\" tool=\"{tool_name}\">"]
+        lines.append(f"  <progress_assessment>{progress}{(' ' + latest_summary) if latest_summary else ''}</progress_assessment>")
+        if issues:
+            lines.append(f"  <identified_issues>{issues}</identified_issues>")
+        lines.append(f"  <next_steps>{next_steps}</next_steps>")
+        lines.append("</mentor_analysis>")
+        return "\n".join(lines)
 
     def _build_watchdog_tool_call(
         self,
