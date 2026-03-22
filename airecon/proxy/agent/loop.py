@@ -4363,6 +4363,7 @@ class AgentLoop(_ValidatorMixin, _FormatterMixin,
             )
         return changed
 
+
     def _build_reflector_message(
         self,
         content_acc: str,
@@ -4428,6 +4429,7 @@ class AgentLoop(_ValidatorMixin, _FormatterMixin,
                 continue
             return entry
         return None
+
 
     def _build_mentor_analysis(
         self,
@@ -4509,6 +4511,7 @@ class AgentLoop(_ValidatorMixin, _FormatterMixin,
                         for _p in ab_signal["objective_patches"]
                     ]
                     self.state.patch_objectives(_patches)
+
 
         lines = [f"<mentor_analysis phase=\"{phase_str}\" tool=\"{tool_name}\">"]
         lines.append(f"  <progress_assessment>{progress}{(' ' + latest_summary) if latest_summary else ''}</progress_assessment>")
