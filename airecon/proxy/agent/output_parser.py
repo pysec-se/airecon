@@ -925,8 +925,7 @@ def _parse_generic_jsonl(lines: list[str]) -> ParsedOutput:
             items.append(line[:120])
 
     seen: set[str] = set()
-    # type: ignore
-    unique = [i for i in items if i not in seen and not seen.add(i)]
+    unique = [i for i in items if i not in seen and not seen.add(i)]  # type: ignore[func-returns-value]  # seen.add() returns None; side-effect used intentionally for dedup
 
     return ParsedOutput(
         tool="json",
@@ -961,8 +960,7 @@ def _parse_generic_tagged(lines: list[str]) -> ParsedOutput:
             :5])
 
     seen: set[str] = set()
-    # type: ignore
-    unique = [i for i in items if i not in seen and not seen.add(i)]
+    unique = [i for i in items if i not in seen and not seen.add(i)]  # type: ignore[func-returns-value]  # seen.add() returns None; side-effect used intentionally for dedup
 
     return ParsedOutput(
         tool="tagged",
@@ -1010,8 +1008,7 @@ def _parse_generic_lines(lines: list[str]) -> ParsedOutput:
             ("---", "===", "###", "✓", "✗", "Error", "Warning"))]
 
     seen: set[str] = set()
-    # type: ignore
-    unique = [i for i in meaningful if i not in seen and not seen.add(i)]
+    unique = [i for i in meaningful if i not in seen and not seen.add(i)]  # type: ignore[func-returns-value]  # seen.add() returns None; side-effect used intentionally for dedup
 
     dupes = len(meaningful) - len(unique)
     return ParsedOutput(

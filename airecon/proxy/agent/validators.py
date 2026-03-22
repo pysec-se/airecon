@@ -63,17 +63,24 @@ def extract_paths_from_command(command: str) -> list[str]:
     Positional arguments are NOT inspected — this is a deliberate design
     choice to avoid false positives on host/URL arguments.
     """
+    # Each pattern captures: double-quoted path | single-quoted path | bare path
+    # Three capture groups per pattern — only one will be non-empty per match.
+    _Q = r'(?:"([^"]+)"|\'([^\']+)\'|(\S+))'
     patterns = [
-        r"-o\s+(\S+)",              # -o /path/to/output
-        r"-output\s+(\S+)",         # -output /path
-        r">>\s*(\S+)",              # >> /path (append) — must come BEFORE single >
-        r"(?<!>)>(?!>)\s*(\S+)",   # > /path (redirect) — excludes >>
-        r"-t\s+(\S+)",              # -t /path/to/targets
-        r"--targets\s+(\S+)",       # --targets /path
+        rf"-o\s+{_Q}",              # -o /path  or  -o "/path with spaces"
+        rf"-output\s+{_Q}",         # -output /path
+        rf">>\s*{_Q}",              # >> /path (append) — must come BEFORE single >
+        rf"(?<!>)>(?!>)\s*{_Q}",   # > /path (redirect) — excludes >>
+        rf"-t\s+{_Q}",              # -t /path/to/targets
+        rf"--targets\s+{_Q}",       # --targets /path
     ]
     paths: list[str] = []
     for pattern in patterns:
-        paths.extend(re.findall(pattern, command))
+        for groups in re.findall(pattern, command):
+            # Take the first non-empty group (double-quoted, single-quoted, or bare)
+            path = next((g for g in groups if g), None)
+            if path:
+                paths.append(path)
     return paths
 
 
@@ -178,6 +185,18 @@ def validate_for_execution(
     has_danger, danger_msg = has_dangerous_patterns(command)
     if has_danger:
         return False, danger_msg
+    # Detect unbalanced quotes (LLM quoting bugs cause bash EOF errors).
+    # shlex.split raises ValueError on unmatched ' or " — catch early so
+    # the agent can retry with corrected quoting instead of sending a broken
+    # command to the Docker sandbox.
+    try:
+        shlex.split(command)
+    except ValueError as e:
+        return False, (
+            f"Shell syntax error (unbalanced quotes): {e}. "
+            "Rewrite the command using double-quotes for the outer string "
+            "or avoid embedding single-quotes inside single-quoted arguments."
+        )
     return validate_command_paths(command, base_dir)
 
 
@@ -192,7 +211,11 @@ _HTTP_EVIDENCE_RE = re.compile(
     r"response[:\s]+[2345]\d{2}|→\s*[2345]\d{2}|"
     r"\[[2345]\d{2}\]|\([2345]\d{2}\)|\{[2345]\d{2}\}|"
     r"returned\s+[2345]\d{2}|returns\s+[2345]\d{2}|got\s+[2345]\d{2}|"
-    r"observed[:\s]+[2345]\d{2}|status\s*[2345]\d{2})",
+    r"observed[:\s]+[2345]\d{2}|status\s*[2345]\d{2}|"
+    # JSON API response patterns: {"status": 200}, {"code": 401}, {"statusCode": 403}
+    r"\"status(?:Code)?\"\s*:\s*[2345]\d{2}|"
+    r"\"code\"\s*:\s*[2345]\d{2}|"
+    r"\"http_status\"\s*:\s*[2345]\d{2})",
     re.IGNORECASE,
 )
 

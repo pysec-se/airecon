@@ -136,7 +136,7 @@ async def _create_browser() -> Browser:
                         _state.playwright = None
                     raise RuntimeError(
                         f"Failed to launch both Docker and fallback browsers: {e2}")
-            await asyncio.sleep(1)
+            await asyncio.sleep(0.5 * (2 ** attempt))  # 0.5s, 1s, 2s, …
             continue
 
     raise RuntimeError("Browser creation failed after retries")

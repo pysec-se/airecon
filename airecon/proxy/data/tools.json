@@ -593,6 +593,8 @@
                         "items": {
                             "type": "string"
                         },
+                        "minItems": 1,
+                        "maxItems": 10000,
                         "description": "List of payloads to inject at §FUZZ§ positions (e.g. [\"' OR 1=1--\", \"admin\", \"<script>alert(1)</script>\"])"
                     },
                     "workers": {

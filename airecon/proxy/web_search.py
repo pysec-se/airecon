@@ -20,15 +20,26 @@ _CACHE_TTL = 3600  # 1 hour cache lifetime
 # Minimum seconds between consecutive DDG requests to avoid rate limiting
 _DDG_MIN_INTERVAL = 2.0
 _last_ddg_search_time: float = 0.0
-# Lock to serialize concurrent DDG calls and enforce the rate limit correctly
+# Lock to serialize concurrent DDG calls and enforce the rate limit correctly.
+# Initialized at first use via _get_ddg_lock() which is always called from
+# within a running asyncio event loop — asyncio.Lock() binds to the running
+# loop at creation time, so creation here (module load, no loop) would bind
+# to the wrong loop. _get_ddg_lock() must be called from an async context.
 _ddg_lock: asyncio.Lock | None = None
+_ddg_lock_init_lock = __import__("threading").Lock()
 
 
 def _get_ddg_lock() -> asyncio.Lock:
-    """Return a shared asyncio.Lock, created lazily within the running loop."""
+    """Return a shared asyncio.Lock, created once within the running loop.
+
+    Thread-safe: uses a threading.Lock to prevent double-initialization
+    if two coroutines race before the asyncio.Lock is created.
+    """
     global _ddg_lock
     if _ddg_lock is None:
-        _ddg_lock = asyncio.Lock()
+        with _ddg_lock_init_lock:
+            if _ddg_lock is None:  # double-checked locking
+                _ddg_lock = asyncio.Lock()
     return _ddg_lock
 
 
@@ -208,13 +219,6 @@ async def web_search(query: str, max_results: int = 10, use_cache: bool = True) 
     # Never cache target-specific queries — fresh intel only.
     effective_cache = use_cache and not _is_target_specific_query(query)
 
-    # Check cache first
-    if effective_cache:
-        cached = _get_cached_results(query, max_results)
-        if cached:
-            cached["from_cache"] = True
-            return cached
-
     try:
         from .config import get_config
         cfg = get_config()
@@ -226,11 +230,18 @@ async def web_search(query: str, max_results: int = 10, use_cache: bool = True) 
 
     max_results = min(int(max_results), 50)
 
+    # Check cache first — include engines in key to avoid cross-engine cache hits
+    if effective_cache:
+        cached = _get_cached_results(query, max_results, engines)
+        if cached:
+            cached["from_cache"] = True
+            return cached
+
     if searxng_url:
         result = await _searxng_search(query, max_results, searxng_url, engines)
         # Cache generic SearXNG results too (previously uncached)
         if result.get("success") and effective_cache:
-            _cache_results(query, max_results, result)
+            _cache_results(query, max_results, result, engines)
         # If SearXNG is unreachable, fall back to DDG with a warning
         if not result.get(
                 "success") and "Cannot connect" in result.get("error", ""):
@@ -243,7 +254,7 @@ async def web_search(query: str, max_results: int = 10, use_cache: bool = True) 
                 + ddg_result.get("result", "")
             )
             if ddg_result.get("success") and effective_cache:
-                _cache_results(query, max_results, ddg_result)
+                _cache_results(query, max_results, ddg_result, "")
             return ddg_result
         return result
 
@@ -251,21 +262,21 @@ async def web_search(query: str, max_results: int = 10, use_cache: bool = True) 
 
     # Cache successful results
     if result.get("success") and effective_cache:
-        _cache_results(query, max_results, result)
+        _cache_results(query, max_results, result, "")
 
     return result
 
 
-def _get_cache_key(query: str, max_results: int) -> str:
+def _get_cache_key(query: str, max_results: int, engines: str = "") -> str:
     """Generate a unique cache key for the search parameters."""
     return hashlib.md5(  # nosec B324 - non-security cache key
-        f"{query}:{max_results}".encode(), usedforsecurity=False).hexdigest()
+        f"{query}:{max_results}:{engines}".encode(), usedforsecurity=False).hexdigest()
 
 
-def _get_cached_results(query: str, max_results: int) -> dict[str, Any] | None:
+def _get_cached_results(query: str, max_results: int, engines: str = "") -> dict[str, Any] | None:
     """Get cached results if they exist and are fresh."""
     try:
-        cache_key = _get_cache_key(query, max_results)
+        cache_key = _get_cache_key(query, max_results, engines)
         import gzip
         cache_file = _CACHE_DIR / f"{cache_key}.json.gz"
 
@@ -283,12 +294,12 @@ def _get_cached_results(query: str, max_results: int) -> dict[str, Any] | None:
         return None
 
 
-def _cache_results(query: str, max_results: int, results: dict[str, Any]) -> None:
+def _cache_results(query: str, max_results: int, results: dict[str, Any], engines: str = "") -> None:
     """Cache search results to disk."""
     try:
         import gzip
         _CACHE_DIR.mkdir(parents=True, exist_ok=True)
-        cache_key = _get_cache_key(query, max_results)
+        cache_key = _get_cache_key(query, max_results, engines)
         cache_file = _CACHE_DIR / f"{cache_key}.json.gz"
 
         with gzip.open(cache_file, "wt") as f:
