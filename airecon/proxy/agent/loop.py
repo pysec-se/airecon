@@ -31,6 +31,7 @@ from .file_reference import (
 )
 from .formatters import _FormatterMixin
 from .models import MAX_TOOL_ITERATIONS, AgentEvent, AgentState
+from .owasp import classify_owasp, severity_for_evidence
 from .output_parser import parse_tool_output
 from .pipeline import _PHASE_TOOL_BUDGETS, PipelineEngine, PipelinePhase
 from .session import (
@@ -3185,6 +3186,7 @@ class AgentLoop(_ValidatorMixin, _FormatterMixin,
             record_tested_endpoint(self._session, url, method)
 
     def get_stats(self) -> dict[str, Any]:
+        from .owasp import evidence_risk_summary
         _caido_sends = self.state.tool_counts.get("caido_send_request", 0)
         _caido_autos = self.state.tool_counts.get("caido_automate", 0)
         return {
@@ -3196,6 +3198,7 @@ class AgentLoop(_ValidatorMixin, _FormatterMixin,
                 "active": (_caido_sends + _caido_autos) > 0,
                 "findings_count": _caido_sends + _caido_autos,
             },
+            "risk": evidence_risk_summary(self.state.evidence_log),
         }
 
     def _extract_tool_calls_from_text(
@@ -3903,6 +3906,19 @@ class AgentLoop(_ValidatorMixin, _FormatterMixin,
         merged = "\n".join(p for p in parts if p).strip()
         return merged[:7000]
 
+    def _enrich_evidence(
+        self,
+        summary: str,
+        base_tags: list[str],
+        confidence: float,
+        tool_name: str,
+    ) -> tuple[list[str], int]:
+        """Auto-classify OWASP categories and compute severity for an evidence entry."""
+        owasp_tags = classify_owasp(summary, base_tags, tool_name)
+        enriched_tags = list(dict.fromkeys(base_tags + owasp_tags))
+        sev = severity_for_evidence(summary, enriched_tags, confidence, tool_name)
+        return enriched_tags, sev
+
     def _record_evidence_from_result(
         self,
         phase: str,
@@ -3913,13 +3929,15 @@ class AgentLoop(_ValidatorMixin, _FormatterMixin,
         output_file: str | None,
     ) -> None:
         if output_file:
+            _t, _s = self._enrich_evidence(f"Artifact saved to {output_file}", ["artifact", "file"], 0.9, tool_name)
             self.state.add_evidence(
                 phase=phase,
                 source_tool=tool_name,
                 summary=f"Artifact saved to {output_file}",
                 confidence=0.9,
                 artifact=output_file,
-                tags=["artifact", "file"],
+                tags=_t,
+                severity=_s,
             )
 
         blob = self._extract_result_text(result)
@@ -3929,31 +3947,40 @@ class AgentLoop(_ValidatorMixin, _FormatterMixin,
         if not success:
             err = str(result.get("error", "")).strip() if isinstance(result, dict) else ""
             if err:
+                _summary = f"Execution error observed: {err[:240]}"
+                _t, _s = self._enrich_evidence(_summary, ["error"], 0.4, tool_name)
                 self.state.add_evidence(
                     phase=phase,
                     source_tool=tool_name,
-                    summary=f"Execution error observed: {err[:240]}",
+                    summary=_summary,
                     confidence=0.4,
-                    tags=["error"],
+                    tags=_t,
+                    severity=_s,
                 )
             return
 
         for flag in re.findall(r"(?:FLAG|flag)\{[^}\n]{1,200}\}", blob):
+            _summary = f"Flag pattern captured: {flag}"
+            _t, _s = self._enrich_evidence(_summary, ["flag", "ctf"], 1.0, tool_name)
             self.state.add_evidence(
                 phase=phase,
                 source_tool=tool_name,
-                summary=f"Flag pattern captured: {flag}",
+                summary=_summary,
                 confidence=1.0,
-                tags=["flag", "ctf"],
+                tags=_t,
+                severity=_s,
             )
 
         for cve in re.findall(r"CVE-\d{4}-\d{4,7}", blob, re.IGNORECASE):
+            _summary = f"CVE reference discovered: {cve.upper()}"
+            _t, _s = self._enrich_evidence(_summary, ["cve", "vulnerability"], 0.75, tool_name)
             self.state.add_evidence(
                 phase=phase,
                 source_tool=tool_name,
-                summary=f"CVE reference discovered: {cve.upper()}",
+                summary=_summary,
                 confidence=0.75,
-                tags=["cve", "vulnerability"],
+                tags=_t,
+                severity=_s,
             )
 
         url_matches = list(
@@ -3962,12 +3989,15 @@ class AgentLoop(_ValidatorMixin, _FormatterMixin,
             )
         )
         for url in url_matches[:4]:
+            _summary = f"Interesting URL collected: {url}"
+            _t, _s = self._enrich_evidence(_summary, ["url", "endpoint"], 0.65, tool_name)
             self.state.add_evidence(
                 phase=phase,
                 source_tool=tool_name,
-                summary=f"Interesting URL collected: {url}",
+                summary=_summary,
                 confidence=0.65,
-                tags=["url", "endpoint"],
+                tags=_t,
+                severity=_s,
             )
 
         port_hits = list(
@@ -3980,12 +4010,15 @@ class AgentLoop(_ValidatorMixin, _FormatterMixin,
             )
         )
         for hit in port_hits[:4]:
+            _summary = f"Service/port evidence: {hit}"
+            _t, _s = self._enrich_evidence(_summary, ["network", "recon"], 0.7, tool_name)
             self.state.add_evidence(
                 phase=phase,
                 source_tool=tool_name,
-                summary=f"Service/port evidence: {hit}",
+                summary=_summary,
                 confidence=0.7,
-                tags=["network", "recon"],
+                tags=_t,
+                severity=_s,
             )
 
         high_signal_lines = []
@@ -4001,23 +4034,29 @@ class AgentLoop(_ValidatorMixin, _FormatterMixin,
             if len(high_signal_lines) >= 3:
                 break
         for line in high_signal_lines:
+            _summary = f"Security signal: {line}"
+            _t, _s = self._enrich_evidence(_summary, ["signal"], 0.7, tool_name)
             self.state.add_evidence(
                 phase=phase,
                 source_tool=tool_name,
-                summary=f"Security signal: {line}",
+                summary=_summary,
                 confidence=0.7,
-                tags=["signal"],
+                tags=_t,
+                severity=_s,
             )
 
         if tool_name == "execute":
             cmd = str(arguments.get("command", "")).strip()
             if cmd:
+                _summary = f"Executed command: {cmd[:220]}"
+                _t, _s = self._enrich_evidence(_summary, ["execution", "trace"], 0.55, tool_name)
                 self.state.add_evidence(
                     phase=phase,
                     source_tool=tool_name,
-                    summary=f"Executed command: {cmd[:220]}",
+                    summary=_summary,
                     confidence=0.55,
-                    tags=["execution", "trace"],
+                    tags=_t,
+                    severity=_s,
                 )
 
     def _build_phase_gate_note(self, tool_name: str, success: bool) -> str:

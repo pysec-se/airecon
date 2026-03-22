@@ -171,6 +171,7 @@ class AgentState:
         confidence: float = 0.70,
         artifact: str | None = None,
         tags: list[str] | None = None,
+        severity: int = 1,
     ) -> bool:
         """Record deduplicated evidence from real tool output.
 
@@ -223,6 +224,7 @@ class AgentState:
                 "source_tool": source_tool,
                 "summary": clean_summary[:600],
                 "confidence": max(0.0, min(float(confidence), 1.0)),
+                "severity": max(1, min(int(severity), 5)),
                 "artifact": artifact,
                 "tags": tags,
                 "iteration": self.iteration,
@@ -330,7 +332,11 @@ class AgentState:
                 summary = ev.get("summary", "")
                 artifact = ev.get("artifact")
                 artifact_note = f" [{artifact}]" if artifact else ""
-                lines.append(f"- [{src}] {summary}{artifact_note}")
+                sev = int(ev.get("severity", 1))
+                sev_label = {5: "CRITICAL", 4: "HIGH", 3: "MEDIUM", 2: "LOW", 1: "INFO"}.get(sev, "INFO")
+                owasp_tags = [t for t in ev.get("tags", []) if t.startswith("owasp:")]
+                owasp_note = f" {','.join(owasp_tags)}" if owasp_tags else ""
+                lines.append(f"- [{src}][{sev_label}]{owasp_note} {summary}{artifact_note}")
 
         lines.append(
             "MANDATORY: pick one pending objective OR run one high-value novel hypothesis, then call the best next tool now."
