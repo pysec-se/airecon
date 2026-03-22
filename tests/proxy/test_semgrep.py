@@ -59,9 +59,11 @@ def test_build_semgrep_command_with_languages():
 def test_build_semgrep_command_max_findings_affects_head():
     cmd50 = build_semgrep_command("/workspace", max_findings=50)
     cmd200 = build_semgrep_command("/workspace", max_findings=200)
-    # head -c limit should differ
-    assert "250000" in cmd50   # 50 * 5000
-    assert "1000000" in cmd200  # 200 * 5000
+    # --max-findings flag must carry the count; head -c is not used
+    assert "--max-findings 50" in cmd50
+    assert "--max-findings 200" in cmd200
+    assert "head -c" not in cmd50
+    assert "head -c" not in cmd200
 
 
 def test_build_semgrep_command_has_safety_flags():

@@ -15,6 +15,7 @@ from urllib.parse import urlparse
 from ..browser import browser_action
 from ..config import get_config, get_workspace_root
 from ..filesystem import create_file, list_files, read_file
+from ..fuzzer import FUZZ_PAYLOADS as _FUZZ_PAYLOAD_KEYS
 from ..reporting import create_vulnerability_report
 from ..web_search import web_search
 from .command_parse import extract_primary_binary
@@ -640,17 +641,12 @@ class _ExecutorMixin:
         target = arguments.get("target", "")
         params = arguments.get("parameters", [])
         method = arguments.get("method", "GET")
-        vuln_types = arguments.get("vuln_types",
-                                   ["sql_injection",
-                                    "xss",
-                                    "idor",
-                                    "ssti",
-                                    "command_injection",
-                                    "path_traversal",
-                                    "xxe",
-                                    "race_condition",
-                                    "parameter_pollution",
-                                    "mass_assignment"])
+        _valid_vuln_types = set(_FUZZ_PAYLOAD_KEYS.keys())
+        _raw_vuln_types = arguments.get("vuln_types")
+        if _raw_vuln_types and isinstance(_raw_vuln_types, list):
+            vuln_types = [v for v in _raw_vuln_types if isinstance(v, str) and v in _valid_vuln_types] or list(_valid_vuln_types)
+        else:
+            vuln_types = list(_valid_vuln_types)
 
         try:
             fuzzer = Fuzzer(target=target, method=method, headers=self._build_fuzz_headers())
@@ -1117,7 +1113,14 @@ class _ExecutorMixin:
             port = int(_port_raw) if _port_raw is not None else (443 if is_tls else 80)
         except (TypeError, ValueError):
             port = 443 if is_tls else 80
-        payloads = arguments.get("payloads", [])
+        raw_payloads = arguments.get("payloads", [])
+        if not isinstance(raw_payloads, list):
+            return False, 0.0, {"success": False, "error": "payloads must be a list of strings"}, None
+        payloads = [str(p) for p in raw_payloads if isinstance(p, (str, int, float)) and str(p).strip()]
+        if not payloads:
+            return False, 0.0, {"success": False, "error": "payloads list is empty or contains no valid string items"}, None
+        if len(payloads) > 10_000:
+            return False, 0.0, {"success": False, "error": f"payloads list too large ({len(payloads)}); max 10,000 items"}, None
         workers = min(int(arguments.get("workers", 10)), 50)
 
         # Calculate §FUZZ§ placeholders BEFORE stripping markers.

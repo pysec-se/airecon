@@ -91,13 +91,13 @@ class TestBuildSemgrepCommand:
         assert "--lang python" in cmd
 
     def test_with_max_findings(self):
-        """Command should handle max_findings parameter."""
+        """Command should handle max_findings parameter via --max-findings flag."""
         cmd = semgrep.build_semgrep_command(
             "/workspace/src",
             max_findings=50
         )
-        # The command contains head with max_findings * 5000
-        assert "head -c 250000" in cmd  # 50 * 5000
+        assert "--max-findings 50" in cmd
+        assert "head -c" not in cmd
 
     def test_no_git_ignore_flag(self):
         """Command should include --no-git-ignore flag."""

@@ -43,6 +43,7 @@ def build_semgrep_command(
     Returns:
         Full command string to run inside the Docker sandbox.
     """
+    max_findings = max(1, min(int(max_findings), 1000))
     rule_sets = rules or get_default_rules()
     rule_args = " ".join(f"--config {r}" for r in rule_sets)
 
@@ -54,8 +55,8 @@ def build_semgrep_command(
         f"semgrep {rule_args} {lang_arg} "
         f"--json --no-git-ignore --max-target-bytes 1000000 "
         f"--timeout 120 --max-memory 2048 "
-        f"--metrics off "
-        f"{target_path} 2>/dev/null | head -c {int(max_findings) * 5000}"
+        f"--metrics off --max-findings {int(max_findings)} "
+        f"{target_path} 2>/dev/null"
     )
 
 

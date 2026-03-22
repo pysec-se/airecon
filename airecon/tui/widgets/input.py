@@ -13,7 +13,7 @@ from textual.widgets import Label, ListItem, ListView, TextArea
 logger = logging.getLogger("airecon.tui.input")
 
 # Master list of slash commands — keep in sync with _handle_slash_command() in app.py
-_SLASH_COMMANDS: list[tuple[str, str]] = [
+_SLASH_COMMANDS: tuple[tuple[str, str], ...] = (
     ("/help",   "Show help and available commands"),
     ("/info",   "Show AIRecon information and key bindings"),
     ("/status", "Check Ollama / Docker service status"),
@@ -21,7 +21,7 @@ _SLASH_COMMANDS: list[tuple[str, str]] = [
     ("/skills", "Browse AI skill knowledge base"),
     ("/reset",  "Reset conversation context"),
     ("/clear",  "Clear the chat display"),
-]
+)
 
 
 class SlashCompleter(Widget):

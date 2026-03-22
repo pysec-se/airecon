@@ -695,7 +695,8 @@ class ExpertHeuristics:
                 elif any(t in payload for t in ["{{", "${", "<%= ", "#{"]):
                     result["vuln_type"] = "ssti"
 
-        # 2. Time-based anomaly (requires fuzz to be 3x slower + absolute >3s)
+        # 2. Time-based anomaly
+        # Relative check: fuzz is 3x slower than baseline AND absolute >3s
         if (
             baseline_time_ms > 0
             and fuzz_time_ms > baseline_time_ms * 3
@@ -704,6 +705,14 @@ class ExpertHeuristics:
             confidence += 0.65
             evidence.append(
                 f"Time anomaly: baseline={baseline_time_ms:.0f}ms fuzz={fuzz_time_ms:.0f}ms"
+            )
+            result["vuln_type"] = f"time_based_{vuln_type}"
+        # Absolute fallback: when baseline fetch failed (baseline_time_ms==0),
+        # still flag extremely slow responses as suspicious.
+        elif baseline_time_ms == 0 and fuzz_time_ms > 5000:
+            confidence += 0.40  # lower confidence — no baseline comparison available
+            evidence.append(
+                f"Time anomaly (no baseline): fuzz={fuzz_time_ms:.0f}ms exceeded 5s absolute threshold"
             )
             result["vuln_type"] = f"time_based_{vuln_type}"
 

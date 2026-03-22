@@ -171,6 +171,7 @@ class AgentState:
         confidence: float = 0.70,
         artifact: str | None = None,
         tags: list[str] | None = None,
+        severity: int = 1,
     ) -> bool:
         """Record deduplicated evidence from real tool output.
 
@@ -223,6 +224,7 @@ class AgentState:
                 "source_tool": source_tool,
                 "summary": clean_summary[:600],
                 "confidence": max(0.0, min(float(confidence), 1.0)),
+                "severity": max(1, min(int(severity), 5)),
                 "artifact": artifact,
                 "tags": tags,
                 "iteration": self.iteration,
@@ -304,7 +306,11 @@ class AgentState:
         max_objectives: int = 4,
         max_evidence: int = 6,
     ) -> str:
-        """Create objective+evidence context to keep the LLM execution-focused."""
+        """Create objective+evidence context to keep the LLM execution-focused.
+
+        Output uses semantic XML delimiters so LLMs parse structure reliably.
+        Prefix is '<objective_focus' for ephemeral-message filtering.
+        """
         phase_key = phase.upper()
 
         pending, completed, evidence = self.get_phase_context(
@@ -314,28 +320,161 @@ class AgentState:
         if not pending and not evidence and not completed:
             return ""
 
-        lines = [f"[SYSTEM: OBJECTIVE FOCUS — PHASE {phase_key}]"]
+        lines = [f'<objective_focus phase="{phase_key}">']
         if pending:
-            lines.append("Pending objectives:")
+            lines.append("  <pending_objectives>")
             for obj in pending:
-                lines.append(f"- {obj.get('title', '')}")
+                lines.append(f"    - {obj.get('title', '')}")
+            lines.append("  </pending_objectives>")
         if completed:
-            lines.append("Completed objectives:")
+            lines.append("  <completed_objectives>")
             for obj in completed:
-                lines.append(f"- {obj.get('title', '')}")
+                lines.append(f"    - {obj.get('title', '')}")
+            lines.append("  </completed_objectives>")
         if evidence:
-            lines.append("Recent evidence:")
+            lines.append("  <recent_evidence>")
             for ev in evidence:
                 src = ev.get("source_tool", "tool")
                 summary = ev.get("summary", "")
                 artifact = ev.get("artifact")
                 artifact_note = f" [{artifact}]" if artifact else ""
-                lines.append(f"- [{src}] {summary}{artifact_note}")
+                sev = int(ev.get("severity", 1))
+                sev_label = {5: "CRITICAL", 4: "HIGH", 3: "MEDIUM", 2: "LOW", 1: "INFO"}.get(sev, "INFO")
+                owasp_tags = [t for t in ev.get("tags", []) if t.startswith("owasp:")]
+                owasp_note = f" {','.join(owasp_tags)}" if owasp_tags else ""
+                lines.append(f"    - [{src}][{sev_label}]{owasp_note} {summary}{artifact_note}")
+            lines.append("  </recent_evidence>")
 
         lines.append(
-            "MANDATORY: pick one pending objective OR run one high-value novel hypothesis, then call the best next tool now."
+            "  <action_required>Pick one pending objective OR one high-value novel hypothesis."
+            " Call the best next tool NOW — no more planning text.</action_required>"
         )
+        lines.append("</objective_focus>")
         return "\n".join(lines)
+
+    def patch_objectives(self, ops: list[dict[str, Any]]) -> int:
+        """Apply delta patches to objective_queue without full regeneration.
+
+        Supported operations (op field):
+          - "add"    : add new pending objective (title + phase required)
+          - "remove" : remove pending objective matching title+phase
+          - "modify" : rename an objective (new_title required)
+          - "done"   : mark an objective as completed (same as mark_objective)
+          - "reorder": move objective to a new position (after_title)
+
+        Returns the number of changes applied.
+        """
+        changed = 0
+        now = datetime.now(timezone.utc).isoformat()
+
+        for op in ops:
+            op_type = op.get("op", "").lower()
+            title = str(op.get("title", "")).strip()
+            phase = str(op.get("phase", "")).strip().upper()
+
+            if op_type == "add":
+                if not title:
+                    continue
+                # Skip duplicate: check only within the target phase.
+                # Using "phase or RECON" resolves the effective phase first so
+                # the check is never accidentally cross-phase.
+                _effective_phase = phase or "RECON"
+                existing_titles = {
+                    str(o.get("title", "")).strip().lower()
+                    for o in self.objective_queue
+                    if str(o.get("phase", "")).upper() == _effective_phase
+                }
+                if title.lower() in existing_titles:
+                    continue
+                new_obj: dict[str, Any] = {
+                    "phase": _effective_phase,
+                    "title": title,
+                    "status": "pending",
+                    "priority": int(op.get("priority", 50)),
+                    "updated_iteration": self.iteration,
+                    "updated_at": now,
+                }
+                after_title = str(op.get("after_title", "")).strip().lower()
+                if after_title:
+                    idx = next(
+                        (
+                            i for i, o in enumerate(self.objective_queue)
+                            if str(o.get("title", "")).strip().lower() == after_title
+                        ),
+                        -1,
+                    )
+                    if idx >= 0:
+                        self.objective_queue.insert(idx + 1, new_obj)
+                    else:
+                        self.objective_queue.append(new_obj)
+                else:
+                    self.objective_queue.append(new_obj)
+                changed += 1
+
+            elif op_type == "remove":
+                before = len(self.objective_queue)
+                self.objective_queue = [
+                    o for o in self.objective_queue
+                    if not (
+                        str(o.get("title", "")).strip().lower() == title.lower()
+                        and (not phase or str(o.get("phase", "")).upper() == phase)
+                        and str(o.get("status", "pending")).lower() != "done"
+                    )
+                ]
+                changed += before - len(self.objective_queue)
+
+            elif op_type == "modify":
+                new_title = str(op.get("new_title", "")).strip()
+                for obj in self.objective_queue:
+                    if (
+                        str(obj.get("title", "")).strip().lower() == title.lower()
+                        and (not phase or str(obj.get("phase", "")).upper() == phase)
+                    ):
+                        if new_title:
+                            obj["title"] = new_title
+                        if "priority" in op:
+                            obj["priority"] = int(op["priority"])
+                        obj["updated_iteration"] = self.iteration
+                        obj["updated_at"] = now
+                        changed += 1
+                        break
+
+            elif op_type == "done":
+                self.mark_objective(
+                    phase or "RECON", title, status="done", note=op.get("note")
+                )
+                changed += 1
+
+            elif op_type == "reorder":
+                # Move matching objective to after another objective
+                obj = next(
+                    (
+                        o for o in self.objective_queue
+                        if str(o.get("title", "")).strip().lower() == title.lower()
+                        and (not phase or str(o.get("phase", "")).upper() == phase)
+                    ),
+                    None,
+                )
+                if obj:
+                    self.objective_queue.remove(obj)
+                    after_title = str(op.get("after_title", "")).strip().lower()
+                    if after_title:
+                        idx = next(
+                            (
+                                i for i, o in enumerate(self.objective_queue)
+                                if str(o.get("title", "")).strip().lower() == after_title
+                            ),
+                            -1,
+                        )
+                        self.objective_queue.insert(idx + 1 if idx >= 0 else 0, obj)
+                    else:
+                        self.objective_queue.insert(0, obj)
+                    changed += 1
+
+        if len(self.objective_queue) > MAX_OBJECTIVES:
+            self.objective_queue = self.objective_queue[-MAX_OBJECTIVES:]
+
+        return changed
 
     def is_approaching_limit(self) -> bool:
         return self.iteration >= (self.max_iterations - 3)
@@ -356,10 +495,13 @@ class AgentState:
             "[SYSTEM: MANDATORY PLANNING",
             "[SYSTEM: PREVIOUS SESSION DATA",
             "[SYSTEM: CRITICAL FINDINGS",
-            "[SYSTEM: OBJECTIVE FOCUS",
+            "[SYSTEM: OBJECTIVE FOCUS",  # legacy prefix
+            "<objective_focus",           # XML format (current)
             "[SYSTEM: PHASE GATE",
             "[SYSTEM: AGGRESSIVE EXPLORATION",
             "[SYSTEM: QUALITY SCOREBOARD",
+            "<reflector ",                # XML reflector messages
+            "<mentor_analysis>",          # XML mentor messages
         )
         # These prefixes carry recovery/orientation state that must survive
         # across truncations — never collapse them to a single message.

@@ -9,7 +9,7 @@ import os
 from dataclasses import dataclass
 from pathlib import Path
 
-logger = logging.getLogger(__name__)
+logger = logging.getLogger("airecon.proxy.config")
 
 APP_DIR_NAME = ".airecon"
 CONFIG_FILENAME = "config.json"

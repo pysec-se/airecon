@@ -307,3 +307,321 @@ def test_sync_token_usage_from_session_keeps_cumulative_resets_used(agent_loop):
     assert agent_loop.state.token_usage["used"] == 0
     assert agent_loop.state.token_usage["last_prompt"] == 0
     assert agent_loop.state.token_usage["last_completion"] == 0
+
+
+# ---------------------------------------------------------------------------
+# _has_scan_work — guard against empty session persistence
+# ---------------------------------------------------------------------------
+
+class TestHasScanWork:
+    """Verify that _has_scan_work() correctly identifies sessions with real work."""
+
+    def test_no_session_returns_false(self, agent_loop):
+        agent_loop._session = None
+        assert agent_loop._has_scan_work() is False
+
+    def test_empty_session_returns_false(self, agent_loop):
+        agent_loop._session = SessionData(target="test.com")
+        agent_loop.state.evidence_log = []
+        # scan_count = 0, evidence_log = [] → no work
+        assert agent_loop._has_scan_work() is False
+
+    def test_scan_count_gt0_returns_true(self, agent_loop):
+        agent_loop._session = SessionData(target="test.com")
+        agent_loop._session.scan_count = 1
+        agent_loop.state.evidence_log = []
+        assert agent_loop._has_scan_work() is True
+
+    def test_evidence_log_returns_true(self, agent_loop):
+        agent_loop._session = SessionData(target="test.com")
+        agent_loop._session.scan_count = 0
+        agent_loop.state.evidence_log = [{"summary": "port 80 open", "confidence": 0.9}]
+        assert agent_loop._has_scan_work() is True
+
+    def test_both_scan_count_and_evidence_returns_true(self, agent_loop):
+        agent_loop._session = SessionData(target="test.com")
+        agent_loop._session.scan_count = 3
+        agent_loop.state.evidence_log = [{"summary": "sqli found", "confidence": 0.8}]
+        assert agent_loop._has_scan_work() is True
+
+
+# ---------------------------------------------------------------------------
+# Feature 1: Reflector Agent Pattern
+# ---------------------------------------------------------------------------
+
+class TestReflectorAgentPattern:
+    """_build_reflector_message generates targeted XML-structured corrections."""
+
+    def test_reflector_attempt1_contains_issue_tag(self, agent_loop):
+        from airecon.proxy.agent.pipeline import PipelinePhase
+        msg = agent_loop._build_reflector_message("", attempt=1, phase=PipelinePhase.RECON)
+        assert "<reflector " in msg
+        assert "<issue>" in msg
+        assert "<required_action>" in msg
+        assert 'attempt="1"' in msg
+
+    def test_reflector_attempt2_stronger_warning(self, agent_loop):
+        from airecon.proxy.agent.pipeline import PipelinePhase
+        msg = agent_loop._build_reflector_message("scan port", attempt=2, phase=PipelinePhase.RECON)
+        assert 'attempt="2"' in msg
+        assert "REFLECTOR" in msg
+
+    def test_reflector_infers_known_tool_from_registry(self, agent_loop):
+        # Inject a mock tool registry so _reflector_infer_tool_hint can detect it
+        agent_loop._tools_ollama = [
+            {"function": {"name": "execute"}},
+            {"function": {"name": "browser_action"}},
+        ]
+        hint = agent_loop._reflector_infer_tool_hint("I will use browser_action to visit the page")
+        assert "browser_action" in hint
+
+    def test_reflector_fallback_when_no_match(self, agent_loop):
+        agent_loop._tools_ollama = [{"function": {"name": "execute"}}]
+        hint = agent_loop._reflector_infer_tool_hint("I will analyze the results carefully")
+        # No known tool mentioned → generic fallback
+        assert "execute" in hint or "<command>" in hint
+
+    def test_reflector_fallback_when_no_registry(self, agent_loop):
+        agent_loop._tools_ollama = []
+        hint = agent_loop._reflector_infer_tool_hint("I will do something")
+        assert hint == 'execute({"command": "<command>"})'
+
+    def test_reflector_has_escalation_warning(self, agent_loop):
+        from airecon.proxy.agent.pipeline import PipelinePhase
+        msg = agent_loop._build_reflector_message("", attempt=1, phase=PipelinePhase.EXPLOIT)
+        assert "<escalation_warning>" in msg
+
+    def test_reflector_phase_in_tag(self, agent_loop):
+        from airecon.proxy.agent.pipeline import PipelinePhase
+        msg = agent_loop._build_reflector_message("", attempt=1, phase=PipelinePhase.ANALYSIS)
+        assert 'phase="ANALYSIS"' in msg
+
+    def test_reflector_uses_no_tool_iterations_as_attempt(self, agent_loop):
+        # Reflector uses _no_tool_iterations directly — no separate counter
+        from airecon.proxy.agent.pipeline import PipelinePhase
+        agent_loop._no_tool_iterations = 2
+        msg = agent_loop._build_reflector_message("", attempt=2, phase=PipelinePhase.RECON)
+        assert 'attempt="2"' in msg
+
+
+# ---------------------------------------------------------------------------
+# Feature 2: Objective Patching
+# ---------------------------------------------------------------------------
+
+class TestObjectivePatching:
+    """patch_objectives() applies delta ops to objective_queue."""
+
+    def _make_state(self):
+        from airecon.proxy.agent.models import AgentState
+        state = AgentState()
+        state.objective_queue = [
+            {"phase": "RECON", "title": "Subdomain enumeration", "status": "pending", "priority": 80},
+            {"phase": "RECON", "title": "Port scan live hosts", "status": "pending", "priority": 70},
+            {"phase": "ANALYSIS", "title": "Prioritize injection points", "status": "pending", "priority": 60},
+        ]
+        return state
+
+    def test_add_new_objective(self):
+        state = self._make_state()
+        changed = state.patch_objectives([
+            {"op": "add", "phase": "RECON", "title": "Certificate transparency scan"}
+        ])
+        assert changed == 1
+        titles = [o["title"] for o in state.objective_queue]
+        assert "Certificate transparency scan" in titles
+
+    def test_add_duplicate_skipped(self):
+        state = self._make_state()
+        changed = state.patch_objectives([
+            {"op": "add", "phase": "RECON", "title": "Subdomain enumeration"}
+        ])
+        assert changed == 0
+        assert sum(1 for o in state.objective_queue if o["title"] == "Subdomain enumeration") == 1
+
+    def test_remove_pending_objective(self):
+        state = self._make_state()
+        changed = state.patch_objectives([
+            {"op": "remove", "phase": "RECON", "title": "Port scan live hosts"}
+        ])
+        assert changed == 1
+        titles = [o["title"] for o in state.objective_queue]
+        assert "Port scan live hosts" not in titles
+
+    def test_remove_done_objective_skipped(self):
+        state = self._make_state()
+        state.objective_queue[0]["status"] = "done"
+        changed = state.patch_objectives([
+            {"op": "remove", "phase": "RECON", "title": "Subdomain enumeration"}
+        ])
+        assert changed == 0
+
+    def test_modify_renames_title(self):
+        state = self._make_state()
+        changed = state.patch_objectives([
+            {"op": "modify", "phase": "RECON", "title": "Port scan live hosts",
+             "new_title": "Full port scan with service detection"}
+        ])
+        assert changed == 1
+        titles = [o["title"] for o in state.objective_queue]
+        assert "Full port scan with service detection" in titles
+        assert "Port scan live hosts" not in titles
+
+    def test_done_marks_objective_complete(self):
+        state = self._make_state()
+        changed = state.patch_objectives([
+            {"op": "done", "phase": "RECON", "title": "Subdomain enumeration"}
+        ])
+        assert changed == 1
+        obj = next(o for o in state.objective_queue if o["title"] == "Subdomain enumeration")
+        assert obj["status"] == "done"
+
+    def test_reorder_moves_objective(self):
+        state = self._make_state()
+        # Move "Port scan live hosts" to after "Prioritize injection points"
+        changed = state.patch_objectives([
+            {"op": "reorder", "phase": "RECON", "title": "Port scan live hosts",
+             "after_title": "Prioritize injection points"}
+        ])
+        assert changed == 1
+        titles = [o["title"] for o in state.objective_queue]
+        idx_moved = titles.index("Port scan live hosts")
+        idx_anchor = titles.index("Prioritize injection points")
+        assert idx_moved == idx_anchor + 1
+
+    def test_multiple_ops_in_one_call(self):
+        state = self._make_state()
+        changed = state.patch_objectives([
+            {"op": "add", "phase": "RECON", "title": "New obj A"},
+            {"op": "done", "phase": "RECON", "title": "Subdomain enumeration"},
+            {"op": "remove", "phase": "ANALYSIS", "title": "Prioritize injection points"},
+        ])
+        assert changed == 3
+
+    def test_empty_ops_returns_zero(self):
+        state = self._make_state()
+        assert state.patch_objectives([]) == 0
+
+
+# ---------------------------------------------------------------------------
+# Feature 3: XML build_focus_context
+# ---------------------------------------------------------------------------
+
+class TestXMLFocusContext:
+    """build_focus_context() now emits semantic XML."""
+
+    def _make_state_with_data(self):
+        from airecon.proxy.agent.models import AgentState
+        state = AgentState()
+        state.objective_queue = [
+            {"phase": "RECON", "title": "Scan subdomains", "status": "pending", "priority": 80},
+        ]
+        state.evidence_log = [
+            {
+                "phase": "RECON", "source_tool": "nmap", "summary": "Port 443 open",
+                "confidence": 0.9, "severity": 2, "artifact": None, "tags": [],
+                "iteration": 1, "created_at": "2026-01-01T00:00:00+00:00",
+            }
+        ]
+        return state
+
+    def test_output_starts_with_objective_focus_xml(self):
+        state = self._make_state_with_data()
+        ctx = state.build_focus_context("RECON")
+        assert ctx.startswith("<objective_focus")
+
+    def test_output_ends_with_closing_tag(self):
+        state = self._make_state_with_data()
+        ctx = state.build_focus_context("RECON")
+        assert "</objective_focus>" in ctx
+
+    def test_phase_attribute_in_tag(self):
+        state = self._make_state_with_data()
+        ctx = state.build_focus_context("RECON")
+        assert 'phase="RECON"' in ctx
+
+    def test_pending_objectives_section(self):
+        state = self._make_state_with_data()
+        ctx = state.build_focus_context("RECON")
+        assert "<pending_objectives>" in ctx
+        assert "Scan subdomains" in ctx
+
+    def test_recent_evidence_section(self):
+        state = self._make_state_with_data()
+        ctx = state.build_focus_context("RECON")
+        assert "<recent_evidence>" in ctx
+        assert "Port 443 open" in ctx
+
+    def test_action_required_section(self):
+        state = self._make_state_with_data()
+        ctx = state.build_focus_context("RECON")
+        assert "<action_required>" in ctx
+
+    def test_empty_state_returns_empty_string(self):
+        from airecon.proxy.agent.models import AgentState
+        state = AgentState()
+        assert state.build_focus_context("RECON") == ""
+
+
+# ---------------------------------------------------------------------------
+# Feature 4: Mentor Supervision
+# ---------------------------------------------------------------------------
+
+class TestMentorSupervision:
+    """_build_mentor_analysis() generates targeted post-tool XML analysis."""
+
+    def test_mentor_output_is_xml(self, agent_loop):
+        from airecon.proxy.agent.pipeline import PipelinePhase
+        agent_loop.state.evidence_log = [
+            {"phase": "ANALYSIS", "source_tool": "sqlmap", "summary": "SQLi in login",
+             "confidence": 0.9, "severity": 5, "artifact": None, "tags": [], "iteration": 1,
+             "created_at": "2026-01-01T00:00:00+00:00"}
+        ]
+        msg = agent_loop._build_mentor_analysis(
+            current_phase=PipelinePhase.ANALYSIS,
+            tool_name="sqlmap",
+            evidence_added=True,
+        )
+        assert "<mentor_analysis" in msg
+        assert "</mentor_analysis>" in msg
+
+    def test_mentor_has_progress_assessment(self, agent_loop):
+        from airecon.proxy.agent.pipeline import PipelinePhase
+        agent_loop.state.evidence_log = [
+            {"phase": "ANALYSIS", "source_tool": "nmap", "summary": "Port open",
+             "confidence": 0.8, "severity": 2, "artifact": None, "tags": [], "iteration": 1,
+             "created_at": "2026-01-01T00:00:00+00:00"}
+        ]
+        msg = agent_loop._build_mentor_analysis(
+            current_phase=PipelinePhase.ANALYSIS,
+            tool_name="nmap",
+            evidence_added=True,
+        )
+        assert "<progress_assessment>" in msg
+
+    def test_mentor_has_next_steps(self, agent_loop):
+        from airecon.proxy.agent.pipeline import PipelinePhase
+        agent_loop.state.evidence_log = []
+        agent_loop.state.objective_queue = [
+            {"phase": "ANALYSIS", "title": "Test for SQLi", "status": "pending", "priority": 80}
+        ]
+        msg = agent_loop._build_mentor_analysis(
+            current_phase=PipelinePhase.ANALYSIS,
+            tool_name="httpx",
+            evidence_added=False,
+        )
+        assert "<next_steps>" in msg
+        assert "Test for SQLi" in msg
+
+    def test_mentor_no_evidence_shows_issue(self, agent_loop):
+        from airecon.proxy.agent.pipeline import PipelinePhase
+        agent_loop.state.evidence_log = []
+        msg = agent_loop._build_mentor_analysis(
+            current_phase=PipelinePhase.EXPLOIT,
+            tool_name="sqlmap",
+            evidence_added=False,
+        )
+        assert "<identified_issues>" in msg
+
+    def test_mentor_tool_call_count_starts_zero(self, agent_loop):
+        # Starts at 0, incremented per-tool (inside tool loop) not per-iteration
+        assert agent_loop._mentor_tool_call_count == 0
