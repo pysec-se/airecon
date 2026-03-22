@@ -20,6 +20,7 @@ from pathlib import Path
 from typing import Any, Iterable, TypeVar
 from urllib.parse import parse_qsl, urlencode, urlparse, urlunparse
 
+from .models import jaccard_similarity
 from .output_parser import ParsedOutput
 
 logger = logging.getLogger("airecon.agent.session")
@@ -379,17 +380,8 @@ def _calculate_similarity(v1: str, v2: str) -> float:
         if p1 and p2 and p1 != p2:
             return 0.0  # Different targeted parameters = NOT duplicate
 
-    # Check for common words
-    words1 = set(v1_lower.split())
-    words2 = set(v2_lower.split())
-
-    if not words1 or not words2:
-        return 0.0
-
-    intersection = words1 & words2
-    union = words1 | words2
-
-    return len(intersection) / len(union)
+    # Token-overlap (Jaccard) similarity — shared with evidence dedup in models.py
+    return jaccard_similarity(v1_lower, v2_lower)
 
 
 def _is_duplicate_vulnerability(

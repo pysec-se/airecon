@@ -44,9 +44,21 @@ _NEG_PREFIX_RE = re.compile(
 # ---------------------------------------------------------------------------
 
 def _load_rules() -> list[dict[str, Any]]:
-    with _DATA_FILE.open(encoding="utf-8") as f:
-        data = json.load(f)
-    return data["rules"]
+    import logging as _log
+    try:
+        with _DATA_FILE.open(encoding="utf-8") as f:
+            data = json.load(f)
+        return data["rules"]
+    except FileNotFoundError:
+        _log.getLogger("airecon.owasp").error(
+            "owasp_rules.json not found at %s — OWASP classification disabled", _DATA_FILE
+        )
+        return []
+    except (KeyError, json.JSONDecodeError) as e:
+        _log.getLogger("airecon.owasp").error(
+            "Failed to parse owasp_rules.json: %s — OWASP classification disabled", e
+        )
+        return []
 
 
 _RAW_RULES: list[dict[str, Any]] = _load_rules()

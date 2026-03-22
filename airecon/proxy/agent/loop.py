@@ -57,8 +57,14 @@ except (OSError, json.JSONDecodeError) as _e:
     warnings.warn(f"tools_meta.json unavailable ({_e}); tool catalog features disabled.")
     _TOOLS_META = {}
 
+_ab_signals_path = Path(__file__).parent.parent / "data" / "ab_signals.json"
+try:
+    with open(_ab_signals_path, "r") as f:
+        _AB_SIGNALS_DATA = json.load(f)
+except (OSError, json.JSONDecodeError) as _e:
+    warnings.warn(f"ab_signals.json unavailable ({_e}); A→B signal method disabled.")
+    _AB_SIGNALS_DATA = {"signals": [], "min_severity": 3}
 
-# from ..correlation import run_correlation
 
 logger = logging.getLogger("airecon.agent")
 
@@ -2112,6 +2118,17 @@ class AgentLoop(_ValidatorMixin, _FormatterMixin,
                 _has_task_complete = "[TASK_COMPLETE]" in content_acc
                 content_acc = content_acc.replace(
                     "[TASK_COMPLETE]", "").strip()
+
+                # --- OBJECTIVE PATCHING ---
+                # Strip <objective_patch> block from content before storing in
+                # conversation history (keep history clean), then apply ops.
+                if "<objective_patch" in content_acc:
+                    _patch_count = self._apply_objective_patch(
+                        content_acc, current_phase
+                    )
+                    content_acc = self._OBJECTIVE_PATCH_RE.sub(
+                        "", content_acc
+                    ).strip()
 
                 self.state.add_message(
                     "assistant", content_acc, tool_calls_acc, thinking_acc
@@ -4304,6 +4321,49 @@ class AgentLoop(_ValidatorMixin, _FormatterMixin,
                     return f"{name}({{...}})"
         return 'execute({"command": "<command>"})'
 
+    _OBJECTIVE_PATCH_RE = re.compile(
+        r"<objective_patch[^>]*>(.*?)</objective_patch>",
+        re.DOTALL | re.IGNORECASE,
+    )
+
+    def _apply_objective_patch(
+        self, content: str, current_phase: "PipelinePhase"
+    ) -> int:
+        """Parse <objective_patch>[...]</objective_patch> from LLM response text
+        and apply delta ops to objective_queue via patch_objectives().
+
+        The LLM emits this block to add, remove, modify, or reorder objectives
+        mid-session without triggering a full regeneration.  The block is parsed
+        and stripped from content *before* add_message() so conversation history
+        stays clean.
+
+        Returns the number of changes applied (0 if no valid block found).
+        """
+        match = self._OBJECTIVE_PATCH_RE.search(content)
+        if not match:
+            return 0
+        raw = match.group(1).strip()
+        try:
+            ops = json.loads(raw)
+        except (json.JSONDecodeError, ValueError) as e:
+            logger.debug("objective_patch JSON parse error: %s", e)
+            return 0
+        if not isinstance(ops, list):
+            ops = [ops]
+        # Default phase to current if the LLM omitted it
+        for op in ops:
+            if isinstance(op, dict) and not op.get("phase"):
+                op["phase"] = current_phase.value
+        changed = self.state.patch_objectives(ops)
+        if changed:
+            logger.info(
+                "Objective patch applied: %d change(s) (phase=%s)",
+                changed,
+                current_phase.value,
+            )
+        return changed
+
+
     def _build_reflector_message(
         self,
         content_acc: str,
@@ -4350,6 +4410,27 @@ class AgentLoop(_ValidatorMixin, _FormatterMixin,
             f"</reflector>"
         )
 
+    def _get_ab_signals(self, evidence_summary: str) -> dict[str, Any] | None:
+        """Return the first matching A→B signal entry dict for the given finding.
+
+        Loads signal rules from data/ab_signals.json at runtime — never
+        hardcoded in Python.  Checks all keywords (any-match, case-insensitive)
+        then suppresses false positives via negative_keywords.
+        Returns the full entry dict so callers can render test_vectors,
+        chain_with, kill_conditions, and apply objective_patches.
+        Only the first match fires to avoid flooding the mentor block.
+        """
+        summary_lower = evidence_summary.lower()
+        for entry in _AB_SIGNALS_DATA.get("signals", []):
+            if not any(kw in summary_lower for kw in entry.get("keywords", [])):
+                continue
+            # Suppress if any negative keyword is present
+            if any(nkw in summary_lower for nkw in entry.get("negative_keywords", [])):
+                continue
+            return entry
+        return None
+
+
     def _build_mentor_analysis(
         self,
         current_phase: PipelinePhase,
@@ -4362,6 +4443,7 @@ class AgentLoop(_ValidatorMixin, _FormatterMixin,
         best next action. Rule-based (no extra LLM call) — derived from the
         current evidence log and pending objectives.
         Inspired by PentAGI's Mentor Supervision system.
+        A→B Signal Method inspired by shuvonsec/claude-bug-bounty Rule #11.
         """
         phase_str = current_phase.value
         pending, _, recent_evidence = self.state.get_phase_context(
@@ -4409,11 +4491,61 @@ class AgentLoop(_ValidatorMixin, _FormatterMixin,
         elif high_sev == 0 and phase_str.upper() in ("ANALYSIS", "EXPLOIT"):
             issues = "No HIGH/CRITICAL findings yet — increase test depth or pivot attack vector."
 
+        # A→B Signal: look up follow-up tests based on the latest finding type.
+        # Only fire when severity >= min_severity to avoid noise on low-value evidence.
+        ab_signal: dict[str, Any] | None = None
+        if recent_evidence:
+            last_ev = recent_evidence[0]
+            last_sev = int(last_ev.get("severity", 1))
+            _min_sev = int(_AB_SIGNALS_DATA.get("min_severity", 3))
+            if last_sev >= _min_sev:
+                ab_signal = self._get_ab_signals(last_ev.get("summary", ""))
+                # Auto-apply objective patches immediately when signal fires
+                if ab_signal and ab_signal.get("objective_patches"):
+                    # Inject current phase as default for add ops that omit it;
+                    # copy each dict to avoid mutating the shared JSON-loaded object.
+                    _patches = [
+                        dict(_p, phase=phase_str)
+                        if _p.get("op") == "add" and not _p.get("phase")
+                        else _p
+                        for _p in ab_signal["objective_patches"]
+                    ]
+                    self.state.patch_objectives(_patches)
+
+
         lines = [f"<mentor_analysis phase=\"{phase_str}\" tool=\"{tool_name}\">"]
         lines.append(f"  <progress_assessment>{progress}{(' ' + latest_summary) if latest_summary else ''}</progress_assessment>")
         if issues:
             lines.append(f"  <identified_issues>{issues}</identified_issues>")
         lines.append(f"  <next_steps>{next_steps}</next_steps>")
+        if ab_signal:
+            signal_id = ab_signal.get("id", "")
+            owasp_id = ab_signal.get("owasp_id", "")
+            signal_attr = f' signal="{signal_id}"' if signal_id else ""
+            owasp_attr = f' owasp="{owasp_id}"' if owasp_id else ""
+            lines.append(f"  <followup_signals{signal_attr}{owasp_attr}>")
+            # Quick-start hints (text)
+            for hint in ab_signal.get("followup", []):
+                lines.append(f"    <hint>{hint}</hint>")
+            # Structured test vectors (label + payload)
+            if ab_signal.get("test_vectors"):
+                lines.append("    <test_vectors>")
+                for tv in ab_signal["test_vectors"]:
+                    lbl = tv.get("label", "")
+                    pay = tv.get("payload", "")
+                    lines.append(f'      <vector label="{lbl}">{pay}</vector>')
+                lines.append("    </test_vectors>")
+            # Chain-with: other signal IDs worth testing in parallel
+            if ab_signal.get("chain_with"):
+                chain_str = ", ".join(ab_signal["chain_with"])
+                lines.append(f"    <chain_with>{chain_str}</chain_with>")
+            # Kill conditions: when to stop pursuing this attack class
+            if ab_signal.get("kill_conditions"):
+                lines.append("    <kill_conditions>")
+                for kc in ab_signal["kill_conditions"]:
+                    lines.append(f"      <condition>{kc}</condition>")
+                lines.append("    </kill_conditions>")
+            lines.append("  </followup_signals>")
         lines.append("</mentor_analysis>")
         return "\n".join(lines)
 
