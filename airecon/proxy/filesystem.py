@@ -182,7 +182,11 @@ def list_files(path: str = "") -> dict[str, Any]:
                     "error": f"Path is not a directory: {path}"}
 
         lines_output: list[str] = []
-        display_root = f"workspace/{clean_path}" if clean_path else "workspace/"
+        try:
+            rel = base_dir.relative_to(workspace_root)
+            display_root = f"workspace/{rel}" if str(rel) != "." else "workspace/"
+        except ValueError:
+            display_root = "workspace/"
         lines_output.append(f"{display_root}")
 
         _walk_dir(base_dir, workspace_root, lines_output, depth=0, prefix="")
