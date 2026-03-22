@@ -1,5 +1,3 @@
-from __future__ import annotations
-
 """OWASP Web Top 10 (2021) + API Security Top 10 (2023) auto-classifier.
 
 Rules are loaded from proxy/data/owasp_rules.json — edit that file to add or
@@ -20,6 +18,8 @@ Severity scale (1–5):
   2 — Low        (misconfiguration, information disclosure)
   1 — Info       (recon finding, port open, technology fingerprint)
 """
+
+from __future__ import annotations
 
 import json
 import re
@@ -178,7 +178,6 @@ def severity_for_evidence(
     text = summary.lower()
     tag_set = frozenset(t.lower() for t in tags)
     max_sev = 1
-    boosted = False
 
     for _owasp_id, _name, kw_pat, hc_pat, neg_pat, rule_tags, base_sev in _COMPILED:
         # High-confidence match → boost
@@ -186,7 +185,6 @@ def severity_for_evidence(
             candidate = min(5, base_sev + 1)
             if candidate > max_sev:
                 max_sev = candidate
-                boosted = True
             continue
 
         # Regular keyword match with negative filtering
