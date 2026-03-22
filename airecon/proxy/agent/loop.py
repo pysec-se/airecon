@@ -1638,11 +1638,11 @@ class AgentLoop(_ValidatorMixin, _FormatterMixin,
 
                         # Extract token usage from last chunk
                         if _last_chunk_data:
-                            # Ollama returns eval_count (tokens generated) and prompt_eval_count (tokens in prompt)
-                            eval_count = _last_chunk_data.get(
-                                "eval_count", 0)  # tokens generated
-                            prompt_eval_count = _last_chunk_data.get(
-                                "prompt_eval_count", 0)  # tokens in prompt
+                            # Ollama returns eval_count (tokens generated) and prompt_eval_count (tokens in prompt).
+                            # model_dump() includes all Optional fields as None even when absent;
+                            # use `or 0` to guard against None before any arithmetic.
+                            eval_count = _last_chunk_data.get("eval_count") or 0
+                            prompt_eval_count = _last_chunk_data.get("prompt_eval_count") or 0
                             self._record_token_usage(
                                 prompt_tokens=prompt_eval_count,
                                 completion_tokens=eval_count,
