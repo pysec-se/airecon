@@ -12,6 +12,8 @@ from __future__ import annotations
 
 import logging
 import os
+import random
+import re
 from dataclasses import dataclass, field
 from enum import Enum
 from pathlib import Path
@@ -69,6 +71,9 @@ class PhaseConfig:
     objective: str
     recommended_tools: list[str] = field(default_factory=list)
     transition_criteria: list[str] = field(default_factory=list)
+    # Randomly sampled each checkpoint — encourages creative / non-repetitive approaches.
+    # 2 hints are injected into the phase prompt so the LLM tries different angles.
+    exploration_hints: list[str] = field(default_factory=list)
 
 
 # Default phase configurations
@@ -77,8 +82,9 @@ DEFAULT_PHASES: dict[PipelinePhase, PhaseConfig] = {
         phase=PipelinePhase.RECON,
         max_iterations=500,
         objective=(
-            "Enumerate attack surface: subdomains, open ports, directories, technologies, endpoints. "
-            + _LIVE_HOST_HINT
+            "Understand the target deeply — choose the recon approach best suited to this "
+            "specific target. Prioritise breadth initially; pivot to unusual entry points "
+            "if standard paths yield nothing. " + _LIVE_HOST_HINT
         ),
         recommended_tools=[
             "execute", "web_search", "browser_action", "create_file",
@@ -93,11 +99,35 @@ DEFAULT_PHASES: dict[PipelinePhase, PhaseConfig] = {
             "subdomain_depth_met",        # >= pipeline_recon_min_subdomains discovered
             "url_discovery_met",          # >= pipeline_recon_min_urls collected
         ],
+        exploration_hints=[
+            "Passive OSINT before active scanning: crt.sh, Shodan dorks, WHOIS, ASN lookup, reverse-IP",
+            "favicon.ico hash lookup → identify framework and find related assets on Shodan (http.favicon.hash:X)",
+            "JS file analysis finds more endpoints on SPAs than directory brute-force — run linkfinder/subjs",
+            "Check /.git/, /.svn/, /backup.zip, /.env, /dump.sql — exposed VCS or backup artifacts",
+            "WAF/CDN fingerprint first — masscan or nmap on a CDN IP wastes time, identify real origin",
+            "Certificate transparency: crt.sh JSON API or tlsx often finds subdomains brute-force misses",
+            "robots.txt + sitemap.xml explicitly list hidden/admin paths the operator wants hidden",
+            "HTTP response header analysis: Server, X-Powered-By, Via, Set-Cookie — fingerprint full stack",
+            "Try HTTP/2 or HTTP/3 — some endpoints respond differently or expose extra headers under h2",
+            "Cloud storage: enumerate target-name S3/GCS buckets (aws s3 ls s3://target-name-*)",
+            "DNS zone transfer attempt — takes <1 second, occasionally reveals full zone even on production",
+            "Reverse IP lookup: shared hosting exposes sibling virtual hosts on the same IP",
+            "Google/Bing dorks: site:{target} filetype:env OR filetype:sql OR inurl:admin OR intext:apikey",
+            "Wayback Machine CDX API — find historical endpoints no longer in the current sitemap",
+            "DMARC/SPF/DKIM records often leak internal mail servers and infrastructure hostnames",
+            "Probe non-standard ports (8080, 8443, 8888, 9000, 9200, 6379, 27017) before standard port scan",
+            "Check for open directory listing on /uploads/, /files/, /backup/, /static/, /assets/",
+            "TLS certificate SAN fields often contain sibling subdomains not visible via DNS",
+        ],
     ),
     PipelinePhase.ANALYSIS: PhaseConfig(
         phase=PipelinePhase.ANALYSIS,
         max_iterations=300,
-        objective="Analyze attack surface: identify injection points, misconfigurations, code vulnerabilities",
+        objective=(
+            "Identify exploitable weaknesses — go beyond standard injection points. "
+            "Look for logic flaws, misconfigured access controls, trust boundary violations, "
+            "and technology-specific vulnerabilities based on the identified stack."
+        ),
         recommended_tools=[
             "execute", "browser_action", "code_analysis", "web_search",
             "read_file", "create_file",
@@ -107,6 +137,23 @@ DEFAULT_PHASES: dict[PipelinePhase, PhaseConfig] = {
             "urls_collected",             # session.urls is non-empty
             "technologies_identified",    # session.technologies is non-empty
             "injection_points_found",     # session.injection_points is non-empty
+        ],
+        exploration_hints=[
+            "Compare authenticated vs unauthenticated responses — missing access controls often show here",
+            "GraphQL introspection if GraphQL detected — map full schema before testing mutations",
+            "API versioning gaps: if /api/v2 exists, probe /api/v1 and /api/v0 for deprecated endpoints",
+            "Test HTTP method override: X-HTTP-Method-Override: DELETE on read-only endpoints",
+            "Mass assignment: send extra JSON fields (role, admin, is_staff) in POST body",
+            "Error message mining: trigger 400/500 with malformed input to reveal framework/version/paths",
+            "Session token entropy: decode base64 JWTs, check for none-alg, weak secret, or expired tokens",
+            "CORS: does server echo Origin with Access-Control-Allow-Origin: * or reflect arbitrary origins?",
+            "Parameter pollution: supply the same parameter twice — many frameworks use the last/first value",
+            "Check OPTIONS method for allowed verbs — PUT/DELETE on read-only resources is a finding",
+            "Search JS source for hardcoded API keys, tokens, internal URLs, debug flags",
+            "Content-Type confusion: send JSON as form-encoded and vice versa — parser differences matter",
+            "Host header injection: change Host header to internal hostnames or attacker domain",
+            "Cache poisoning indicators: Vary header missing, X-Cache present, user-supplied data in response",
+            "Test second-order issues: input stored now, rendered later — check profile/dashboard pages",
         ],
     ),
     PipelinePhase.EXPLOIT: PhaseConfig(
@@ -393,7 +440,20 @@ class PipelineEngine:
                 met.append("injection_points_found")
 
         elif phase == PipelinePhase.EXPLOIT:
-            if getattr(session, "vulnerabilities", []):
+            vulns = getattr(session, "vulnerabilities", [])
+            # Require a *confirmed* vuln (explicit create_vulnerability_report call)
+            # OR an auto-parsed finding of severity MEDIUM/HIGH/CRITICAL (>= 3).
+            # A single [LOW]/[INFO] text-match is not sufficient to conclude
+            # that exploitation was actually attempted and succeeded.
+            _SIGNIFICANT_SEV_RE = re.compile(
+                r"^\[(CRITICAL|HIGH|MEDIUM)\]", re.IGNORECASE
+            )
+            _confirmed = any(v.get("report_generated") for v in vulns)
+            _has_significant = any(
+                _SIGNIFICANT_SEV_RE.match(str(v.get("finding", "")))
+                for v in vulns
+            )
+            if _confirmed or _has_significant:
                 met.append("vulnerabilities_tested")
 
         elif phase == PipelinePhase.REPORT:
@@ -470,11 +530,27 @@ class PipelineEngine:
 
         skill_hint = _PHASE_SKILL_HINTS.get(current.value, "")
         skill_line = f"\n{skill_hint}" if skill_hint else ""
+
+        # Inject 2 randomly sampled exploration hints each checkpoint.
+        # Randomisation prevents the LLM from memorising a fixed sequence and
+        # encourages diverse recon approaches across sessions.
+        exploration_line = ""
+        if config and config.exploration_hints:
+            sampled = random.sample(
+                config.exploration_hints,
+                min(2, len(config.exploration_hints)),
+            )
+            hints_str = "\n".join(f"  • {h}" for h in sampled)
+            exploration_line = (
+                f"\nEXPLORATION ANGLE (try one you haven't used yet):\n{hints_str}"
+            )
+
         return (
             f"{base_prompt}\n\n"
             f"Completed phases: {completed}\n"
             f"{progress}"
             f"{skill_line}"
+            f"{exploration_line}"
         )
 
     # Tools reserved for EXPLOIT/REPORT that should not be used earlier

@@ -25,6 +25,20 @@ _MAX_DEPTH = 3
 _MAX_CREATE_FILE_BYTES = 50 * 1024 * 1024  # 50 MB
 
 
+def _resolve_workspace_path(path: str, workspace_root: Path) -> Path:
+    """Normalize *path* relative to *workspace_root*.
+
+    Strips leading/trailing whitespace, leading slashes, and the optional
+    ``workspace/`` prefix that the LLM occasionally emits.  Returns an
+    absolute, resolved Path guaranteed to be inside *workspace_root* (caller
+    is still responsible for the containment check).
+    """
+    clean = str(path).strip().lstrip("/")
+    if clean.startswith("workspace/"):
+        clean = clean[len("workspace/"):]
+    return (workspace_root / clean).resolve() if clean else workspace_root
+
+
 def create_file(path: str, content: str) -> dict[str, Any]:
     try:
         if len(content.encode("utf-8")) > _MAX_CREATE_FILE_BYTES:
@@ -33,13 +47,7 @@ def create_file(path: str, content: str) -> dict[str, Any]:
                 "error": "Content too large: maximum file size is 50 MB",
             }
         workspace_root = get_workspace_root().resolve()
-
-        # Normalize path: strip leading slashes and "workspace/" prefix
-        clean_path = str(path).lstrip("/")
-        if clean_path.startswith("workspace/"):
-            clean_path = clean_path[len("workspace/"):]
-
-        file_path = (workspace_root / clean_path).resolve()
+        file_path = _resolve_workspace_path(path, workspace_root)
 
         # Prevent path traversal
         try:
@@ -84,12 +92,7 @@ def read_file(path: str, offset: int = 0, limit: int = 500) -> dict[str, Any]:
             return _read_with_pagination(abs_path, offset, limit)
 
         workspace_root = get_workspace_root().resolve()
-
-        clean_path = str(path).lstrip("/")
-        if clean_path.startswith("workspace/"):
-            clean_path = clean_path[len("workspace/"):]
-
-        file_path = (workspace_root / clean_path).resolve()
+        file_path = _resolve_workspace_path(path, workspace_root)
 
         try:
             file_path.relative_to(workspace_root)
@@ -163,14 +166,7 @@ def list_files(path: str = "") -> dict[str, Any]:
     """List files/dirs in the workspace with size and line count metadata."""
     try:
         workspace_root = get_workspace_root().resolve()
-
-        clean_path = str(path).strip().lstrip("/")
-        if clean_path.startswith("workspace/"):
-            clean_path = clean_path[len("workspace/"):]
-
-        base_dir = (
-            workspace_root /
-            clean_path).resolve() if clean_path else workspace_root
+        base_dir = _resolve_workspace_path(path, workspace_root)
 
         try:
             base_dir.relative_to(workspace_root)

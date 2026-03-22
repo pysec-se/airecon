@@ -251,7 +251,8 @@ class StartupScreen(Screen[bool]):
                     ollama_ok = data.get("ollama", {}).get("connected", False)
                     proxy_ok = True
                     break
-                except Exception:
+                except Exception as e:
+                    logger.debug("Proxy poll attempt %d failed: %s", attempt, e)
                     await asyncio.sleep(0.4)
                     dots = "." * ((attempt % 3) + 1)
                     self._set_step("step-proxy", "running", f"starting{dots}")

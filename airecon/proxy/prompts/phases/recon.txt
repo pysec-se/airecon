@@ -20,6 +20,19 @@ Skills cover subdomain enumeration, live host validation, port scanning, web cra
 parameter discovery, and more. Use the tool best suited to the current task — do not
 repeat the same tool class twice with identical scope.
 
+ANTI-MONOTONY RULE — READ THIS FIRST:
+Do NOT default to the same tool sequence every session. Pick your approach based on
+what is most likely to work for THIS specific target type. If the common path yields
+nothing after two attempts, switch technique entirely — not just parameters.
+
+Tool diversity examples:
+  • Subdomain enum: subfinder OR amass OR crt.sh OR tlsx — pick one, not all
+  • Port scan: nmap OR masscan OR rustscan — pick based on target size
+  • Web crawl: katana OR gospider OR hakrawler — pick one
+  • Dir enum: ffuf OR feroxbuster OR gobuster — if one finds nothing, try a different wordlist first
+  • OSINT: dorks OR archive crawl OR cert transparency OR Shodan — pick the angle
+    that fits the target, not the one you always use
+
 RECON COMPLETION CRITERIA — advance when ANY of these are satisfied:
 - At least one live endpoint confirmed reachable and returning meaningful content.
 - Application technology or framework identified from response headers/body.
@@ -30,22 +43,33 @@ RECON COMPLETION CRITERIA — advance when ANY of these are satisfied:
 APPROACH BY TARGET TYPE:
 
 Single-endpoint / CTF (localhost, single service):
-1. Probe root and common paths (/, /login, /api, /admin, /register, /dashboard, /api/v1/).
-2. Read response headers and body — identify technology, auth mechanism, interesting parameters.
-3. Note any session cookies or tokens returned.
-4. Advance to EXPLOIT after basic surface map — do not over-enumerate a CTF target.
+- Probe root and a handful of common paths (/, /login, /api, /admin, /register, /api/v1/).
+- Read ALL response headers and body — identify technology, auth mechanism, interesting parameters.
+- Note any session cookies or tokens returned.
+- Advance to EXPLOIT after basic surface map — do NOT over-enumerate a CTF target.
+- Creative angles: check /robots.txt, /sitemap.xml, /.git/, /.env before brute-forcing paths.
 
-Multi-host / External assessment:
-1. Passive OSINT first (dork operators, archive sources, certificate transparency).
-2. Subdomain enumeration → validate live hosts — do NOT port scan until live hosts confirmed.
-3. Port scan ONLY on validated live hosts.
-4. Web crawl on confirmed live web services.
-5. Parameter discovery on interesting endpoints.
-6. Persist ALL artifacts in output/ — files, not just memory.
+Multi-host / External assessment (choose 2–3 of these angles, not all):
+- Passive OSINT: dork operators, archive sources, certificate transparency, Shodan favicon hash.
+- Subdomain enumeration → validate live hosts — do NOT port scan until live hosts confirmed.
+- Port scan ONLY on validated live hosts (not CDN IPs).
+- Web crawl on confirmed live web services — extract endpoints from JS for SPA targets.
+- Parameter discovery on interesting endpoints.
+- Check for cloud assets: S3/GCS bucket names, exposed APIs, cloud metadata endpoints.
+- Persist ALL artifacts in output/ — files, not just memory.
+
+NON-OBVIOUS ANGLES TO CONSIDER:
+- favicon.ico hash → identify framework and find related assets via Shodan
+- TLS certificate SAN fields contain sibling subdomains not visible via DNS
+- DMARC/SPF/DKIM records leak internal mail servers and infrastructure hostnames
+- Probe non-standard ports before full port scan: 8080, 8443, 8888, 9200, 6379, 27017
+- DNS zone transfer (1 second, occasionally succeeds even on production)
+- Wayback Machine CDX API for endpoints removed from current sitemap
+- HTTP response timing differences reveal internal service existence even on error responses
 
 PHASE DISCIPLINE:
 - Do not repeat the same discovery category twice with identical parameters.
-- If two independent approaches find no new data, advance to ANALYSIS.
+- If two independent approaches find no new data, advance to ANALYSIS — do not loop endlessly.
 - Never block on incomplete subdomain enumeration for CTF/single-service targets.
 - Chain tools via output files (not pipes) so each artifact is reusable by downstream tools.
 
@@ -53,10 +77,11 @@ PHASE DISCIPLINE:
 SPECIALIZED CAPABILITIES FOR THIS PHASE:
 - Passive OSINT: search with dork operators before any active scanning.
   Effective dorks: site:{target}, inurl:admin, filetype:env, filetype:sql, filetype:bak,
-  intitle:"index of", intext:password, intext:secret.
-- Historical intelligence: archive crawling for forgotten endpoints.
-- Certificate transparency: subdomain enumeration on external targets.
+  intitle:"index of", intext:password, intext:secret, intext:apikey.
+- Historical intelligence: archive crawling for forgotten endpoints (Wayback CDX API).
+- Certificate transparency: crt.sh JSON API or tlsx for subdomain enumeration.
 - Proxy workflow: set scope → route traffic → enumerate sitemap before active scanning.
 - JS analysis: extract endpoints from JavaScript — prefer over directory brute-forcing
-  for single-page applications (React/Vue/Angular).
+  for single-page applications (React/Vue/Angular). Use linkfinder or subjs.
+- Cloud intelligence: S3 bucket enumeration, metadata endpoint probing if cloud-hosted.
 </capability_spotlight>

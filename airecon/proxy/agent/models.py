@@ -21,6 +21,21 @@ FLAG_PATTERN = re.compile(r"flag\{[^}]+\}", re.IGNORECASE)
 _EVIDENCE_SIMILARITY_THRESHOLD: float = 0.70
 
 
+def jaccard_similarity(a: str, b: str) -> float:
+    """Token-overlap (Jaccard) similarity between two strings.
+
+    Tokenizes on whitespace and lowercases both inputs.
+    Returns 0.0 when either input is empty.
+
+    Shared by AgentState evidence dedup and session vulnerability dedup.
+    """
+    tokens_a = set(a.lower().split())
+    tokens_b = set(b.lower().split())
+    if not tokens_a or not tokens_b:
+        return 0.0
+    return len(tokens_a & tokens_b) / len(tokens_a | tokens_b)
+
+
 @dataclass
 class ToolExecution:
     tool_name: str
@@ -152,16 +167,8 @@ class AgentState:
 
     @staticmethod
     def _jaccard_similarity(a: str, b: str) -> float:
-        """Token-overlap (Jaccard) similarity between two strings.
-
-        Tokenizes on whitespace and lowercases both strings.
-        Returns 0.0 when either input is empty.
-        """
-        tokens_a = set(a.lower().split())
-        tokens_b = set(b.lower().split())
-        if not tokens_a or not tokens_b:
-            return 0.0
-        return len(tokens_a & tokens_b) / len(tokens_a | tokens_b)
+        """Delegate to module-level jaccard_similarity()."""
+        return jaccard_similarity(a, b)
 
     def add_evidence(
         self,

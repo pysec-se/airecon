@@ -86,7 +86,55 @@ class TestAnalysisPhaseTransitions:
 # ── Phase: EXPLOIT ────────────────────────────────────────────────────────────
 
 class TestExploitPhaseTransitions:
-    def test_exploit_criteria_vulnerabilities(self):
+    def test_exploit_criteria_confirmed_vuln(self):
+        """Explicit report_generated=True triggers transition."""
+        session = _make_session(
+            current_phase="EXPLOIT",
+            vulnerabilities=[{"finding": "SQL Injection", "report_generated": True}],
+        )
+        engine = PipelineEngine(session)
+        _fast_forward(engine)
+
+        assert engine.should_transition() is True
+
+    def test_exploit_criteria_medium_severity(self):
+        """Auto-parsed [MEDIUM] finding triggers transition."""
+        session = _make_session(
+            current_phase="EXPLOIT",
+            vulnerabilities=[{"finding": "[MEDIUM] Reflected XSS in /search"}],
+        )
+        engine = PipelineEngine(session)
+        _fast_forward(engine)
+
+        assert engine.should_transition() is True
+
+    def test_exploit_criteria_high_severity(self):
+        """Auto-parsed [HIGH] finding triggers transition."""
+        session = _make_session(
+            current_phase="EXPLOIT",
+            vulnerabilities=[{"finding": "[HIGH] SQL Injection"}],
+        )
+        engine = PipelineEngine(session)
+        _fast_forward(engine)
+
+        assert engine.should_transition() is True
+
+    def test_exploit_no_transition_low_severity_only(self):
+        """[LOW]/[INFO] findings alone are not enough to transition."""
+        session = _make_session(
+            current_phase="EXPLOIT",
+            vulnerabilities=[
+                {"finding": "[LOW] Server version disclosure"},
+                {"finding": "[INFO] Open port 8080"},
+            ],
+        )
+        engine = PipelineEngine(session)
+        _fast_forward(engine)
+
+        assert engine.should_transition() is False
+
+    def test_exploit_no_transition_untagged_vuln(self):
+        """Untagged text-match vulnerability (no severity, no report_generated) is not enough."""
         session = _make_session(
             current_phase="EXPLOIT",
             vulnerabilities=[{"finding": "SQL Injection", "target": "example.com"}],
@@ -94,12 +142,12 @@ class TestExploitPhaseTransitions:
         engine = PipelineEngine(session)
         _fast_forward(engine)
 
-        assert engine.should_transition() is True
+        assert engine.should_transition() is False
 
     def test_exploit_transition_to_report(self):
         session = _make_session(
             current_phase="EXPLOIT",
-            vulnerabilities=[{"finding": "XSS", "target": "example.com"}],
+            vulnerabilities=[{"finding": "[HIGH] XSS", "report_generated": True}],
         )
         engine = PipelineEngine(session)
         _fast_forward(engine)

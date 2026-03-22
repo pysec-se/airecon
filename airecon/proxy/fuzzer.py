@@ -19,6 +19,7 @@ Engines provided:
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import logging
 import math
@@ -31,6 +32,24 @@ from urllib.parse import parse_qs, urlencode, urlparse, urlunparse
 import httpx
 
 logger = logging.getLogger("airecon.fuzzer")
+
+
+def response_signature(status: int, body: str) -> str:
+    """Compact behavioral fingerprint for an HTTP response.
+
+    Format: ``status:body_len:md5_hex_of_first_1000_bytes``
+
+    Identical to zero_day_fuzzer.py's get_response_signature() pattern.
+    Used to detect behavioral changes between baseline and fuzz responses
+    without full body comparison — runs in O(1) time against a 1 KB window.
+
+    Two responses with the same signature are behaviourally identical;
+    different signatures mean something changed (status, size, or content).
+    """
+    body_bytes = body.encode("utf-8", errors="replace")
+    digest = hashlib.md5(body_bytes[:1000], usedforsecurity=False).hexdigest()  # nosec B324
+    return f"{status}:{len(body_bytes)}:{digest}"
+
 
 # ---------------------------------------------------------------------------
 # Constants
@@ -224,6 +243,9 @@ class Fuzzer:
                 "time_ms": (samples[0]["time_ms"] + samples[1]["time_ms"]) / 2,
                 "length": samples[0]["length"],
                 "length_variance": length_variance,
+                "signature": response_signature(
+                    samples[0]["status"], samples[0]["body"]
+                ),
             }
             if length_variance > 50:
                 logger.debug(
@@ -357,6 +379,18 @@ class Fuzzer:
                         resp = await client.post(self.target, data={param: payload})
                     elapsed = (time.monotonic() - t0) * 1000
 
+                fuzz_sig = response_signature(resp.status_code, resp.text)
+                baseline_sig = baseline.get("signature", "")
+
+                # Fast-path skip: identical signatures → behaviourally same as
+                # baseline, not worth full analysis.  Exception: time-based
+                # checks still run because timing is not captured in the sig.
+                _is_time_based = vuln_type in (
+                    "sql_injection", "command_injection", "time_based"
+                )
+                if baseline_sig and fuzz_sig == baseline_sig and not _is_time_based:
+                    return None
+
                 analysis = ExpertHeuristics.analyze_response_differential(
                     baseline_body=baseline["body"],
                     baseline_status=baseline["status"],
@@ -367,6 +401,8 @@ class Fuzzer:
                     payload=payload,
                     vuln_type=vuln_type,
                     baseline_length_variance=baseline.get("length_variance", 0),
+                    baseline_sig=baseline_sig,
+                    fuzz_sig=fuzz_sig,
                 )
 
                 if analysis["vuln_confirmed"] or analysis["confidence"] > 0.5:
@@ -663,6 +699,8 @@ class ExpertHeuristics:
         payload: str,
         vuln_type: str,
         baseline_length_variance: int = 0,
+        baseline_sig: str = "",
+        fuzz_sig: str = "",
     ) -> dict[str, Any]:
         """Differential response analysis — compare fuzz vs baseline.
 
@@ -673,6 +711,11 @@ class ExpertHeuristics:
         two baseline requests (dynamic CSRF/timestamp fields). Used to raise
         the noise floor for content-length anomaly detection so dynamic pages
         don't trigger false positives.
+
+        baseline_sig / fuzz_sig: compact response signatures from
+        response_signature(). When provided and differing, this adds a
+        low-confidence behavioral-change signal covering cases where the
+        response changed but no specific error/injection keyword was matched.
         """
         result: dict[str, Any] = {
             "vuln_confirmed": False,
@@ -784,6 +827,25 @@ class ExpertHeuristics:
                     f"LFI/path traversal signature in fuzz response: {sig!r}")
                 result["vuln_type"] = "path_traversal"
                 break
+
+        # 8. Behavioral signature mismatch (catch-all for subtle changes)
+        # Fires only when sigs are both present, differ, AND no other evidence
+        # already captured the change.  Low weight (0.15) — this signal alone
+        # won't cross the 0.55 confirmed threshold but boosts marginal cases.
+        if baseline_sig and fuzz_sig and baseline_sig != fuzz_sig and not evidence:
+            b_status, b_len, _ = baseline_sig.split(":", 2)
+            f_status, f_len, _ = fuzz_sig.split(":", 2)
+            change_parts: list[str] = []
+            if b_status != f_status:
+                change_parts.append(f"status {b_status}→{f_status}")
+            if b_len != f_len:
+                change_parts.append(f"body size {b_len}→{f_len} bytes")
+            if not change_parts:
+                change_parts.append("content fingerprint changed")
+            confidence += 0.15
+            evidence.append(
+                f"Behavioral signature changed ({', '.join(change_parts)})"
+            )
 
         result["confidence"] = min(confidence, 1.0)
         result["vuln_confirmed"] = result["confidence"] > 0.55

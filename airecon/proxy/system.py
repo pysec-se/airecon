@@ -3,10 +3,13 @@
 from __future__ import annotations
 
 import json
+import logging
 import re
 from pathlib import Path
 
 from .config import get_config
+
+logger = logging.getLogger("airecon.system")
 
 with open(Path(__file__).parent / "prompts" / "system.txt", "r") as f:
     SYSTEM_PROMPT = f.read()
@@ -262,9 +265,7 @@ def _load_skill_keywords() -> dict[str, str]:
                 data = json.load(f)
                 return data.get("skill_keywords", {})
     except Exception as e:
-        import logging
-        logger = logging.getLogger(__name__)
-        logger.warning(f"Failed to load skill keywords from JSON: {e}")
+        logger.warning("Failed to load skill keywords from JSON: %s", e)
     return {}
 
 
