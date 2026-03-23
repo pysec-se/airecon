@@ -45,6 +45,7 @@ class WorkspacePanel(Vertical):
             yield Static(
                 "Scanning for vulnerabilities…",
                 id="vuln-placeholder",
+                markup=False,
             )
             # #vuln-tree is mounted dynamically when vuln files are found
 
