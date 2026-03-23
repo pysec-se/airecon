@@ -107,11 +107,13 @@ class ChatMessage(Static):
         self,
         content: str,
         role: str = "assistant",
+        markup: bool = False,
         **kwargs,
     ) -> None:
         super().__init__(**kwargs)
         self.role = role
         self.message_content = content
+        self._markup = markup
         self.add_class(f"{role}-message")
 
     def compose(self) -> ComposeResult:
@@ -137,8 +139,9 @@ class ChatMessage(Static):
         name = role_names.get(self.role, self.role.title())
         yield Static(f"{icon} {name}", classes=f"role-label {css_class}")
 
-        # Content as clean Static text (NOT Markdown — must not parse markup)
-        yield Static(self.message_content, classes="msg-body", markup=False)
+        # markup=False by default to prevent MarkupError on user-controlled/LLM content.
+        # Pass markup=True only for internally-generated messages that use Rich markup tags.
+        yield Static(self.message_content, classes="msg-body", markup=self._markup)
 
     def action_copy(self) -> None:
         """Copy message content to clipboard."""
@@ -601,10 +604,10 @@ class ChatPanel(VerticalScroll):
         self._safe_mount(ChatMessage(content, role="user"))
         self.scroll_end(animate=False)
 
-    def add_assistant_message(self, content: str) -> None:
+    def add_assistant_message(self, content: str, markup: bool = False) -> None:
         self.end_streaming()
         self.end_thinking()
-        self._safe_mount(ChatMessage(content, role="assistant"))
+        self._safe_mount(ChatMessage(content, role="assistant", markup=markup))
         self.scroll_end(animate=False)
 
     def add_tool_start(self, tool_id: str, tool_name: str,
