@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from rich.markup import escape as markup_escape
 from textual import events
 from textual.app import ComposeResult
 from textual.containers import Container, Horizontal, Vertical
@@ -111,7 +112,7 @@ class StatusBar(Horizontal):
             metrics_text = (
                 f" [{ollama_color}]{ollama_dot}[/] Ollama  "
                 f"[{docker_color}]{docker_dot}[/] Docker  "
-                f"│ [#8b949e]Model:[/] [#00d4aa]{self.model_name}[/]"
+                f"│ [#8b949e]Model:[/] [#00d4aa]{markup_escape(self.model_name)}[/]"
                 f"  │ [#8b949e]Token:[/] [{token_color}]{token_label}[/]"
             )
             self.query_one("#status-metrics", Label).update(metrics_text)
@@ -120,7 +121,7 @@ class StatusBar(Horizontal):
             skills_text = ""
             if self.skills_used:
                 latest_skill = self.skills_used[-1]
-                skills_text = f"│ [#8b949e]Skills:[/] [#818cf8]{latest_skill} <[/]"
+                skills_text = f"│ [#8b949e]Skills:[/] [#818cf8]{markup_escape(latest_skill)} <[/]"
             self.query_one("#status-skills", Label).update(skills_text)
 
             # 3. Caido / Exec / Shortcuts part
