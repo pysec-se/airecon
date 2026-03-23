@@ -167,7 +167,8 @@ class AIReconApp(App):
             "  [#00d4aa]›[/#00d4aa] review this code [#00d4aa]@/path/file[/#00d4aa]"
             " [#8b949e]or[/#8b949e] [#00d4aa]@/path/dir[/#00d4aa]\n"
             "  [#00d4aa]›[/#00d4aa] bug bounty on [#f59e0b]example.com[/#f59e0b]"
-            " [#8b949e]— find everything[/#8b949e]\n"
+            " [#8b949e]— find everything[/#8b949e]\n",
+            markup=True,
         )
 
         # Focus input
