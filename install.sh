@@ -126,7 +126,7 @@ uninstall_airecon
 
 # ── Build wheel (no venv needed — Poetry just packages the source) ───────────
 echo -e "${GREEN}[+] Building package...${NC}"
-POETRY_VIRTUALENVS_CREATE=false poetry build --quiet
+POETRY_VIRTUALENVS_CREATE=false poetry build
 
 # ── Install wheel to user site ───────────────────────────────────────────────
 mkdir -p "$HOME/.local/bin"
@@ -139,8 +139,7 @@ fi
 
 echo -e "${GREEN}[+] Installing to user site (~/.local)...${NC}"
 if $PYTHON_CMD -m pip install "$WHEEL_FILE" \
-    --user --no-cache-dir --force-reinstall --break-system-packages \
-    --quiet; then
+    --user --no-cache-dir --force-reinstall --break-system-packages; then
     echo -e "${GREEN}[+] Package installed successfully.${NC}"
 else
     echo -e "${RED}[!] Installation failed.${NC}"
