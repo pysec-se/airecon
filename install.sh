@@ -108,15 +108,19 @@ uninstall_airecon() {
 
 # ── Check Poetry ─────────────────────────────────────────────────────────────
 if ! command -v poetry &> /dev/null; then
-    echo -e "${YELLOW}[!] Poetry not found. Installing via pip...${NC}"
-    if command -v pip3 &> /dev/null; then
-        pip3 install poetry --break-system-packages
-    elif command -v pip &> /dev/null; then
-        pip install poetry --break-system-packages
-    else
-        echo -e "${RED}[!] pip not found. Cannot install poetry.${NC}"
+    echo -e "${YELLOW}[!] Poetry not found. Installing via official installer...${NC}"
+    if ! command -v curl &> /dev/null; then
+        echo -e "${RED}[!] curl is required to install Poetry.${NC}"
         exit 1
     fi
+    curl -sSL https://install.python-poetry.org | python3 -
+    # Make poetry available for the rest of this script
+    export PATH="$HOME/.local/bin:$PATH"
+    if ! command -v poetry &> /dev/null; then
+        echo -e "${RED}[!] Poetry installation failed.${NC}"
+        exit 1
+    fi
+    echo -e "${GREEN}[+] Poetry installed successfully.${NC}"
 else
     echo -e "${GREEN}[+] Poetry is already installed.${NC}"
 fi
