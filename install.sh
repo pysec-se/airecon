@@ -26,7 +26,6 @@ if [ ! -f "$PYPROJECT" ]; then
     fi
 
     TMP_DIR=$(mktemp -d)
-    # Clean up temp dir on exit (only if we created it)
     trap 'rm -rf "$TMP_DIR"' EXIT
 
     git clone --depth=1 --branch "$BRANCH" "$REPO_URL" "$TMP_DIR" 2>&1 \
@@ -52,6 +51,26 @@ echo -e "${CYAN}${BOLD}  ▛▌▟▖▌▌▙▖▙▖▙▌▌▌${NC}"
 echo -e "${CYAN}  v${NEW_VERSION} — AI-Powered Security Reconnaissance${NC}"
 echo -e ""
 
+# Normalize PEP 440 version: "0.1.6-beta" → "0.1.6b0", "0.1.6-alpha" → "0.1.6a0"
+normalize_ver() {
+    echo "$1" | sed 's/-beta$/b0/; s/-alpha$/a0/; s/-rc\([0-9]*\)$/rc\1/'
+}
+
+# ── Check Python >= 3.12 ─────────────────────────────────────────────────────
+PYTHON_CMD="python3"
+if [ -f "/usr/bin/python3" ]; then
+    PYTHON_CMD="/usr/bin/python3"
+fi
+
+PY_VERSION=$($PYTHON_CMD -c "import sys; print(f'{sys.version_info.major}.{sys.version_info.minor}')" 2>/dev/null || echo "0.0")
+PY_OK=$($PYTHON_CMD -c "import sys; print('yes' if sys.version_info >= (3,12) else 'no')" 2>/dev/null || echo "no")
+if [ "$PY_OK" != "yes" ]; then
+    echo -e "${RED}[!] Python >= 3.12 required, found $PY_VERSION${NC}"
+    exit 1
+fi
+
+echo -e "${GREEN}[+] Using Python $PY_VERSION ($PYTHON_CMD)${NC}"
+
 # ── Check currently installed version ───────────────────────────────────────
 CURRENT_VERSION=""
 if command -v airecon &> /dev/null; then
@@ -59,7 +78,7 @@ if command -v airecon &> /dev/null; then
 fi
 
 if [ -n "$CURRENT_VERSION" ]; then
-    if [ "$CURRENT_VERSION" = "$NEW_VERSION" ]; then
+    if [ "$(normalize_ver "$CURRENT_VERSION")" = "$(normalize_ver "$NEW_VERSION")" ]; then
         echo -e "${YELLOW}[!] v${CURRENT_VERSION} is already installed. Reinstalling...${NC}"
     else
         echo -e "${YELLOW}[!] Upgrading: v${CURRENT_VERSION} → v${NEW_VERSION}${NC}"
@@ -68,43 +87,26 @@ else
     echo -e "${GREEN}[+] Installing AIRecon v${NEW_VERSION}...${NC}"
 fi
 
-echo -e "${GREEN}[+] Checking environment...${NC}"
-
-# Define system python
-PYTHON_CMD="python3"
-if [ -f "/usr/bin/python3" ]; then
-    PYTHON_CMD="/usr/bin/python3"
-fi
-
-echo -e "${GREEN}[+] Using Python: $PYTHON_CMD${NC}"
-
 # Function to uninstall airecon completely
 uninstall_airecon() {
     echo -e "${YELLOW}[!] Cleaning previous installations...${NC}"
 
-    # 1. Uninstall from current environment (venv or otherwise)
-    if pip show airecon &> /dev/null; then
+    if pip show airecon &> /dev/null 2>&1; then
         echo -e "${YELLOW}[!] Found existing AIRecon in current environment. Removing...${NC}"
-        pip uninstall -y airecon --break-system-packages 2>/dev/null || pip uninstall -y airecon 2>/dev/null
+        pip uninstall -y airecon --break-system-packages 2>/dev/null || pip uninstall -y airecon 2>/dev/null || true
     fi
 
-    # 2. Uninstall from system python user site (force clean slate)
-    if $PYTHON_CMD -m pip show airecon &> /dev/null; then
-        echo -e "${YELLOW}[!] Found existing AIRecon in user site ($PYTHON_CMD). Removing...${NC}"
+    if $PYTHON_CMD -m pip show airecon &> /dev/null 2>&1; then
+        echo -e "${YELLOW}[!] Found existing AIRecon in user site. Removing...${NC}"
         $PYTHON_CMD -m pip uninstall -y airecon --break-system-packages 2>/dev/null || true
     fi
 
-    # Try to clear pip cache for airecon
-    echo -e "${YELLOW}[!] Clearing pip cache...${NC}"
-    pip cache remove airecon &> /dev/null || true
-    $PYTHON_CMD -m pip cache remove airecon &> /dev/null || true
-
-    # Also remove build artifacts
-    echo -e "${YELLOW}[!] Cleaning build artifacts...${NC}"
+    pip cache remove airecon &> /dev/null 2>&1 || true
+    $PYTHON_CMD -m pip cache remove airecon &> /dev/null 2>&1 || true
     rm -rf dist/ build/ *.egg-info
 }
 
-# Check Poetry
+# ── Check Poetry ─────────────────────────────────────────────────────────────
 if ! command -v poetry &> /dev/null; then
     echo -e "${YELLOW}[!] Poetry not found. Installing via pip...${NC}"
     if command -v pip3 &> /dev/null; then
@@ -122,64 +124,56 @@ fi
 # Clean previous installs
 uninstall_airecon
 
-echo -e "${GREEN}[+] Updating dependencies...${NC}"
-poetry install
-
-echo -e "${GREEN}[+] Installing Playwright browsers...${NC}"
-poetry run playwright install chromium
-
+# ── Build wheel (no venv needed — Poetry just packages the source) ───────────
 echo -e "${GREEN}[+] Building package...${NC}"
-poetry build
+POETRY_VIRTUALENVS_CREATE=false poetry build --quiet
 
-echo -e "${GREEN}[+] Installing to ~/.local/bin...${NC}"
+# ── Install wheel to user site ───────────────────────────────────────────────
 mkdir -p "$HOME/.local/bin"
 
-# Find the built wheel
 WHEEL_FILE=$(find dist -name "airecon-*.whl" | head -n 1)
 if [ -z "$WHEEL_FILE" ]; then
     echo -e "${RED}[!] Build failed. No wheel file found.${NC}"
     exit 1
 fi
 
-echo -e "${GREEN}[+] Installing wheel globally to user site...${NC}"
-if $PYTHON_CMD -m pip install "$WHEEL_FILE" --user --no-cache-dir --force-reinstall --break-system-packages; then
-    echo -e "${GREEN}[+] Package installed successfully to user site.${NC}"
+echo -e "${GREEN}[+] Installing to user site (~/.local)...${NC}"
+# Suppress unrelated Kali tool dependency conflict warnings
+if $PYTHON_CMD -m pip install "$WHEEL_FILE" \
+    --user --no-cache-dir --force-reinstall --break-system-packages \
+    --quiet 2>/dev/null; then
+    echo -e "${GREEN}[+] Package installed successfully.${NC}"
 else
     echo -e "${RED}[!] Installation failed.${NC}"
     exit 1
 fi
 
-echo -e "${GREEN}[+] Done!${NC}"
+# ── Install Playwright browser (after pip install, uses installed package) ───
+echo -e "${GREEN}[+] Installing Playwright browsers...${NC}"
+$PYTHON_CMD -m playwright install chromium 2>/dev/null \
+    || echo -e "${YELLOW}[!] Playwright browser install failed (optional — browser features may not work).${NC}"
 
-# Check location - verify using the INSTALLER path
+echo -e "${GREEN}[+] Done!${NC}"
+echo -e ""
+
+# ── Verify installation ───────────────────────────────────────────────────────
 INSTALLED_BIN="$HOME/.local/bin/airecon"
 if [ ! -f "$INSTALLED_BIN" ]; then
     echo -e "${YELLOW}[!] 'airecon' binary not found at $INSTALLED_BIN.${NC}"
-    echo -e "${YELLOW}[!] Checking where it might be...${NC}"
-    $PYTHON_CMD -m pip show -f airecon | grep "bin/airecon" || true
+    $PYTHON_CMD -m pip show -f airecon 2>/dev/null | grep "bin/airecon" || true
 else
-    echo -e "${GREEN}[+] Verified: $INSTALLED_BIN exists.${NC}"
     INSTALLED_VERSION=$($INSTALLED_BIN --version 2>/dev/null | awk '{print $NF}' || true)
-    # Normalize PEP 440: "0.1.6-beta" == "0.1.6b0" — use Python packaging for accurate comparison
-    VERSION_MATCH=$($PYTHON_CMD -c "
-from packaging.version import Version
-try:
-    print('yes' if Version('$INSTALLED_VERSION') == Version('$NEW_VERSION') else 'no')
-except Exception:
-    print('yes' if '$INSTALLED_VERSION' == '$NEW_VERSION' else 'no')
-" 2>/dev/null || echo "no")
-    if [ "$VERSION_MATCH" = "yes" ]; then
+    if [ "$(normalize_ver "$INSTALLED_VERSION")" = "$(normalize_ver "$NEW_VERSION")" ]; then
         echo -e "${GREEN}[+] Version: ${BOLD}v${INSTALLED_VERSION}${NC}${GREEN} ✓${NC}"
     else
         echo -e "${YELLOW}[!] Version mismatch — expected v${NEW_VERSION}, got v${INSTALLED_VERSION}${NC}"
     fi
 
     if command -v airecon &> /dev/null; then
-        echo -e "${GREEN}[+] 'airecon' is in your PATH.${NC}"
+        echo -e "${GREEN}[+] 'airecon' is in your PATH. Run: airecon${NC}"
     else
         echo -e "${YELLOW}[!] 'airecon' is installed but NOT in your PATH.${NC}"
-        echo -e "You need to add ~/.local/bin to your PATH."
-        echo -e "Add this to your .bashrc or .zshrc:"
-        echo -e "  export PATH=\"\$HOME/.local/bin:\$PATH\""
+        echo -e "    Add this to your .bashrc or .zshrc:"
+        echo -e "    ${BOLD}export PATH=\"\$HOME/.local/bin:\$PATH\"${NC}"
     fi
 fi
