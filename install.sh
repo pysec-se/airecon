@@ -138,10 +138,9 @@ if [ -z "$WHEEL_FILE" ]; then
 fi
 
 echo -e "${GREEN}[+] Installing to user site (~/.local)...${NC}"
-# Suppress unrelated Kali tool dependency conflict warnings
 if $PYTHON_CMD -m pip install "$WHEEL_FILE" \
     --user --no-cache-dir --force-reinstall --break-system-packages \
-    --quiet 2>/dev/null; then
+    --quiet; then
     echo -e "${GREEN}[+] Package installed successfully.${NC}"
 else
     echo -e "${RED}[!] Installation failed.${NC}"
