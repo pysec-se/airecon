@@ -67,15 +67,23 @@ AIRecon requires a model with **extended thinking** (`<think>` blocks) and **rel
 
 ## Installation
 
-**Prerequisites:** Python 3.12+, Docker 20.10+, Ollama (running), Poetry 1.4+
+**Prerequisites:** Python 3.12+, Docker 20.10+, Ollama (running), git, curl
+
+### One-line install (recommended)
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/pikpikcu/airecon/refs/heads/main/install.sh | bash
+```
+
+The script auto-detects remote vs local mode, installs Poetry if missing (via official installer — no system package conflicts), builds the wheel, and installs to `~/.local/bin`.
+
+### Manual install (from source)
 
 ```bash
 git clone https://github.com/pikpikcu/airecon.git
 cd airecon
 ./install.sh
 ```
-
-The install script installs Poetry if missing, runs `poetry install`, installs Playwright Chromium, and builds the wheel to `~/.local/bin`.
 
 ```bash
 # Add to ~/.bashrc or ~/.zshrc if needed
