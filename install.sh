@@ -160,7 +160,9 @@ if [ ! -f "$INSTALLED_BIN" ]; then
 else
     echo -e "${GREEN}[+] Verified: $INSTALLED_BIN exists.${NC}"
     INSTALLED_VERSION=$($INSTALLED_BIN --version 2>/dev/null | awk '{print $NF}' || true)
-    if [ "$INSTALLED_VERSION" = "$NEW_VERSION" ]; then
+    # Normalize PEP 440: "0.1.6-beta" == "0.1.6b0" — strip dashes/dots for comparison
+    normalize_ver() { echo "$1" | sed 's/-//g; s/\.//g' | tr '[:upper:]' '[:lower:]'; }
+    if [ "$(normalize_ver "$INSTALLED_VERSION")" = "$(normalize_ver "$NEW_VERSION")" ]; then
         echo -e "${GREEN}[+] Version: ${BOLD}v${INSTALLED_VERSION}${NC}${GREEN} ✓${NC}"
     else
         echo -e "${YELLOW}[!] Version mismatch — expected v${NEW_VERSION}, got v${INSTALLED_VERSION}${NC}"
