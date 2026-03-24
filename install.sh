@@ -9,10 +9,36 @@ CYAN='\033[0;36m'
 BOLD='\033[1m'
 NC='\033[0m' # No Color
 
-# ── Detect version from pyproject.toml ──────────────────────────────────────
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REPO_URL="https://github.com/pikpikcu/airecon"
+BRANCH="main"
+
+# ── Detect local vs remote (curl|bash) mode ─────────────────────────────────
+# When piped via curl, BASH_SOURCE[0] is empty/stdin and pyproject.toml won't exist
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]:-/tmp}")" && pwd 2>/dev/null || echo /tmp)"
 PYPROJECT="$SCRIPT_DIR/pyproject.toml"
 
+if [ ! -f "$PYPROJECT" ]; then
+    echo -e "${CYAN}[*] Remote install detected — cloning repository...${NC}"
+
+    if ! command -v git &> /dev/null; then
+        echo -e "${RED}[!] git is required but not installed.${NC}"
+        exit 1
+    fi
+
+    TMP_DIR=$(mktemp -d)
+    # Clean up temp dir on exit (only if we created it)
+    trap 'rm -rf "$TMP_DIR"' EXIT
+
+    git clone --depth=1 --branch "$BRANCH" "$REPO_URL" "$TMP_DIR" 2>&1 \
+        || { echo -e "${RED}[!] Failed to clone repository.${NC}"; exit 1; }
+
+    SCRIPT_DIR="$TMP_DIR"
+    PYPROJECT="$SCRIPT_DIR/pyproject.toml"
+fi
+
+cd "$SCRIPT_DIR"
+
+# ── Detect version from pyproject.toml ──────────────────────────────────────
 if [ -f "$PYPROJECT" ]; then
     NEW_VERSION=$(grep -m1 '^version' "$PYPROJECT" | sed 's/version = "\(.*\)"/\1/')
 else
@@ -55,7 +81,7 @@ echo -e "${GREEN}[+] Using Python: $PYTHON_CMD${NC}"
 # Function to uninstall airecon completely
 uninstall_airecon() {
     echo -e "${YELLOW}[!] Cleaning previous installations...${NC}"
-    
+
     # 1. Uninstall from current environment (venv or otherwise)
     if pip show airecon &> /dev/null; then
         echo -e "${YELLOW}[!] Found existing AIRecon in current environment. Removing...${NC}"
@@ -64,15 +90,15 @@ uninstall_airecon() {
 
     # 2. Uninstall from system python user site (force clean slate)
     if $PYTHON_CMD -m pip show airecon &> /dev/null; then
-         echo -e "${YELLOW}[!] Found existing AIRecon in user site ($PYTHON_CMD). Removing...${NC}"
-         $PYTHON_CMD -m pip uninstall -y airecon --break-system-packages 2>/dev/null || true
+        echo -e "${YELLOW}[!] Found existing AIRecon in user site ($PYTHON_CMD). Removing...${NC}"
+        $PYTHON_CMD -m pip uninstall -y airecon --break-system-packages 2>/dev/null || true
     fi
 
     # Try to clear pip cache for airecon
-    echo -e "${YELLOW}[!] Clearing pip cache definition...${NC}"
+    echo -e "${YELLOW}[!] Clearing pip cache...${NC}"
     pip cache remove airecon &> /dev/null || true
     $PYTHON_CMD -m pip cache remove airecon &> /dev/null || true
-    
+
     # Also remove build artifacts
     echo -e "${YELLOW}[!] Cleaning build artifacts...${NC}"
     rm -rf dist/ build/ *.egg-info
@@ -106,7 +132,6 @@ echo -e "${GREEN}[+] Building package...${NC}"
 poetry build
 
 echo -e "${GREEN}[+] Installing to ~/.local/bin...${NC}"
-# Create local bin if it doesn't exist
 mkdir -p "$HOME/.local/bin"
 
 # Find the built wheel
@@ -117,8 +142,6 @@ if [ -z "$WHEEL_FILE" ]; then
 fi
 
 echo -e "${GREEN}[+] Installing wheel globally to user site...${NC}"
-# FORCE install to system user site, ignoring active venv
-# using /usr/bin/python3 explicitly ensures we bypass the venv python
 if $PYTHON_CMD -m pip install "$WHEEL_FILE" --user --no-cache-dir --force-reinstall --break-system-packages; then
     echo -e "${GREEN}[+] Package installed successfully to user site.${NC}"
 else
@@ -136,7 +159,6 @@ if [ ! -f "$INSTALLED_BIN" ]; then
     $PYTHON_CMD -m pip show -f airecon | grep "bin/airecon" || true
 else
     echo -e "${GREEN}[+] Verified: $INSTALLED_BIN exists.${NC}"
-    # Verify installed version matches expected
     INSTALLED_VERSION=$($INSTALLED_BIN --version 2>/dev/null | awk '{print $NF}' || true)
     if [ "$INSTALLED_VERSION" = "$NEW_VERSION" ]; then
         echo -e "${GREEN}[+] Version: ${BOLD}v${INSTALLED_VERSION}${NC}${GREEN} ✓${NC}"
@@ -144,7 +166,6 @@ else
         echo -e "${YELLOW}[!] Version mismatch — expected v${NEW_VERSION}, got v${INSTALLED_VERSION}${NC}"
     fi
 
-    # Check if it's in PATH
     if command -v airecon &> /dev/null; then
         echo -e "${GREEN}[+] 'airecon' is in your PATH.${NC}"
     else
