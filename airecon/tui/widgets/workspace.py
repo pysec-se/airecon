@@ -20,6 +20,49 @@ class WorkspaceTree(DirectoryTree):
         return filtered[:500]
 
 
+class VulnTree(WorkspaceTree):
+    """Directory tree rooted at workspace, showing only targets with vuln files.
+
+    Filter logic per depth relative to workspace root:
+      depth 1 — target dir   : show only if target/vulnerabilities/ has files
+      depth 2 — subdir        : show only the 'vulnerabilities' folder
+      depth 3+ — inside vulns : show everything (non-hidden)
+    """
+
+    def __init__(self, workspace_path: Path, *args, **kwargs) -> None:
+        self._workspace_root = workspace_path.resolve()
+        super().__init__(workspace_path, *args, **kwargs)
+
+    def filter_paths(self, paths: list[Path]) -> list[Path]:
+        result = []
+        for p in paths:
+            if p.name.startswith("."):
+                continue
+            try:
+                rel = p.resolve().relative_to(self._workspace_root)
+                depth = len(rel.parts)
+            except ValueError:
+                continue
+
+            if depth == 1:
+                # Target directory — include only if vulnerabilities/ has content
+                vuln_dir = p / "vulnerabilities"
+                try:
+                    if vuln_dir.exists() and any(vuln_dir.iterdir()):
+                        result.append(p)
+                except OSError:
+                    pass
+            elif depth == 2:
+                # Subfolder of target — include only the vulnerabilities dir
+                if p.name == "vulnerabilities":
+                    result.append(p)
+            else:
+                # Inside vulnerabilities or deeper — include all non-hidden
+                result.append(p)
+
+        return result[:500]
+
+
 class WorkspacePanel(Vertical):
     """Panel showing workspace tree and auto-updating vulnerability panel."""
 
@@ -28,7 +71,6 @@ class WorkspacePanel(Vertical):
     def __init__(self, workspace_path: Path, **kwargs) -> None:
         self.workspace_path = workspace_path
         self._current_target_path: Path | None = None
-        self._vuln_tree_path: Path | None = None  # track what the mounted tree shows
         super().__init__(**kwargs)
 
     def compose(self) -> ComposeResult:
@@ -53,121 +95,119 @@ class WorkspacePanel(Vertical):
         self.call_after_refresh(self._refresh_vuln_panel)
 
     # ------------------------------------------------------------------
-    # Core auto-scan logic — called on every reload
+    # Helper: count targets that have vulnerability files
     # ------------------------------------------------------------------
 
-    def _find_best_vuln_target(self) -> tuple[Path | None, Path | None]:
-        """
-        Scan workspace and return (target_path, vuln_path) for the best target.
-        Priority:
-          1. Current target if it has vuln files
-          2. Any target with vuln files (most recently modified first)
-          3. Most recently modified target (even if vuln folder is empty)
-          4. None if workspace is empty
-        Returns (target_path, vuln_path) where vuln_path may be None/empty.
-        """
+    def _count_targets_with_vulns(self) -> int:
+        count = 0
         try:
-            all_targets = sorted(
-                [d for d in self.workspace_path.iterdir()
-                 if d.is_dir() and not d.name.startswith(".")],
-                key=lambda x: x.stat().st_mtime,
-                reverse=True,
+            for d in self.workspace_path.iterdir():
+                if not d.is_dir() or d.name.startswith("."):
+                    continue
+                vp = d / "vulnerabilities"
+                try:
+                    if vp.exists() and any(vp.iterdir()):
+                        count += 1
+                except OSError:
+                    pass
+        except Exception:
+            pass
+        return count
+
+    def _has_any_targets(self) -> bool:
+        try:
+            return any(
+                d for d in self.workspace_path.iterdir()
+                if d.is_dir() and not d.name.startswith(".")
             )
         except Exception:
-            return None, None
+            return False
 
-        if not all_targets:
-            return None, None
-
-        def _has_vuln_files(vp: "Path") -> bool:
-            try:
-                return vp.exists() and any(vp.iterdir())
-            except OSError:
-                return False
-
-        # Prefer current target if it already has vuln files
-        if self._current_target_path and self._current_target_path in all_targets:
-            vp = self._current_target_path / "vulnerabilities"
-            if _has_vuln_files(vp):
-                return self._current_target_path, vp
-
-        # Find any target that has vuln files
-        for t in all_targets:
-            vp = t / "vulnerabilities"
-            if _has_vuln_files(vp):
-                return t, vp
-
-        # Fall back to most-recently-modified target (no vuln files yet)
-        return all_targets[0], None
+    # ------------------------------------------------------------------
+    # Core refresh logic
+    # ------------------------------------------------------------------
 
     def _refresh_vuln_panel(self) -> None:
-        """Scan workspace and update the vulnerability panel automatically."""
-        target_path, vuln_path = self._find_best_vuln_target()
+        """Scan all targets and update the vulnerability panel."""
+        count = self._count_targets_with_vulns()
 
-        if target_path is None:
-            self._show_placeholder(
-                "No workspace targets found.\nStart a recon scan to begin.")
+        if count == 0:
+            if not self._has_any_targets():
+                self._show_placeholder(
+                    "No workspace targets found.\nStart a recon scan to begin.")
+            else:
+                self._show_placeholder(
+                    "No vulnerability reports yet.\n"
+                    "Vulnerabilities will appear here automatically.")
             self._remove_vuln_tree()
+            self._update_header()
             return
 
-        self._current_target_path = target_path
+        # Ensure tree is mounted once, then reload to pick up new files
+        self._ensure_vuln_tree()
+        self._reload_vuln_tree()
 
-        if vuln_path is None:
-            # Target found but no vuln files yet
-            self._show_placeholder(
-                f"No reports yet for {target_path.name}.\n"
-                "Vulnerabilities will appear here automatically."
-            )
-            self._remove_vuln_tree()
-            return
+        try:
+            self.query_one("#vuln-placeholder", Static).display = False
+        except Exception:  # nosec B110
+            pass
 
-        # We have vuln files — show/update the tree
-        self._show_vuln_tree(vuln_path)
+        self._update_header(count)
+
+    # ------------------------------------------------------------------
+    # Header management
+    # ------------------------------------------------------------------
+
+    def _update_header(self, count: int | None = None) -> None:
+        try:
+            h = self.query_one("#vuln-header", Static)
+            if self._current_target_path:
+                h.update(f"🐞 VULNERABILITIES — {self._current_target_path.name}")
+            elif count:
+                label = f"{count} target" + ("s" if count != 1 else "")
+                h.update(f"🐞 VULNERABILITIES ({label})")
+            else:
+                h.update("🐞 VULNERABILITIES")
+        except Exception:  # nosec B110
+            pass
+
+    # ------------------------------------------------------------------
+    # Vuln tree mount / reload / remove
+    # ------------------------------------------------------------------
+
+    def _ensure_vuln_tree(self) -> None:
+        """Mount VulnTree if not already mounted."""
+        try:
+            self.query_one("#vuln-tree", VulnTree)
+        except Exception:
+            self._mount_vuln_tree()
+
+    def _mount_vuln_tree(self) -> None:
+        try:
+            section = self.query_one("#vuln-section", Vertical)
+            new_tree = VulnTree(self.workspace_path, id="vuln-tree")
+            section.mount(new_tree)
+        except Exception:  # nosec B110
+            pass
+
+    def _reload_vuln_tree(self) -> None:
+        try:
+            self.query_one("#vuln-tree", VulnTree).reload()
+        except Exception:  # nosec B110
+            pass
+
+    def _remove_vuln_tree(self) -> None:
+        try:
+            self.query_one("#vuln-tree").remove()
+        except Exception:  # nosec B110
+            pass
 
     def _show_placeholder(self, msg: str) -> None:
         try:
             p = self.query_one("#vuln-placeholder", Static)
             p.update(msg)
             p.display = True
-        except Exception:  # nosec B110 - widget may not exist yet
-            pass
-
-    def _remove_vuln_tree(self) -> None:
-        try:
-            self.query_one("#vuln-tree", WorkspaceTree).remove()
-            self._vuln_tree_path = None
-        except Exception:  # nosec B110 - tree may not be mounted
-            pass
-
-    def _show_vuln_tree(self, vuln_path: Path) -> None:
-        """Mount or reload the vuln tree for the given path."""
-        try:
-            existing = self.query_one("#vuln-tree", WorkspaceTree)
-            # Same path already mounted — just reload
-            if self._vuln_tree_path == vuln_path:
-                existing.reload()
-            else:
-                # Different path — remove and remount
-                existing.remove()
-                self._vuln_tree_path = None
-                self._mount_vuln_tree(vuln_path)
-        except Exception:
-            # Tree not mounted yet
-            self._mount_vuln_tree(vuln_path)
-
-        # Hide placeholder
-        try:
-            self.query_one("#vuln-placeholder", Static).display = False
-        except Exception:  # nosec B110 - widget may not exist yet
-            pass
-
-    def _mount_vuln_tree(self, vuln_path: Path) -> None:
-        try:
-            section = self.query_one("#vuln-section", Vertical)
-            new_tree = WorkspaceTree(vuln_path, id="vuln-tree")
-            section.mount(new_tree)
-            self._vuln_tree_path = vuln_path
-        except Exception:  # nosec B110 - mount is best-effort
+        except Exception:  # nosec B110
             pass
 
     # ------------------------------------------------------------------
@@ -177,21 +217,20 @@ class WorkspacePanel(Vertical):
     def update_vulnerabilities_path(self, target_path: Path) -> None:
         """Called when user clicks a folder in the workspace tree."""
         self._current_target_path = target_path
-        self._refresh_vuln_panel()
+        self._update_header()
+        self._reload_vuln_tree()
 
     def clear_vulnerabilities_view(self) -> None:
-        self._show_placeholder(
-            "No target selected.\nSelect a workspace folder to view reports.")
-        self._remove_vuln_tree()
+        self._current_target_path = None
+        self._update_header()
 
     def reload(self) -> None:
-        """Reload workspace tree and auto-refresh vuln panel."""
+        """Reload workspace tree and refresh vuln panel."""
         try:
             self.query_one("#workspace-tree", WorkspaceTree).reload()
-        except Exception:  # nosec B110 - reload is best-effort
+        except Exception:  # nosec B110
             pass
-        # Always auto-scan — no dependency on _current_target_path being set
         try:
             self._refresh_vuln_panel()
-        except Exception:  # nosec B110 - refresh is best-effort
+        except Exception:  # nosec B110
             pass
