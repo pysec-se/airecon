@@ -695,7 +695,10 @@ class _ValidatorMixin:
 
         elif tool_name == "create_vulnerability_report":
             _phase_obj = self._get_current_phase() if hasattr(self, "_get_current_phase") else None
-            _phase_str = _phase_obj.value.upper() if hasattr(_phase_obj, "value") else "RECON"
+            _phase_str = (_phase_obj.value if _phase_obj is not None else None)
+            if _phase_str is None:
+                _phase_str = "RECON"
+            _phase_str = _phase_str.upper()
             is_strict_phase = _phase_str in ("EXPLOIT", "REPORT")
             poc_code = self._str_arg(arguments, "poc_script_code").strip()
             poc_desc = self._str_arg(arguments, "poc_description").strip()
