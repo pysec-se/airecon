@@ -738,7 +738,9 @@ _CAUSAL_REFUTE_THRESHOLD = _coerce_unit_float(
 
 def _stable_causal_hypothesis_id(id_prefix: str, entity: str, attribute: str) -> str:
     seed = f"{id_prefix}|{entity.strip().lower()}|{attribute.strip().lower()}"
-    digest = hashlib.sha1(seed.encode("utf-8", errors="replace")).hexdigest()[:12]
+    digest = hashlib.sha1(
+        seed.encode("utf-8", errors="replace"), usedforsecurity=False
+    ).hexdigest()[:12]
     return f"{id_prefix}_{digest}"
 
 
@@ -908,7 +910,7 @@ def _record_causal_intervention_from_parse(
 
     iv_id = (
         f"iv_{session.scan_count}_"
-        f"{hashlib.sha1(cmd.encode('utf-8', errors='replace')).hexdigest()[:8]}"
+        f"{hashlib.sha1(cmd.encode('utf-8', errors='replace'), usedforsecurity=False).hexdigest()[:8]}"
     )
     avg_conf = sum(
         _coerce_unit_float(obs.get("confidence", 0.5), 0.5) for obs in meaningful
