@@ -172,10 +172,25 @@ def test_soft_timeout_with_data_but_no_live_hosts_blocks_transition():
 
     engine = _make_engine(session)
     engine._recon_soft_timeout = 30
+    engine._recon_hard_timeout = 60
     engine._phase_entry_iteration = 0
-    engine._current_iteration = 40
+    engine._current_iteration = 40  # past soft (30) but below hard (60)
 
     assert engine.should_transition() is False
+
+
+def test_hard_timeout_forces_transition_when_data_but_no_live_hosts():
+    """Hard timeout (2× soft) must force RECON → ANALYSIS to prevent 2000-iter loops."""
+    session = SessionData(target="test.com")
+    session.subdomains = ["api.test.com"]  # has data but no live hosts
+
+    engine = _make_engine(session)
+    engine._recon_soft_timeout = 30
+    engine._recon_hard_timeout = 60
+    engine._phase_entry_iteration = 0
+    engine._current_iteration = 61  # past hard timeout
+
+    assert engine.should_transition() is True
 
 
 def test_soft_timeout_with_live_hosts_counts_as_data():
@@ -225,3 +240,34 @@ def test_ctf_mode_unaffected_by_depth_checks():
 
     assert engine.get_current_phase() == PipelinePhase.EXPLOIT
     assert engine.should_transition() is False
+
+
+def test_phase_transition_confidence_exposed():
+    session = SessionData(target="test.com")
+    session.subdomains = ["a.test.com", "b.test.com", "c.test.com"]
+    session.live_hosts = ["https://a.test.com"]
+    session.open_ports = {"a.test.com": [80]}
+    session.urls = ["https://a.test.com/login"]
+
+    engine = _make_engine(session)
+    conf = engine.get_phase_transition_confidence()
+    assert 0.0 <= conf <= 1.0
+    assert conf >= 0.60
+
+
+def test_phase_transition_confidence_penalizes_inconsistent_recon_state():
+    healthy = SessionData(target="healthy.test")
+    healthy.subdomains = ["a.healthy.test", "b.healthy.test"]
+    healthy.live_hosts = ["https://a.healthy.test"]
+    healthy.open_ports = {"a.healthy.test": [80, 443]}
+    healthy.urls = ["https://a.healthy.test/login"]
+    healthy_engine = _make_engine(healthy)
+
+    inconsistent = SessionData(target="inconsistent.test")
+    inconsistent.subdomains = ["a.inconsistent.test", "b.inconsistent.test"]
+    inconsistent.live_hosts = []  # Contradiction with open ports/URLs below
+    inconsistent.open_ports = {"a.inconsistent.test": [80, 443]}
+    inconsistent.urls = ["https://a.inconsistent.test/login"]
+    inconsistent_engine = _make_engine(inconsistent)
+
+    assert healthy_engine.get_phase_transition_confidence() > inconsistent_engine.get_phase_transition_confidence()

@@ -80,7 +80,7 @@ DEFAULT_CONFIG = {
     "agent_exploration_mode": True,
     # 0.9 — push exploration hard; 122B model handles branching paths well.
     "agent_exploration_intensity": 0.9,
-    "agent_exploration_temperature": 0.35,
+    "agent_exploration_temperature": 0.5,
     "agent_stagnation_threshold": 2,
     "agent_tool_diversity_window": 8,
     "agent_max_same_tool_streak": 3,

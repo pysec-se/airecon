@@ -6,6 +6,7 @@ Verifies that HTTP evidence requires actual impact proof, not just status codes.
 
 import pytest
 from airecon.proxy.agent.validators import _ValidatorMixin
+from airecon.proxy.agent.models import ToolExecution
 
 
 class MockAgentLoop(_ValidatorMixin):
@@ -287,6 +288,37 @@ class TestHTTPEvidenceValidationGap1:
         })
         is_valid, msg = result
         assert is_valid, f"Should accept sensitive data keywords: {msg}"
+
+    def test_runtime_replay_mismatch_rejected_in_strict_phase(self):
+        """Runtime context present but unrelated evidence should fail replay-verification."""
+        self.validator._get_current_phase = lambda: type("P", (), {"value": "EXPLOIT"})()  # type: ignore[attr-defined]
+        self.validator.state = type("S", (), {
+            "tool_history": [
+                ToolExecution(
+                    tool_name="execute",
+                    arguments={"command": "curl http://target/health"},
+                    result={"stdout": "service alive"},
+                    status="success",
+                )
+            ],
+            "evidence_log": [],
+        })()
+
+        is_valid, msg = self.validator._validate_tool_args("create_vulnerability_report", {
+            "poc_script_code": (
+                "#!/bin/bash\n"
+                "curl \"http://target/search?q=1' OR 1=1 --\" 2>&1 | head -20"
+            ),
+            "poc_description": (
+                "Request returned HTTP 200 with SQL error and leaked user data from vulnerable endpoint."
+            ),
+            "title": "SQL Injection in Search Endpoint",
+            "technical_analysis": (
+                "Unsanitized user input is concatenated into SQL query and allows attacker-controlled predicates."
+            ),
+        })
+        assert not is_valid
+        assert msg is not None and "Replay verification confidence too low" in msg
 
 
 if __name__ == "__main__":

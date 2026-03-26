@@ -14,6 +14,7 @@ Two layers of validation live here:
 from __future__ import annotations
 
 import ast
+import json
 import logging
 import re
 import shlex
@@ -21,6 +22,33 @@ from pathlib import Path
 from typing import Any
 
 logger = logging.getLogger("airecon.validation")
+
+
+def _load_known_tools() -> frozenset[str]:
+    """Load tool names from tools_meta.json once at module load time.
+
+    Returns a frozenset of lowercase tool names so _validate_tool_args
+    can check poc_description references without hardcoding names or
+    doing file I/O on every call.
+    """
+    try:
+        data_file = Path(__file__).parent.parent / "data" / "tools_meta.json"
+        meta = json.loads(data_file.read_text(encoding="utf-8"))
+        tools: set[str] = set()
+        for category in meta.get("categories", {}).values():
+            if isinstance(category, dict):
+                for tool_list in category.values():
+                    if isinstance(tool_list, list):
+                        tools.update(t.lower() for t in tool_list if t)
+            elif isinstance(category, list):
+                tools.update(t.lower() for t in category if t)
+        return frozenset(tools)
+    except Exception as exc:
+        logger.debug("Could not load tools_meta.json for validator: %s", exc)
+        return frozenset()
+
+
+_KNOWN_TOOLS: frozenset[str] = _load_known_tools()
 
 
 # ── Path / command validation ─────────────────────────────────────────────────
@@ -264,6 +292,194 @@ class _ValidatorMixin:
         "login_form", "handle_totp", "save_auth_state", "inject_cookies", "oauth_authorize",
     })
 
+    def _collect_runtime_verification_texts(self, max_entries: int = 24) -> list[str]:
+        """Collect recent runtime evidence snippets for replay verification.
+
+        Sources:
+        - self.state.tool_history (tool args + result excerpts)
+        - self.state.evidence_log summaries (if available)
+        """
+        chunks: list[str] = []
+        state = getattr(self, "state", None)
+        if state is None:
+            return chunks
+
+        tool_history = list(getattr(state, "tool_history", []) or [])[-max_entries:]
+        for entry in tool_history:
+            try:
+                tool_name = str(getattr(entry, "tool_name", "") or "")
+                arguments = getattr(entry, "arguments", {}) or {}
+                result = getattr(entry, "result", {}) or {}
+                arg_blob = " ".join(f"{k}={v}" for k, v in list(arguments.items())[:6])
+                out_blob = " ".join(
+                    str(result.get(k, ""))[:500]
+                    for k in ("stdout", "stderr", "output", "content", "summary")
+                    if isinstance(result.get(k), str)
+                )
+                merged = f"{tool_name} {arg_blob} {out_blob}".strip()
+                if merged:
+                    chunks.append(merged)
+            except Exception:
+                continue
+
+        evidence_log = list(getattr(state, "evidence_log", []) or [])[-max_entries:]
+        for ev in evidence_log:
+            try:
+                if not isinstance(ev, dict):
+                    continue
+                summary = str(ev.get("summary", "")).strip()
+                artifact = str(ev.get("artifact", "")).strip()
+                if summary:
+                    chunks.append(f"{summary} {artifact}".strip())
+            except Exception:
+                continue
+        return chunks
+
+    @staticmethod
+    def _extract_payload_markers(text: str) -> list[str]:
+        """Extract high-signal payload markers from PoC code/description."""
+        markers: list[str] = []
+        for m in re.findall(r"(['\"`])(.*?)\1", text):
+            token = str(m[1]).strip()
+            if len(token) < 4:
+                continue
+            if re.search(r"(or\s+1=1|union\s+select|<script|../|169\.254|cmd=|token=|jwt)", token, re.IGNORECASE):
+                markers.append(token.lower()[:120])
+        for m in re.findall(r"(?:payload|param|query|id|user|url)\s*[:=]\s*([^\s,&]+)", text, re.IGNORECASE):
+            tok = str(m).strip().strip("'\"")
+            if tok and len(tok) >= 3:
+                markers.append(tok.lower()[:80])
+        # Dedup while preserving order
+        seen: set[str] = set()
+        return [x for x in markers if not (x in seen or seen.add(x))]
+
+    def _replay_verification_score(
+        self,
+        *,
+        poc_code: str,
+        poc_desc: str,
+        report_finding: str,
+        matching_finding: bool,
+    ) -> tuple[float, list[str], bool, bool]:
+        """Compute replay-verification confidence from runtime and textual evidence."""
+        gaps: list[str] = []
+        runtime_chunks = self._collect_runtime_verification_texts()
+        has_runtime = bool(runtime_chunks)
+
+        runtime_text = " ".join(runtime_chunks).lower()
+        desc_lower = poc_desc.lower()
+        code_lower = poc_code.lower()
+        report_lower = report_finding.lower()
+        host_matches = re.findall(r"https?://([^\s/\"']+)", poc_code, re.IGNORECASE)
+        hosts = [h.split(":")[0].lower() for h in host_matches if h]
+
+        request_logged = bool(
+            re.search(r"\b(get|post|put|delete|patch|curl|request)\b", desc_lower)
+            or re.search(r"\b(curl|requests\.|httpx\.|urllib|fetch\()", code_lower)
+        )
+        response_logged = bool(
+            _HTTP_EVIDENCE_RE.search(poc_desc)
+            or re.search(r"\b(response|returned|body|status|code)\b", desc_lower)
+        )
+        if not request_logged:
+            gaps.append("jelaskan request yang dijalankan")
+        if not response_logged:
+            gaps.append("jelaskan response hasil exploit")
+
+        payload_markers = self._extract_payload_markers(poc_code + " " + poc_desc)
+        payload_observed = bool(payload_markers) and any(
+            marker in desc_lower or (has_runtime and marker in runtime_text)
+            for marker in payload_markers[:8]
+        )
+        if payload_markers and not payload_observed and not has_runtime:
+            payload_observed = bool(
+                re.search(
+                    r"\b(sql|sqli|xss|ssrf|idor|csrf|rce|lfi|token|admin|password|credential|bypass)\b",
+                    desc_lower,
+                )
+            )
+        if payload_markers and not payload_observed:
+            gaps.append("hubungkan payload dengan output yang terobservasi")
+
+        target_bound = False
+        runtime_host_bound = False
+        if hosts:
+            if has_runtime:
+                runtime_host_bound = any(h in runtime_text for h in hosts)
+                target_bound = runtime_host_bound or any(h in desc_lower for h in hosts)
+            else:
+                target_bound = True
+        elif report_lower:
+            key_terms = [w for w in report_lower.split() if len(w) >= 5][:10]
+            target_bound = bool(key_terms) and any(
+                any(term in blob for term in key_terms)
+                for blob in ([desc_lower] + ([runtime_text] if has_runtime else []))
+            )
+        if not target_bound:
+            gaps.append("ikat PoC ke target/endpoint yang sama dengan finding")
+
+        runtime_http = has_runtime and bool(re.search(r"\b(http/?\d\.\d|status|code)\s*[=:]?\s*[2345]\d{2}", runtime_text))
+        runtime_signal = has_runtime and bool(
+            re.search(
+                r"\b(sql|xss|ssrf|idor|csrf|rce|lfi|auth|forbidden|unauthorized|credential|token)\b",
+                runtime_text,
+            )
+        )
+        runtime_payload_bound = has_runtime and (
+            not payload_markers
+            or any(marker in runtime_text for marker in payload_markers[:8])
+        )
+        if has_runtime and not runtime_http:
+            gaps.append("sertakan status HTTP dari replay runtime")
+        if has_runtime and not runtime_signal:
+            gaps.append("sertakan bukti dampak dari replay runtime")
+        if has_runtime and hosts and not runtime_host_bound:
+            gaps.append("samakan host PoC dengan host pada replay runtime")
+        if has_runtime and payload_markers and not runtime_payload_bound:
+            gaps.append("samakan payload PoC dengan payload yang muncul di replay runtime")
+
+        artifact_bound = bool(
+            re.search(r"\b(output/|artifact|log|trace|capture|pcap|json)\b", desc_lower)
+            or (has_runtime and re.search(r"\b(output/|artifact|log|trace|capture)\b", runtime_text))
+        )
+
+        score = 0.0
+        if request_logged:
+            score += 0.16
+        if response_logged:
+            score += 0.16
+        if target_bound:
+            score += 0.18
+        if payload_observed or not payload_markers:
+            score += 0.14
+        if matching_finding:
+            score += 0.12
+        if artifact_bound:
+            score += 0.09
+
+        if has_runtime:
+            if runtime_http:
+                score += 0.09
+            if runtime_signal:
+                score += 0.06
+            if runtime_host_bound or not hosts:
+                score += 0.05
+            if runtime_payload_bound:
+                score += 0.05
+        else:
+            # No runtime context available (unit tests/offline path):
+            # slightly favor strong textual replay descriptions.
+            if request_logged and response_logged and target_bound:
+                score += 0.08
+
+        runtime_bound = (
+            runtime_http
+            and runtime_signal
+            and (runtime_host_bound or not hosts)
+            and runtime_payload_bound
+        ) if has_runtime else False
+        return min(1.0, score), gaps, has_runtime, runtime_bound
+
     def _validate_tool_args(
         self, tool_name: str, arguments: dict[str, Any]
     ) -> tuple[bool, str | None]:
@@ -366,11 +582,29 @@ class _ValidatorMixin:
                     )
 
         elif tool_name == "create_vulnerability_report":
+            _phase_obj = self._get_current_phase() if hasattr(self, "_get_current_phase") else None
+            _phase_str = _phase_obj.value.upper() if hasattr(_phase_obj, "value") else "RECON"
+            is_strict_phase = _phase_str in ("EXPLOIT", "REPORT")
             poc_code = self._str_arg(arguments, "poc_script_code").strip()
             poc_desc = self._str_arg(arguments, "poc_description").strip()
             title = self._str_arg(arguments, "title").strip()
             technical = self._str_arg(arguments, "technical_analysis").strip()
             is_ctf = bool(self._str_arg(arguments, "flag").strip())
+            report_finding = (
+                self._str_arg(arguments, "description").strip().lower()
+                or poc_desc.lower()
+                or title.lower()
+            )
+
+            matching_finding = False
+            if hasattr(self, "_session") and self._session and self._session.vulnerabilities:
+                for v in self._session.vulnerabilities:
+                    vuln_finding = str(v.get("finding", "")).lower()
+                    if report_finding and any(
+                        w in vuln_finding for w in report_finding.split() if len(w) > 4
+                    ):
+                        matching_finding = True
+                        break
 
             if not poc_code:
                 return False, (
@@ -416,13 +650,14 @@ class _ValidatorMixin:
                         "It must be a Python script (with valid syntax), a curl command, "
                         "PHP/JS snippet, or an HTTP request."
                     )
-            if not poc_desc or len(poc_desc) < 80:
+            if not poc_desc or len(poc_desc) < 40:
                 return False, (
                     f"REPORT REJECTED: 'poc_description' is too short ({len(poc_desc)} chars). "
                     "Provide step-by-step reproduction with specific URLs, parameters, and observed behavior."
                 )
-            # technical_analysis is only mandatory for full reports, not CTF
-            if not is_ctf and (not technical or len(technical) < 80):
+            # technical_analysis is only mandatory for full reports, not CTF.
+            # Minimum 40 chars as hard gate; richer detail is handled by scoring.
+            if not is_ctf and (not technical or len(technical) < 40):
                 return False, (
                     f"REPORT REJECTED: 'technical_analysis' is too short ({len(technical)} chars). "
                     "Explain the root cause with specific technical details."
@@ -431,12 +666,6 @@ class _ValidatorMixin:
                 "vulnerability found", "security issue", "bug found", "potential",
                 "possible", "issue detected", "security bug",
             )
-            if any(g in title.lower()
-                   for g in GENERIC_TITLES) or len(title) < 15:
-                return False, (
-                    f"REPORT REJECTED: Title '{title}' is too vague. "
-                    "Use a specific title like 'SQL Injection in /api/login username parameter'."
-                )
             UNVERIFIED_PHRASES = (
                 "further verification needed", "needs verification", "needs to be verified",
                 "may be vulnerable", "could be vulnerable", "appears to be vulnerable",
@@ -457,7 +686,58 @@ class _ValidatorMixin:
                     "REPORT REJECTED: 'poc_script_code' must include the actual target URL. "
                     "Show the real HTTP request that demonstrates the vulnerability."
                 )
+
+            # Subdomain-friendly PoC URL validation
+            scope_valid = True
+            if hasattr(self, '_session') and self._session:
+                # Helper: check if string is IP address
+                def _is_ip_address(host: str) -> bool:
+                    parts = host.split('.')
+                    return len(parts) == 4 and all(p.isdigit() and 0 <= int(p) <= 255 for p in parts)
+                
+                # Helper: extract base domain for flexible subdomain matching
+                def _get_base_domain(host: str) -> str:
+                    host = host.lower().split(':')[0]  # Remove port
+                    if _is_ip_address(host):
+                        return host  # IPs use exact match
+                    parts = host.split('.')
+                    return '.'.join(parts[-2:]) if len(parts) >= 2 else host
+                
+                poc_url_match = re.search(r"https?://([^\s/\"']+)", poc_code.lower())
+                if poc_url_match:
+                    poc_host = poc_url_match.group(1).split(':')[0]  # Remove port
+                    session_hosts = [self._session.target] + list(self._session.live_hosts)
+
+                    # For IP addresses: require exact match
+                    if _is_ip_address(poc_host):
+                        direct_match = poc_host in session_hosts
+                        if not direct_match:
+                            scope_valid = False
+                            return False, (
+                                f"REPORT REJECTED: PoC targets '{poc_host}' which is not in session scan scope. "
+                                f"Session target: {self._session.target}. Live hosts: {', '.join(self._session.live_hosts[:5])}. "
+                                "PoC must target the actual session target IP."
+                            )
+                    else:
+                        # For domains: allow subdomain matching
+                        poc_base = _get_base_domain(poc_host)
+                        session_bases = [_get_base_domain(h) for h in session_hosts]
+                        
+                        # Also check direct substring match (for exact host matches)
+                        direct_match = any(poc_host == h.split(':')[0] for h in session_hosts)
+                        base_match = any(poc_base == s_base for s_base in session_bases)
+                        
+                        if not (direct_match or base_match):
+                            scope_valid = False
+                            return False, (
+                                f"REPORT REJECTED: PoC targets '{poc_host}' which is not in session scan scope. "
+                                f"Session target: {self._session.target}. Live hosts: {', '.join(self._session.live_hosts[:5])}. "
+                                "PoC must target the actual session target or its subdomains."
+                            )
+            
             if not is_ctf:
+                # Flexible HTTP evidence validation: allow both tool references
+                # and descriptive observations.
                 if not _HTTP_EVIDENCE_RE.search(poc_desc):
                     return False, (
                         "REPORT REJECTED: 'poc_description' must include actual HTTP response evidence. "
@@ -465,12 +745,36 @@ class _ValidatorMixin:
                         "'GET /api/data → HTTP 200, response contained {user records}'. "
                         "A 301 redirect alone, or 'endpoint exists', is not sufficient — show what data/access was obtained."
                     )
-                # Gap #1: Require IMPACT proof alongside HTTP status (not just status code alone)
-                has_status_change = _HTTP_EVIDENCE_PATTERNS["status_change"].search(poc_desc)
-                has_content_proof = _HTTP_EVIDENCE_PATTERNS["response_content"].search(poc_desc)
-                has_error_or_data = (
-                    _HTTP_EVIDENCE_PATTERNS["error_indicator"].search(poc_desc) or
-                    _HTTP_EVIDENCE_PATTERNS["data_extraction"].search(poc_desc)
+                
+                # Flexible tool output reference (allow descriptive observations)
+                # Uses module-level _KNOWN_TOOLS (loaded once from tools_meta.json)
+                _desc_lower = poc_desc.lower()
+                has_tool_reference = (
+                    "output/" in _desc_lower or          # References saved file
+                    "session" in _desc_lower or           # References session data
+                    "response" in _desc_lower or          # Describes actual response
+                    "→" in poc_desc or                    # Arrow notation for request/response
+                    "http " in _desc_lower or             # HTTP protocol mention
+                    "observed" in _desc_lower or          # Descriptive observation
+                    "received" in _desc_lower or
+                    "got" in _desc_lower or
+                    "server returned" in _desc_lower or
+                    "response body" in _desc_lower or
+                    "response contained" in _desc_lower or
+                    any(tool in _desc_lower for tool in _KNOWN_TOOLS)  # Tool mention
+                )
+                if not has_tool_reference:
+                    return False, (
+                        "REPORT REJECTED: 'poc_description' must reference actual tool output or observed response data. "
+                        "Reference the tool output file (e.g., 'output/nmap_scan.txt') or describe the actual response observed."
+                    )
+
+                # Gap #1: Require impact proof, not only status line.
+                has_status_change = bool(_HTTP_EVIDENCE_PATTERNS["status_change"].search(poc_desc))
+                has_content_proof = bool(_HTTP_EVIDENCE_PATTERNS["response_content"].search(poc_desc))
+                has_error_or_data = bool(
+                    _HTTP_EVIDENCE_PATTERNS["error_indicator"].search(poc_desc)
+                    or _HTTP_EVIDENCE_PATTERNS["data_extraction"].search(poc_desc)
                 )
                 impact_proven = has_status_change or has_content_proof or has_error_or_data
                 if not impact_proven:
@@ -483,5 +787,106 @@ class _ValidatorMixin:
                         "'Response leaked 50 user records'. "
                         "Do not submit 'HTTP 200' alone without explaining the impact."
                     )
+
+            # Replay-verification gate: prioritize end-to-end reproducibility.
+            replay_score, replay_gaps, has_runtime_context, runtime_bound = self._replay_verification_score(
+                poc_code=poc_code,
+                poc_desc=poc_desc,
+                report_finding=report_finding,
+                matching_finding=matching_finding,
+            )
+            if not is_ctf:
+                if is_strict_phase and has_runtime_context and not runtime_bound:
+                    gap_hint = "; ".join(dict.fromkeys(replay_gaps[:3])) if replay_gaps else (
+                        "pastikan host/payload/status dari PoC muncul pada replay runtime"
+                    )
+                    return False, (
+                        "REPORT REJECTED: Replay verification confidence too low. "
+                        "Runtime replay evidence is not bound to this PoC. "
+                        "Di phase strict, laporan wajib terbukti pada jejak runtime yang sama "
+                        "(host + payload + status/impact). "
+                        f"Perbaiki: {gap_hint}."
+                    )
+                replay_threshold = 0.58 if (is_strict_phase and has_runtime_context) else (
+                    0.48 if is_strict_phase else 0.38
+                )
+                if replay_score < replay_threshold:
+                    gap_hint = "; ".join(dict.fromkeys(replay_gaps[:3])) if replay_gaps else "tambahkan bukti replay yang lebih jelas"
+                    return False, (
+                        "REPORT REJECTED: Replay verification confidence too low "
+                        f"({replay_score:.2f}/{replay_threshold:.2f}). "
+                        "Laporan harus membuktikan alur exploit end-to-end (request → payload → response → impact). "
+                        f"Perbaiki: {gap_hint}."
+                    )
+
+            # Quality gate: strict in EXPLOIT/REPORT, lenient in RECON/ANALYSIS.
+            score = 0
+            improvements: list[str] = []
+
+            if len(poc_code) >= 120:
+                score += 20
+            elif len(poc_code) >= 80:
+                score += 14
+            else:
+                improvements.append("expand PoC code with full request and payload details")
+
+            if _is_python or _is_curl or _is_php or _is_js or _is_bash:
+                score += 15
+            else:
+                improvements.append("use a concrete script/HTTP snippet format")
+
+            if len(poc_desc) >= 120:
+                score += 20
+            elif len(poc_desc) >= 80:
+                score += 14
+            else:
+                improvements.append("make reproduction steps more explicit")
+
+            if is_ctf:
+                score += 10
+            elif len(technical) >= 120:
+                score += 15
+            elif len(technical) >= 80:
+                score += 10
+            else:
+                improvements.append("expand root-cause analysis")
+
+            if title and len(title) >= 15 and not any(g in title.lower() for g in GENERIC_TITLES):
+                score += 10
+            else:
+                improvements.append("use a specific vulnerability title with endpoint/parameter")
+
+            if scope_valid:
+                score += 5
+
+            if matching_finding:
+                score += 10
+            elif not is_strict_phase:
+                score += 5
+                improvements.append("link finding to session evidence when available")
+
+            if not is_ctf and _HTTP_EVIDENCE_RE.search(poc_desc):
+                score += 10
+            if not is_ctf and impact_proven:
+                score += 10
+            if not is_ctf:
+                score += int(replay_score * 20)
+                if replay_score < 0.65:
+                    improvements.append("perkuat replay verification (request/payload/response/impact)")
+
+            if is_strict_phase and hasattr(self, "_session") and self._session and self._session.vulnerabilities:
+                if not matching_finding and len(poc_code) < 200:
+                    return False, (
+                        "REPORT REJECTED: Vulnerability not found in session discoveries and PoC is too short. "
+                        "Report tool-discovered findings, or provide a stronger manual PoC (>200 chars) with explicit evidence."
+                    )
+
+            threshold = 45 if is_ctf else (70 if is_strict_phase else 55)
+            if score < threshold:
+                hint = "; ".join(dict.fromkeys(improvements[:3]))
+                return False, (
+                    f"REPORT REJECTED: Report quality score too low ({score}/{threshold}) for {_phase_str} phase. "
+                    + (f"Improve: {hint}." if hint else "Add stronger evidence and technical detail.")
+                )
 
         return True, None

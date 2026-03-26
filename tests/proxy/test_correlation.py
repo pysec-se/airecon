@@ -1,5 +1,9 @@
 import pytest
-from airecon.proxy.correlation import run_correlation, synthesize_attack_chains
+from airecon.proxy.correlation import (
+    build_attack_graph,
+    run_correlation,
+    synthesize_attack_chains,
+)
 from airecon.proxy.agent.session import SessionData
 
 
@@ -21,6 +25,19 @@ def test_correlation_by_port(mock_session):
     mysql_finding = next((r for r in results if r.get("port") == 3306), None)
     assert mysql_finding is not None
     assert "MySQL" in mysql_finding.get("service", "")
+
+
+def test_run_correlation_handles_string_port_formats(mock_session):
+    """run_correlation should match common string port formats like '443/tcp'."""
+    from airecon.proxy.correlation import PORT_CORRELATIONS
+
+    mock_session.open_ports = {
+        "example.com": ["443/tcp", "80", "not-a-port"],
+    }
+    results = run_correlation(mock_session)
+    ports = {r.get("port") for r in results if r.get("type") == "port"}
+    expected = {p for p in (80, 443) if p in PORT_CORRELATIONS}
+    assert expected.issubset(ports)
 
 
 def test_correlation_by_technology_and_cve(mock_session):
@@ -137,6 +154,7 @@ def test_synthesize_attack_chains_result_schema(mock_session):
         assert "steps" in r
         assert "severity" in r
         assert "confidence" in r
+        assert "evidence_strength" in r
         assert "matched_signals" in r
         assert 0.0 <= r["confidence"] <= 1.0
 
@@ -148,3 +166,71 @@ def test_synthesize_attack_chains_empty_session(mock_session):
     # Key assertion: no KeyError / exception and all returned items are valid
     for r in results:
         assert r["type"] == "synthesized_chain"
+
+
+def test_synthesize_attack_chains_handles_string_port_formats(mock_session):
+    """String-like open port values should not crash synthesis."""
+    mock_session.open_ports = {
+        "example.com": ["443/tcp", "80", 22, "not-a-port"],
+    }
+    results = synthesize_attack_chains(mock_session)
+    assert isinstance(results, list)
+
+
+def test_synthesize_attack_chains_word_boundary_avoids_substring_false_positive(mock_session, monkeypatch):
+    """Single-word required findings should not match partial tokens like nosql->sql."""
+    import airecon.proxy.correlation as corr
+
+    monkeypatch.setattr(corr, "ATTACK_CHAINS", [{
+        "name": "SQL Boundary Chain",
+        "required_findings": ["sql"],
+        "steps": ["step1"],
+        "severity": "MEDIUM",
+    }])
+
+    mock_session.vulnerabilities = [{"title": "NoSQL injection in profile endpoint"}]
+    results = corr.synthesize_attack_chains(mock_session)
+    assert results == []
+
+
+def test_build_attack_graph_from_session_signals(mock_session):
+    mock_session.technologies = {"WordPress": "6.0", "PHP": "8.1"}
+    mock_session.open_ports = {"example.com": [80, 443]}
+    mock_session.injection_points = [
+        {"parameter": "id", "type_hint": "IDOR", "url": "https://example.com/api/user?id=1"}
+    ]
+    mock_session.vulnerabilities = [
+        {"finding": "[HIGH] IDOR in /api/user endpoint exposes other user records"}
+    ]
+
+    graph = build_attack_graph(mock_session)
+    assert graph is not None
+    assert graph["type"] == "attack_graph"
+    assert graph["node_count"] >= 3
+    assert graph["edge_count"] >= 1
+    assert 0.0 <= graph["risk_score"] <= 1.0
+
+
+def test_attack_graph_risk_increases_with_exploitability(mock_session):
+    mock_session.technologies = {"MySQL": "8.0"}
+    mock_session.open_ports = {"example.com": [3306]}
+    mock_session.injection_points = [{"type_hint": "SQL injection"}]
+    mock_session.vulnerabilities = [
+        {"finding": "[HIGH] SQL injection in login endpoint using mysql backend"},
+    ]
+    base_graph = build_attack_graph(mock_session)
+    assert base_graph is not None
+
+    mock_session.vulnerabilities = [
+        {
+            "finding": "[HIGH] SQL injection in login endpoint using mysql backend",
+            "report_generated": True,
+            "poc_script_code": "curl http://example.com/login?u=1' OR 1=1 --",
+            "evidence": "HTTP 500 SQL syntax error",
+        },
+    ]
+    stronger_graph = build_attack_graph(mock_session)
+    assert stronger_graph is not None
+    assert stronger_graph["risk_score"] >= base_graph["risk_score"]
+    assert "risk_factors" in stronger_graph
+    assert stronger_graph["risk_factors"]["exploitability_component"] > 0.0

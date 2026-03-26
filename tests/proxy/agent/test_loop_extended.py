@@ -1,10 +1,12 @@
 """Extended AgentLoop tests: VRAM crash patterns, dedup logic, session init,
 tool call parsing, and mocked end-to-end streaming."""
 
+import os
 import pytest
 from unittest.mock import AsyncMock, MagicMock, patch
 from airecon.proxy.agent.loop import AgentLoop
 from airecon.proxy.agent.pipeline import PipelinePhase
+from airecon.proxy.agent.session import SessionData
 
 
 # ── Fixture ───────────────────────────────────────────────────────────────────
@@ -166,6 +168,29 @@ class TestAgentLoopInitialisation:
             str(m.get("content", "")) for m in loop.state.conversation
         )
         assert "REGISTERED TOOLS" in all_content or "EXECUTE_COMMAND" in all_content
+
+    @pytest.mark.asyncio
+    async def test_initialize_restores_recovery_state_from_session(self, loop, mocker):
+        mocker.patch("airecon.proxy.agent.loop.get_system_prompt", return_value="SYS")
+        resumed = SessionData(session_id="sess_x", target="test.com")
+        resumed.adaptive_num_ctx = 8192
+        resumed.adaptive_num_predict_cap = 2048
+        resumed.vram_crash_count = 2
+        mocker.patch("airecon.proxy.agent.loop.load_session", return_value=resumed)
+
+        old = os.environ.get("AIRECON_SESSION_ID")
+        os.environ["AIRECON_SESSION_ID"] = "sess_x"
+        try:
+            await loop.initialize(target="test.com", user_message="resume")
+        finally:
+            if old is None:
+                os.environ.pop("AIRECON_SESSION_ID", None)
+            else:
+                os.environ["AIRECON_SESSION_ID"] = old
+
+        assert loop._adaptive_num_ctx == 8192
+        assert loop._adaptive_num_predict_cap == 2048
+        assert loop._vram_crash_count == 2
 
 
 # ── Reset ─────────────────────────────────────────────────────────────────────

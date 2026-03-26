@@ -44,7 +44,13 @@ PORT_CORRELATIONS: dict[int, dict] = {
 
 TECH_CORRELATIONS: dict[str, dict] = _load("tech_correlations.json")
 CVE_CORRELATIONS: dict[str, dict] = _load("cve_correlations.json")
-ATTACK_CHAINS: list[dict] = _load("attack_chains.json", default=[])
+_attack_chains_raw = _load("attack_chains.json", default=[])
+# Support both formats: new {"chains": [...]} dict and legacy flat list
+ATTACK_CHAINS: list[dict] = (
+    _attack_chains_raw.get("chains", [])
+    if isinstance(_attack_chains_raw, dict)
+    else _attack_chains_raw
+)
 BUSINESS_LOGIC_PATTERNS: dict[str, dict] = _load(
     "business_logic_patterns.json")
 EXPERT_TESTING_PATTERNS: dict[str, dict] = _load(
@@ -73,6 +79,7 @@ _URL_TECH_PATH_RES: dict[str, re.Pattern[str]] = {
 _INJECTION_TO_CHAIN_KEYWORD: dict[str, str] = {
     "IDOR":           "IDOR",
     "SSRF":           "SSRF",
+    "OPEN_REDIRECT":  "open redirect",
     "PATH_TRAVERSAL": "LFI",
     "SQLi_XSS":       "SQL injection",
     "AUTH":           "JWT",
@@ -87,6 +94,223 @@ _CHAIN_SEVERITY_RANK: dict[str, int] = {
 }
 # Word-boundary pattern to avoid short-word false positives (e.g. "log" in "catalog").
 _WORD_BOUNDARY_RE = re.compile(r"\b{}\b", re.IGNORECASE)
+
+
+def _normalize_port_token(port_value: Any) -> int | None:
+    """Return normalized int port from common token formats.
+
+    Supports values like:
+    - 443
+    - "443"
+    - "443/tcp"
+    Returns None for unparsable values.
+    """
+    try:
+        return int(str(port_value).split("/", 1)[0])
+    except (TypeError, ValueError):
+        return None
+
+
+def _signal_matches(haystack: str, needle: str) -> bool:
+    """Return True if a required signal matches text with low false positives."""
+    n = needle.strip().lower()
+    if not n:
+        return False
+    # Phrase-like signals keep substring semantics.
+    if " " in n or any(ch in n for ch in ("/", ":", "-", "_")):
+        return n in haystack
+    # Single-word signals use boundaries to avoid partial-token noise.
+    return re.search(r"\b" + re.escape(n) + r"\b", haystack, re.IGNORECASE) is not None
+
+
+def build_attack_graph(session: SessionData) -> dict[str, Any] | None:
+    """Build a lightweight attack graph from correlated session signals."""
+    nodes: list[dict[str, Any]] = []
+    edges: list[dict[str, Any]] = []
+    node_ids: set[str] = set()
+
+    def _add_node(node_id: str, node_type: str, label: str, severity: str = "INFO") -> None:
+        if node_id in node_ids:
+            return
+        node_ids.add(node_id)
+        nodes.append({
+            "id": node_id,
+            "type": node_type,
+            "label": label[:120],
+            "severity": severity.upper(),
+        })
+
+    # Technology nodes
+    for tech, version in list(getattr(session, "technologies", {}).items())[:15]:
+        label = f"{tech} {version}".strip()
+        _add_node(f"tech:{tech.lower()}", "technology", label, "LOW")
+
+    # Service nodes from correlated ports
+    for host, ports in list(getattr(session, "open_ports", {}).items())[:20]:
+        if not isinstance(ports, list):
+            continue
+        for p in ports[:20]:
+            p_norm = _normalize_port_token(p)
+            if p_norm is None:
+                continue
+            svc = PORT_CORRELATIONS.get(p_norm, {}).get("service", f"port {p_norm}")
+            _add_node(f"svc:{host}:{p_norm}", "service", f"{host}:{p_norm} ({svc})", "LOW")
+
+    # Injection type nodes
+    inj_types = sorted({
+        str(pt.get("type_hint", "")).upper()
+        for pt in getattr(session, "injection_points", [])
+        if pt.get("type_hint")
+    })
+    for inj in inj_types[:10]:
+        _add_node(f"inj:{inj}", "injection", inj, "MEDIUM")
+
+    # Vulnerability nodes
+    vulns = getattr(session, "vulnerabilities", [])
+    sev_rank = {"CRITICAL": 4, "HIGH": 3, "MEDIUM": 2, "LOW": 1, "INFO": 0}
+    vuln_nodes: list[tuple[str, str, str, dict[str, Any]]] = []  # (node_id, text, severity, raw)
+    for idx, v in enumerate(vulns[:20]):
+        finding = str(v.get("title") or v.get("finding") or "").strip()
+        if not finding:
+            continue
+        sev = str(v.get("severity", "")).upper()
+        if sev in {"5", "4", "3", "2", "1"}:
+            sev = {"5": "CRITICAL", "4": "HIGH", "3": "MEDIUM", "2": "LOW", "1": "INFO"}[sev]
+        if sev not in sev_rank:
+            for lbl in ("CRITICAL", "HIGH", "MEDIUM", "LOW", "INFO"):
+                if f"[{lbl}]" in finding.upper():
+                    sev = lbl
+                    break
+        if sev not in sev_rank:
+            sev = "MEDIUM"
+        node_id = f"vuln:{idx}"
+        _add_node(node_id, "vulnerability", finding, sev)
+        vuln_nodes.append((node_id, finding.lower(), sev, v))
+
+    # Edges: tech/injection/service -> vulnerability
+    tech_keys = list(getattr(session, "technologies", {}).keys())
+    for node_id, vuln_text, _, _ in vuln_nodes:
+        for tech in tech_keys[:15]:
+            if _signal_matches(vuln_text, tech.lower()):
+                edges.append({
+                    "source": f"tech:{tech.lower()}",
+                    "target": node_id,
+                    "relation": "affects",
+                    "weight": 0.8,
+                })
+        for inj in inj_types[:10]:
+            if _signal_matches(vuln_text, inj.lower().replace("_", " ")):
+                edges.append({
+                    "source": f"inj:{inj}",
+                    "target": node_id,
+                    "relation": "vector",
+                    "weight": 0.85,
+                })
+        for host, ports in list(getattr(session, "open_ports", {}).items())[:20]:
+            if not isinstance(ports, list):
+                continue
+            for p in ports[:20]:
+                p_norm = _normalize_port_token(p)
+                if p_norm is None:
+                    continue
+                svc = str(PORT_CORRELATIONS.get(p_norm, {}).get("service", "")).lower()
+                if svc and _signal_matches(vuln_text, svc):
+                    edges.append({
+                        "source": f"svc:{host}:{p_norm}",
+                        "target": node_id,
+                        "relation": "exposes",
+                        "weight": 0.7,
+                    })
+
+    if len(nodes) < 3 or not vuln_nodes:
+        return None
+
+    unique_edges: list[dict[str, Any]] = []
+    seen_edge_keys: set[tuple[str, str, str]] = set()
+    for e in edges:
+        key = (e["source"], e["target"], e["relation"])
+        if key in seen_edge_keys:
+            continue
+        seen_edge_keys.add(key)
+        unique_edges.append(e)
+
+    if not unique_edges:
+        return None
+
+    # Causal risk model:
+    # - severity_component: inherent impact from vulnerability severities
+    # - exploitability_component: presence of PoC/report/evidence-backed findings
+    # - convergence_component: independent upstream signal types converging on each vuln
+    # - killchain_component: breadth of attack-chain stages observed in graph
+    # - uncertainty_penalty: many weak/unverified vulns should reduce confidence
+    avg_severity = sum(sev_rank.get(sev, 0) for _, _, sev, _ in vuln_nodes) / max(1, len(vuln_nodes))
+    severity_component = min(1.0, avg_severity / 4.0)
+
+    exploitability_votes = 0
+    weak_findings = 0
+    for _, _, _, raw in vuln_nodes:
+        if (
+            raw.get("report_generated")
+            or raw.get("replay_verified")
+            or raw.get("verified")
+            or raw.get("proof")
+            or raw.get("poc_script_code")
+            or raw.get("evidence")
+        ):
+            exploitability_votes += 1
+        else:
+            weak_findings += 1
+    exploitability_component = exploitability_votes / max(1, len(vuln_nodes))
+
+    incoming_types: dict[str, set[str]] = {}
+    for edge in unique_edges:
+        target = str(edge.get("target", ""))
+        source = str(edge.get("source", ""))
+        if not target.startswith("vuln:") or ":" not in source:
+            continue
+        src_type = source.split(":", 1)[0]
+        incoming_types.setdefault(target, set()).add(src_type)
+
+    convergence_scores = [
+        min(1.0, len(types) / 3.0) for types in incoming_types.values()
+    ]
+    convergence_component = (
+        sum(convergence_scores) / len(convergence_scores) if convergence_scores else 0.0
+    )
+
+    node_types_present = {n.get("type", "") for n in nodes}
+    killchain_component = len(node_types_present & {"technology", "service", "injection", "vulnerability"}) / 4.0
+
+    uncertainty_penalty = min(0.25, (weak_findings / max(1, len(vuln_nodes))) * 0.25)
+    risk_score = round(
+        min(
+            1.0,
+            max(
+                0.0,
+                (severity_component * 0.38)
+                + (exploitability_component * 0.28)
+                + (convergence_component * 0.22)
+                + (killchain_component * 0.12)
+                - uncertainty_penalty,
+            ),
+        ),
+        3,
+    )
+    return {
+        "type": "attack_graph",
+        "nodes": nodes[:40],
+        "edges": unique_edges[:80],
+        "risk_score": risk_score,
+        "node_count": len(nodes),
+        "edge_count": len(unique_edges),
+        "risk_factors": {
+            "severity_component": round(severity_component, 3),
+            "exploitability_component": round(exploitability_component, 3),
+            "convergence_component": round(convergence_component, 3),
+            "killchain_component": round(killchain_component, 3),
+            "uncertainty_penalty": round(uncertainty_penalty, 3),
+        },
+    }
 
 
 def synthesize_attack_chains(session: SessionData) -> list[dict]:
@@ -106,7 +330,11 @@ def synthesize_attack_chains(session: SessionData) -> list[dict]:
         if not isinstance(host_ports, list):
             continue
         for p in host_ports:
-            info = PORT_CORRELATIONS.get(int(p)) or PORT_CORRELATIONS.get(p)
+            # Handle int ports and common string forms like "443" or "443/tcp".
+            p_int = _normalize_port_token(p)
+            if p_int is None:
+                continue
+            info = PORT_CORRELATIONS.get(p_int)
             if info:
                 port_signals.append(info.get("service", "").lower())
 
@@ -123,6 +351,7 @@ def synthesize_attack_chains(session: SessionData) -> list[dict]:
         for ip in getattr(session, "injection_points", [])
         if ip.get("type_hint")
     ]
+    inj_signal_str = " ".join(inj_signals)
 
     # URL paths (token-level, not raw full URLs)
     url_signals = " ".join(session.urls).lower()
@@ -146,23 +375,29 @@ def synthesize_attack_chains(session: SessionData) -> list[dict]:
             continue
 
         matched: list[str] = []
+        high_quality_hits = 0
         for finding in req:
             f = finding.strip()
             if not f:
                 continue
-            # Word-boundary match for single-word entries; substring for phrases.
-            if " " in f:
-                if f.lower() in full_signal_str:
-                    matched.append(f)
-            else:
-                if re.search(r"\b" + re.escape(f.lower()) + r"\b", full_signal_str):
-                    matched.append(f)
+            f_lower = f.lower()
+            if _signal_matches(full_signal_str, f_lower):
+                matched.append(f)
+                # Stronger signal if corroborated by explicit vulnerability/injection evidence.
+                if _signal_matches(vuln_signals, f_lower) or _signal_matches(inj_signal_str, f_lower):
+                    high_quality_hits += 1
 
         match_ratio = len(matched) / len(req)
         if match_ratio < _CHAIN_MIN_MATCH_RATIO:
             continue
 
-        confidence = round(min(1.0, match_ratio * 1.1), 2)
+        quality_boost = min(0.15, high_quality_hits * 0.05)
+        confidence = round(min(1.0, match_ratio * 1.1 + quality_boost), 2)
+        evidence_strength = (
+            "high" if high_quality_hits >= 2
+            else "medium" if high_quality_hits == 1
+            else "low"
+        )
         severity_rank = _CHAIN_SEVERITY_RANK.get(
             str(chain.get("severity", "MEDIUM")).upper(), 2
         )
@@ -176,6 +411,7 @@ def synthesize_attack_chains(session: SessionData) -> list[dict]:
             "steps": chain.get("steps", []),
             "severity": chain.get("severity", "MEDIUM"),
             "confidence": confidence,
+            "evidence_strength": evidence_strength,
             "required_findings": req,
             "matched_signals": matched,
         }))
@@ -210,6 +446,11 @@ def _corr_fingerprint(corr: dict) -> str:
         return f"chain:{corr.get('name', '?')}"
     if ctype == "synthesized_chain":
         return f"synth:{corr.get('chain_id', '?')}"
+    if ctype == "attack_graph":
+        return (
+            f"attack_graph:{corr.get('node_count', 0)}:"
+            f"{corr.get('edge_count', 0)}:{corr.get('risk_score', 0)}"
+        )
     return f"{ctype}:{str(corr)[:40]}"
 
 
@@ -230,14 +471,13 @@ def run_correlation(session: SessionData) -> list[dict]:
     # session.open_ports is always dict[str, list[int]] — {host: [80, 443, 22]}
     # as produced by update_from_parsed_output() in session.py.
     for port, info in PORT_CORRELATIONS.items():
-        port_str = str(port)
         for host, host_ports in session.open_ports.items():
             if not isinstance(host_ports, list):
                 continue
-            if port in host_ports or port_str in [str(p) for p in host_ports]:
-                matched = True
-            else:
-                matched = False
+            normalized_ports = {
+                p for p in (_normalize_port_token(v) for v in host_ports) if p is not None
+            }
+            matched = port in normalized_ports
             if matched:
                 results.append(
                     {
@@ -422,6 +662,11 @@ def run_correlation(session: SessionData) -> list[dict]:
     # injection + URL + vuln signals together for higher-fidelity suggestions.
     synthesized = synthesize_attack_chains(session)
     results.extend(synthesized)
+
+    # Attack graph synthesis — structural map of pivots and likely chains.
+    graph = build_attack_graph(session)
+    if graph:
+        results.append(graph)
 
     # --- DEDUP FILTER ---
     # Remove correlations the LLM has already seen this session to prevent

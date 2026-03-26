@@ -7,6 +7,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 from pathlib import Path
 from unittest.mock import MagicMock, patch
@@ -56,7 +57,7 @@ class TestEnforceCharBudget:
         ])
 
         # Force a very small budget so compression is triggered
-        loop._enforce_char_budget(num_ctx=100)
+        asyncio.run(loop._enforce_char_budget(num_ctx=100))
 
         # First user message must be completely intact
         user_msgs = [m for m in loop.state.conversation if m.get("role") == "user"]
@@ -76,7 +77,7 @@ class TestEnforceCharBudget:
             *[{"role": "tool", "name": "execute", "content": "x" * 5000} for _ in range(10)],
         ])
 
-        loop._enforce_char_budget(num_ctx=200)
+        asyncio.run(loop._enforce_char_budget(num_ctx=200))
 
         user_msgs = [m for m in loop.state.conversation if m.get("role") == "user"]
         # First user message always intact
@@ -94,7 +95,7 @@ class TestEnforceCharBudget:
         ]
         loop = self._build_loop_with_conversation(msgs)
 
-        loop._enforce_char_budget(num_ctx=131072)  # generous budget
+        asyncio.run(loop._enforce_char_budget(num_ctx=131072))  # generous budget
 
         assert loop.state.conversation[1]["content"] == "pentest target.com"
         assert loop.state.conversation[2]["content"] == "small result"
@@ -102,7 +103,7 @@ class TestEnforceCharBudget:
     def test_empty_conversation_does_not_crash(self):
         """No error if conversation is empty."""
         loop = self._build_loop_with_conversation([])
-        loop._enforce_char_budget(num_ctx=100)  # must not raise
+        asyncio.run(loop._enforce_char_budget(num_ctx=100))  # must not raise
         assert loop.state.conversation == []
 
     def test_budget_uses_num_ctx_minus_num_predict(self, monkeypatch):
@@ -132,7 +133,7 @@ class TestEnforceCharBudget:
         cfg_mock.ollama_num_predict = num_predict
 
         with patch("airecon.proxy.agent.loop.get_config", return_value=cfg_mock):
-            loop._enforce_char_budget(num_ctx=num_ctx)
+            asyncio.run(loop._enforce_char_budget(num_ctx=num_ctx))
 
         # Tool result must have been compressed (budget was exceeded)
         tool_msg = next(
@@ -157,7 +158,7 @@ class TestEnforceCharBudget:
         # Explicit runtime reservation = 1000 → budget = (10000 - 1000 - 0) * 3 = 27k chars
         # (tool output 22k should remain uncompressed).
         loop._tools_ollama = []
-        loop._enforce_char_budget(num_ctx=num_ctx, num_predict=1_000)
+        asyncio.run(loop._enforce_char_budget(num_ctx=num_ctx, num_predict=1_000))
         tool_msg = next(m for m in loop.state.conversation if m.get("role") == "tool")
         assert tool_msg["content"] == tool_result
 
@@ -351,3 +352,150 @@ class TestOutputParserToolPatterns:
         with patch.object(output_parser, "_TOOL_PATTERNS", []):
             result = output_parser.detect_tool("nmap -sV target.com")
             assert result is None
+
+
+# ── 4. skill/session alignment and stale-skill pruning ────────────────
+
+class TestSkillSessionAlignment:
+    def test_auto_load_returns_relative_skill_paths(self):
+        """auto_load_skills_for_message should return rel-paths for session dedup."""
+        from airecon.proxy.system import auto_load_skills_for_message
+
+        _, loaded = auto_load_skills_for_message(
+            "please do code review for this patch", phase="ANALYSIS"
+        )
+        assert loaded, "Expected at least one loaded skill"
+        assert all("/" in s and s.endswith(".md") for s in loaded)
+
+    def test_session_dedup_accepts_legacy_stem_and_path(self, monkeypatch):
+        """Session dedup should work with both new rel-path and old stem format."""
+        import airecon.proxy.system as sys_module
+
+        monkeypatch.setattr(
+            sys_module,
+            "_SKILL_KEYWORDS",
+            {"keyword_x": "tools/code_review.md"},
+        )
+        monkeypatch.setattr(
+            sys_module,
+            "_PHASE_ENTRY_SKILLS",
+            {"RECON": [], "ANALYSIS": [], "EXPLOIT": [], "REPORT": [], "COMPLETE": []},
+        )
+
+        _, loaded = sys_module.auto_load_skills_for_message(
+            "keyword_x", phase="ANALYSIS"
+        )
+        assert loaded == ["tools/code_review.md"]
+
+        _, loaded_again_path = sys_module.auto_load_skills_for_message(
+            "keyword_x",
+            phase="ANALYSIS",
+            session_loaded_skills={"tools/code_review.md"},
+        )
+        assert loaded_again_path == []
+
+        _, loaded_again_stem = sys_module.auto_load_skills_for_message(
+            "keyword_x",
+            phase="ANALYSIS",
+            session_loaded_skills={"code_review"},
+        )
+        assert loaded_again_stem == []
+
+
+class TestStaleSkillPruning:
+    def test_prunes_wrapper_format_skill_message(self):
+        """Pruner should handle wrapper messages containing [AUTO-LOADED SKILL: ...]."""
+        from airecon.proxy.agent.pipeline import PipelinePhase
+
+        loop = _make_agent_loop()
+        loop.state.iteration = 50
+        loop.pipeline = MagicMock()
+        loop.pipeline.get_current_phase.return_value = PipelinePhase.ANALYSIS
+
+        loop.state.conversation = [
+            {
+                "role": "system",
+                "iteration": 1,
+                "content": (
+                    "[SYSTEM: RELEVANT SKILLS AUTO-LOADED based on your request]\n"
+                    "[AUTO-LOADED SKILL: reconnaissance/full_recon.md]\n"
+                    "..."
+                ),
+            },
+            *[
+                {"role": "user" if i % 2 else "assistant", "content": f"m{i}"}
+                for i in range(12)
+            ],
+        ]
+
+        pruned = loop._prune_stale_skills(max_age_iterations=10)
+        assert pruned == 1
+        assert all(
+            "[AUTO-LOADED SKILL:" not in str(m.get("content", ""))
+            for m in loop.state.conversation
+        )
+
+
+# ── 5. context/objective fixes from review findings ───────────────────
+
+class TestExploitContextAndObjectives:
+    def test_inject_exploit_context_uses_finding_field(self):
+        """EXPLOIT context should show session finding text, not 'Unknown' fallback."""
+        from airecon.proxy.agent.session import SessionData
+
+        loop = _make_agent_loop()
+        loop._session = SessionData(target="example.com")
+        loop._session.vulnerabilities.append(
+            {"finding": "[HIGH] SQL injection in /login username parameter"}
+        )
+
+        loop._inject_exploit_vuln_context()
+        ctx = loop.state.conversation[-1]["content"]
+
+        assert "SQL injection in /login" in ctx
+        assert "Unknown" not in ctx
+
+    def test_handoff_summary_uses_objective_title_when_description_missing(self):
+        """Pending objectives in handoff should use title fallback."""
+        from airecon.proxy.agent.session import SessionData
+
+        loop = _make_agent_loop()
+        loop._session = SessionData(target="example.com")
+        loop.state.conversation = [{"role": "user", "content": "scan example.com"}]
+        loop.state.objective_queue = [
+            {"phase": "ANALYSIS", "title": "Map technologies", "status": "pending"}
+        ]
+
+        summary = loop._build_handoff_summary()
+        assert "Map technologies" in summary
+
+    def test_exploit_tool_objectives_cover_all_five_defaults(self):
+        """EXPLOIT objective updater should mark auth, authz, injection, and impact steps."""
+        from airecon.proxy.agent.pipeline import PipelinePhase
+
+        loop = _make_agent_loop()
+        phase = PipelinePhase.EXPLOIT
+        loop._sync_phase_objectives(phase)
+
+        loop._update_objectives_from_tool(
+            phase=phase,
+            tool_name="execute",
+            arguments={"command": "curl -i https://target.local/api/users/1"},
+            success=True,
+            result={
+                "stdout": (
+                    "GET /api/users/1 status: 200\n"
+                    "login success for admin\n"
+                    "IDOR confirmed: unauthorized access to user 2\n"
+                    "SQL injection confirmed in id parameter\n"
+                    "FLAG{demo-proof}"
+                )
+            },
+            output_file=None,
+        )
+
+        exploit_objs = [
+            o for o in loop.state.objective_queue if o.get("phase") == "EXPLOIT"
+        ]
+        done = [o for o in exploit_objs if o.get("status") == "done"]
+        assert len(done) >= 5

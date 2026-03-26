@@ -68,6 +68,16 @@ class TestParseRefs:
         assert len(refs) == 1
         assert refs[0].path == Path("/tmp/file.txt")
 
+    def test_quoted_ref_with_spaces_parsed(self):
+        refs = parse_refs('scan "@/tmp/my project/main.py" now')
+        assert len(refs) == 1
+        assert refs[0].path == Path("/tmp/my project/main.py")
+
+    def test_single_quoted_ref_with_spaces_parsed(self):
+        refs = parse_refs("scan '@/opt/challenges/level 1/' now")
+        assert len(refs) == 1
+        assert refs[0].path == Path("/opt/challenges/level 1/")
+
 
 # ─────────────────────────────────────────────────────────────────────────────
 # strip_refs

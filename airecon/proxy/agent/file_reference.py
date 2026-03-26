@@ -17,8 +17,10 @@ from pathlib import Path
 
 logger = logging.getLogger("airecon.file_reference")
 
-# Matches @/absolute/path — stops at whitespace or quote
+# Matches @/absolute/path (unquoted) — stops at whitespace or quote
 _AT_REF_RE = re.compile(r"@(/[^\s\"'<>]+)")
+# Matches quoted "@/absolute/path with spaces"
+_AT_REF_QUOTED_RE = re.compile(r"([\"'])@(/[^\n]*?)\1")
 
 # Binary extensions — copy to workspace, let LLM use execute tools on them
 _BINARY_EXTENSIONS = frozenset({
@@ -85,14 +87,39 @@ class ResolvedRef:
 def parse_refs(message: str) -> list[FileRef]:
     """Extract all @/path tokens from a user message."""
     refs: list[FileRef] = []
+    quoted_ranges: list[tuple[int, int]] = []
+
+    # Parse quoted refs first so paths with spaces are captured intact.
+    for m in _AT_REF_QUOTED_RE.finditer(message):
+        path_str = m.group(2).strip()
+        if not path_str.startswith("/") or "<" in path_str or ">" in path_str:
+            continue
+        token_start = m.start(0) + 1  # skip opening quote, points to '@'
+        token_end = token_start + 1 + len(path_str)  # '@' + '/path...'
+        if token_end <= token_start:
+            continue
+        raw = message[token_start:token_end]
+        refs.append(
+            FileRef(
+                raw=raw,
+                path=Path(path_str),
+                start=token_start,
+                end=token_end,
+            )
+        )
+        quoted_ranges.append((token_start, token_end))
+
+    # Parse unquoted refs, skipping tokens already captured from quoted spans.
     for m in _AT_REF_RE.finditer(message):
+        token_start = m.start(0)  # starts at "@"
+        if any(start <= token_start < end for start, end in quoted_ranges):
+            continue
         path_str = m.group(1)      # "/path/..."
         # Trim trailing punctuation that may not be part of the path
         trimmed = path_str.rstrip(".,;:!?)")
         if not trimmed.startswith("/"):
             continue
         strip_count = len(path_str) - len(trimmed)
-        token_start = m.start(0)   # starts at "@"
         token_end = m.end(0) - strip_count
         if token_end <= token_start:
             continue
@@ -105,6 +132,8 @@ def parse_refs(message: str) -> list[FileRef]:
                 end=token_end,
             )
         )
+
+    refs.sort(key=lambda r: r.start)
     return refs
 
 

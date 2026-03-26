@@ -74,6 +74,21 @@ def create_file(path: str, content: str) -> dict[str, Any]:
 
 
 def read_file(path: str, offset: int = 0, limit: int = 500) -> dict[str, Any]:
+    """Read file with streaming support via pagination.
+    
+    For large files (>500 lines), use offset/limit to read in chunks:
+    - First call: read_file(path="/workspace/file.txt", offset=0, limit=500)
+    - Second call: read_file(path="/workspace/file.txt", offset=500, limit=500)
+    - Continue until has_more=False
+    
+    Args:
+        path: File path (relative to workspace or absolute if in workspace/project)
+        offset: Starting line number (0-indexed, default=0)
+        limit: Max lines to read (default=500, max=5000)
+    
+    Returns:
+        Dict with success, result (file content), total_lines, and has_more flag
+    """
     try:
         # Allow reading absolute paths ONLY if they are inside the workspace
         # or inside the airecon project directory (e.g., for loading skills)

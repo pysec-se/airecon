@@ -34,13 +34,26 @@ class ParsedOutput:
     # Technology fingerprints extracted from tool output: {"nginx": "1.18.0",
     # "Bootstrap": "3.3.7"}
     technologies: dict[str, str] = field(default_factory=dict)
+    # Parsing quality marker: "known" for dedicated parser, "fallback" for
+    # generic parser.
+    parse_quality: str = "known"
 
 
 # Maximum items to include in parsed output for LLM context.
-# Raised from 25 → 100 to give the LLM broader coverage of large scans
-# (e.g. 80+ open ports from nmap, 100+ endpoints from ffuf).
-# Monitor prompt size if slow responses or context-limit errors appear.
-MAX_ITEMS = 100
+# Phase-aware dynamic limits (replaces static MAX_ITEMS=100):
+# - RECON: 200 items (breadth over depth, need full attack surface)
+# - ANALYSIS: 150 items (focused vulnerability detection)
+# - EXPLOIT: 50 items (high-signal exploit targets only)
+# - REPORT: 25 items (verified findings only)
+_MAX_ITEMS_BY_PHASE: dict[str, int] = {
+    "RECON": 200,
+    "ANALYSIS": 150,
+    "EXPLOIT": 50,
+    "REPORT": 25,
+}
+# Default fallback when phase not specified (backward compatible)
+DEFAULT_MAX_ITEMS = 100
+
 MAX_RAW_FALLBACK = 3000
 
 
@@ -73,6 +86,24 @@ def _load_tool_patterns() -> list[tuple[re.Pattern[str], str]]:
 # Map of tool binary names → parser type. Loaded from tools_meta.json
 # (single source of truth). Each entry: (compiled regex, parser_type_name).
 _TOOL_PATTERNS: list[tuple[re.Pattern[str], str]] = _load_tool_patterns()
+_GENERIC_WARNED_TOOLS: set[str] = set()
+# Runtime memory of unknown-binary -> parser mapping learned from adaptive fallback.
+_ADAPTIVE_TOOL_HINTS: dict[str, str] = {}
+_MAX_ADAPTIVE_TOOL_HINTS = 128
+
+
+def _remember_adaptive_tool_hint(binary: str, parser_name: str) -> None:
+    """Store binary->parser hint with bounded LRU-like eviction."""
+    b = str(binary or "").strip().lower()
+    p = str(parser_name or "").strip().lower()
+    if not b or not p:
+        return
+    if b in _ADAPTIVE_TOOL_HINTS:
+        _ADAPTIVE_TOOL_HINTS.pop(b, None)
+    _ADAPTIVE_TOOL_HINTS[b] = p
+    while len(_ADAPTIVE_TOOL_HINTS) > _MAX_ADAPTIVE_TOOL_HINTS:
+        oldest = next(iter(_ADAPTIVE_TOOL_HINTS))
+        _ADAPTIVE_TOOL_HINTS.pop(oldest, None)
 
 
 def detect_tool(command: str) -> str | None:
@@ -87,48 +118,223 @@ def detect_tool(command: str) -> str | None:
     return None
 
 
+def _signature_candidates_for_unknown(command: str, stdout: str) -> list[str]:
+    """Infer likely parser candidates for unknown tools from output signatures."""
+    cmd = (command or "").lower()
+    out = stdout or ""
+    lower_out = out.lower()
+    lines = [line.strip() for line in out.splitlines() if line.strip()]
+    head = lines[:20]
+    candidates: list[str] = []
+
+    def _add(name: str) -> None:
+        if name in _PARSERS and name not in candidates:
+            candidates.append(name)
+
+    json_lines = sum(1 for line in head if line.startswith("{"))
+    url_lines = sum(1 for line in head if re.match(r"https?://", line))
+    host_port_lines = sum(1 for line in head if re.match(r"^[\w\.\-]+:\d{1,5}$", line))
+    subdomain_lines = sum(
+        1
+        for line in head
+        if re.match(r"^[a-z0-9][a-z0-9\.\-]+\.[a-z]{2,}$", line, re.IGNORECASE)
+    )
+
+    if "<?xml" in out or "<nmaprun" in out:
+        _add("nmap")
+    if "template-id" in lower_out or re.search(r"\[[^\]]+\]\s*\[(critical|high|medium|low|info)\]", lower_out):
+        _add("nuclei")
+    if "sqlmap" in cmd or "appears injectable" in lower_out or "parameter '" in lower_out:
+        _add("sqlmap")
+    if "whatweb" in cmd or ("plugins" in lower_out and "summary" in lower_out):
+        _add("whatweb")
+    if host_port_lines >= max(2, int(len(head) * 0.5)):
+        _add("naabu")
+    if url_lines >= max(2, int(len(head) * 0.6)):
+        _add("url_list")
+    if subdomain_lines >= max(2, int(len(head) * 0.6)):
+        _add("subfinder")
+    if json_lines >= max(2, int(len(head) * 0.5)):
+        _add("httpx")
+
+    # Command-name hints for common recon binaries not mapped yet.
+    hint_map = {
+        "wayback": "url_list",
+        "gau": "url_list",
+        "crawler": "url_list",
+        "spider": "url_list",
+        "hakrawler": "url_list",
+        "assetfinder": "subfinder",
+        "amass": "subfinder",
+        "harvester": "subfinder",
+    }
+    for needle, parser in hint_map.items():
+        if needle in cmd:
+            _add(parser)
+
+    return candidates
+
+
+def _score_parsed_quality(parsed: ParsedOutput, stdout: str) -> float:
+    """Estimate how informative a parsed output is (0.0-1.0)."""
+    lines = [line.strip() for line in stdout.splitlines() if line.strip()]
+    raw_count = len(lines)
+    if raw_count <= 0:
+        return 0.0
+
+    items = [str(i).strip() for i in parsed.items if str(i).strip()]
+    unique_items = len(set(items))
+    coverage = min(1.0, parsed.total_count / max(1, raw_count))
+    uniqueness = unique_items / max(1, len(items)) if items else 0.0
+    structured = 0
+    for item in items[:30]:
+        if (
+            re.search(r"\bhttps?://", item, re.IGNORECASE)
+            or re.search(r"\b\d{1,5}/(tcp|udp)\b", item, re.IGNORECASE)
+            or re.search(r"\b(CRITICAL|HIGH|MEDIUM|LOW|INFO)\b", item, re.IGNORECASE)
+            or re.search(r"\b\d{1,3}(?:\.\d{1,3}){3}:\d{1,5}\b", item)
+        ):
+            structured += 1
+    structure_ratio = structured / max(1, min(len(items), 30))
+    summary_quality = 1.0 if parsed.summary and not parsed.summary.startswith("Output:") else 0.4
+    raw_fallback_penalty = 0.15 if parsed.raw_truncated and not items else 0.0
+
+    score = (
+        (coverage * 0.30)
+        + (uniqueness * 0.20)
+        + (structure_ratio * 0.30)
+        + (summary_quality * 0.20)
+        - raw_fallback_penalty
+    )
+    return max(0.0, min(1.0, score))
+
+
+def _adaptive_unknown_parse(
+    command: str,
+    stdout: str,
+    *,
+    detected_binary: str,
+    max_items: int,
+) -> tuple[ParsedOutput, str, float]:
+    """Try multiple parser candidates for unknown tools and pick best quality."""
+    candidates = _signature_candidates_for_unknown(command, stdout)
+    hinted_parser = _ADAPTIVE_TOOL_HINTS.get(detected_binary.lower())
+    if hinted_parser in _PARSERS and hinted_parser not in candidates:
+        candidates.insert(0, hinted_parser)
+    attempts: list[tuple[ParsedOutput, str, float]] = []
+
+    for parser_name in candidates:
+        parser_fn = _PARSERS.get(parser_name)
+        if not parser_fn:
+            continue
+        try:
+            parsed = parser_fn(stdout, max_items=max_items)
+            score = _score_parsed_quality(parsed, stdout)
+            attempts.append((parsed, parser_name, score))
+        except Exception as exc:
+            logger.debug("Adaptive parser candidate failed (%s): %s", parser_name, exc)
+
+    generic = _parse_generic_smart(stdout, max_items=max_items)
+    generic_score = _score_parsed_quality(generic, stdout)
+    attempts.append((generic, "generic", generic_score))
+
+    best_parsed, best_parser, best_score = max(attempts, key=lambda item: item[2])
+    if best_parser != "generic" and best_score >= 0.45 and detected_binary:
+        _remember_adaptive_tool_hint(detected_binary, best_parser)
+    return best_parsed, best_parser, best_score
+
+
 # ── Parsers ─────────────────────────────────────────────────────────
 
-def parse_tool_output(command: str, stdout: str) -> ParsedOutput | None:
+def parse_tool_output(
+    command: str,
+    stdout: str,
+    phase: str = "",
+) -> ParsedOutput | None:
     """Auto-detect tool from command and parse its output.
 
     ALWAYS tries to return a ParsedOutput — either from a known tool parser
     or from the generic smart parser. Returns None ONLY if stdout is empty.
+    
+    Args:
+        command: Shell command that was executed
+        stdout: Raw stdout from tool execution
+        phase: Current pipeline phase (RECON/ANALYSIS/EXPLOIT/REPORT) for dynamic item limits
     """
     if not stdout or not stdout.strip():
         return None
 
     tool = detect_tool(command)
+    
+    # Get phase-aware max items limit
+    max_items = _MAX_ITEMS_BY_PHASE.get(phase.upper(), DEFAULT_MAX_ITEMS)
 
     parser_fn = _PARSERS.get(tool) if tool else None
     if parser_fn:
         try:
-            result = parser_fn(stdout)
+            result = parser_fn(stdout, max_items=max_items)  # Pass max_items to parser
             result.tool = tool or ""
+            result.parse_quality = "known"
             return result
         except Exception as e:
             logger.warning(f"Parser failed for {tool}: {e}")
 
-    # Fallback: generic smart parser for ALL unknown tools
+    # Fallback: adaptive parser selection for unknown tools.
     try:
-        result = _parse_generic_smart(stdout)
+        detected = (tool or extract_primary_binary(command) or "unknown").lower()
+        result, chosen_parser, quality_score = _adaptive_unknown_parse(
+            command,
+            stdout,
+            detected_binary=detected,
+            max_items=max_items,
+        )
         detected = tool or extract_primary_binary(command) or "unknown"
-        if not tool:
-            logger.warning(
-                f"Unknown tool detected: {detected}. Using generic parser. "
-                f"Output quality may be reduced. Command: {command[:100]}"
-            )
-            # Ensure raw output is attached so insights aren't lost
-            if not result.raw_truncated:
-                result.raw_truncated = stdout[:MAX_RAW_FALLBACK]
+        if not result.raw_truncated:
+            result.raw_truncated = stdout[:MAX_RAW_FALLBACK]
+        if detected not in _GENERIC_WARNED_TOOLS:
+            if chosen_parser == "generic":
+                logger.warning(
+                    f"Unknown tool detected: {detected}. Using generic parser. "
+                    f"Output quality may be reduced. Command: {command[:100]}"
+                )
+            else:
+                logger.info(
+                    "Unknown tool '%s' parsed adaptively via '%s' (quality=%.2f).",
+                    detected,
+                    chosen_parser,
+                    quality_score,
+                )
+            _GENERIC_WARNED_TOOLS.add(detected)
         result.tool = detected
+        result.parse_quality = "fallback" if chosen_parser == "generic" else "adaptive"
         return result
     except Exception as e:
         logger.warning(f"Generic parser failed: {e}")
         return None
 
 
-def _parse_nmap(stdout: str) -> ParsedOutput:
+def register_output_parser(
+    parser_name: str,
+    parser_fn: Any,
+    binaries: list[str] | None = None,
+) -> None:
+    """Register a custom output parser at runtime.
+
+    This enables plugin-style parser extensions without touching core code.
+    """
+    name = str(parser_name or "").strip().lower()
+    if not name:
+        raise ValueError("parser_name must be non-empty")
+    _PARSERS[name] = parser_fn
+    if binaries:
+        for binary in binaries:
+            b = str(binary or "").strip().lower()
+            if not b:
+                continue
+            _TOOL_PATTERNS.append((re.compile(rf"\b{re.escape(b)}\b"), name))
+
+
+def _parse_nmap(stdout: str, max_items: int = DEFAULT_MAX_ITEMS) -> ParsedOutput:
     """Parse nmap output — extract open ports and services."""
     # Try XML parsing first (if output contains XML)
     if "<?xml" in stdout or "<nmaprun" in stdout:
@@ -169,12 +375,12 @@ def _parse_nmap(stdout: str) -> ParsedOutput:
     return ParsedOutput(
         tool="nmap",
         summary=f"Nmap: {len(open_ports)} open ports found ({hosts_up} hosts up)",
-        items=open_ports[:MAX_ITEMS],
+        items=open_ports[:max_items],
         total_count=len(open_ports),
     )
 
 
-def _parse_nmap_xml(stdout: str) -> ParsedOutput:
+def _parse_nmap_xml(stdout: str, max_items: int = DEFAULT_MAX_ITEMS) -> ParsedOutput:
     """Parse nmap XML output."""
     # Extract XML portion
     xml_start = stdout.find("<?xml")
@@ -229,12 +435,12 @@ def _parse_nmap_xml(stdout: str) -> ParsedOutput:
     return ParsedOutput(
         tool="nmap",
         summary=f"Nmap: {len(open_ports)} open ports across {hosts_up} hosts",
-        items=open_ports[:MAX_ITEMS],
+        items=open_ports[:max_items],
         total_count=len(open_ports),
     )
 
 
-def _parse_nuclei(stdout: str) -> ParsedOutput:
+def _parse_nuclei(stdout: str, max_items: int = DEFAULT_MAX_ITEMS) -> ParsedOutput:
     """Parse nuclei output — JSON lines or text format."""
     findings: list[str] = []
     severity_counts: dict[str, int] = {
@@ -292,12 +498,12 @@ def _parse_nuclei(stdout: str) -> ParsedOutput:
     return ParsedOutput(
         tool="nuclei",
         summary=f"Nuclei: {len(findings)} findings ({sev_str})",
-        items=findings[:MAX_ITEMS],
+        items=findings[:max_items],
         total_count=len(findings),
     )
 
 
-def _parse_httpx(stdout: str) -> ParsedOutput:
+def _parse_httpx(stdout: str, max_items: int = DEFAULT_MAX_ITEMS) -> ParsedOutput:
     """Parse httpx output — JSON lines or text format.
 
     Extracts technologies from -tech-detect JSON output into ParsedOutput.technologies.
@@ -356,13 +562,13 @@ def _parse_httpx(stdout: str) -> ParsedOutput:
         tool="httpx",
         summary=f"httpx: {len(hosts)} live hosts found"
         + (f", {len(technologies)} technologies" if technologies else ""),
-        items=hosts[:MAX_ITEMS],
+        items=hosts[:max_items],
         total_count=len(hosts),
         technologies=technologies,
     )
 
 
-def _parse_whatweb(stdout: str) -> ParsedOutput:
+def _parse_whatweb(stdout: str, max_items: int = DEFAULT_MAX_ITEMS) -> ParsedOutput:
     """Parse whatweb output — JSON array or text 'Summary:' format.
 
     WhatWeb JSON (--log-json):
@@ -395,7 +601,7 @@ def _parse_whatweb(stdout: str) -> ParsedOutput:
                 return ParsedOutput(
                     tool="whatweb",
                     summary=f"WhatWeb: {len(technologies)} technologies fingerprinted",
-                    items=items[:MAX_ITEMS],
+                    items=items[:max_items],
                     total_count=len(technologies),
                     technologies=technologies,
                 )
@@ -457,13 +663,13 @@ def _parse_whatweb(stdout: str) -> ParsedOutput:
     return ParsedOutput(
         tool="whatweb",
         summary=f"WhatWeb: {len(technologies)} technologies fingerprinted",
-        items=items[:MAX_ITEMS],
+        items=items[:max_items],
         total_count=len(technologies),
         technologies=technologies,
     )
 
 
-def _parse_line_list(stdout: str) -> ParsedOutput:
+def _parse_line_list(stdout: str, max_items: int = DEFAULT_MAX_ITEMS) -> ParsedOutput:
     """Generic parser for line-per-item tools (subfinder, katana, waybackurls, etc.)."""
     # Log-prefix patterns to skip: [INFO], [+], [*], [ERR], [WRN] — but NOT
     # katana/gospider output lines like "[javascript] https://..." which contain
@@ -492,12 +698,12 @@ def _parse_line_list(stdout: str) -> ParsedOutput:
     return ParsedOutput(
         tool="list",
         summary=f"Found {len(unique)} items ({len(items) - len(unique)} duplicates removed)",
-        items=unique[:MAX_ITEMS],
+        items=unique[:max_items],
         total_count=len(unique),
     )
 
 
-def _parse_ffuf(stdout: str) -> ParsedOutput:
+def _parse_ffuf(stdout: str, max_items: int = DEFAULT_MAX_ITEMS) -> ParsedOutput:
     """Parse ffuf output — JSON or text format."""
     results: list[str] = []
 
@@ -537,12 +743,12 @@ def _parse_ffuf(stdout: str) -> ParsedOutput:
     return ParsedOutput(
         tool="ffuf",
         summary=f"ffuf: {len(results)} endpoints discovered",
-        items=results[:MAX_ITEMS],
+        items=results[:max_items],
         total_count=len(results),
     )
 
 
-def _parse_naabu(stdout: str) -> ParsedOutput:
+def _parse_naabu(stdout: str, max_items: int = DEFAULT_MAX_ITEMS) -> ParsedOutput:
     """Parse naabu output — host:port per line."""
     ports: list[str] = []
     port_counts: dict[str, list[str]] = {}  # host -> [ports]
@@ -575,14 +781,14 @@ def _parse_naabu(stdout: str) -> ParsedOutput:
     return ParsedOutput(
         tool="naabu",
         summary=f"naabu: {len(ports)} open ports across {len(port_counts)} hosts — {host_summary}",
-        items=ports[:MAX_ITEMS],
+        items=ports[:max_items],
         total_count=len(ports),
     )
 
 
 # ── Exploitation Tool Parsers ────────────────────────────────────────
 
-def _parse_sqlmap(stdout: str) -> ParsedOutput:
+def _parse_sqlmap(stdout: str, max_items: int = DEFAULT_MAX_ITEMS) -> ParsedOutput:
     """Parse sqlmap/ghauri output — extract injection points and payloads."""
     findings: list[str] = []
     param_vulns: list[str] = []
@@ -661,12 +867,12 @@ def _parse_sqlmap(stdout: str) -> ParsedOutput:
     return ParsedOutput(
         tool="sqlmap",
         summary=f"sqlmap: {vuln_count} vulnerable parameter(s) found{dbms_note}",
-        items=findings[:MAX_ITEMS],
+        items=findings[:max_items],
         total_count=len(findings),
     )
 
 
-def _parse_nikto(stdout: str) -> ParsedOutput:
+def _parse_nikto(stdout: str, max_items: int = DEFAULT_MAX_ITEMS) -> ParsedOutput:
     """Parse nikto output — extract findings and vulnerabilities."""
     findings: list[str] = []
     target: str = ""
@@ -729,12 +935,12 @@ def _parse_nikto(stdout: str) -> ParsedOutput:
     return ParsedOutput(
         tool="nikto",
         summary=f"nikto: {len(findings)} findings ({high_count} HIGH){target_note}",
-        items=findings[:MAX_ITEMS],
+        items=findings[:max_items],
         total_count=len(findings),
     )
 
 
-def _parse_dalfox(stdout: str) -> ParsedOutput:
+def _parse_dalfox(stdout: str, max_items: int = DEFAULT_MAX_ITEMS) -> ParsedOutput:
     """Parse dalfox output — extract XSS vulnerability findings."""
     findings: list[str] = []
     poc_lines: list[str] = []
@@ -756,7 +962,7 @@ def _parse_dalfox(stdout: str) -> ParsedOutput:
             findings.append(f"[LOW] {line}")
 
     # Combine findings with their PoC lines
-    combined = findings[:MAX_ITEMS]
+    combined = findings[:max_items]
     if poc_lines:
         combined.extend(poc_lines[:10])
 
@@ -778,7 +984,7 @@ def _parse_dalfox(stdout: str) -> ParsedOutput:
     )
 
 
-def _parse_wpscan(stdout: str) -> ParsedOutput:
+def _parse_wpscan(stdout: str, max_items: int = DEFAULT_MAX_ITEMS) -> ParsedOutput:
     """Parse wpscan output — extract WordPress vulnerabilities, plugins, users."""
     findings: list[str] = []
     current_section: str = ""
@@ -836,14 +1042,14 @@ def _parse_wpscan(stdout: str) -> ParsedOutput:
     return ParsedOutput(
         tool="wpscan",
         summary=f"wpscan: {len(findings)} findings ({vuln_count} HIGH/CRITICAL)",
-        items=findings[:MAX_ITEMS],
+        items=findings[:max_items],
         total_count=len(findings),
     )
 
 
 # ── Generic Smart Parser ────────────────────────────────────────────
 
-def _parse_generic_smart(stdout: str) -> ParsedOutput:
+def _parse_generic_smart(stdout: str, max_items: int = DEFAULT_MAX_ITEMS) -> ParsedOutput:
     """Smart parser for ANY tool output — auto-detects format.
 
     Handles: JSON lines, CSV-like tables, URL lists, key:value pairs,
@@ -860,37 +1066,37 @@ def _parse_generic_smart(stdout: str) -> ParsedOutput:
     # Detect: JSON lines output
     json_count = sum(1 for line in lines[:20] if line.startswith("{"))
     if json_count > len(lines[:20]) * 0.5:
-        return _parse_generic_jsonl(lines)
+        return _parse_generic_jsonl(lines, max_items=max_items)
 
     # Detect: all lines are URLs
     url_count = sum(1 for line in lines[:20] if re.match(r"https?://", line))
     if url_count > len(lines[:20]) * 0.7:
-        return _parse_line_list(stdout)
+        return _parse_line_list(stdout, max_items=max_items)
 
     # Detect: bracket-tagged lines like "[tag] content" (nuclei-style,
     # nikto-style)
     tag_count = sum(1 for line in lines[:20] if re.match(r"^\[.+\]", line))
     if tag_count > len(lines[:20]) * 0.5:
-        return _parse_generic_tagged(lines)
+        return _parse_generic_tagged(lines, max_items=max_items)
 
     # Detect: table-like output (columns separated by spaces/tabs)
     # Check if lines have consistent column count
     col_counts = [len(re.split(r"\s{2,}|\t", line)) for line in lines[:10]]
     if col_counts and min(col_counts) >= 3 and max(
             col_counts) - min(col_counts) <= 1:
-        return _parse_generic_table(lines)
+        return _parse_generic_table(lines, max_items=max_items)
 
     # Detect: key:value or key=value pairs
     kv_count = sum(1 for line in lines[:20] if re.match(
         r"^[\w\-\.]+:\s+.+", line))
     if kv_count > len(lines[:20]) * 0.5:
-        return _parse_generic_kv(lines)
+        return _parse_generic_kv(lines, max_items=max_items)
 
     # Default: smart line summary
-    return _parse_generic_lines(lines)
+    return _parse_generic_lines(lines, max_items=max_items)
 
 
-def _parse_generic_jsonl(lines: list[str]) -> ParsedOutput:
+def _parse_generic_jsonl(lines: list[str], max_items: int = DEFAULT_MAX_ITEMS) -> ParsedOutput:
     """Parse JSON lines output from any tool."""
     items: list[str] = []
     for line in lines:
@@ -930,12 +1136,12 @@ def _parse_generic_jsonl(lines: list[str]) -> ParsedOutput:
     return ParsedOutput(
         tool="json",
         summary=f"JSON output: {len(unique)} entries",
-        items=unique[:MAX_ITEMS],
+        items=unique[:max_items],
         total_count=len(unique),
     )
 
 
-def _parse_generic_tagged(lines: list[str]) -> ParsedOutput:
+def _parse_generic_tagged(lines: list[str], max_items: int = DEFAULT_MAX_ITEMS) -> ParsedOutput:
     """Parse bracket-tagged output like [INFO] message, [+] found, etc."""
     items: list[str] = []
     tag_counts: dict[str, int] = {}
@@ -965,28 +1171,28 @@ def _parse_generic_tagged(lines: list[str]) -> ParsedOutput:
     return ParsedOutput(
         tool="tagged",
         summary=f"{len(unique)} results ({tag_str})",
-        items=unique[:MAX_ITEMS],
+        items=unique[:max_items],
         total_count=len(unique),
     )
 
 
-def _parse_generic_table(lines: list[str]) -> ParsedOutput:
+def _parse_generic_table(lines: list[str], max_items: int = DEFAULT_MAX_ITEMS) -> ParsedOutput:
     """Parse table-like output with columns."""
     items: list[str] = []
     # header = lines[0] if lines else ""
 
-    for line in lines[:MAX_ITEMS + 5]:
+    for line in lines[:max_items + 5]:
         items.append(line[:150])
 
     return ParsedOutput(
         tool="table",
         summary=f"Table output: {len(lines)} rows",
-        items=items[:MAX_ITEMS],
+        items=items[:max_items],
         total_count=len(lines),
     )
 
 
-def _parse_generic_kv(lines: list[str]) -> ParsedOutput:
+def _parse_generic_kv(lines: list[str], max_items: int = DEFAULT_MAX_ITEMS) -> ParsedOutput:
     """Parse key:value or key=value output."""
     items: list[str] = []
     for line in lines:
@@ -995,12 +1201,12 @@ def _parse_generic_kv(lines: list[str]) -> ParsedOutput:
     return ParsedOutput(
         tool="kv",
         summary=f"Output: {len(lines)} entries",
-        items=items[:MAX_ITEMS],
+        items=items[:max_items],
         total_count=len(lines),
     )
 
 
-def _parse_generic_lines(lines: list[str]) -> ParsedOutput:
+def _parse_generic_lines(lines: list[str], max_items: int = DEFAULT_MAX_ITEMS) -> ParsedOutput:
     """Smart line-based summary for any text output."""
     # Filter out empty/noise lines
     meaningful = [
@@ -1015,14 +1221,14 @@ def _parse_generic_lines(lines: list[str]) -> ParsedOutput:
         tool="text",
         summary=f"Output: {len(unique)} lines" +
         (f" ({dupes} duplicates removed)" if dupes > 0 else ""),
-        items=unique[:MAX_ITEMS],
+        items=unique[:max_items],
         total_count=len(unique),
         raw_truncated="" if len(
-            unique) <= MAX_ITEMS else "\n".join(lines[-10:]),
+            unique) <= max_items else "\n".join(lines[-10:]),
     )
 
 
-def _parse_hydra(stdout: str) -> ParsedOutput:
+def _parse_hydra(stdout: str, max_items: int = DEFAULT_MAX_ITEMS) -> ParsedOutput:
     """Parse hydra/medusa output — extract credential findings."""
     findings: list[str] = []
 
@@ -1051,12 +1257,12 @@ def _parse_hydra(stdout: str) -> ParsedOutput:
     return ParsedOutput(
         tool="hydra",
         summary=f"hydra: {len(findings)} credential(s) found",
-        items=findings[:MAX_ITEMS],
+        items=findings[:max_items],
         total_count=len(findings),
     )
 
 
-def _parse_metasploit(stdout: str) -> ParsedOutput:
+def _parse_metasploit(stdout: str, max_items: int = DEFAULT_MAX_ITEMS) -> ParsedOutput:
     """Parse metasploit/msfconsole output — extract exploitation results."""
     findings: list[str] = []
     _NEGATIVE_RE = re.compile(
@@ -1103,7 +1309,7 @@ def _parse_metasploit(stdout: str) -> ParsedOutput:
     return ParsedOutput(
         tool="metasploit",
         summary=f"metasploit: {len(findings)} result(s)",
-        items=findings[:MAX_ITEMS],
+        items=findings[:max_items],
         total_count=len(findings),
     )
 

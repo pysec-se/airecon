@@ -63,6 +63,47 @@ class TestSaveAndLoadSession:
         assert loaded.auth_type == "login_form"
         assert loaded.auth_tokens.get("Authorization") == "Bearer xyz"
 
+    def test_roundtrip_app_model_and_waf_profiles(self, tmp_sessions_dir):
+        session = SessionData(target="example.com")
+        session.app_model.update_from_response(
+            url="https://example.com/api/users",
+            method="GET",
+            status_code=401,
+            headers={"www-authenticate": "Bearer realm=api"},
+            body_excerpt='{"users":[]}',
+            param_names=["page", "limit"],
+        )
+        session.waf_profiles = {
+            "example.com": {
+                "waf_name": "Cloudflare",
+                "confidence": 0.87,
+                "evidence": ["Header cf-ray: Cloudflare"],
+                "detected_at": 12,
+                "bypass_strategies": ["URL encoding", "Header injection"],
+            }
+        }
+        save_session(session)
+
+        loaded = load_session(session.session_id)
+        assert loaded is not None
+        assert "/api/users" in loaded.app_model.resources
+        assert loaded.app_model.auth_map.get("/api/users") == "bearer"
+        assert "example.com" in loaded.waf_profiles
+        assert loaded.waf_profiles["example.com"]["waf_name"] == "Cloudflare"
+
+    def test_roundtrip_recovery_state(self, tmp_sessions_dir):
+        session = SessionData(target="recover.example")
+        session.adaptive_num_ctx = 8192
+        session.adaptive_num_predict_cap = 2048
+        session.vram_crash_count = 3
+        save_session(session)
+
+        loaded = load_session(session.session_id)
+        assert loaded is not None
+        assert loaded.adaptive_num_ctx == 8192
+        assert loaded.adaptive_num_predict_cap == 2048
+        assert loaded.vram_crash_count == 3
+
     def test_load_nonexistent_returns_none(self, tmp_sessions_dir):
         result = load_session("nonexistent_session_id_xyz")
         assert result is None

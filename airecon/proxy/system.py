@@ -314,19 +314,21 @@ _PHASE_ENTRY_SKILLS: dict[str, list[str]] = {
     "ANALYSIS": [
         "tools/semgrep.md",
         "vulnerabilities/api_testing.md",
-        # JS analysis auto-loaded for all ANALYSIS phases — modern web apps expose
-        # API routes, secrets, and hidden endpoints inside JS bundles.
-        "reconnaissance/javascript_analysis.md",
+        # javascript_analysis.md removed — loads via keyword match + phase boost (+2 score)
+        # Keywords: "javascript", "js bundle", "webpack", "react", "vue", "angular", etc.
     ],
     "EXPLOIT": [
         "tools/advanced_fuzzing.md",
+        "payloads/exploitation.md",  # Added to ensure exploitation techniques always available
     ],
     "REPORT": [],
 }
 
 
 def auto_load_skills_for_message(
-    user_message: str, phase: str = ""
+    user_message: str,
+    phase: str = "",
+    session_loaded_skills: set[str] | None = None,
 ) -> tuple[str, list[str]]:
     """Auto-detect relevant skills from user message and return their content.
 
@@ -337,7 +339,12 @@ def auto_load_skills_for_message(
     Phase-aware boost: skills in preferred directories for the active phase
     receive +2 score bonus to promote phase-appropriate content.
 
-    Returns a tuple of (skill_context_string, list_of_loaded_skill_names).
+    Args:
+        user_message: User's input message
+        phase: Current pipeline phase (RECON/ANALYSIS/EXPLOIT/REPORT)
+        session_loaded_skills: Set of skill paths already loaded this session (for dedup)
+
+    Returns a tuple of (skill_context_string, list_of_loaded_skill_paths).
     """
     skills_dir = Path(__file__).resolve().parent / "skills"
     if not skills_dir.exists():
@@ -371,27 +378,38 @@ def auto_load_skills_for_message(
 
     # Phase-guaranteed skills load first (foundational knowledge for the phase),
     # keyword-matched skills fill remaining budget slots.
-    # Budget: guaranteed always load; keyword fills max(2, 4 - len(guaranteed)).
+    # Budget: guaranteed always load; keyword fills max(2, 3 - len(guaranteed)).
+    # Cap total skills at 3 to prevent context bloat (reduced from 4 to reduce token overhead).
     guaranteed = _PHASE_ENTRY_SKILLS.get(phase.upper(), []) if phase else []
-    keyword_slots = max(2, 4 - len(guaranteed))
+    keyword_slots = max(2, 3 - len(guaranteed))
 
     parts: list[str] = []
-    loaded_names: list[str] = []
+    loaded_skills: list[str] = []
     loaded_paths: set[str] = set()
 
     def _load_skill(skill_rel: str) -> bool:
         if skill_rel in loaded_paths:
             return False
+        # Check session-level dedup (prevent re-loading skills from earlier messages)
+        if session_loaded_skills:
+            # Primary format: relative skill path (e.g. tools/code_review.md).
+            # Backward compatible: accept legacy stem-only tracking (code_review).
+            _legacy_stem = Path(skill_rel).stem
+            if skill_rel in session_loaded_skills or _legacy_stem in session_loaded_skills:
+                logger.debug("Skill already loaded this session: %s", skill_rel)
+                return False
         skill_file = skills_dir / skill_rel
         if not skill_file.exists():
             return False
         try:
             content = skill_file.read_text(encoding="utf-8", errors="replace")
             # Tool reference docs and reconnaissance skills get a higher budget
-            limit = 20000 if (
+            # Reduced from 20000/4000 to 15000/3000 (25% cut) to prevent context bloat
+            # while preserving critical skill content (all guaranteed skills fit under 15K)
+            limit = 15000 if (
                 skill_rel.startswith("tools/")
                 or skill_rel.startswith("reconnaissance/")
-            ) else 4000
+            ) else 3000
             if len(content) > limit:
                 content = (
                     content[:limit]
@@ -399,7 +417,7 @@ def auto_load_skills_for_message(
                     f" full content: {skill_file.absolute().as_posix()})"
                 )
             parts.append(f"[AUTO-LOADED SKILL: {skill_rel}]\n{content}")
-            loaded_names.append(skill_file.stem)
+            loaded_skills.append(skill_rel)
             loaded_paths.add(skill_rel)
             return True
         except Exception:  # nosec B110 - skill loading is best-effort
@@ -420,10 +438,18 @@ def auto_load_skills_for_message(
     if not parts:
         return "", []
 
+    # Empirical data logging for skill injection tuning (collect over 50-100 sessions)
+    # Track: phase, skill counts, total chars, truncation events
+    total_chars = sum(len(p) for p in parts)
+    logger.debug(
+        "skill_injection_stats: phase=%s guaranteed=%d keyword_slots=%d loaded=%d total_chars=%d",
+        phase, len(guaranteed), keyword_slots, len(loaded_skills), total_chars,
+    )
+
     return (
         "[SYSTEM: RELEVANT SKILLS AUTO-LOADED based on your request]\n"
         + "\n---\n".join(parts),
-        loaded_names,
+        loaded_skills,
     )
 
 
@@ -485,7 +511,9 @@ def auto_load_skills_for_technologies(
                 if len(content) > limit:
                     content = content[:limit] + f"\n... (truncated, use read_file for full: {skill_file.absolute().as_posix()})"
                 parts.append(f"[AUTO-LOADED TECH SKILL: {skill_rel}]\n{content}")
-                loaded_names.append(skill_file.stem)
+                # Return relative path (not stem) so dedup and telemetry use the
+                # same stable identifier format.
+                loaded_names.append(skill_rel)
                 already_loaded.add(skill_rel)
             except Exception:  # nosec B110
                 pass

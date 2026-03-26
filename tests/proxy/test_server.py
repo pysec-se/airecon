@@ -72,6 +72,7 @@ def _make_mock_ollama() -> MagicMock:
     m = MagicMock()
     m.health_check = AsyncMock(return_value=True)
     m.unload_model = AsyncMock()
+    m.model = "test-model"
     return m
 
 

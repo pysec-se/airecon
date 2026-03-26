@@ -1,6 +1,8 @@
 """Tests for Phase 2: Skill Orchestration Policy + Tool Budget."""
 from __future__ import annotations
 
+import pytest
+
 from airecon.proxy.system import auto_load_skills_for_message, _PHASE_SKILL_DIRECTORIES
 from airecon.proxy.agent.models import AgentState
 from airecon.proxy.agent.pipeline import _PHASE_TOOL_BUDGETS, PipelineEngine
@@ -70,7 +72,7 @@ def test_skill_phase_no_boost_zero_hits(mocker):
     ctx, loaded = auto_load_skills_for_message("totally unrelated message", phase="EXPLOIT")
 
     # The keyword-only skill (xss.md) must NOT be loaded (zero hits, no keyword match).
-    assert "xss" not in loaded
+    assert "payloads/xss.md" not in loaded
     # Guaranteed skill (advanced_fuzzing) may load if the file exists on disk.
     # We do NOT assert ctx == "" because guaranteed skills bypass the zero-hit guard.
 
@@ -160,6 +162,18 @@ def test_phase_tool_usage_isolated_per_phase():
 
     assert state.get_phase_tool_count("RECON", "quick_fuzz") == 5
     assert state.get_phase_tool_count("EXPLOIT", "quick_fuzz") == 3
+
+
+def test_tool_effectiveness_tracks_meaningful_hits():
+    state = AgentState()
+    state.record_tool_outcome("ANALYSIS", "quick_fuzz", success=True, meaningful_evidence_delta=1)
+    state.record_tool_outcome("ANALYSIS", "quick_fuzz", success=True, meaningful_evidence_delta=0)
+    state.record_tool_outcome("ANALYSIS", "quick_fuzz", success=False, meaningful_evidence_delta=0)
+
+    eff = state.get_tool_effectiveness("ANALYSIS", "quick_fuzz")
+    assert eff["calls"] == 3.0
+    assert eff["success_rate"] == pytest.approx(2 / 3, rel=0.01)
+    assert eff["hit_rate"] == pytest.approx(1 / 3, rel=0.01)
 
 
 def test_phase_tool_budgets_defined():

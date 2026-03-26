@@ -192,6 +192,26 @@ def _load_param_type_map() -> dict[str, str]:
 _PARAM_TYPE_MAP: dict[str, str] = _load_param_type_map()
 
 
+def _load_redirect_path_indicators() -> frozenset[str]:
+    """Load open-redirect path indicators from patterns.json.
+
+    When a URL-accepting parameter (type=SSRF) sits on an endpoint whose PATH
+    contains one of these words, the actual risk is open redirect, not SSRF.
+    Example: /api/frontendweb.aredirurl?url=... → url param should be OPEN_REDIRECT.
+    """
+    try:
+        data_file = Path(__file__).parent.parent / "data" / "patterns.json"
+        data = json.loads(data_file.read_text(encoding="utf-8"))
+        indicators: list[str] = data.get("open_redirect_url_param", {}).get("indicators", [])
+        return frozenset(ind.lower() for ind in indicators if ind)
+    except Exception as e:
+        logger.debug("Could not load redirect path indicators from patterns.json: %s", e)
+        return frozenset()
+
+
+_REDIRECT_PATH_INDICATORS: frozenset[str] = _load_redirect_path_indicators()
+
+
 def _guess_injection_type(param: str, value: str) -> str:
     """Infer the most likely injection type from parameter name and sample value.
 
@@ -244,17 +264,30 @@ def _extract_injection_points(url: str) -> list[dict[str, Any]]:
             "", "", "",
         ))
 
+        # Pre-compute whether this endpoint's path indicates redirect behaviour.
+        # Used to upgrade SSRF-typed URL params to OPEN_REDIRECT when the path
+        # context reveals the parameter is used for redirecting, not fetching.
+        _path_lower = p.path.lower()
+        _path_is_redirect = any(ind in _path_lower for ind in _REDIRECT_PATH_INDICATORS)
+
         # Query string parameters — skip pure analytics/tracking params that
         # are never injection points and only inflate the injection_points list.
         for param, value in parse_qsl(p.query, keep_blank_values=True):
             if param.lower() in _TRACKING_PARAMS:
                 continue
+            type_hint = _guess_injection_type(param, value)
+            # Reclassify SSRF → OPEN_REDIRECT when the endpoint path signals
+            # redirect behaviour (e.g. /frontendweb.aredirurl?url=...).
+            # URL-accepting parameters on redirect endpoints should be tested
+            # with javascript:, //attacker.com etc., not with cloud metadata.
+            if type_hint == "SSRF" and _path_is_redirect:
+                type_hint = "OPEN_REDIRECT"
             points.append({
                 "url": base,
                 "parameter": param,
                 "method": "GET",
                 "value_sample": value[:30] if value else "",
-                "type_hint": _guess_injection_type(param, value),
+                "type_hint": type_hint,
             })
 
         # Path segments that look like IDs (numeric or UUID).
@@ -280,8 +313,13 @@ def _extract_injection_points(url: str) -> list[dict[str, Any]]:
 
 
 def injection_point_key(url: str, parameter: str, method: str = "GET") -> str:
-    """Build a stable string key for an injection point triple."""
-    return f"{url}||{parameter}||{method.upper()}"
+    """Build a stable string key for an injection point triple.
+
+    The URL is normalized (lowercase scheme/host, trailing slash stripped,
+    query params sorted) so that /api/ and /api produce the same key.
+    """
+    normalized = _normalize_url(url) if url else url
+    return f"{normalized}||{parameter}||{method.upper()}"
 
 
 def mark_injection_point_tested(session: "SessionData", url: str, parameter: str, method: str = "GET") -> None:
@@ -422,6 +460,174 @@ def _is_duplicate_vulnerability(
 
 
 @dataclass
+class ApplicationModel:
+    """Incrementally-built structural model of the target application.
+
+    Populated from HTTP responses observed during RECON/ANALYSIS phases.
+    Gives the LLM a persistent mental map of the app without re-reading
+    raw tool outputs from history.
+
+    Resources       — {endpoint: {methods, param_names, auth_required, content_type}}
+    auth_map        — {endpoint_pattern: "none"|"cookie"|"bearer"|"basic"|"apikey"}
+    param_relationships — {param_name: [related_params]}
+    roles_detected  — distinct user roles observed (admin, user, guest, ...)
+    api_schema      — discovered JSON keys per endpoint (from responses)
+    """
+
+    resources: dict[str, dict[str, Any]] = field(default_factory=dict)
+    auth_map: dict[str, str] = field(default_factory=dict)
+    param_relationships: dict[str, list[str]] = field(default_factory=dict)
+    roles_detected: list[str] = field(default_factory=list)
+    api_schema: dict[str, dict[str, Any]] = field(default_factory=dict)
+
+    def update_from_response(
+        self,
+        url: str,
+        method: str,
+        status_code: int,
+        headers: dict[str, str],
+        body_excerpt: str,
+        param_names: list[str] | None = None,
+    ) -> None:
+        """Incrementally update application model from a single HTTP observation."""
+        try:
+            parsed = urlparse(url)
+            endpoint = parsed.path.rstrip("/") or "/"
+        except Exception:
+            endpoint = url
+
+        # Update resources map
+        entry = self.resources.setdefault(endpoint, {
+            "methods": [],
+            "param_names": [],
+            "auth_required": False,
+            "content_types": [],
+        })
+        if method.upper() not in entry["methods"]:
+            entry["methods"].append(method.upper())
+
+        for p in (param_names or []):
+            if p and p not in entry["param_names"]:
+                entry["param_names"].append(p)
+
+        # Auth detection from response headers
+        auth_header = headers.get("www-authenticate", headers.get("WWW-Authenticate", ""))
+        set_cookie = headers.get("set-cookie", headers.get("Set-Cookie", ""))
+        auth_header_val = headers.get("authorization", headers.get("Authorization", ""))
+
+        if status_code == 401:
+            entry["auth_required"] = True
+            if "bearer" in auth_header.lower():
+                self.auth_map[endpoint] = "bearer"
+            elif "basic" in auth_header.lower():
+                self.auth_map[endpoint] = "basic"
+            else:
+                self.auth_map[endpoint] = "auth_required"
+        elif set_cookie and "session" in set_cookie.lower():
+            self.auth_map[endpoint] = "cookie"
+        elif "bearer" in auth_header_val.lower():
+            self.auth_map[endpoint] = "bearer"
+
+        # Content type
+        ct = headers.get("content-type", headers.get("Content-Type", ""))
+        if ct and ct not in entry["content_types"]:
+            entry["content_types"].append(ct.split(";")[0].strip())
+
+        # Role detection from response body
+        if body_excerpt:
+            body_lower = body_excerpt.lower()
+            for role in ("admin", "superuser", "moderator", "staff", "manager"):
+                if role in body_lower and role not in self.roles_detected:
+                    self.roles_detected.append(role)
+
+        # API schema: extract top-level JSON keys from body if it looks like JSON
+        if "application/json" in ct and body_excerpt.strip().startswith("{"):
+            try:
+                obj = json.loads(body_excerpt[:2000])
+                if isinstance(obj, dict):
+                    schema = self.api_schema.setdefault(endpoint, {})
+                    schema.update({k: type(v).__name__ for k, v in obj.items()})
+            except Exception:
+                pass
+
+        # Prune resources if exceeding limits (keep most recent 500 endpoints)
+        if len(self.resources) > 500:
+            excess = list(self.resources.keys())[:-500]
+            for k in excess:
+                del self.resources[k]
+
+    def build_context(self, max_endpoints: int = 8) -> str:
+        """Return a compact XML summary of the application model for LLM injection."""
+        if not self.resources and not self.roles_detected:
+            return ""
+
+        lines = ['<application_model>']
+        if self.resources:
+            # Prioritize endpoints that need auth or have params
+            interesting = sorted(
+                self.resources.items(),
+                key=lambda kv: (
+                    -len(kv[1].get("param_names", [])),
+                    -int(kv[1].get("auth_required", False)),
+                ),
+            )[:max_endpoints]
+            lines.append("  <endpoints>")
+            for ep, info in interesting:
+                methods_str = ",".join(info.get("methods", ["GET"]))
+                params = info.get("param_names", [])
+                params_str = f" params=[{','.join(params[:5])}]" if params else ""
+                auth = " auth=required" if info.get("auth_required") else ""
+                auth_type = self.auth_map.get(ep, "")
+                auth_type_str = f"({auth_type})" if auth_type else ""
+                lines.append(
+                    f'    <endpoint path="{ep}" methods="{methods_str}"'
+                    f'{auth}{auth_type_str}{params_str}/>'
+                )
+            lines.append("  </endpoints>")
+
+        if self.roles_detected:
+            lines.append(f"  <roles>{', '.join(self.roles_detected)}</roles>")
+
+        if self.api_schema:
+            for ep, schema in list(self.api_schema.items())[:3]:
+                keys_str = ", ".join(list(schema.keys())[:10])
+                lines.append(f'  <api_schema endpoint="{ep}" keys="{keys_str}"/>')
+
+        lines.append('</application_model>')
+        return "\n".join(lines)
+
+
+def _serialize_app_model(model: ApplicationModel) -> dict[str, Any]:
+    """Serialize ApplicationModel to JSON-safe dict."""
+    return {
+        "resources": dict(model.resources),
+        "auth_map": dict(model.auth_map),
+        "roles_detected": list(model.roles_detected),
+        "api_schema": dict(model.api_schema),
+    }
+
+
+def _deserialize_app_model(raw: Any) -> ApplicationModel:
+    """Deserialize ApplicationModel from persisted payload."""
+    model = ApplicationModel()
+    if not isinstance(raw, dict):
+        return model
+    resources = raw.get("resources", {})
+    auth_map = raw.get("auth_map", {})
+    roles = raw.get("roles_detected", [])
+    api_schema = raw.get("api_schema", {})
+    if isinstance(resources, dict):
+        model.resources = resources
+    if isinstance(auth_map, dict):
+        model.auth_map = {str(k): str(v) for k, v in auth_map.items()}
+    if isinstance(roles, list):
+        model.roles_detected = [str(r) for r in roles]
+    if isinstance(api_schema, dict):
+        model.api_schema = api_schema
+    return model
+
+
+@dataclass
 class SessionData:
     """Persistent per-session state, identified by a unique session_id."""
 
@@ -484,6 +690,26 @@ class SessionData:
     # a crash or extreme context truncation.
     tested_endpoints: list[str] = field(default_factory=lambda: BoundedList(maxlen=_MAX_TESTED_ENDPOINTS))
 
+    # Tracks skills that have been auto-loaded this session to prevent re-injection.
+    # Format: skill relative path e.g. "vulnerabilities/sql_injection.md"
+    # Persisted to disk so skills aren't re-loaded after session resume.
+    loaded_skills: list[str] = field(default_factory=lambda: BoundedList(maxlen=200))
+
+    # Application Model Builder — incrementally updated from HTTP observations.
+    # Persisted so resumed sessions keep endpoint/auth/schema understanding.
+    app_model: ApplicationModel = field(default_factory=ApplicationModel)
+
+    # WAF profiles detected during testing.
+    # Key: target host, Value: {waf_name, confidence, evidence, ...}
+    waf_profiles: dict[str, dict[str, Any]] = field(default_factory=dict)
+
+    # Recovery state persisted across session reloads.
+    # Keeps post-crash context limits stable instead of bouncing back to large
+    # defaults that can immediately trigger another OOM.
+    adaptive_num_ctx: int = 0
+    adaptive_num_predict_cap: int = 0
+    vram_crash_count: int = 0
+
     def __post_init__(self) -> None:
         if not self.session_id:
             self.session_id = generate_session_id()
@@ -519,6 +745,8 @@ class SessionData:
             maxlen=_MAX_CORRELATION_SUGGESTIONS)
         self.tested_endpoints = _coerce_sequence_field(
             self.tested_endpoints, field_name="tested_endpoints", maxlen=_MAX_TESTED_ENDPOINTS)
+        if not isinstance(self.waf_profiles, dict):
+            self.waf_profiles = {}
         # Trim auth_tokens dict
         if isinstance(self.auth_tokens, dict) and len(self.auth_tokens) > _MAX_AUTH_TOKENS:
             keys = list(self.auth_tokens.keys())
@@ -529,6 +757,9 @@ class SessionData:
         self.token_prompt_total = _coerce_non_negative_int(self.token_prompt_total)
         self.token_completion_total = _coerce_non_negative_int(self.token_completion_total)
         self.token_last_used = _coerce_non_negative_int(self.token_last_used)
+        self.adaptive_num_ctx = _coerce_non_negative_int(self.adaptive_num_ctx)
+        self.adaptive_num_predict_cap = _coerce_non_negative_int(self.adaptive_num_predict_cap)
+        self.vram_crash_count = _coerce_non_negative_int(self.vram_crash_count)
 
 
 def record_tested_endpoint(session: SessionData, url: str, method: str = "GET") -> None:
@@ -606,6 +837,15 @@ def load_session(session_id: str) -> SessionData | None:
             tested_endpoints=_coerce_sequence_field(
                 data.get("tested_endpoints", []), field_name="tested_endpoints",
                 maxlen=_MAX_TESTED_ENDPOINTS),
+            loaded_skills=_coerce_sequence_field(
+                data.get("loaded_skills", []), field_name="loaded_skills", maxlen=200),
+            app_model=_deserialize_app_model(data.get("app_model", {})),
+            waf_profiles=data.get("waf_profiles", {}) if isinstance(data.get("waf_profiles", {}), dict) else {},
+            adaptive_num_ctx=_coerce_non_negative_int(data.get("adaptive_num_ctx", 0)),
+            adaptive_num_predict_cap=_coerce_non_negative_int(
+                data.get("adaptive_num_predict_cap", 0)
+            ),
+            vram_crash_count=_coerce_non_negative_int(data.get("vram_crash_count", 0)),
             _prior_merged=data.get("_prior_merged", False),
         )
         session.prune_old_data()
@@ -638,12 +878,15 @@ def save_session(session: SessionData) -> None:
         session.updated_at = datetime.now().isoformat()
         filepath = SESSIONS_DIR / f"{session.session_id}.json"
         payload = asdict(session)
+        payload["app_model"] = _serialize_app_model(session.app_model)
+        if not isinstance(payload.get("waf_profiles"), dict):
+            payload["waf_profiles"] = {}
         # Convert BoundedList fields to plain list for JSON serialization
         _bounded_fields = (
             "subdomains", "live_hosts", "urls", "vulnerabilities",
             "attack_chains", "completed_phases", "tools_run",
             "injection_points", "auth_cookies", "tested_injection_points",
-            "suggested_correlations", "tested_endpoints",
+            "suggested_correlations", "tested_endpoints", "loaded_skills",
         )
         for key in _bounded_fields:
             payload[key] = list(payload.get(key, []))
@@ -1134,19 +1377,54 @@ def session_to_context(session: SessionData) -> str:
 
     if session.subdomains:
         count = len(session.subdomains)
-        preview = ", ".join(session.subdomains[:10])
+        # Prioritized preview: show subdomains with open ports first, then alphabetical
+        # This ensures high-value targets are visible to LLM (not just first-inserted)
+        subdomains_with_ports = [
+            sd for sd in session.subdomains
+            if any(sd in host for host in session.open_ports.keys())
+        ]
+        subdomains_without_ports = [
+            sd for sd in session.subdomains
+            if sd not in subdomains_with_ports
+        ]
+        # Show up to 5 with ports, then 5 without ports (total 10)
+        preview_items = (subdomains_with_ports[:5] + subdomains_without_ports[:5])[:10]
+        preview = ", ".join(preview_items)
         parts.append(
             f"Subdomains found: {count} — {preview}"
             + (f" ... +{count - 10} more" if count > 10 else "")
         )
+        if subdomains_with_ports and count > 10:
+            parts.append(f"  [!]{len(subdomains_with_ports)} subdomains have open ports (prioritized above)")
 
     if session.live_hosts:
         count = len(session.live_hosts)
-        preview = ", ".join(session.live_hosts[:10])
+        # Prioritized preview: show hosts with open ports or injection points first
+        hosts_with_ports = [
+            h for h in session.live_hosts
+            if any(h in host for host in session.open_ports.keys())
+        ]
+        hosts_with_injections = [
+            h for h in session.live_hosts
+            if any(h in pt.get("url", "") for pt in session.injection_points)
+        ]
+        # Deduplicate while preserving order
+        seen = set()
+        priority_hosts = []
+        for h in hosts_with_ports + hosts_with_injections:
+            if h not in seen:
+                priority_hosts.append(h)
+                seen.add(h)
+        other_hosts = [h for h in session.live_hosts if h not in seen]
+        # Show up to 10: priority first, then others
+        preview_items = (priority_hosts + other_hosts)[:10]
+        preview = ", ".join(preview_items)
         parts.append(
             f"Live hosts: {count} — {preview}"
             + (f" ... +{count - 10} more" if count > 10 else "")
         )
+        if priority_hosts and count > 10:
+            parts.append(f"  [!]{len(priority_hosts)} hosts have ports/injections (prioritized above)")
 
     if session.open_ports:
         total_ports = sum(len(p) for p in session.open_ports.values())
@@ -1171,27 +1449,59 @@ def session_to_context(session: SessionData) -> str:
         # Fall back to all IPs if everything is already tested.
         show_list = untested if untested else session.injection_points
 
-        # Group by type_hint for clarity
+        # Prioritize by type_hint (IDOR/SSRF first as most critical), then alphabetically
+        # Type priority based on exploitability: IDOR > SSRF > PATH_TRAVERSAL > OPEN_REDIRECT > SQLi_XSS > AUTH > INJECT
+        type_priority = {"IDOR": 0, "SSRF": 1, "PATH_TRAVERSAL": 2, "OPEN_REDIRECT": 3, "SQLi_XSS": 4, "AUTH": 5, "INJECT": 6}
+        def get_type_priority(pt: dict) -> int:
+            t = pt.get("type_hint", "INJECT").upper()
+            return type_priority.get(t, 6)
+        
+        # Sort untested points by type priority (most critical first), then by type_hint
+        sorted_points = sorted(
+            show_list,
+            key=lambda pt: (get_type_priority(pt), pt.get("type_hint", "INJECT"))
+        )
+
+        # Group by type_hint for clarity, but show HIGH/CRITICAL first across all types
         by_type: dict[str, list[dict[str, Any]]] = {}
-        for pt in show_list:
+        for pt in sorted_points:
             t = pt.get("type_hint", "INJECT")
             by_type.setdefault(t, []).append(pt)
 
         preview_lines: list[str] = []
         shown = 0
+        # Show up to 25 untested injection points (increased from 9 for better coverage)
+        # Prioritize CRITICAL/HIGH severity
         for type_hint, pts in by_type.items():
-            for pt in pts[:3]:
+            # Show all CRITICAL/HIGH first, regardless of type
+            critical_high = [pt for pt in pts if get_type_priority(pt) <= 3]  # IDOR, SSRF, PATH_TRAVERSAL, OPEN_REDIRECT
+            others = [pt for pt in pts if get_type_priority(pt) > 3]
+            for pt in critical_high[:5]:  # Up to 5 high-priority per type
                 param = pt.get("parameter", "?")
                 url_short = pt.get("url", "")
                 path = urlparse(url_short).path or url_short
+                type_hint = pt.get("type_hint", "INJECT").upper()
                 preview_lines.append(f"  [{type_hint}] {param} @ {path}")
                 shown += 1
-            if shown >= 9:
+            if shown >= 15:  # Show max 15 high-priority total
                 break
+        # Then show lower-priority if space remains
+        if shown < 25:
+            for type_hint, pts in by_type.items():
+                others = [pt for pt in pts if get_type_priority(pt) > 3]
+                for pt in others[:3]:  # Up to 3 lower-priority per type
+                    param = pt.get("parameter", "?")
+                    url_short = pt.get("url", "")
+                    path = urlparse(url_short).path or url_short
+                    type_hint = pt.get("type_hint", "INJECT").upper()
+                    preview_lines.append(f"  [{type_hint}] {param} @ {path}")
+                    shown += 1
+                if shown >= 25:  # Max 25 total
+                    break
 
         suffix = f" ... +{len(show_list) - shown} more" if len(show_list) > shown else ""
         untested_note = (
-            f"⚠ {len(untested)} UNTESTED — prioritize these!" if untested
+            f"[!]{len(untested)} UNTESTED — prioritize these!" if untested
             else f"✓ all {tested_count} tested"
         )
         parts.append(
@@ -1234,6 +1544,18 @@ def session_to_context(session: SessionData) -> str:
         parts.append(
             auth_info +
             " (use inject_cookies action to restore session)")
+
+    if session.waf_profiles:
+        waf_preview = []
+        for host, prof in list(session.waf_profiles.items())[:4]:
+            waf_name = str(prof.get("waf_name", "Unknown"))
+            conf = float(prof.get("confidence", 0.0))
+            waf_preview.append(f"{host}={waf_name}({conf:.0%})")
+        parts.append(
+            f"WAF profiles: {len(session.waf_profiles)} — "
+            + ", ".join(waf_preview)
+            + (f" ... +{len(session.waf_profiles) - 4} more" if len(session.waf_profiles) > 4 else "")
+        )
 
     parts.append(
         "Use this data to RESUME work — do NOT re-run scans that already have results above."

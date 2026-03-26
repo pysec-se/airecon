@@ -5,8 +5,10 @@ P1 Priority: Tests for edge cases in nuclei, gobuster, subfinder, whatweb parsin
 
 import json
 from airecon.proxy.agent.output_parser import (
+    ParsedOutput,
     parse_tool_output,
     detect_tool,
+    register_output_parser,
     _parse_nmap,
     _parse_nuclei,
     _parse_line_list,
@@ -53,6 +55,26 @@ class TestDetectTool:
 
     def test_unknown_tool_returns_none(self):
         assert detect_tool("unknown_tool -flag") is None
+
+    def test_register_output_parser_runtime_extension(self):
+        def _custom(stdout: str, max_items: int = 100):
+            return ParsedOutput(
+                tool="custom_scan",
+                summary="custom parser",
+                items=stdout.splitlines()[:max_items],
+                total_count=len([l for l in stdout.splitlines() if l.strip()]),
+            )
+
+        register_output_parser("custom_scan", _custom, binaries=["customscan"])
+        out = parse_tool_output("customscan --target example.com", "a\nb\nc")
+        assert out is not None
+        assert out.tool == "custom_scan"
+        assert out.parse_quality == "known"
+
+    def test_unknown_tool_uses_generic_fallback_quality(self):
+        out = parse_tool_output("tool_that_does_not_exist --x", "line1\nline2")
+        assert out is not None
+        assert out.parse_quality == "fallback"
 
 
 class TestParseNmap:
@@ -413,13 +435,13 @@ class TestParseToolOutputIntegration:
         assert parsed is not None
 
     def test_parse_respects_max_items(self):
-        """Test that MAX_ITEMS limit is respected."""
-        from airecon.proxy.agent.output_parser import MAX_ITEMS
+        """Test that DEFAULT_MAX_ITEMS limit is respected."""
+        from airecon.proxy.agent.output_parser import DEFAULT_MAX_ITEMS
 
-        # Create output with more items than MAX_ITEMS
-        subdomains = "\n".join([f"sub{i}.example.com" for i in range(MAX_ITEMS + 10)])
+        # Create output with more items than DEFAULT_MAX_ITEMS
+        subdomains = "\n".join([f"sub{i}.example.com" for i in range(DEFAULT_MAX_ITEMS + 10)])
         parsed = parse_tool_output("subfinder -d example.com", subdomains)
 
         assert parsed is not None
-        assert len(parsed.items) <= MAX_ITEMS
-        assert parsed.total_count == MAX_ITEMS + 10
+        assert len(parsed.items) <= DEFAULT_MAX_ITEMS
+        assert parsed.total_count == DEFAULT_MAX_ITEMS + 10
