@@ -21,7 +21,7 @@ from ..system import (
     auto_load_skills_for_technologies,
     get_system_prompt,
 )
-from .executors import _RECON_PORT_SCAN_BINS, _ExecutorMixin
+from .executors import _ExecutorMixin
 from .file_reference import (
     build_injection_message,
     parse_refs,
@@ -31,13 +31,11 @@ from .file_reference import (
 )
 from .formatters import _FormatterMixin
 from .models import MAX_TOOL_ITERATIONS, AgentEvent, AgentState
-from .owasp import classify_owasp, severity_for_evidence
 from .output_parser import parse_tool_output
-from .pipeline import _PHASE_TOOL_BUDGETS, PipelineEngine, PipelinePhase
+from .pipeline import PipelineEngine, PipelinePhase
 from .session import (
     SessionData,
     find_prior_session,
-    get_untested_injection_points,
     load_session,
     merge_prior_findings,
     record_tested_endpoint,
@@ -50,7 +48,7 @@ from dataclasses import asdict as _asdict
 from .chain_planner import ChainStep as _ChainStep
 from .chain_planner import ExploitChain as _ExploitChain
 from .chain_planner import build_chain_context, plan_chains
-from .validators import _ValidatorMixin, has_dangerous_patterns
+from .validators import _ValidatorMixin
 from .waf_detector import (
     build_waf_bypass_context,
     detect_waf_from_response,

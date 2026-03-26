@@ -118,7 +118,7 @@ class TestResolveHypothesesFromEvidence:
         assert h["status"] == "confirmed"
 
     def test_ignores_low_severity_evidence(self, state: AgentState) -> None:
-        hyp_id = state.add_hypothesis(
+        state.add_hypothesis(
             "SQLi vulnerability in login username field", "inject quotes"
         )
         state.add_evidence(
@@ -132,7 +132,7 @@ class TestResolveHypothesesFromEvidence:
         assert confirmed == 0
 
     def test_ignores_low_confidence_evidence(self, state: AgentState) -> None:
-        hyp_id = state.add_hypothesis(
+        state.add_hypothesis(
             "SSRF via redirect parameter endpoint", "check Location"
         )
         state.add_evidence(

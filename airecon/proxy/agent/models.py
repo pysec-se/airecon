@@ -810,7 +810,7 @@ class AgentState:
                 lines.append(f'      <claim>{claim}</claim>')
                 if plan:
                     lines.append(f'      <test_plan>{plan}</test_plan>')
-                lines.append(f'    </hypothesis>')
+                lines.append('    </hypothesis>')
             lines.append("  </pending>")
         if confirmed:
             lines.append("  <confirmed>")

@@ -22,7 +22,6 @@ from urllib.parse import urlparse
 
 from ..config import get_config
 from .models import AgentState
-from .pipeline import PipelinePhase
 from .session import get_untested_injection_points
 
 logger = logging.getLogger("airecon.agent")
@@ -697,10 +696,10 @@ class _ContextMixin:
             lines.append("## Progress")
             if done_lines:
                 lines.append("### Done")
-                lines.extend(f"  - {l}" for l in done_lines)
+                lines.extend(f"  - {line}" for line in done_lines)
             if in_progress_lines:
                 lines.append("### In Progress")
-                lines.extend(f"  - {l}" for l in in_progress_lines)
+                lines.extend(f"  - {line}" for line in in_progress_lines)
 
         # --- Key Decisions: technologies, attack surface ---
         decision_lines: list[str] = []
@@ -718,7 +717,7 @@ class _ContextMixin:
                 )
         if decision_lines:
             lines.append("## Key Context")
-            lines.extend(f"  - {l}" for l in decision_lines)
+            lines.extend(f"  - {line}" for line in decision_lines)
 
         # --- Next Steps: untested injection points ---
         if self._session and self._session.injection_points:

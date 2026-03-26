@@ -1,11 +1,8 @@
 """Tests for WAF detection and bypass strategy module (waf_detector.py)."""
 from __future__ import annotations
 
-import pytest
-
 from airecon.proxy.agent.waf_detector import (
     WAFProfile,
-    _GENERIC_BYPASS_FALLBACK,
     build_waf_bypass_context,
     detect_waf_from_response,
     merge_waf_profiles,

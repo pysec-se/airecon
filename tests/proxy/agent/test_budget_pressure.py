@@ -48,7 +48,7 @@ class TestBudgetPressureCascade:
             loop.state.conversation.append({
                 "role": "system",
                 "content": (
-                    f"[SYSTEM: BUDGET EXHAUSTED] You have used all available "
+                    "[SYSTEM: BUDGET EXHAUSTED] You have used all available "
                     "iterations. STOP all testing immediately. Your ONLY task "
                     "now is to call the report tool and write the final report "
                     "with everything you have found."

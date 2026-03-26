@@ -62,7 +62,7 @@ class TestDetectTool:
                 tool="custom_scan",
                 summary="custom parser",
                 items=stdout.splitlines()[:max_items],
-                total_count=len([l for l in stdout.splitlines() if l.strip()]),
+                total_count=len([line for line in stdout.splitlines() if line.strip()]),
             )
 
         register_output_parser("custom_scan", _custom, binaries=["customscan"])

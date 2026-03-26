@@ -312,7 +312,6 @@ class TestConfirmedHypothesesFeedChainPlanner:
     def test_confirmed_hypothesis_becomes_synthetic_vuln(self):
         """Confirmed hypothesis → synthetic vuln entry for chain planner."""
         from airecon.proxy.agent.models import AgentState
-        from airecon.proxy.agent.chain_planner import plan_chains
 
         state = AgentState()
         hyp_id = state.add_hypothesis(

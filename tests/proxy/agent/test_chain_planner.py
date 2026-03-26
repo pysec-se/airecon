@@ -1,8 +1,6 @@
 """Tests for Exploit Chain Planner (chain_planner.py)."""
 from __future__ import annotations
 
-import pytest
-
 from airecon.proxy.agent.chain_planner import (
     ChainStep,
     ExploitChain,

@@ -242,7 +242,7 @@ class TestArgsValidation:
     @pytest.mark.asyncio
     async def test_list_args_rejected(self):
         """Passing a list as arguments must return an error, not crash."""
-        from unittest.mock import AsyncMock, MagicMock
+        from unittest.mock import MagicMock
         from airecon.proxy.agent.executors import _ExecutorMixin
 
         class FakeExecutor(_ExecutorMixin):

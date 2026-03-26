@@ -10,7 +10,6 @@ Extracted from loop.py to keep that file manageable. Contains:
 from __future__ import annotations
 
 import re
-from typing import Any
 
 from ..config import get_config
 from .pipeline import PipelinePhase
