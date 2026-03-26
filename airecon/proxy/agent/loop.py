@@ -1109,6 +1109,14 @@ class AgentLoop(
                                 existing_chain_ids=_existing_ids,
                                 iteration=self.state.iteration,
                                 max_chains=3,
+                                causal_hypotheses=[
+                                    h.__dict__
+                                    for h in getattr(
+                                        getattr(self._session, "causal_state", None),
+                                        "hypotheses",
+                                        [],
+                                    )
+                                ],
                             )
                             for _nc in _new_chains:
                                 # Serialise ExploitChain to dict for state storage

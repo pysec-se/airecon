@@ -19,6 +19,7 @@ from pathlib import Path
 from typing import Any
 
 from .agent.session import SessionData
+from .agent.tuning import get_tuning
 
 logger = logging.getLogger("airecon.correlation")
 
@@ -86,11 +87,33 @@ _INJECTION_TO_CHAIN_KEYWORD: dict[str, str] = {
 }
 
 # Minimum ratio of required_findings that must match to include a chain.
-_CHAIN_MIN_MATCH_RATIO: float = 0.5
+_CHAIN_MIN_MATCH_RATIO: float = float(
+    get_tuning("correlation.chain_min_match_ratio", 0.5)
+)
 # Maximum synthesized chains returned (prevent context flooding).
-_CHAIN_MAX_RESULTS: int = 10
+_CHAIN_MAX_RESULTS: int = int(
+    get_tuning("correlation.chain_max_results", 10)
+)
 _CHAIN_SEVERITY_RANK: dict[str, int] = {
     "CRITICAL": 4, "HIGH": 3, "MEDIUM": 2, "LOW": 1
+}
+_CHAIN_CONFIDENCE_TUNING = {
+    "ratio_multiplier": float(get_tuning("correlation.confidence.ratio_multiplier", 1.05)),
+    "quality_per_hit": float(get_tuning("correlation.confidence.quality_per_hit", 0.04)),
+    "quality_cap": float(get_tuning("correlation.confidence.quality_cap", 0.12)),
+    "diversity_per_source": float(get_tuning("correlation.confidence.diversity_per_source", 0.05)),
+    "diversity_cap": float(get_tuning("correlation.confidence.diversity_cap", 0.10)),
+    "mono_source_penalty": float(get_tuning("correlation.confidence.mono_source_penalty", 0.08)),
+    "min_sources_without_hq": int(get_tuning("correlation.confidence.min_sources_without_hq", 2)),
+    "attack_chain_cross_source_bonus": float(
+        get_tuning("correlation.confidence.attack_chain_cross_source_bonus", 0.10)
+    ),
+    "attack_chain_min_cross_sources": int(
+        get_tuning("correlation.confidence.attack_chain_min_cross_sources", 2)
+    ),
+    "attack_chain_min_matches_with_vuln_anchor": int(
+        get_tuning("correlation.confidence.attack_chain_min_matches_with_vuln_anchor", 2)
+    ),
 }
 # Word-boundary pattern to avoid short-word false positives (e.g. "log" in "catalog").
 _WORD_BOUNDARY_RE = re.compile(r"\b{}\b", re.IGNORECASE)
@@ -362,10 +385,16 @@ def synthesize_attack_chains(session: SessionData) -> list[dict]:
         for v in getattr(session, "vulnerabilities", [])
     )
 
-    # Single searchable string combining all signals
-    full_signal_str = " ".join(
-        port_signals + tech_signals + inj_signals + [url_signals, vuln_signals]
-    )
+    source_texts: dict[str, str] = {
+        "port": " ".join(port_signals),
+        "tech": " ".join(tech_signals),
+        "inj": inj_signal_str,
+        "url": url_signals,
+        "vuln": vuln_signals,
+    }
+    # Single searchable string is still used as coarse pre-check, but
+    # confidence now depends on cross-source convergence.
+    full_signal_str = " ".join(source_texts.values())
 
     # --- Score each chain ---
     scored: list[tuple[int, float, dict]] = []
@@ -376,6 +405,7 @@ def synthesize_attack_chains(session: SessionData) -> list[dict]:
 
         matched: list[str] = []
         high_quality_hits = 0
+        matched_sources: set[str] = set()
         for finding in req:
             f = finding.strip()
             if not f:
@@ -383,19 +413,54 @@ def synthesize_attack_chains(session: SessionData) -> list[dict]:
             f_lower = f.lower()
             if _signal_matches(full_signal_str, f_lower):
                 matched.append(f)
+                for source_name, source_blob in source_texts.items():
+                    if source_blob and _signal_matches(source_blob, f_lower):
+                        matched_sources.add(source_name)
                 # Stronger signal if corroborated by explicit vulnerability/injection evidence.
-                if _signal_matches(vuln_signals, f_lower) or _signal_matches(inj_signal_str, f_lower):
+                if (
+                    _signal_matches(vuln_signals, f_lower)
+                    or _signal_matches(inj_signal_str, f_lower)
+                ):
                     high_quality_hits += 1
 
         match_ratio = len(matched) / len(req)
         if match_ratio < _CHAIN_MIN_MATCH_RATIO:
             continue
 
-        quality_boost = min(0.15, high_quality_hits * 0.05)
-        confidence = round(min(1.0, match_ratio * 1.1 + quality_boost), 2)
+        source_diversity = len(matched_sources)
+        if (
+            source_diversity < _CHAIN_CONFIDENCE_TUNING["min_sources_without_hq"]
+            and high_quality_hits == 0
+        ):
+            continue
+
+        quality_boost = min(
+            _CHAIN_CONFIDENCE_TUNING["quality_cap"],
+            high_quality_hits * _CHAIN_CONFIDENCE_TUNING["quality_per_hit"],
+        )
+        diversity_boost = min(
+            _CHAIN_CONFIDENCE_TUNING["diversity_cap"],
+            max(0, source_diversity - 1) * _CHAIN_CONFIDENCE_TUNING["diversity_per_source"],
+        )
+        mono_source_penalty = (
+            _CHAIN_CONFIDENCE_TUNING["mono_source_penalty"] if source_diversity <= 1 else 0.0
+        )
+        confidence = round(
+            min(
+                1.0,
+                max(
+                    0.0,
+                    (match_ratio * _CHAIN_CONFIDENCE_TUNING["ratio_multiplier"])
+                    + quality_boost
+                    + diversity_boost
+                    - mono_source_penalty,
+                ),
+            ),
+            2,
+        )
         evidence_strength = (
-            "high" if high_quality_hits >= 2
-            else "medium" if high_quality_hits == 1
+            "high" if high_quality_hits >= 2 or (high_quality_hits >= 1 and source_diversity >= 3)
+            else "medium" if high_quality_hits == 1 or source_diversity >= 2
             else "low"
         )
         severity_rank = _CHAIN_SEVERITY_RANK.get(
@@ -414,6 +479,7 @@ def synthesize_attack_chains(session: SessionData) -> list[dict]:
             "evidence_strength": evidence_strength,
             "required_findings": req,
             "matched_signals": matched,
+            "matched_sources": sorted(matched_sources),
         }))
 
     # Sort by severity descending, then confidence descending
@@ -643,18 +709,71 @@ def run_correlation(session: SessionData) -> list[dict]:
     vuln_names_str = " ".join([v.get("title", v.get("finding", ""))
                               for v in getattr(session, "vulnerabilities", [])]).lower()
     full_attack_context = url_str + " " + tech_str + " " + vuln_names_str
+    _attack_sources = {
+        "url": url_str,
+        "tech": tech_str,
+        "vuln": vuln_names_str,
+    }
 
     for chain in ATTACK_CHAINS:
         req_findings = chain.get("required_findings", [])
-        # If any of the required findings match our context, alert the LLM to
-        # the chain
-        if any(finding.lower() in full_attack_context for finding in req_findings):
+        if not req_findings:
+            continue
+
+        def _attack_signal_match(blob: str, needle: str) -> bool:
+            if _signal_matches(blob, needle):
+                return True
+            # Light plural/singular normalization to reduce brittle misses
+            # (e.g. "cookie" vs "cookies").
+            if _signal_matches(blob, f"{needle}s"):
+                return True
+            if needle.endswith("y") and _signal_matches(blob, f"{needle[:-1]}ies"):
+                return True
+            return False
+
+        matched_req: list[str] = []
+        matched_sources: set[str] = set()
+        vuln_hits = 0
+        for finding in req_findings:
+            needle = str(finding).strip().lower()
+            if not needle or not _attack_signal_match(full_attack_context, needle):
+                continue
+            matched_req.append(str(finding))
+            for src_name, src_blob in _attack_sources.items():
+                if src_blob and _attack_signal_match(src_blob, needle):
+                    matched_sources.add(src_name)
+                    if src_name == "vuln":
+                        vuln_hits += 1
+
+        match_ratio = len(matched_req) / max(1, len(req_findings))
+        has_cross_source = len(matched_sources) >= _CHAIN_CONFIDENCE_TUNING["attack_chain_min_cross_sources"]
+        has_vuln_anchor = vuln_hits >= 1
+        if match_ratio >= _CHAIN_MIN_MATCH_RATIO and (
+            has_cross_source
+            or (
+                has_vuln_anchor
+                and len(matched_req) >= _CHAIN_CONFIDENCE_TUNING["attack_chain_min_matches_with_vuln_anchor"]
+            )
+        ):
             results.append(
                 {
                     "type": "attack_chain",
                     "name": chain.get("name"),
                     "steps": chain.get("steps", []),
                     "severity": chain.get("severity", "CRITICAL"),
+                    "confidence": round(
+                        min(
+                            1.0,
+                            match_ratio
+                            + (
+                                _CHAIN_CONFIDENCE_TUNING["attack_chain_cross_source_bonus"]
+                                if has_cross_source
+                                else 0.0
+                            ),
+                        ),
+                        2,
+                    ),
+                    "matched_signals": matched_req[:6],
                 }
             )
 

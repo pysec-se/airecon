@@ -26,6 +26,7 @@ from typing import Any
 from ..config import get_config
 from .models import AgentState
 from .pipeline import PipelinePhase
+from .tuning import get_tuning
 from .validators import has_dangerous_patterns
 
 logger = logging.getLogger("airecon.agent")
@@ -55,6 +56,27 @@ _WATCHDOG_COMMAND_PREFIX_RE: re.Pattern[str] = re.compile(
     r"^(?:" + "|".join(re.escape(p) for p in _watchdog_prefixes) + r")\b",
     re.IGNORECASE,
 ) if _watchdog_prefixes else re.compile(r"(?!)")
+_QUALITY_TUNING = {
+    "weak_penalty_per_vuln": float(get_tuning("quality_scoring.weak_penalty_per_vuln", 0.04)),
+    "weak_penalty_cap": float(get_tuning("quality_scoring.weak_penalty_cap", 0.20)),
+    "evidence_artifact": float(get_tuning("quality_scoring.evidence.artifact", 0.16)),
+    "evidence_high_conf": float(get_tuning("quality_scoring.evidence.high_conf", 0.10)),
+    "evidence_backed_vuln": float(get_tuning("quality_scoring.evidence.backed_vuln", 0.14)),
+    "evidence_non_error": float(get_tuning("quality_scoring.evidence.non_error_event", 0.02)),
+    "repro_execution": float(get_tuning("quality_scoring.repro.execution", 0.03)),
+    "repro_artifact": float(get_tuning("quality_scoring.repro.artifact", 0.12)),
+    "repro_report": float(get_tuning("quality_scoring.repro.report", 0.26)),
+    "repro_replay_verified": float(get_tuning("quality_scoring.repro.replay_verified", 0.22)),
+    "repro_verified_vuln": float(get_tuning("quality_scoring.repro.verified_vuln", 0.10)),
+    "impact_flag": float(get_tuning("quality_scoring.impact.flag", 0.45)),
+    "impact_verified_vuln": float(get_tuning("quality_scoring.impact.verified_vuln", 0.22)),
+    "impact_report": float(get_tuning("quality_scoring.impact.report", 0.18)),
+    "impact_cve": float(get_tuning("quality_scoring.impact.cve", 0.06)),
+    "impact_signal": float(get_tuning("quality_scoring.impact.signal", 0.01)),
+    "overall_evidence": float(get_tuning("quality_scoring.overall.evidence", 0.40)),
+    "overall_repro": float(get_tuning("quality_scoring.overall.repro", 0.35)),
+    "overall_impact": float(get_tuning("quality_scoring.overall.impact", 0.25)),
+}
 
 
 class _SupervisionMixin:
@@ -443,39 +465,63 @@ class _SupervisionMixin:
         error_count = tags.count("error")
 
         vuln_count = len(self._session.vulnerabilities) if self._session else 0
+        evidence_backed_vuln_count = 0
+        verified_vuln_count = 0
+        replay_verified_count = 0
+        weak_vuln_count = 0
         report_count = 0
         if self._session:
-            report_count = sum(
-                1 for v in self._session.vulnerabilities if v.get("report_generated")
-            )
+            for v in self._session.vulnerabilities:
+                has_report = bool(v.get("report_generated"))
+                has_replay = bool(v.get("replay_verified"))
+                has_verified = bool(v.get("verified"))
+                has_evidence = bool(v.get("proof") or v.get("evidence") or v.get("poc_script_code"))
+                has_scope = bool(v.get("url") or v.get("endpoint") or v.get("parameter"))
+                if has_report:
+                    report_count += 1
+                if has_replay:
+                    replay_verified_count += 1
+                if has_verified or has_report or has_replay:
+                    verified_vuln_count += 1
+                if has_evidence or has_scope:
+                    evidence_backed_vuln_count += 1
+                if not (has_report or has_replay or has_verified or has_evidence):
+                    weak_vuln_count += 1
+
+        weak_penalty = min(
+            _QUALITY_TUNING["weak_penalty_cap"],
+            weak_vuln_count * _QUALITY_TUNING["weak_penalty_per_vuln"],
+        )
 
         evidence_score = min(
             1.0,
-            (artifact_count * 0.18)
-            + (high_conf_count * 0.12)
-            + (max(0, len(evidence) - error_count) * 0.02),
+            (artifact_count * _QUALITY_TUNING["evidence_artifact"])
+            + (high_conf_count * _QUALITY_TUNING["evidence_high_conf"])
+            + (evidence_backed_vuln_count * _QUALITY_TUNING["evidence_backed_vuln"])
+            + (max(0, len(evidence) - error_count) * _QUALITY_TUNING["evidence_non_error"])
+            - weak_penalty,
         )
         reproducibility_score = min(
             1.0,
-            # execution_count weight reduced — running more tools should not
-            # inflate reproducibility; confirmed reports and artifacts matter more.
-            (execution_count * 0.04)
-            + (artifact_count * 0.14)
-            + (report_count * 0.30),
+            (execution_count * _QUALITY_TUNING["repro_execution"])
+            + (artifact_count * _QUALITY_TUNING["repro_artifact"])
+            + (report_count * _QUALITY_TUNING["repro_report"])
+            + (replay_verified_count * _QUALITY_TUNING["repro_replay_verified"])
+            + (verified_vuln_count * _QUALITY_TUNING["repro_verified_vuln"]),
         )
         impact_score = min(
             1.0,
-            (flag_count * 0.50)
-            # vuln_count weight raised: confirmed exploits are the primary goal.
-            + (vuln_count * 0.25)
-            + (cve_count * 0.08)
-            # signal_count weight reduced: keyword matches are low-value evidence.
-            + (signal_count * 0.02),
+            (flag_count * _QUALITY_TUNING["impact_flag"])
+            + (verified_vuln_count * _QUALITY_TUNING["impact_verified_vuln"])
+            + (report_count * _QUALITY_TUNING["impact_report"])
+            + (cve_count * _QUALITY_TUNING["impact_cve"])
+            + (signal_count * _QUALITY_TUNING["impact_signal"])
+            - weak_penalty,
         )
         overall = (
-            (evidence_score * 0.40)
-            + (reproducibility_score * 0.35)
-            + (impact_score * 0.25)
+            (evidence_score * _QUALITY_TUNING["overall_evidence"])
+            + (reproducibility_score * _QUALITY_TUNING["overall_repro"])
+            + (impact_score * _QUALITY_TUNING["overall_impact"])
         )
 
         return {
@@ -490,6 +536,8 @@ class _SupervisionMixin:
                 "vulnerabilities": vuln_count,
                 "reports": report_count,
                 "flags": flag_count,
+                "verified_vulns": verified_vuln_count,
+                "replay_verified": replay_verified_count,
             },
         }
 

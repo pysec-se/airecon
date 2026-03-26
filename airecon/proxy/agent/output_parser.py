@@ -37,6 +37,9 @@ class ParsedOutput:
     # Parsing quality marker: "known" for dedicated parser, "fallback" for
     # generic parser.
     parse_quality: str = "known"
+    # Structured causal observations derived from parsed output.
+    # Each item: {observation_type, entity, attribute, value, source_tool, evidence, confidence}
+    causal_observations: list[dict[str, Any]] = field(default_factory=list)
 
 
 # Maximum items to include in parsed output for LLM context.
@@ -57,28 +60,140 @@ DEFAULT_MAX_ITEMS = 100
 MAX_RAW_FALLBACK = 3000
 
 
+def _load_tools_meta() -> dict[str, Any]:
+    """Load tools metadata once for parser detection and adaptive hints."""
+    try:
+        path = Path(__file__).resolve().parent.parent / "data" / "tools_meta.json"
+        return json.loads(path.read_text(encoding="utf-8"))
+    except Exception as exc:
+        logger.warning("Could not load tools_meta.json: %s", exc)
+        return {}
+
+
+_TOOLS_META: dict[str, Any] = _load_tools_meta()
+_CAUSAL_CONFIDENCE_RAW = _TOOLS_META.get("causal_observation_confidence", {})
+if not isinstance(_CAUSAL_CONFIDENCE_RAW, dict):
+    _CAUSAL_CONFIDENCE_RAW = {}
+
+
+def _causal_confidence(key: str, default: float) -> float:
+    try:
+        value = float(_CAUSAL_CONFIDENCE_RAW.get(key, default))
+    except (TypeError, ValueError):
+        value = default
+    return max(0.0, min(value, 1.0))
+
+
 def _load_tool_patterns() -> list[tuple[re.Pattern[str], str]]:
     """Load tool binary → parser type mappings from data/tools_meta.json.
 
     Falls back to an empty list (triggers generic parser for all tools)
     if the JSON file is unavailable.
     """
-    try:
-        path = Path(__file__).resolve().parent.parent / "data" / "tools_meta.json"
-        data = json.loads(path.read_text(encoding="utf-8"))
-        patterns = data.get("output_parser_tool_patterns", {})
-        return [
-            (re.compile(rf"\b{re.escape(binary)}\b"), parser_type)
-            for binary, parser_type in patterns.items()
-            if binary and parser_type
-        ]
-    except Exception as exc:
+    patterns = _TOOLS_META.get("output_parser_tool_patterns", {})
+    if not isinstance(patterns, dict):
         logger.warning(
-            "Could not load output_parser_tool_patterns from tools_meta.json: %s — "
-            "tool detection disabled, generic parser will be used for all tools.",
-            exc,
+            "Invalid output_parser_tool_patterns format in tools_meta.json — "
+            "tool detection disabled, generic parser will be used for all tools."
         )
         return []
+    return [
+        (re.compile(rf"\b{re.escape(binary)}\b"), parser_type)
+        for binary, parser_type in patterns.items()
+        if binary and parser_type
+    ]
+
+
+def _compile_regex_list(raw_patterns: list[Any]) -> list[re.Pattern[str]]:
+    compiled: list[re.Pattern[str]] = []
+    for pattern in raw_patterns:
+        p = str(pattern or "").strip()
+        if not p:
+            continue
+        try:
+            compiled.append(re.compile(p, re.IGNORECASE))
+        except re.error:
+            logger.debug("Skipping invalid adaptive regex pattern: %r", p)
+    return compiled
+
+
+def _load_adaptive_unknown_hints() -> tuple[list[dict[str, Any]], list[dict[str, Any]], list[dict[str, Any]], dict[str, str]]:
+    """Load adaptive unknown-tool parser hints from tools_meta.json."""
+    cfg = _TOOLS_META.get("output_parser_adaptive_hints", {})
+    if not isinstance(cfg, dict):
+        return [], [], [], {}
+
+    content_rules: list[dict[str, Any]] = []
+    count_rules: list[dict[str, Any]] = []
+    json_rules: list[dict[str, Any]] = []
+
+    for raw in cfg.get("content_rules", []) or []:
+        if not isinstance(raw, dict):
+            continue
+        parser_name = str(raw.get("parser", "")).strip().lower()
+        if not parser_name:
+            continue
+        content_rules.append(
+            {
+                "parser": parser_name,
+                "contains_any": [str(v).lower() for v in (raw.get("contains_any") or []) if str(v).strip()],
+                "contains_all": [str(v).lower() for v in (raw.get("contains_all") or []) if str(v).strip()],
+                "command_contains_any": [str(v).lower() for v in (raw.get("command_contains_any") or []) if str(v).strip()],
+                "regex_any": _compile_regex_list(raw.get("regex_any") or []),
+                "regex_all": _compile_regex_list(raw.get("regex_all") or []),
+            }
+        )
+
+    for raw in cfg.get("count_rules", []) or []:
+        if not isinstance(raw, dict):
+            continue
+        parser_name = str(raw.get("parser", "")).strip().lower()
+        metric_name = str(raw.get("metric", "")).strip()
+        if not parser_name or not metric_name:
+            continue
+        try:
+            min_abs = int(raw.get("min_abs", 1))
+        except (TypeError, ValueError):
+            min_abs = 1
+        try:
+            min_ratio = float(raw.get("min_ratio", 0.0))
+        except (TypeError, ValueError):
+            min_ratio = 0.0
+        count_rules.append(
+            {
+                "parser": parser_name,
+                "metric": metric_name,
+                "min_abs": max(0, min_abs),
+                "min_ratio": max(0.0, min_ratio),
+            }
+        )
+
+    for raw in cfg.get("json_rules", []) or []:
+        if not isinstance(raw, dict):
+            continue
+        parser_name = str(raw.get("parser", "")).strip().lower()
+        if not parser_name:
+            continue
+        json_rules.append(
+            {
+                "parser": parser_name,
+                "contains_any": [str(v).lower() for v in (raw.get("contains_any") or []) if str(v).strip()],
+                "contains_all": [str(v).lower() for v in (raw.get("contains_all") or []) if str(v).strip()],
+                "regex_any": _compile_regex_list(raw.get("regex_any") or []),
+                "regex_all": _compile_regex_list(raw.get("regex_all") or []),
+            }
+        )
+
+    command_hints_raw = cfg.get("command_hints", {})
+    command_hints: dict[str, str] = {}
+    if isinstance(command_hints_raw, dict):
+        for needle, parser_name in command_hints_raw.items():
+            n = str(needle or "").strip().lower()
+            p = str(parser_name or "").strip().lower()
+            if n and p:
+                command_hints[n] = p
+
+    return content_rules, count_rules, json_rules, command_hints
 
 
 # ── Tool Detection ──────────────────────────────────────────────────
@@ -90,6 +205,12 @@ _GENERIC_WARNED_TOOLS: set[str] = set()
 # Runtime memory of unknown-binary -> parser mapping learned from adaptive fallback.
 _ADAPTIVE_TOOL_HINTS: dict[str, str] = {}
 _MAX_ADAPTIVE_TOOL_HINTS = 128
+(
+    _ADAPTIVE_CONTENT_RULES,
+    _ADAPTIVE_COUNT_RULES,
+    _ADAPTIVE_JSON_RULES,
+    _ADAPTIVE_COMMAND_HINTS,
+) = _load_adaptive_unknown_hints()
 
 
 def _remember_adaptive_tool_hint(binary: str, parser_name: str) -> None:
@@ -131,6 +252,24 @@ def _signature_candidates_for_unknown(command: str, stdout: str) -> list[str]:
         if name in _PARSERS and name not in candidates:
             candidates.append(name)
 
+    def _rule_matches(text: str, rule: dict[str, Any], *, command_text: str = "") -> bool:
+        contains_any = rule.get("contains_any", [])
+        if contains_any and not any(token in text for token in contains_any):
+            return False
+        contains_all = rule.get("contains_all", [])
+        if contains_all and not all(token in text for token in contains_all):
+            return False
+        command_contains_any = rule.get("command_contains_any", [])
+        if command_contains_any and not any(token in command_text for token in command_contains_any):
+            return False
+        regex_any = rule.get("regex_any", [])
+        if regex_any and not any(rx.search(text) for rx in regex_any):
+            return False
+        regex_all = rule.get("regex_all", [])
+        if regex_all and not all(rx.search(text) for rx in regex_all):
+            return False
+        return True
+
     json_lines = sum(1 for line in head if line.startswith("{"))
     url_lines = sum(1 for line in head if re.match(r"https?://", line))
     host_port_lines = sum(1 for line in head if re.match(r"^[\w\.\-]+:\d{1,5}$", line))
@@ -139,36 +278,34 @@ def _signature_candidates_for_unknown(command: str, stdout: str) -> list[str]:
         for line in head
         if re.match(r"^[a-z0-9][a-z0-9\.\-]+\.[a-z]{2,}$", line, re.IGNORECASE)
     )
-
-    if "<?xml" in out or "<nmaprun" in out:
-        _add("nmap")
-    if "template-id" in lower_out or re.search(r"\[[^\]]+\]\s*\[(critical|high|medium|low|info)\]", lower_out):
-        _add("nuclei")
-    if "sqlmap" in cmd or "appears injectable" in lower_out or "parameter '" in lower_out:
-        _add("sqlmap")
-    if "whatweb" in cmd or ("plugins" in lower_out and "summary" in lower_out):
-        _add("whatweb")
-    if host_port_lines >= max(2, int(len(head) * 0.5)):
-        _add("naabu")
-    if url_lines >= max(2, int(len(head) * 0.6)):
-        _add("url_list")
-    if subdomain_lines >= max(2, int(len(head) * 0.6)):
-        _add("subfinder")
-    if json_lines >= max(2, int(len(head) * 0.5)):
-        _add("httpx")
-
-    # Command-name hints for common recon binaries not mapped yet.
-    hint_map = {
-        "wayback": "url_list",
-        "gau": "url_list",
-        "crawler": "url_list",
-        "spider": "url_list",
-        "hakrawler": "url_list",
-        "assetfinder": "subfinder",
-        "amass": "subfinder",
-        "harvester": "subfinder",
+    metric_values: dict[str, int] = {
+        "json_lines": json_lines,
+        "url_lines": url_lines,
+        "host_port_lines": host_port_lines,
+        "subdomain_lines": subdomain_lines,
     }
-    for needle, parser in hint_map.items():
+
+    for rule in _ADAPTIVE_CONTENT_RULES:
+        if _rule_matches(lower_out, rule, command_text=cmd):
+            _add(rule.get("parser", ""))
+
+    sample_size = max(1, len(head))
+    for rule in _ADAPTIVE_COUNT_RULES:
+        metric_name = str(rule.get("metric", ""))
+        metric_value = metric_values.get(metric_name, 0)
+        min_abs = int(rule.get("min_abs", 1))
+        min_ratio = float(rule.get("min_ratio", 0.0))
+        threshold = max(min_abs, int(sample_size * min_ratio))
+        if metric_value >= threshold:
+            _add(rule.get("parser", ""))
+
+    # JSON-structured hints for wrappers that emit ndjson-like output.
+    json_blob = "\n".join(head)
+    for rule in _ADAPTIVE_JSON_RULES:
+        if _rule_matches(json_blob, rule):
+            _add(rule.get("parser", ""))
+
+    for needle, parser in _ADAPTIVE_COMMAND_HINTS.items():
         if needle in cmd:
             _add(parser)
 
@@ -244,6 +381,238 @@ def _adaptive_unknown_parse(
     return best_parsed, best_parser, best_score
 
 
+# Causal observation extraction patterns (content-shape based).
+_CAUSAL_URL_STATUS_RE = re.compile(r"(https?://\S+?)\s+\[(\d{3})[^\]]*\]")
+_CAUSAL_URL_RE = re.compile(r"^https?://\S+")
+_CAUSAL_ANY_URL_RE = re.compile(r"https?://\S+")
+_CAUSAL_HOST_PORT_RE = re.compile(r"^([a-zA-Z0-9.\-]+):(\d{1,5})$")
+_CAUSAL_PORT_STATE_RE = re.compile(r"(\d+)/(tcp|udp)\s+(open|filtered)")
+_CAUSAL_SUBDOMAIN_RE = re.compile(
+    r"^[a-z0-9]([a-z0-9\-]*[a-z0-9])?(\.[a-z0-9]([a-z0-9\-]*[a-z0-9])?)+$",
+    re.IGNORECASE,
+)
+_CAUSAL_SEVERITY_RE = re.compile(r"\[(CRITICAL|HIGH|MEDIUM|LOW|INFO)\]", re.IGNORECASE)
+_CAUSAL_VULN_HINT_RE = re.compile(
+    r"\b(vulnerab|exploit|sqli|sql injection|xss|ssrf|idor|csrf|rce|lfi|cve-\d{4}-\d{4,7})\b",
+    re.IGNORECASE,
+)
+
+
+def _append_causal_observation(
+    observations: list[dict[str, Any]],
+    seen: set[tuple[str, str, str, str]],
+    *,
+    observation_type: str,
+    entity: str,
+    attribute: str = "",
+    value: str = "",
+    source_tool: str = "",
+    evidence: str = "",
+    confidence: float = 0.5,
+    phase: str = "",
+) -> None:
+    obs_type = str(observation_type or "").strip().lower()
+    ent = str(entity or "").strip()
+    attr = str(attribute or "").strip().lower()
+    val = str(value or "").strip()
+    if not obs_type or not ent:
+        return
+    key = (obs_type, ent.lower(), attr, val.lower())
+    if key in seen:
+        return
+    seen.add(key)
+    observations.append(
+        {
+            "observation_type": obs_type,
+            "entity": ent[:200],
+            "attribute": attr[:80],
+            "value": val[:200],
+            "source_tool": str(source_tool or "").strip().lower()[:80],
+            "evidence": str(evidence or "").strip()[:600],
+            "confidence": max(0.0, min(float(confidence), 1.0)),
+            "phase": str(phase or "").strip().upper()[:24],
+        }
+    )
+
+
+def _extract_causal_observations(
+    command: str,
+    parsed: ParsedOutput,
+    stdout: str,
+    phase: str = "",
+) -> list[dict[str, Any]]:
+    """Derive structured causal observations from parsed output content."""
+    observations: list[dict[str, Any]] = []
+    seen: set[tuple[str, str, str, str]] = set()
+    source_tool = (parsed.tool or extract_primary_binary(command) or "unknown").lower()
+
+    for tech_name, tech_ver in (parsed.technologies or {}).items():
+        _append_causal_observation(
+            observations,
+            seen,
+            observation_type="technology_detected",
+            entity=str(tech_name),
+            attribute="version",
+            value=str(tech_ver or ""),
+            source_tool=source_tool,
+            evidence=f"{tech_name} {tech_ver}".strip(),
+            confidence=_causal_confidence("technology_detected", 0.86),
+            phase=phase,
+        )
+
+    for raw_item in parsed.items[:250]:
+        item = str(raw_item or "").strip()
+        if not item:
+            continue
+
+        url_status_m = _CAUSAL_URL_STATUS_RE.search(item)
+        if url_status_m:
+            url = url_status_m.group(1).rstrip(".,;:)]}>\"'")
+            status = url_status_m.group(2)
+            _append_causal_observation(
+                observations,
+                seen,
+                observation_type="endpoint_observed",
+                entity=url,
+                attribute="status_code",
+                value=status,
+                source_tool=source_tool,
+                evidence=item,
+                confidence=_causal_confidence("endpoint_observed", 0.82),
+                phase=phase,
+            )
+            status_int = int(status)
+            if 200 <= status_int < 400:
+                _append_causal_observation(
+                    observations,
+                    seen,
+                    observation_type="endpoint_accessible",
+                    entity=url,
+                    attribute="status_class",
+                    value=f"{status_int // 100}xx",
+                    source_tool=source_tool,
+                    evidence=item,
+                    confidence=_causal_confidence("endpoint_accessible", 0.80),
+                    phase=phase,
+                )
+            continue
+
+        host_port_m = _CAUSAL_HOST_PORT_RE.match(item)
+        if host_port_m:
+            host, port = host_port_m.groups()
+            _append_causal_observation(
+                observations,
+                seen,
+                observation_type="service_exposed",
+                entity=host,
+                attribute="port",
+                value=port,
+                source_tool=source_tool,
+                evidence=item,
+                confidence=_causal_confidence("service_exposed", 0.80),
+                phase=phase,
+            )
+            continue
+
+        port_state_m = _CAUSAL_PORT_STATE_RE.search(item)
+        if port_state_m:
+            port, proto, state = port_state_m.groups()
+            _append_causal_observation(
+                observations,
+                seen,
+                observation_type="port_state_observed",
+                entity=f"{port}/{proto}",
+                attribute="state",
+                value=state,
+                source_tool=source_tool,
+                evidence=item,
+                confidence=_causal_confidence("port_state_observed", 0.78),
+                phase=phase,
+            )
+            continue
+
+        if _CAUSAL_URL_RE.match(item):
+            url = item.split()[0].rstrip(".,;:)]}>\"'")
+            _append_causal_observation(
+                observations,
+                seen,
+                observation_type="endpoint_discovered",
+                entity=url,
+                attribute="discovery",
+                value="url",
+                source_tool=source_tool,
+                evidence=item,
+                confidence=_causal_confidence("endpoint_discovered", 0.74),
+                phase=phase,
+            )
+            continue
+
+        embedded_url = _CAUSAL_ANY_URL_RE.search(item)
+        if embedded_url:
+            url = embedded_url.group(0).rstrip(".,;:)]}>\"'")
+            _append_causal_observation(
+                observations,
+                seen,
+                observation_type="endpoint_discovered",
+                entity=url,
+                attribute="discovery",
+                value="embedded_url",
+                source_tool=source_tool,
+                evidence=item,
+                confidence=_causal_confidence("endpoint_discovered", 0.70),
+                phase=phase,
+            )
+            continue
+
+        token = item.split()[0].strip()
+        if _CAUSAL_SUBDOMAIN_RE.match(token):
+            _append_causal_observation(
+                observations,
+                seen,
+                observation_type="asset_discovered",
+                entity=token,
+                attribute="asset_type",
+                value="subdomain",
+                source_tool=source_tool,
+                evidence=item,
+                confidence=_causal_confidence("asset_discovered", 0.72),
+                phase=phase,
+            )
+
+        sev_match = _CAUSAL_SEVERITY_RE.search(item)
+        if sev_match or _CAUSAL_VULN_HINT_RE.search(item):
+            severity = sev_match.group(1).upper() if sev_match else "UNSPECIFIED"
+            _append_causal_observation(
+                observations,
+                seen,
+                observation_type="vulnerability_signal",
+                entity=source_tool or "scanner",
+                attribute="severity",
+                value=severity,
+                source_tool=source_tool,
+                evidence=item,
+                confidence=_causal_confidence("vulnerability_signal", 0.68),
+                phase=phase,
+            )
+
+    if not observations and stdout:
+        summary = parsed.summary or stdout.strip().splitlines()[0][:200]
+        _append_causal_observation(
+            observations,
+            seen,
+            observation_type="tool_output_observed",
+            entity=source_tool or "unknown",
+            attribute="summary",
+            value=summary[:120],
+            source_tool=source_tool,
+            evidence=summary,
+            confidence=_causal_confidence("tool_output_observed", 0.55),
+            phase=phase,
+        )
+
+    return observations
+
+
 # ── Parsers ─────────────────────────────────────────────────────────
 
 def parse_tool_output(
@@ -275,6 +644,12 @@ def parse_tool_output(
             result = parser_fn(stdout, max_items=max_items)  # Pass max_items to parser
             result.tool = tool or ""
             result.parse_quality = "known"
+            result.causal_observations = _extract_causal_observations(
+                command=command,
+                parsed=result,
+                stdout=stdout,
+                phase=phase,
+            )
             return result
         except Exception as e:
             logger.warning(f"Parser failed for {tool}: {e}")
@@ -307,6 +682,12 @@ def parse_tool_output(
             _GENERIC_WARNED_TOOLS.add(detected)
         result.tool = detected
         result.parse_quality = "fallback" if chosen_parser == "generic" else "adaptive"
+        result.causal_observations = _extract_causal_observations(
+            command=command,
+            parsed=result,
+            stdout=stdout,
+            phase=phase,
+        )
         return result
     except Exception as e:
         logger.warning(f"Generic parser failed: {e}")

@@ -21,6 +21,8 @@ import shlex
 from pathlib import Path
 from typing import Any
 
+from .tuning import get_tuning
+
 logger = logging.getLogger("airecon.validation")
 
 
@@ -49,6 +51,93 @@ def _load_known_tools() -> frozenset[str]:
 
 
 _KNOWN_TOOLS: frozenset[str] = _load_known_tools()
+_REPLAY_GAP_MESSAGES = {
+    "request_logged": str(
+        get_tuning(
+            "validator.replay.gap_messages.request_logged",
+            "describe the exact replay request that was executed",
+        )
+    ),
+    "response_logged": str(
+        get_tuning(
+            "validator.replay.gap_messages.response_logged",
+            "describe the exploit response that was observed",
+        )
+    ),
+    "payload_observed": str(
+        get_tuning(
+            "validator.replay.gap_messages.payload_observed",
+            "link the payload to the observed output",
+        )
+    ),
+    "target_bound": str(
+        get_tuning(
+            "validator.replay.gap_messages.target_bound",
+            "bind the PoC to the same target/endpoint as the finding",
+        )
+    ),
+    "runtime_command_logged": str(
+        get_tuning(
+            "validator.replay.gap_messages.runtime_command_logged",
+            "include the exact replay command that was executed",
+        )
+    ),
+    "runtime_response_logged": str(
+        get_tuning(
+            "validator.replay.gap_messages.runtime_response_logged",
+            "include runtime response details (status/body) for that replay",
+        )
+    ),
+    "runtime_http": str(
+        get_tuning(
+            "validator.replay.gap_messages.runtime_http",
+            "include HTTP status evidence from runtime replay",
+        )
+    ),
+    "runtime_signal": str(
+        get_tuning(
+            "validator.replay.gap_messages.runtime_signal",
+            "include impact evidence from runtime replay",
+        )
+    ),
+    "runtime_impact": str(
+        get_tuning(
+            "validator.replay.gap_messages.runtime_impact",
+            "show runtime impact (data/error/access change), not only heartbeat output",
+        )
+    ),
+    "runtime_host_bound": str(
+        get_tuning(
+            "validator.replay.gap_messages.runtime_host_bound",
+            "use the same PoC host in runtime replay evidence",
+        )
+    ),
+    "runtime_payload_bound": str(
+        get_tuning(
+            "validator.replay.gap_messages.runtime_payload_bound",
+            "use the same PoC payload in runtime replay evidence",
+        )
+    ),
+}
+_REPLAY_SCORE_WEIGHTS = {
+    "request_logged": float(get_tuning("validator.replay.score_weights.request_logged", 0.16)),
+    "response_logged": float(get_tuning("validator.replay.score_weights.response_logged", 0.16)),
+    "target_bound": float(get_tuning("validator.replay.score_weights.target_bound", 0.18)),
+    "payload_observed": float(get_tuning("validator.replay.score_weights.payload_observed", 0.14)),
+    "matching_finding": float(get_tuning("validator.replay.score_weights.matching_finding", 0.12)),
+    "artifact_bound": float(get_tuning("validator.replay.score_weights.artifact_bound", 0.09)),
+    "runtime_http": float(get_tuning("validator.replay.score_weights.runtime_http", 0.09)),
+    "runtime_signal": float(get_tuning("validator.replay.score_weights.runtime_signal", 0.06)),
+    "runtime_impact": float(get_tuning("validator.replay.score_weights.runtime_impact", 0.05)),
+    "runtime_host_bound": float(get_tuning("validator.replay.score_weights.runtime_host_bound", 0.05)),
+    "runtime_payload_bound": float(get_tuning("validator.replay.score_weights.runtime_payload_bound", 0.05)),
+    "no_runtime_text_bonus": float(get_tuning("validator.replay.score_weights.no_runtime_text_bonus", 0.08)),
+}
+_REPLAY_THRESHOLDS = {
+    "strict_with_runtime": float(get_tuning("validator.replay.thresholds.strict_with_runtime", 0.58)),
+    "strict_no_runtime": float(get_tuning("validator.replay.thresholds.strict_no_runtime", 0.48)),
+    "non_strict": float(get_tuning("validator.replay.thresholds.non_strict", 0.38)),
+}
 
 
 # ── Path / command validation ─────────────────────────────────────────────────
@@ -382,9 +471,9 @@ class _ValidatorMixin:
             or re.search(r"\b(response|returned|body|status|code)\b", desc_lower)
         )
         if not request_logged:
-            gaps.append("jelaskan request yang dijalankan")
+            gaps.append(_REPLAY_GAP_MESSAGES["request_logged"])
         if not response_logged:
-            gaps.append("jelaskan response hasil exploit")
+            gaps.append(_REPLAY_GAP_MESSAGES["response_logged"])
 
         payload_markers = self._extract_payload_markers(poc_code + " " + poc_desc)
         payload_observed = bool(payload_markers) and any(
@@ -399,7 +488,7 @@ class _ValidatorMixin:
                 )
             )
         if payload_markers and not payload_observed:
-            gaps.append("hubungkan payload dengan output yang terobservasi")
+            gaps.append(_REPLAY_GAP_MESSAGES["payload_observed"])
 
         target_bound = False
         runtime_host_bound = False
@@ -416,12 +505,24 @@ class _ValidatorMixin:
                 for blob in ([desc_lower] + ([runtime_text] if has_runtime else []))
             )
         if not target_bound:
-            gaps.append("ikat PoC ke target/endpoint yang sama dengan finding")
+            gaps.append(_REPLAY_GAP_MESSAGES["target_bound"])
 
         runtime_http = has_runtime and bool(re.search(r"\b(http/?\d\.\d|status|code)\s*[=:]?\s*[2345]\d{2}", runtime_text))
+        runtime_command_logged = has_runtime and bool(
+            re.search(r"\b(curl|requests\.|httpx\.|urllib|fetch\(|\bget\b|\bpost\b|\bput\b|\bdelete\b|\bpatch\b)\b", runtime_text)
+        )
+        runtime_response_logged = has_runtime and bool(
+            re.search(r"\b(response|returned|body|status|code)\b", runtime_text)
+        )
         runtime_signal = has_runtime and bool(
             re.search(
                 r"\b(sql|xss|ssrf|idor|csrf|rce|lfi|auth|forbidden|unauthorized|credential|token)\b",
+                runtime_text,
+            )
+        )
+        runtime_impact = has_runtime and bool(
+            re.search(
+                r"\b(admin|credential|password|token|dump|leak|record|rows?|session opened|meterpreter|shell|forbidden|unauthorized|error)\b",
                 runtime_text,
             )
         )
@@ -429,14 +530,20 @@ class _ValidatorMixin:
             not payload_markers
             or any(marker in runtime_text for marker in payload_markers[:8])
         )
+        if has_runtime and not runtime_command_logged:
+            gaps.append(_REPLAY_GAP_MESSAGES["runtime_command_logged"])
+        if has_runtime and not runtime_response_logged:
+            gaps.append(_REPLAY_GAP_MESSAGES["runtime_response_logged"])
         if has_runtime and not runtime_http:
-            gaps.append("sertakan status HTTP dari replay runtime")
+            gaps.append(_REPLAY_GAP_MESSAGES["runtime_http"])
         if has_runtime and not runtime_signal:
-            gaps.append("sertakan bukti dampak dari replay runtime")
+            gaps.append(_REPLAY_GAP_MESSAGES["runtime_signal"])
+        if has_runtime and not runtime_impact:
+            gaps.append(_REPLAY_GAP_MESSAGES["runtime_impact"])
         if has_runtime and hosts and not runtime_host_bound:
-            gaps.append("samakan host PoC dengan host pada replay runtime")
+            gaps.append(_REPLAY_GAP_MESSAGES["runtime_host_bound"])
         if has_runtime and payload_markers and not runtime_payload_bound:
-            gaps.append("samakan payload PoC dengan payload yang muncul di replay runtime")
+            gaps.append(_REPLAY_GAP_MESSAGES["runtime_payload_bound"])
 
         artifact_bound = bool(
             re.search(r"\b(output/|artifact|log|trace|capture|pcap|json)\b", desc_lower)
@@ -445,36 +552,41 @@ class _ValidatorMixin:
 
         score = 0.0
         if request_logged:
-            score += 0.16
+            score += _REPLAY_SCORE_WEIGHTS["request_logged"]
         if response_logged:
-            score += 0.16
+            score += _REPLAY_SCORE_WEIGHTS["response_logged"]
         if target_bound:
-            score += 0.18
+            score += _REPLAY_SCORE_WEIGHTS["target_bound"]
         if payload_observed or not payload_markers:
-            score += 0.14
+            score += _REPLAY_SCORE_WEIGHTS["payload_observed"]
         if matching_finding:
-            score += 0.12
+            score += _REPLAY_SCORE_WEIGHTS["matching_finding"]
         if artifact_bound:
-            score += 0.09
+            score += _REPLAY_SCORE_WEIGHTS["artifact_bound"]
 
         if has_runtime:
             if runtime_http:
-                score += 0.09
+                score += _REPLAY_SCORE_WEIGHTS["runtime_http"]
             if runtime_signal:
-                score += 0.06
+                score += _REPLAY_SCORE_WEIGHTS["runtime_signal"]
+            if runtime_impact:
+                score += _REPLAY_SCORE_WEIGHTS["runtime_impact"]
             if runtime_host_bound or not hosts:
-                score += 0.05
+                score += _REPLAY_SCORE_WEIGHTS["runtime_host_bound"]
             if runtime_payload_bound:
-                score += 0.05
+                score += _REPLAY_SCORE_WEIGHTS["runtime_payload_bound"]
         else:
             # No runtime context available (unit tests/offline path):
             # slightly favor strong textual replay descriptions.
             if request_logged and response_logged and target_bound:
-                score += 0.08
+                score += _REPLAY_SCORE_WEIGHTS["no_runtime_text_bonus"]
 
         runtime_bound = (
-            runtime_http
+            runtime_command_logged
+            and runtime_response_logged
+            and runtime_http
             and runtime_signal
+            and runtime_impact
             and (runtime_host_bound or not hosts)
             and runtime_payload_bound
         ) if has_runtime else False
@@ -798,25 +910,31 @@ class _ValidatorMixin:
             if not is_ctf:
                 if is_strict_phase and has_runtime_context and not runtime_bound:
                     gap_hint = "; ".join(dict.fromkeys(replay_gaps[:3])) if replay_gaps else (
-                        "pastikan host/payload/status dari PoC muncul pada replay runtime"
+                        "ensure PoC host/payload/status are present in runtime replay evidence"
                     )
                     return False, (
                         "REPORT REJECTED: Replay verification confidence too low. "
                         "Runtime replay evidence is not bound to this PoC. "
-                        "Di phase strict, laporan wajib terbukti pada jejak runtime yang sama "
+                        "In strict phases, reports must be proven on the same runtime trace "
                         "(host + payload + status/impact). "
-                        f"Perbaiki: {gap_hint}."
+                        f"Fix: {gap_hint}."
                     )
-                replay_threshold = 0.58 if (is_strict_phase and has_runtime_context) else (
-                    0.48 if is_strict_phase else 0.38
+                replay_threshold = (
+                    _REPLAY_THRESHOLDS["strict_with_runtime"]
+                    if (is_strict_phase and has_runtime_context)
+                    else (
+                        _REPLAY_THRESHOLDS["strict_no_runtime"]
+                        if is_strict_phase
+                        else _REPLAY_THRESHOLDS["non_strict"]
+                    )
                 )
                 if replay_score < replay_threshold:
-                    gap_hint = "; ".join(dict.fromkeys(replay_gaps[:3])) if replay_gaps else "tambahkan bukti replay yang lebih jelas"
+                    gap_hint = "; ".join(dict.fromkeys(replay_gaps[:3])) if replay_gaps else "add clearer replay evidence"
                     return False, (
                         "REPORT REJECTED: Replay verification confidence too low "
                         f"({replay_score:.2f}/{replay_threshold:.2f}). "
-                        "Laporan harus membuktikan alur exploit end-to-end (request → payload → response → impact). "
-                        f"Perbaiki: {gap_hint}."
+                        "The report must prove an end-to-end exploit flow (request → payload → response → impact). "
+                        f"Fix: {gap_hint}."
                     )
 
             # Quality gate: strict in EXPLOIT/REPORT, lenient in RECON/ANALYSIS.

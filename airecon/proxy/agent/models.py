@@ -14,6 +14,10 @@ MAX_TOOL_HISTORY = 100
 MAX_OBJECTIVES = 64
 MAX_EVIDENCE = 200
 MAX_HYPOTHESES = 32
+MAX_CAUSAL_OBSERVATIONS = 2000
+MAX_CAUSAL_INTERVENTIONS = 300
+MAX_CAUSAL_HYPOTHESES = 256
+MAX_CAUSAL_EDGES = 512
 FLAG_PATTERN = re.compile(r"flag\{[^}]+\}", re.IGNORECASE)
 
 # Compiled once at module level — used by add_message() to strip <think> leakage.
@@ -95,6 +99,255 @@ class ToolExecution:
 class AgentEvent:
     type: str  # "text", "tool_start", "tool_end", "error", "done", "thinking"
     data: dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass
+class CausalObservation:
+    """Structured observation captured from tool/runtime output."""
+
+    observation_type: str
+    entity: str
+    attribute: str = ""
+    value: str = ""
+    source_tool: str = ""
+    evidence: str = ""
+    confidence: float = 0.5
+    phase: str = ""
+    timestamp: str = ""
+
+    def fingerprint(self) -> str:
+        """Stable key for deduplication."""
+        return "|".join(
+            [
+                self.observation_type.strip().lower(),
+                self.entity.strip().lower(),
+                self.attribute.strip().lower(),
+                self.value.strip().lower(),
+            ]
+        )
+
+    @classmethod
+    def from_dict(cls, raw: dict[str, Any]) -> "CausalObservation":
+        return cls(
+            observation_type=str(raw.get("observation_type", "")).strip(),
+            entity=str(raw.get("entity", "")).strip(),
+            attribute=str(raw.get("attribute", "")).strip(),
+            value=str(raw.get("value", "")).strip(),
+            source_tool=str(raw.get("source_tool", "")).strip(),
+            evidence=str(raw.get("evidence", "")).strip()[:600],
+            confidence=max(0.0, min(float(raw.get("confidence", 0.5) or 0.5), 1.0)),
+            phase=str(raw.get("phase", "")).strip().upper(),
+            timestamp=str(raw.get("timestamp", "")).strip(),
+        )
+
+
+@dataclass
+class CausalHypothesis:
+    """Causal hypothesis with posterior confidence."""
+
+    hypothesis_id: str
+    statement: str
+    prior: float = 0.5
+    posterior: float = 0.5
+    status: str = "pending"  # pending|supported|refuted
+    evidence_refs: list[str] = field(default_factory=list)
+    updated_at: str = ""
+
+    @classmethod
+    def from_dict(cls, raw: dict[str, Any]) -> "CausalHypothesis":
+        return cls(
+            hypothesis_id=str(raw.get("hypothesis_id", "")).strip(),
+            statement=str(raw.get("statement", "")).strip(),
+            prior=max(0.0, min(float(raw.get("prior", 0.5) or 0.5), 1.0)),
+            posterior=max(0.0, min(float(raw.get("posterior", 0.5) or 0.5), 1.0)),
+            status=str(raw.get("status", "pending")).strip().lower(),
+            evidence_refs=[
+                str(x).strip()
+                for x in (raw.get("evidence_refs", []) or [])
+                if str(x).strip()
+            ][:30],
+            updated_at=str(raw.get("updated_at", "")).strip(),
+        )
+
+
+@dataclass
+class CausalEdge:
+    """Directed relation between entities/hypotheses in the causal graph."""
+
+    cause: str
+    effect: str
+    relation: str = "supports"
+    confidence: float = 0.5
+
+    @classmethod
+    def from_dict(cls, raw: dict[str, Any]) -> "CausalEdge":
+        return cls(
+            cause=str(raw.get("cause", "")).strip(),
+            effect=str(raw.get("effect", "")).strip(),
+            relation=str(raw.get("relation", "supports")).strip().lower(),
+            confidence=max(0.0, min(float(raw.get("confidence", 0.5) or 0.5), 1.0)),
+        )
+
+
+@dataclass
+class CausalIntervention:
+    """Intervention/action and observed causal effect."""
+
+    intervention_id: str
+    action: str
+    target: str = ""
+    expected_effect: str = ""
+    observed_effect: str = ""
+    success: bool | None = None
+    confidence: float = 0.5
+    timestamp: str = ""
+
+    @classmethod
+    def from_dict(cls, raw: dict[str, Any]) -> "CausalIntervention":
+        return cls(
+            intervention_id=str(raw.get("intervention_id", "")).strip(),
+            action=str(raw.get("action", "")).strip(),
+            target=str(raw.get("target", "")).strip(),
+            expected_effect=str(raw.get("expected_effect", "")).strip(),
+            observed_effect=str(raw.get("observed_effect", "")).strip(),
+            success=raw.get("success"),
+            confidence=max(0.0, min(float(raw.get("confidence", 0.5) or 0.5), 1.0)),
+            timestamp=str(raw.get("timestamp", "")).strip(),
+        )
+
+
+@dataclass
+class CausalState:
+    """Persistent causal reasoning state for a session."""
+
+    observations: list[CausalObservation] = field(default_factory=list)
+    hypotheses: list[CausalHypothesis] = field(default_factory=list)
+    edges: list[CausalEdge] = field(default_factory=list)
+    interventions: list[CausalIntervention] = field(default_factory=list)
+    posterior: dict[str, float] = field(default_factory=dict)
+
+    def record_observation(self, observation: CausalObservation | dict[str, Any]) -> bool:
+        """Record an observation if it is not a duplicate."""
+        obs = (
+            observation
+            if isinstance(observation, CausalObservation)
+            else CausalObservation.from_dict(observation)
+        )
+        if not obs.observation_type or not obs.entity:
+            return False
+        fp = obs.fingerprint()
+        for existing in self.observations:
+            if existing.fingerprint() == fp:
+                return False
+        if not obs.timestamp:
+            obs.timestamp = datetime.now(timezone.utc).isoformat()
+        self.observations.append(obs)
+        if len(self.observations) > MAX_CAUSAL_OBSERVATIONS:
+            self.observations = self.observations[-MAX_CAUSAL_OBSERVATIONS:]
+        return True
+
+    def add_intervention(self, intervention: CausalIntervention | dict[str, Any]) -> None:
+        """Append intervention history with bounded capacity."""
+        iv = (
+            intervention
+            if isinstance(intervention, CausalIntervention)
+            else CausalIntervention.from_dict(intervention)
+        )
+        if not iv.intervention_id:
+            iv.intervention_id = f"iv_{len(self.interventions)+1}"
+        if not iv.timestamp:
+            iv.timestamp = datetime.now(timezone.utc).isoformat()
+        self.interventions.append(iv)
+        if len(self.interventions) > MAX_CAUSAL_INTERVENTIONS:
+            self.interventions = self.interventions[-MAX_CAUSAL_INTERVENTIONS:]
+
+    def add_edge(self, edge: CausalEdge | dict[str, Any]) -> bool:
+        """Record a causal edge if not already present."""
+        ce = edge if isinstance(edge, CausalEdge) else CausalEdge.from_dict(edge)
+        if not ce.cause or not ce.effect:
+            return False
+        for existing in self.edges:
+            if (
+                existing.cause == ce.cause
+                and existing.effect == ce.effect
+                and existing.relation == ce.relation
+            ):
+                # Keep strongest confidence for repeated edges.
+                if ce.confidence > existing.confidence:
+                    existing.confidence = ce.confidence
+                return False
+        self.edges.append(ce)
+        if len(self.edges) > MAX_CAUSAL_EDGES:
+            self.edges = self.edges[-MAX_CAUSAL_EDGES:]
+        return True
+
+    def upsert_hypothesis(self, hypothesis: CausalHypothesis | dict[str, Any]) -> None:
+        """Insert or update a causal hypothesis by id."""
+        h = (
+            hypothesis
+            if isinstance(hypothesis, CausalHypothesis)
+            else CausalHypothesis.from_dict(hypothesis)
+        )
+        if not h.hypothesis_id:
+            h.hypothesis_id = f"hyp_{len(self.hypotheses)+1}"
+        h.updated_at = datetime.now(timezone.utc).isoformat()
+        for idx, existing in enumerate(self.hypotheses):
+            if existing.hypothesis_id == h.hypothesis_id:
+                self.hypotheses[idx] = h
+                break
+        else:
+            self.hypotheses.append(h)
+            if len(self.hypotheses) > MAX_CAUSAL_HYPOTHESES:
+                self.hypotheses = self.hypotheses[-MAX_CAUSAL_HYPOTHESES:]
+        self.posterior[h.hypothesis_id] = h.posterior
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "observations": [o.__dict__ for o in self.observations],
+            "hypotheses": [h.__dict__ for h in self.hypotheses],
+            "edges": [e.__dict__ for e in self.edges],
+            "interventions": [i.__dict__ for i in self.interventions],
+            "posterior": {
+                str(k): max(0.0, min(float(v), 1.0))
+                for k, v in self.posterior.items()
+            },
+        }
+
+    @classmethod
+    def from_dict(cls, raw: dict[str, Any]) -> "CausalState":
+        if not isinstance(raw, dict):
+            return cls()
+        state = cls(
+            observations=[
+                CausalObservation.from_dict(x)
+                for x in (raw.get("observations", []) or [])
+                if isinstance(x, dict)
+            ],
+            hypotheses=[
+                CausalHypothesis.from_dict(x)
+                for x in (raw.get("hypotheses", []) or [])
+                if isinstance(x, dict)
+            ],
+            edges=[
+                CausalEdge.from_dict(x)
+                for x in (raw.get("edges", []) or [])
+                if isinstance(x, dict)
+            ],
+            interventions=[
+                CausalIntervention.from_dict(x)
+                for x in (raw.get("interventions", []) or [])
+                if isinstance(x, dict)
+            ],
+            posterior={},
+        )
+        raw_post = raw.get("posterior", {})
+        if isinstance(raw_post, dict):
+            state.posterior = {
+                str(k): max(0.0, min(float(v), 1.0))
+                for k, v in raw_post.items()
+                if str(k).strip()
+            }
+        return state
 
 
 @dataclass

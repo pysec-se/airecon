@@ -21,6 +21,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+from .tuning import get_tuning
+
 logger = logging.getLogger("airecon.agent.chain_planner")
 
 _TRIGGER_TOKEN_RE = re.compile(r"[a-z0-9_]{2,}")
@@ -49,6 +51,43 @@ _TEMPLATE_SEVERITY_RANK: dict[str, int] = {
     "MEDIUM": 2,
     "LOW": 1,
 }
+_CONFIRMED_SIGNAL_RE = re.compile(
+    r"\b(confirmed|verified|replay_verified|report_generated|exploit(?:ed|ation)?\s+confirmed)\b",
+    re.IGNORECASE,
+)
+_CHAIN_MATCH_THRESHOLD = float(
+    get_tuning("chain_planner.match_threshold", 0.45)
+)
+_CHAIN_WEIGHTS = {
+    "coverage": float(get_tuning("chain_planner.weights.coverage", 0.60)),
+    "trigger": float(get_tuning("chain_planner.weights.trigger", 0.25)),
+    "evidence": float(get_tuning("chain_planner.weights.evidence", 0.15)),
+    "combined_match": float(get_tuning("chain_planner.weights.combined_match", 0.45)),
+    "combined_priority": float(get_tuning("chain_planner.weights.combined_priority", 0.35)),
+    "combined_evidence": float(get_tuning("chain_planner.weights.combined_evidence", 0.20)),
+}
+_CHAIN_TRIGGER_TUNING = {
+    "phrase_exact_score": float(get_tuning("chain_planner.trigger.phrase_exact_score", 1.0)),
+    "word_exact_score": float(get_tuning("chain_planner.trigger.word_exact_score", 0.90)),
+    "overlap_min": float(get_tuning("chain_planner.trigger.overlap_min", 0.60)),
+    "overlap_base": float(get_tuning("chain_planner.trigger.overlap_base", 0.65)),
+    "overlap_scale": float(get_tuning("chain_planner.trigger.overlap_scale", 0.25)),
+    "accept_threshold": float(get_tuning("chain_planner.trigger.accept_threshold", 0.55)),
+}
+_CHAIN_EVIDENCE_SUPPORT = {
+    "direct_evidence": float(get_tuning("chain_planner.evidence_support.direct_evidence", 0.55)),
+    "target_context": float(get_tuning("chain_planner.evidence_support.target_context", 0.25)),
+    "confirmation_language": float(get_tuning("chain_planner.evidence_support.confirmation_language", 0.20)),
+}
+_CHAIN_MIN_TRIGGER_WITHOUT_EVIDENCE = float(
+    get_tuning("chain_planner.min_trigger_without_evidence", 0.90)
+)
+_CAUSAL_CHAIN_MIN_POSTERIOR = float(
+    get_tuning("causal_reasoning.chain_min_posterior", 0.62)
+)
+_CAUSAL_CHAIN_HIGH_POSTERIOR = float(
+    get_tuning("causal_reasoning.chain_high_posterior", 0.82)
+)
 
 # ---------------------------------------------------------------------------
 # Attack chain templates — loaded from data/attack_chains.json at import time
@@ -199,6 +238,16 @@ def _match_template_to_vuln(
         return 0.0, []
 
     signal_tokens = set(_TRIGGER_TOKEN_RE.findall(signal_text))
+    has_target_context = bool(vuln.get("url") or vuln.get("endpoint") or vuln.get("parameter"))
+    has_direct_evidence = bool(
+        vuln.get("proof")
+        or vuln.get("evidence")
+        or vuln.get("poc_script_code")
+        or vuln.get("report_generated")
+        or vuln.get("replay_verified")
+        or vuln.get("verified")
+    )
+    has_confirmation_language = bool(_CONFIRMED_SIGNAL_RE.search(signal_text))
     matched: list[str] = []
     max_trigger_score = 0.0
 
@@ -218,19 +267,23 @@ def _match_template_to_vuln(
 
             if " " in c or any(ch in c for ch in ("/", ":", "-", "_")):
                 if c in signal_text:
-                    trigger_score = max(trigger_score, 1.0)
+                    trigger_score = max(trigger_score, _CHAIN_TRIGGER_TUNING["phrase_exact_score"])
                     continue
             elif re.search(r"\b" + re.escape(c) + r"\b", signal_text):
-                trigger_score = max(trigger_score, 0.90)
+                trigger_score = max(trigger_score, _CHAIN_TRIGGER_TUNING["word_exact_score"])
                 continue
 
             trigger_tokens = set(_TRIGGER_TOKEN_RE.findall(c))
             if trigger_tokens:
                 overlap = len(trigger_tokens & signal_tokens) / len(trigger_tokens)
-                if overlap >= 0.60:
-                    trigger_score = max(trigger_score, 0.65 + (0.25 * overlap))
+                if overlap >= _CHAIN_TRIGGER_TUNING["overlap_min"]:
+                    trigger_score = max(
+                        trigger_score,
+                        _CHAIN_TRIGGER_TUNING["overlap_base"]
+                        + (_CHAIN_TRIGGER_TUNING["overlap_scale"] * overlap),
+                    )
 
-        if trigger_score >= 0.55:
+        if trigger_score >= _CHAIN_TRIGGER_TUNING["accept_threshold"]:
             matched.append(trigger_text)
         max_trigger_score = max(max_trigger_score, trigger_score)
 
@@ -238,7 +291,29 @@ def _match_template_to_vuln(
         return 0.0, []
 
     coverage = len(matched) / max(1, len(triggers))
-    score = min(1.0, (coverage * 0.75) + (max_trigger_score * 0.25))
+    evidence_support = 0.0
+    if has_direct_evidence:
+        evidence_support += _CHAIN_EVIDENCE_SUPPORT["direct_evidence"]
+    if has_target_context:
+        evidence_support += _CHAIN_EVIDENCE_SUPPORT["target_context"]
+    if has_confirmation_language:
+        evidence_support += _CHAIN_EVIDENCE_SUPPORT["confirmation_language"]
+    evidence_support = min(1.0, evidence_support)
+
+    # Weak findings with no target/evidence context need a strong lexical match.
+    if (
+        not has_direct_evidence
+        and not has_target_context
+        and max_trigger_score < _CHAIN_MIN_TRIGGER_WITHOUT_EVIDENCE
+    ):
+        return 0.0, []
+
+    score = min(
+        1.0,
+        (coverage * _CHAIN_WEIGHTS["coverage"])
+        + (max_trigger_score * _CHAIN_WEIGHTS["trigger"])
+        + (evidence_support * _CHAIN_WEIGHTS["evidence"]),
+    )
     return round(score, 3), matched
 
 
@@ -270,7 +345,79 @@ def _vuln_priority_score(vuln: dict[str, Any]) -> int:
         evidence_bonus += 3
     if vuln.get("url") or vuln.get("endpoint") or vuln.get("parameter"):
         evidence_bonus += 2
-    return base + evidence_bonus
+    try:
+        causal_posterior = float(vuln.get("causal_posterior", 0.0) or 0.0)
+    except (TypeError, ValueError):
+        causal_posterior = 0.0
+    causal_bonus = max(0, min(10, int(causal_posterior * 10)))
+    return base + evidence_bonus + causal_bonus
+
+
+def _vuln_chain_evidence_score(vuln: dict[str, Any]) -> float:
+    """Estimate evidence strength for chain ranking (0.0-1.0)."""
+    score = 0.0
+    if vuln.get("report_generated") or vuln.get("replay_verified") or vuln.get("verified"):
+        score += 0.45
+    if vuln.get("proof") or vuln.get("evidence") or vuln.get("poc_script_code"):
+        score += 0.30
+    if vuln.get("url") or vuln.get("endpoint") or vuln.get("parameter"):
+        score += 0.15
+    finding_blob = " ".join(
+        str(vuln.get(k, "")) for k in ("finding", "title", "description", "poc_description")
+    )
+    if _CONFIRMED_SIGNAL_RE.search(finding_blob):
+        score += 0.10
+    try:
+        score += min(0.20, max(0.0, float(vuln.get("causal_posterior", 0.0) or 0.0) * 0.20))
+    except (TypeError, ValueError):
+        pass
+    return min(1.0, score)
+
+
+def _causal_hypotheses_to_vulns(
+    causal_hypotheses: list[dict[str, Any]] | None,
+) -> list[dict[str, Any]]:
+    """Convert high-posterior causal hypotheses into chain-planning candidates."""
+    if not causal_hypotheses:
+        return []
+
+    converted: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for raw in causal_hypotheses:
+        if not isinstance(raw, dict):
+            continue
+        statement = str(raw.get("statement", "")).strip()
+        if not statement:
+            continue
+        try:
+            posterior = float(raw.get("posterior", 0.0) or 0.0)
+        except (TypeError, ValueError):
+            posterior = 0.0
+        posterior = max(0.0, min(1.0, posterior))
+        if posterior < _CAUSAL_CHAIN_MIN_POSTERIOR:
+            continue
+
+        status = str(raw.get("status", "pending")).strip().lower()
+        severity = "HIGH" if posterior >= _CAUSAL_CHAIN_HIGH_POSTERIOR else "MEDIUM"
+        if status == "supported" and posterior >= _CAUSAL_CHAIN_HIGH_POSTERIOR:
+            severity = "CRITICAL"
+
+        refs = [str(x).strip() for x in (raw.get("evidence_refs", []) or []) if str(x).strip()]
+        fingerprint = statement.lower()[:180]
+        if fingerprint in seen:
+            continue
+        seen.add(fingerprint)
+        converted.append(
+            {
+                "finding": statement,
+                "severity": severity,
+                "proof": "; ".join(refs[:3])[:240],
+                "causal_posterior": posterior,
+                "verified": status == "supported",
+                "type": "causal_hypothesis",
+            }
+        )
+    return converted
 
 
 def plan_chains(
@@ -278,6 +425,7 @@ def plan_chains(
     existing_chain_ids: set[str],
     iteration: int = 0,
     max_chains: int = 5,
+    causal_hypotheses: list[dict[str, Any]] | None = None,
 ) -> list[ExploitChain]:
     """Generate candidate exploit chains from confirmed vulnerabilities.
 
@@ -292,10 +440,13 @@ def plan_chains(
         logger.debug("No attack chain templates loaded — chain planning skipped")
         return new_chains
 
+    candidate_vulnerabilities = list(vulnerabilities or [])
+    candidate_vulnerabilities.extend(_causal_hypotheses_to_vulns(causal_hypotheses))
+
     # Prioritize high-severity, evidence-backed findings first so chain planning
     # focuses on high-impact paths before low-signal findings.
     ranked_vulns = sorted(
-        list(enumerate(vulnerabilities[:20])),
+        list(enumerate(candidate_vulnerabilities[:30])),
         key=lambda item: (-_vuln_priority_score(item[1]), item[0]),
     )
 
@@ -315,7 +466,7 @@ def plan_chains(
 
         for template in _ATTACK_CHAIN_TEMPLATES:
             match_score, matched_triggers = _match_template_to_vuln(template, vuln)
-            if match_score < 0.45:
+            if match_score < _CHAIN_MATCH_THRESHOLD:
                 continue
 
             # Deterministic chain ID so existing_chain_ids can dedup across
@@ -363,7 +514,12 @@ def plan_chains(
                 str(template.get("severity", "MEDIUM")).upper(),
                 2,
             )
-            combined_score = (match_score * 0.55) + (min(1.0, vuln_priority / 60.0) * 0.45)
+            evidence_score = _vuln_chain_evidence_score(vuln)
+            combined_score = (
+                (match_score * _CHAIN_WEIGHTS["combined_match"])
+                + (min(1.0, vuln_priority / 60.0) * _CHAIN_WEIGHTS["combined_priority"])
+                + (evidence_score * _CHAIN_WEIGHTS["combined_evidence"])
+            )
             candidate_chains.append((combined_score, template_rank, chain, chain_id))
 
     if not candidate_chains:

@@ -279,6 +279,220 @@
         "msfconsole": "metasploit",
         "msfdb": "metasploit"
     },
+    "output_parser_adaptive_hints": {
+        "content_rules": [
+            {
+                "parser": "nmap",
+                "contains_any": ["<?xml", "<nmaprun"]
+            },
+            {
+                "parser": "nuclei",
+                "contains_any": ["template-id"],
+                "regex_any": ["\\[[^\\]]+\\]\\s*\\[(critical|high|medium|low|info)\\]"]
+            },
+            {
+                "parser": "sqlmap",
+                "command_contains_any": ["sqlmap"],
+                "contains_any": ["appears injectable", "parameter '"]
+            },
+            {
+                "parser": "whatweb",
+                "command_contains_any": ["whatweb"],
+                "contains_all": ["plugins", "summary"]
+            }
+        ],
+        "count_rules": [
+            {"parser": "naabu", "metric": "host_port_lines", "min_abs": 2, "min_ratio": 0.5},
+            {"parser": "url_list", "metric": "url_lines", "min_abs": 2, "min_ratio": 0.6},
+            {"parser": "subfinder", "metric": "subdomain_lines", "min_abs": 2, "min_ratio": 0.6},
+            {"parser": "httpx", "metric": "json_lines", "min_abs": 2, "min_ratio": 0.5}
+        ],
+        "json_rules": [
+            {
+                "parser": "naabu",
+                "regex_all": ["\"(?:host|ip)\"\\s*:\\s*\".+?\"", "\"port\"\\s*:\\s*\\d+"]
+            },
+            {
+                "parser": "httpx",
+                "regex_all": ["\"url\"\\s*:\\s*\".+?\"", "\"status\"\\s*:\\s*\\d{3}"]
+            },
+            {
+                "parser": "nuclei",
+                "regex_all": ["\"template-id\"\\s*:", "\"severity\"\\s*:"]
+            }
+        ],
+        "command_hints": {
+            "wayback": "url_list",
+            "gau": "url_list",
+            "crawler": "url_list",
+            "spider": "url_list",
+            "hakrawler": "url_list",
+            "assetfinder": "subfinder",
+            "amass": "subfinder",
+            "harvester": "subfinder",
+            "scanner": "nuclei",
+            "vuln": "nuclei"
+        }
+    },
+    "causal_observation_confidence": {
+        "technology_detected": 0.86,
+        "endpoint_observed": 0.82,
+        "endpoint_accessible": 0.8,
+        "service_exposed": 0.8,
+        "port_state_observed": 0.78,
+        "endpoint_discovered": 0.74,
+        "asset_discovered": 0.72,
+        "vulnerability_signal": 0.68,
+        "tool_output_observed": 0.55
+    },
+    "agent_tuning": {
+        "chain_planner": {
+            "match_threshold": 0.45,
+            "min_trigger_without_evidence": 0.9,
+            "weights": {
+                "coverage": 0.6,
+                "trigger": 0.25,
+                "evidence": 0.15,
+                "combined_match": 0.45,
+                "combined_priority": 0.35,
+                "combined_evidence": 0.2
+            },
+            "trigger": {
+                "phrase_exact_score": 1.0,
+                "word_exact_score": 0.9,
+                "overlap_min": 0.6,
+                "overlap_base": 0.65,
+                "overlap_scale": 0.25,
+                "accept_threshold": 0.55
+            },
+            "evidence_support": {
+                "direct_evidence": 0.55,
+                "target_context": 0.25,
+                "confirmation_language": 0.2
+            }
+        },
+        "correlation": {
+            "chain_min_match_ratio": 0.5,
+            "chain_max_results": 10,
+            "confidence": {
+                "ratio_multiplier": 1.05,
+                "quality_per_hit": 0.04,
+                "quality_cap": 0.12,
+                "diversity_per_source": 0.05,
+                "diversity_cap": 0.1,
+                "mono_source_penalty": 0.08,
+                "min_sources_without_hq": 2,
+                "attack_chain_cross_source_bonus": 0.1,
+                "attack_chain_min_cross_sources": 2,
+                "attack_chain_min_matches_with_vuln_anchor": 2
+            }
+        },
+        "quality_scoring": {
+            "weak_penalty_per_vuln": 0.04,
+            "weak_penalty_cap": 0.2,
+            "evidence": {
+                "artifact": 0.16,
+                "high_conf": 0.1,
+                "backed_vuln": 0.14,
+                "non_error_event": 0.02
+            },
+            "repro": {
+                "execution": 0.03,
+                "artifact": 0.12,
+                "report": 0.26,
+                "replay_verified": 0.22,
+                "verified_vuln": 0.1
+            },
+            "impact": {
+                "flag": 0.45,
+                "verified_vuln": 0.22,
+                "report": 0.18,
+                "cve": 0.06,
+                "signal": 0.01
+            },
+            "overall": {
+                "evidence": 0.4,
+                "repro": 0.35,
+                "impact": 0.25
+            }
+        },
+        "validator": {
+            "replay": {
+                "thresholds": {
+                    "strict_with_runtime": 0.58,
+                    "strict_no_runtime": 0.48,
+                    "non_strict": 0.38
+                },
+                "score_weights": {
+                    "request_logged": 0.16,
+                    "response_logged": 0.16,
+                    "target_bound": 0.18,
+                    "payload_observed": 0.14,
+                    "matching_finding": 0.12,
+                    "artifact_bound": 0.09,
+                    "runtime_http": 0.09,
+                    "runtime_signal": 0.06,
+                    "runtime_impact": 0.05,
+                    "runtime_host_bound": 0.05,
+                    "runtime_payload_bound": 0.05,
+                    "no_runtime_text_bonus": 0.08
+                },
+                "gap_messages": {
+                    "request_logged": "describe the exact replay request that was executed",
+                    "response_logged": "describe the exploit response that was observed",
+                    "payload_observed": "link the payload to the observed output",
+                    "target_bound": "bind the PoC to the same target/endpoint as the finding",
+                    "runtime_command_logged": "include the exact replay command that was executed",
+                    "runtime_response_logged": "include runtime response details (status/body) for that replay",
+                    "runtime_http": "include HTTP status evidence from runtime replay",
+                    "runtime_signal": "include impact evidence from runtime replay",
+                    "runtime_impact": "show runtime impact (data/error/access change), not only heartbeat output",
+                    "runtime_host_bound": "use the same PoC host in runtime replay evidence",
+                    "runtime_payload_bound": "use the same PoC payload in runtime replay evidence"
+                }
+            }
+        },
+        "causal_reasoning": {
+            "support_threshold": 0.72,
+            "refute_threshold": 0.2,
+            "chain_min_posterior": 0.62,
+            "chain_high_posterior": 0.82,
+            "hypothesis_rules": [
+                {
+                    "observation_type": "endpoint_accessible",
+                    "id_prefix": "endpoint_access",
+                    "statement_template": "Reachable endpoint {entity} may expose actionable attack surface.",
+                    "prior": 0.5,
+                    "evidence_weight": 0.3,
+                    "allow_support": true
+                },
+                {
+                    "observation_type": "service_exposed",
+                    "id_prefix": "service_exposure",
+                    "statement_template": "Exposed service on {entity}:{value} should be tested for service-level abuse.",
+                    "prior": 0.48,
+                    "evidence_weight": 0.32,
+                    "allow_support": true
+                },
+                {
+                    "observation_type": "technology_detected",
+                    "id_prefix": "tech_risk",
+                    "statement_template": "Detected technology {entity} {value} may contain version-specific weaknesses.",
+                    "prior": 0.45,
+                    "evidence_weight": 0.26,
+                    "allow_support": true
+                },
+                {
+                    "observation_type": "vulnerability_signal",
+                    "id_prefix": "vuln_signal",
+                    "statement_template": "Vulnerability signal from {source_tool} against {entity} should be replay-validated.",
+                    "prior": 0.56,
+                    "evidence_weight": 0.36,
+                    "allow_support": true
+                }
+            ]
+        }
+    },
     "analysis_phase_vuln_tools": [
         "sqlmap", "dalfox", "nuclei", "xsser", "ffuf", "wfuzz", "nikto"
     ],

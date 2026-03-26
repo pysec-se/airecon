@@ -9,6 +9,7 @@ Storage: ~/.airecon/sessions/<session_id>.json
 from __future__ import annotations
 
 import ast
+import hashlib
 import json
 import logging
 import re
@@ -20,8 +21,9 @@ from pathlib import Path
 from typing import Any, Iterable, TypeVar
 from urllib.parse import parse_qsl, urlencode, urlparse, urlunparse
 
-from .models import jaccard_similarity
+from .models import CausalHypothesis, CausalIntervention, CausalState, jaccard_similarity
 from .output_parser import ParsedOutput
+from .tuning import get_tuning
 
 logger = logging.getLogger("airecon.agent.session")
 
@@ -627,6 +629,320 @@ def _deserialize_app_model(raw: Any) -> ApplicationModel:
     return model
 
 
+def _serialize_causal_state(state: CausalState) -> dict[str, Any]:
+    """Serialize CausalState to JSON-safe dict."""
+    return state.to_dict() if isinstance(state, CausalState) else CausalState().to_dict()
+
+
+def _deserialize_causal_state(raw: Any) -> CausalState:
+    """Deserialize CausalState from persisted payload."""
+    if isinstance(raw, dict):
+        return CausalState.from_dict(raw)
+    return CausalState()
+
+
+def _coerce_unit_float(value: Any, default: float = 0.0) -> float:
+    """Parse float safely and clamp to [0.0, 1.0]."""
+    try:
+        return max(0.0, min(float(value), 1.0))
+    except (TypeError, ValueError):
+        return default
+
+
+class _SafeFormatDict(dict[str, str]):
+    """String formatter map that returns an empty string for missing keys."""
+
+    def __missing__(self, key: str) -> str:
+        return ""
+
+
+_DEFAULT_CAUSAL_HYPOTHESIS_RULES: list[dict[str, Any]] = [
+    {
+        "observation_type": "endpoint_accessible",
+        "id_prefix": "endpoint_access",
+        "statement_template": "Reachable endpoint {entity} may expose actionable attack surface.",
+        "prior": 0.50,
+        "evidence_weight": 0.30,
+        "allow_support": True,
+    },
+    {
+        "observation_type": "service_exposed",
+        "id_prefix": "service_exposure",
+        "statement_template": "Exposed service on {entity}:{value} should be tested for service-level abuse.",
+        "prior": 0.48,
+        "evidence_weight": 0.32,
+        "allow_support": True,
+    },
+    {
+        "observation_type": "technology_detected",
+        "id_prefix": "tech_risk",
+        "statement_template": "Detected technology {entity} {value} may contain version-specific weaknesses.",
+        "prior": 0.45,
+        "evidence_weight": 0.26,
+        "allow_support": True,
+    },
+    {
+        "observation_type": "vulnerability_signal",
+        "id_prefix": "vuln_signal",
+        "statement_template": "Vulnerability signal from {source_tool} against {entity} should be replay-validated.",
+        "prior": 0.56,
+        "evidence_weight": 0.36,
+        "allow_support": True,
+    },
+]
+
+
+def _load_causal_hypothesis_rules() -> list[dict[str, Any]]:
+    """Load causal-hypothesis rules from tuning with strict shape checks."""
+    raw_rules = get_tuning(
+        "causal_reasoning.hypothesis_rules",
+        _DEFAULT_CAUSAL_HYPOTHESIS_RULES,
+    )
+    if not isinstance(raw_rules, list):
+        return list(_DEFAULT_CAUSAL_HYPOTHESIS_RULES)
+
+    rules: list[dict[str, Any]] = []
+    for raw in raw_rules:
+        if not isinstance(raw, dict):
+            continue
+        obs_type = str(raw.get("observation_type", "")).strip().lower()
+        id_prefix = str(raw.get("id_prefix", "")).strip().lower() or obs_type
+        template = str(raw.get("statement_template", "")).strip()
+        if not obs_type or not template:
+            continue
+        rules.append(
+            {
+                "observation_type": obs_type,
+                "id_prefix": id_prefix[:40],
+                "statement_template": template[:320],
+                "prior": _coerce_unit_float(raw.get("prior", 0.5), 0.5),
+                "evidence_weight": _coerce_unit_float(
+                    raw.get("evidence_weight", 0.3), 0.3
+                ),
+                "allow_support": bool(raw.get("allow_support", True)),
+            }
+        )
+    return rules or list(_DEFAULT_CAUSAL_HYPOTHESIS_RULES)
+
+
+_CAUSAL_HYPOTHESIS_RULES = _load_causal_hypothesis_rules()
+_CAUSAL_SUPPORT_THRESHOLD = _coerce_unit_float(
+    get_tuning("causal_reasoning.support_threshold", 0.72),
+    0.72,
+)
+_CAUSAL_REFUTE_THRESHOLD = _coerce_unit_float(
+    get_tuning("causal_reasoning.refute_threshold", 0.20),
+    0.20,
+)
+
+
+def _stable_causal_hypothesis_id(id_prefix: str, entity: str, attribute: str) -> str:
+    seed = f"{id_prefix}|{entity.strip().lower()}|{attribute.strip().lower()}"
+    digest = hashlib.sha1(seed.encode("utf-8", errors="replace")).hexdigest()[:12]
+    return f"{id_prefix}_{digest}"
+
+
+def _build_causal_context_block(
+    state: CausalState,
+    *,
+    max_observations: int = 6,
+    max_hypotheses: int = 6,
+    max_interventions: int = 3,
+) -> str:
+    """Build concise causal reasoning context for prompt injection."""
+    if not isinstance(state, CausalState):
+        return ""
+    if not state.observations and not state.hypotheses and not state.interventions:
+        return ""
+
+    lines = [
+        (
+            f"<causal_reasoning observations=\"{len(state.observations)}\" "
+            f"hypotheses=\"{len(state.hypotheses)}\" "
+            f"interventions=\"{len(state.interventions)}\">"
+        )
+    ]
+
+    if state.observations:
+        lines.append("  <recent_observations>")
+        for obs in state.observations[-max_observations:]:
+            value = f"={obs.value}" if obs.value else ""
+            attribute = f" {obs.attribute}{value}" if obs.attribute else ""
+            lines.append(
+                f"    - [{obs.observation_type}] {obs.entity}{attribute} "
+                f"(conf={obs.confidence:.0%})"
+            )
+        lines.append("  </recent_observations>")
+
+    if state.hypotheses:
+        ranked = sorted(
+            state.hypotheses,
+            key=lambda h: (h.status == "supported", h.posterior),
+            reverse=True,
+        )[:max_hypotheses]
+        lines.append("  <top_hypotheses>")
+        for hyp in ranked:
+            lines.append(
+                f"    - [{hyp.status.upper()} {hyp.posterior:.0%}] {hyp.statement}"
+            )
+        lines.append("  </top_hypotheses>")
+
+    if state.interventions:
+        lines.append("  <recent_interventions>")
+        for iv in state.interventions[-max_interventions:]:
+            status = "success" if iv.success else "unknown" if iv.success is None else "failed"
+            lines.append(
+                f"    - [{status}] {iv.action[:120]} => {iv.observed_effect[:120]}"
+            )
+        lines.append("  </recent_interventions>")
+
+    lines.append(
+        "  <instruction>Use supported hypotheses as priority targets and choose next tests that disambiguate pending hypotheses.</instruction>"
+    )
+    lines.append("</causal_reasoning>")
+    return "\n".join(lines)
+
+
+def _update_causal_hypotheses_from_observation(
+    session: "SessionData",
+    observation: dict[str, Any],
+) -> None:
+    """Map a structured observation to posterior updates on causal hypotheses."""
+    state = session.causal_state
+    obs_type = str(observation.get("observation_type", "")).strip().lower()
+    if not obs_type:
+        return
+    entity = str(observation.get("entity", "")).strip()
+    attribute = str(observation.get("attribute", "")).strip()
+    value = str(observation.get("value", "")).strip()
+    source_tool = str(observation.get("source_tool", "")).strip()
+    evidence = str(observation.get("evidence", "")).strip()[:180]
+    confidence = _coerce_unit_float(observation.get("confidence", 0.5), 0.5)
+    if not entity:
+        return
+
+    for rule in _CAUSAL_HYPOTHESIS_RULES:
+        if rule.get("observation_type") != obs_type:
+            continue
+        id_prefix = str(rule.get("id_prefix", obs_type)).strip().lower() or obs_type
+        hyp_id = _stable_causal_hypothesis_id(id_prefix, entity, attribute)
+
+        current = next(
+            (h for h in state.hypotheses if h.hypothesis_id == hyp_id),
+            None,
+        )
+        prior = _coerce_unit_float(rule.get("prior", 0.5), 0.5)
+        old_post = current.posterior if current else prior
+        blend = _coerce_unit_float(rule.get("evidence_weight", 0.3), 0.3)
+        new_post = max(0.0, min(old_post + ((confidence - old_post) * blend), 1.0))
+
+        status = current.status if current else "pending"
+        if bool(rule.get("allow_support", True)) and new_post >= _CAUSAL_SUPPORT_THRESHOLD:
+            status = "supported"
+        elif new_post <= _CAUSAL_REFUTE_THRESHOLD:
+            status = "refuted"
+        elif status not in {"supported", "refuted"}:
+            status = "pending"
+
+        refs = list(current.evidence_refs) if current else []
+        if evidence:
+            ref = f"{obs_type}:{evidence}"
+            if ref not in refs:
+                refs.append(ref)
+        refs = refs[-30:]
+
+        statement_template = str(rule.get("statement_template", "{entity}"))
+        statement = statement_template.format_map(
+            _SafeFormatDict(
+                {
+                    "entity": entity,
+                    "attribute": attribute,
+                    "value": value,
+                    "source_tool": source_tool,
+                    "observation_type": obs_type,
+                }
+            )
+        ).strip()
+        if not statement:
+            statement = f"{obs_type} observed on {entity}"
+
+        state.upsert_hypothesis(
+            CausalHypothesis(
+                hypothesis_id=hyp_id,
+                statement=statement[:320],
+                prior=prior,
+                posterior=new_post,
+                status=status,
+                evidence_refs=refs,
+            )
+        )
+        state.add_edge(
+            {
+                "cause": f"obs:{obs_type}:{entity[:80]}",
+                "effect": f"hyp:{hyp_id}",
+                "relation": "supports" if confidence >= 0.5 else "weakens",
+                "confidence": confidence,
+            }
+        )
+
+
+def _record_causal_intervention_from_parse(
+    session: "SessionData",
+    command: str,
+    parsed: ParsedOutput,
+    observations: list[dict[str, Any]],
+) -> None:
+    """Persist action→effect links from parser output as interventions."""
+    state = session.causal_state
+    cmd = str(command or "").strip()
+    if not cmd or not observations:
+        return
+
+    meaningful = [
+        obs
+        for obs in observations
+        if str(obs.get("observation_type", "")).strip().lower() != "tool_output_observed"
+    ]
+    if not meaningful:
+        return
+
+    iv_id = (
+        f"iv_{session.scan_count}_"
+        f"{hashlib.sha1(cmd.encode('utf-8', errors='replace')).hexdigest()[:8]}"
+    )
+    avg_conf = sum(
+        _coerce_unit_float(obs.get("confidence", 0.5), 0.5) for obs in meaningful
+    ) / max(1, len(meaningful))
+    target = str(meaningful[0].get("entity", "")).strip() or parsed.tool
+    observed_effect = parsed.summary or str(meaningful[0].get("evidence", ""))[:160]
+    success = bool(parsed.total_count or parsed.items)
+
+    state.add_intervention(
+        CausalIntervention(
+            intervention_id=iv_id,
+            action=cmd[:180],
+            target=target[:120],
+            expected_effect="Collect falsifiable evidence",
+            observed_effect=str(observed_effect)[:220],
+            success=success,
+            confidence=max(0.0, min(avg_conf, 1.0)),
+        )
+    )
+    for obs in meaningful[:4]:
+        obs_type = str(obs.get("observation_type", "")).strip().lower()
+        entity = str(obs.get("entity", "")).strip()
+        if not obs_type or not entity:
+            continue
+        state.add_edge(
+            {
+                "cause": f"iv:{iv_id}",
+                "effect": f"obs:{obs_type}:{entity[:80]}",
+                "relation": "influences",
+                "confidence": avg_conf,
+            }
+        )
+
+
 @dataclass
 class SessionData:
     """Persistent per-session state, identified by a unique session_id."""
@@ -698,6 +1014,8 @@ class SessionData:
     # Application Model Builder — incrementally updated from HTTP observations.
     # Persisted so resumed sessions keep endpoint/auth/schema understanding.
     app_model: ApplicationModel = field(default_factory=ApplicationModel)
+    # Causal reasoning state — structured observations/hypotheses/interventions.
+    causal_state: CausalState = field(default_factory=CausalState)
 
     # WAF profiles detected during testing.
     # Key: target host, Value: {waf_name, confidence, evidence, ...}
@@ -745,6 +1063,8 @@ class SessionData:
             maxlen=_MAX_CORRELATION_SUGGESTIONS)
         self.tested_endpoints = _coerce_sequence_field(
             self.tested_endpoints, field_name="tested_endpoints", maxlen=_MAX_TESTED_ENDPOINTS)
+        if not isinstance(self.causal_state, CausalState):
+            self.causal_state = _deserialize_causal_state(self.causal_state)
         if not isinstance(self.waf_profiles, dict):
             self.waf_profiles = {}
         # Trim auth_tokens dict
@@ -840,6 +1160,7 @@ def load_session(session_id: str) -> SessionData | None:
             loaded_skills=_coerce_sequence_field(
                 data.get("loaded_skills", []), field_name="loaded_skills", maxlen=200),
             app_model=_deserialize_app_model(data.get("app_model", {})),
+            causal_state=_deserialize_causal_state(data.get("causal_state", {})),
             waf_profiles=data.get("waf_profiles", {}) if isinstance(data.get("waf_profiles", {}), dict) else {},
             adaptive_num_ctx=_coerce_non_negative_int(data.get("adaptive_num_ctx", 0)),
             adaptive_num_predict_cap=_coerce_non_negative_int(
@@ -879,6 +1200,7 @@ def save_session(session: SessionData) -> None:
         filepath = SESSIONS_DIR / f"{session.session_id}.json"
         payload = asdict(session)
         payload["app_model"] = _serialize_app_model(session.app_model)
+        payload["causal_state"] = _serialize_causal_state(session.causal_state)
         if not isinstance(payload.get("waf_profiles"), dict):
             payload["waf_profiles"] = {}
         # Convert BoundedList fields to plain list for JSON serialization
@@ -1115,6 +1437,24 @@ def update_from_parsed_output(
                 # available
                 session.technologies[name] = version
 
+    # Merge causal observations extracted by output parser.
+    if parsed.causal_observations and session.causal_state:
+        newly_added_observations: list[dict[str, Any]] = []
+        for obs in parsed.causal_observations:
+            if isinstance(obs, dict):
+                obs.setdefault("source_tool", tool_key)
+                obs.setdefault("phase", session.current_phase)
+                if session.causal_state.record_observation(obs):
+                    newly_added_observations.append(obs)
+                    _update_causal_hypotheses_from_observation(session, obs)
+        if newly_added_observations and command:
+            _record_causal_intervention_from_parse(
+                session,
+                command=command,
+                parsed=parsed,
+                observations=newly_added_observations,
+            )
+
     if not parsed.items:
         return
 
@@ -1171,6 +1511,21 @@ def update_from_parsed_output(
         r"CVE-\d{4}-\d{4,7}.{0,80}(vulnerab|exploit|found|\baffected\b|\bimpacted\b)|"
         r"^(VULN|VULNERABLE|EXPLOIT|PWNED)\s*[:!]",
         re.IGNORECASE)
+    _ACTIONABLE_VULN_SIGNAL_RE = re.compile(
+        r"\b("
+        r"vulnerab\w*|exploit\w*|sqli|sql injection|xss|ssrf|idor|csrf|rce|lfi|xxe|"
+        r"auth(?:entication|orization)?\s*bypass|session opened|meterpreter|shell|"
+        r"credential|token|leak(?:ed)?|cve-\d{4}-\d{4,7}"
+        r")\b",
+        re.IGNORECASE,
+    )
+    _VULN_CONTEXT_RE = re.compile(
+        r"(https?://|/[a-z0-9_\-./]{2,}|\b("
+        r"endpoint|parameter|param|payload|response|status|http/?\d\.\d|"
+        r"cookie|header|access|admin|database|record|dump|error|forbidden|unauthorized"
+        r")\b)",
+        re.IGNORECASE,
+    )
     # httpx outputs URL followed by [STATUS] bracket — handle multiple common formats:
     #   https://host.com [200]                     (httpx -sc)
     #   https://host.com [200] [title] [tech]      (httpx default)
@@ -1190,6 +1545,20 @@ def update_from_parsed_output(
         re.IGNORECASE,
     )
 
+    def _is_actionable_vuln_line(text: str, *, severity_tagged: bool) -> bool:
+        candidate = text.strip()
+        if not candidate:
+            return False
+        if _NEGATIVE_VULN_PHRASE_RE.search(candidate):
+            return False
+        has_signal = bool(_ACTIONABLE_VULN_SIGNAL_RE.search(candidate))
+        has_context = bool(_VULN_CONTEXT_RE.search(candidate))
+        if severity_tagged:
+            # Severity tags alone are noisy; require at least one exploit signal
+            # plus either context or sufficiently descriptive content.
+            return has_signal and (has_context or len(candidate) >= 35)
+        return has_signal and (has_context or len(candidate) >= 30)
+
     for item in parsed.items:
         item_stripped = item.strip()
         if not item_stripped:
@@ -1203,7 +1572,7 @@ def update_from_parsed_output(
 
         # 1. Severity-tagged finding → vulnerability
         if _SEVERITY_RE.match(item_stripped):
-            if _NEGATIVE_VULN_PHRASE_RE.search(item_stripped):
+            if not _is_actionable_vuln_line(item_stripped, severity_tagged=True):
                 continue
             new_vuln = {
                 "finding": item_stripped,
@@ -1220,7 +1589,7 @@ def update_from_parsed_output(
         # metasploit [+] success, CVE findings, explicit VULN:/EXPLOIT: prefixes.
         if (
             _VULN_PATTERN_RE.search(item_stripped)
-            and not _NEGATIVE_VULN_PHRASE_RE.search(item_stripped)
+            and _is_actionable_vuln_line(item_stripped, severity_tagged=False)
         ):
             new_vuln = {
                 "finding": item_stripped,
@@ -1520,6 +1889,10 @@ def session_to_context(session: SessionData) -> str:
             f"Technologies fingerprinted: {count} — {', '.join(tech_parts)}"
             + (f" ... +{count - 15} more" if count > 15 else "")
         )
+
+    causal_ctx = _build_causal_context_block(session.causal_state)
+    if causal_ctx:
+        parts.append(causal_ctx)
 
     if session.vulnerabilities:
         parts.append(f"Vulnerabilities found: {len(session.vulnerabilities)}")

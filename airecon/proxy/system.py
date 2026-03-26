@@ -101,6 +101,17 @@ _BUGBOUNTY_INDICATORS_MSG = (
     "public domain",
     "external assessment",
 )
+_BUGBOUNTY_TARGET_HINTS = (
+    "hackerone",
+    "bugcrowd",
+    "intigriti",
+    "/security",
+    "/security.txt",
+    "/responsible-disclosure",
+    "/vulnerability-disclosure",
+    "/bug-bounty",
+    "/bounty",
+)
 _PUBLIC_DOMAIN_RE = re.compile(
     r"\b([a-z0-9]([a-z0-9\-]{0,61}[a-z0-9])?\.)+"
     r"(com|net|org|io|co|app|dev|ai|xyz|tech|gov|edu)\b",
@@ -111,17 +122,34 @@ _PUBLIC_DOMAIN_RE = re.compile(
 def _is_bugbounty_target(target: str | None = None,
                          user_message: str | None = None) -> bool:
     """Return True when the engagement looks like a bug bounty / external assessment."""
+    msg_has_indicator = False
+    target_has_indicator = False
+    target_is_public_domain = False
+
     if user_message:
         m_lower = user_message.lower()
-        if any(ind in m_lower for ind in _BUGBOUNTY_INDICATORS_MSG):
-            return True
+        msg_has_indicator = any(ind in m_lower for ind in _BUGBOUNTY_INDICATORS_MSG)
+
     if target:
         t_lower = target.lower()
-        # Has subdomains or is a public TLD domain without port-only style
-        if _PUBLIC_DOMAIN_RE.search(t_lower) and ":" not in t_lower:
-            return True
-        if any(ind in t_lower for ind in _BUGBOUNTY_INDICATORS_MSG):
-            return True
+        target_is_public_domain = bool(_PUBLIC_DOMAIN_RE.search(t_lower) and ":" not in t_lower)
+        target_has_indicator = any(ind in t_lower for ind in _BUGBOUNTY_INDICATORS_MSG)
+        if not target_has_indicator:
+            target_has_indicator = any(hint in t_lower for hint in _BUGBOUNTY_TARGET_HINTS)
+
+    # Explicit user intent always wins.
+    if msg_has_indicator:
+        return True
+
+    # Public domains alone are not enough to classify as bug bounty.
+    # Require target-level bounty/disclosure hints.
+    if target_is_public_domain and target_has_indicator:
+        return True
+
+    # Target strings that explicitly reference bounty platforms/programs.
+    if target_has_indicator:
+        return True
+
     return False
 
 
