@@ -175,3 +175,69 @@ def test_reporting_uses_domain_token_for_scheme_less_url_path(tmp_path):
     report_path = result["report_path"]
     assert "/example.com/vulnerabilities/" in report_path.replace("\\", "/")
     assert os.path.exists(report_path)
+
+
+def test_reporting_full_cvss_integration(tmp_path):
+    """INTEGRATION TEST: Full report generation with all CVSS fields and optional metadata."""
+    workspace = str(tmp_path)
+
+    result = create_vulnerability_report(
+        title="Critical SQL Injection in Authentication Endpoint",
+        description=(
+            "A critical SQL injection vulnerability exists in the login endpoint. "
+            "Attackers can bypass authentication and gain unauthorized access to user accounts. "
+            "The vulnerability was confirmed with error-based SQL injection techniques."
+        ),
+        target="https://example.com/api/v1/login",
+        poc_description=(
+            "Send POST request with SQL payload in username parameter. "
+            "Database error messages confirm SQL injection. "
+            "Authentication bypass achieved with admin'-- payload."
+        ),
+        poc_script_code=(
+            "curl -X POST https://example.com/api/v1/login \\\n"
+            "  -H 'Content-Type: application/json' \\\n"
+            "  -d '{\"username\": \"admin\\'--\", \"password\": \"x\"}' \\\n"
+            "  | grep -i 'welcome'"
+        ),
+        # Full CVSS 3.1 metrics - Critical severity
+        attack_vector="N",        # Network
+        attack_complexity="L",    # Low
+        privileges_required="N",  # None
+        user_interaction="N",     # None
+        scope="U",                # Unchanged
+        confidentiality="H",      # High
+        integrity="H",            # High
+        availability="H",         # High
+        # Optional metadata
+        cve="CVE-2024-12345",
+        impact="Complete system compromise possible. Attackers can bypass authentication and access all user accounts.",
+        technical_analysis="Error-based SQL injection confirmed via verbose database error messages.",
+        remediation_steps="Use parameterized queries or prepared statements. Validate and sanitize all user inputs.",
+        suggested_fix="Replace string concatenation with parameterized query: cursor.execute('SELECT * FROM users WHERE username = ?', (username,))",
+        _workspace_root=workspace,
+    )
+
+    # Assert success
+    assert result["success"] is True
+    assert "errors" not in result or len(result["errors"]) == 0
+
+    # Assert CVSS calculation
+    assert result["cvss_score"] == 9.8
+    assert result.get("severity") == "critical"
+
+    # Assert report file created
+    report_path = result["report_path"]
+    assert report_path is not None
+    assert os.path.exists(report_path)
+    assert "/example.com/vulnerabilities/" in report_path.replace("\\", "/")
+
+    # Assert report content
+    with open(report_path, "r", encoding="utf-8") as f:
+        content = f.read()
+
+    assert "# Critical SQL Injection" in content
+    assert "9.8" in content
+    assert "CVE-2024-12345" in content
+    assert "parameterized" in content.lower() or "Parameterized" in content
+    assert "curl -X POST" in content

@@ -1230,9 +1230,9 @@ class InteractiveRealTimeTester:
         tester = InteractiveRealTimeTester("https://target.com/search")
         async for event in tester.stream_fuzz(params=["q", "id"]):
             if event.event_type == "finding":
-                print(f"[{event.data['severity'].upper()}] {event.data['vuln_type']}")
+                logger.info("[%s] %s", event.data['severity'].upper(), event.data['vuln_type'])
             elif event.event_type == "chain_discovered":
-                print(f"Chain: {event.data['name']}")
+                logger.info("Chain: %s", event.data['name'])
     """
 
     def __init__(

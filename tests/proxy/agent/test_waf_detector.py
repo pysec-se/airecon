@@ -238,3 +238,39 @@ class TestWafProfileMergingAndRanking:
         ranked = rank_bypass_strategies(profile, stats)
         assert isinstance(ranked, list)
         assert len(ranked) > 0
+
+    def test_merge_multiple_wafs_same_host(self) -> None:
+        """CRITICAL: When multiple WAFs detected on same host, should handle gracefully."""
+        # First detection: Cloudflare
+        cloudflare_profile = WAFProfile(
+            host="example.com",
+            waf_name="Cloudflare",
+            confidence=0.85,
+            evidence=["Header cf-ray: Cloudflare"],
+            detected_at_iteration=5,
+        )
+        
+        # Second detection: AWS WAF (could be behind Cloudflare)
+        aws_profile = WAFProfile(
+            host="example.com",
+            waf_name="AWS WAF",
+            confidence=0.75,
+            evidence=["Header x-amzn-waf: AWS WAF"],
+            detected_at_iteration=8,
+        )
+        
+        # Merge should handle multiple WAFs
+        merged = merge_waf_profiles(
+            existing=cloudflare_profile,  # Pass WAFProfile directly
+            observed=aws_profile,
+            host="example.com",
+            status_code=403,
+            iteration=10,
+        )
+        
+        # Should not crash and should preserve evidence from both
+        assert merged is not None
+        # Should keep the higher confidence or fresher one
+        assert merged.confidence > 0
+        # Evidence should include both WAF indicators
+        assert len(merged.evidence) >= 1

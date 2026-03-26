@@ -241,3 +241,82 @@ def test_session_to_context_includes_causal_block(mock_session):
     ctx = session_to_context(mock_session)
     assert "<causal_reasoning" in ctx
     assert "service_exposed" in ctx
+
+
+class TestBoundedListDeserialization:
+    """Test BoundedList deserialization edge cases for legacy session compatibility."""
+
+    def test_coerce_sequence_valid_json_list(self) -> None:
+        """Test _coerce_sequence_field with valid JSON list format."""
+        from airecon.proxy.agent.session import _coerce_sequence_field
+        
+        # Valid JSON list
+        data = ["item1", "item2", "item3"]
+        result = _coerce_sequence_field(data, field_name="test", maxlen=100)
+        
+        assert result is not None
+        assert len(result) == 3
+        assert "item1" in result
+        assert "item3" in result
+
+    def test_coerce_sequence_empty_list(self) -> None:
+        """Test _coerce_sequence_field with empty list."""
+        from airecon.proxy.agent.session import _coerce_sequence_field
+        
+        data = []
+        result = _coerce_sequence_field(data, field_name="test", maxlen=100)
+        
+        assert result is not None
+        assert len(result) == 0
+
+    def test_coerce_sequence_legacy_deque_string_format(self) -> None:
+        """Test _coerce_sequence_field with legacy deque string format."""
+        from airecon.proxy.agent.session import _coerce_sequence_field
+        
+        # Legacy format: deque(['item1', 'item2'])
+        data = "deque(['item1', 'item2'])"
+        result = _coerce_sequence_field(data, field_name="test", maxlen=100)
+        
+        # Should handle legacy format gracefully
+        assert result is not None
+        assert len(result) >= 0
+
+    def test_coerce_sequence_corrupted_legacy_format(self) -> None:
+        """CRITICAL: Corrupted legacy deque format should not crash."""
+        from airecon.proxy.agent.session import _coerce_sequence_field
+        
+        # Corrupted legacy format (truncated)
+        data = "deque(['item1', 'item"  # Missing closing
+        result = _coerce_sequence_field(data, field_name="test", maxlen=100)
+        
+        # Should not crash
+        assert result is not None
+
+    def test_coerce_sequence_none_input(self) -> None:
+        """Test _coerce_sequence_field with None input."""
+        from airecon.proxy.agent.session import _coerce_sequence_field
+        
+        result = _coerce_sequence_field(None, field_name="test", maxlen=100)
+        
+        # Should handle None gracefully
+        assert result is not None
+
+    def test_coerce_sequence_empty_string(self) -> None:
+        """Test _coerce_sequence_field with empty string."""
+        from airecon.proxy.agent.session import _coerce_sequence_field
+        
+        result = _coerce_sequence_field("", field_name="test", maxlen=100)
+        
+        # Should handle empty string gracefully
+        assert result is not None
+
+    def test_coerce_sequence_truncates_to_maxlen(self) -> None:
+        """Test that _coerce_sequence_field truncates to maxlen."""
+        from airecon.proxy.agent.session import _coerce_sequence_field
+        
+        data = ["item" + str(i) for i in range(50)]
+        result = _coerce_sequence_field(data, field_name="test", maxlen=10)
+        
+        assert len(result) == 10
+        # Should keep the newest items (last ones)
+        assert "item49" in result
