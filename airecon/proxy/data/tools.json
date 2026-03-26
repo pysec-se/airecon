@@ -318,73 +318,43 @@
                     },
                     "attack_vector": {
                         "type": "string",
-                        "enum": [
-                            "N",
-                            "A",
-                            "L",
-                            "P"
-                        ],
-                        "description": "CVSS Attack Vector:\nN=Network, A=Adjacent, L=Local, P=Physical"
+                        "enum": ["N", "A", "L", "P"],
+                        "description": "CVSS Attack Vector — how the attacker reaches the vulnerability.\nN=Network: exploitable remotely over the internet (SQLi, XSS, SSRF, IDOR, open redirect, API vuln).\nA=Adjacent: requires attacker on same local network/VLAN (ARP spoofing, internal-only API).\nL=Local: requires local OS access/shell (privilege escalation, local file read).\nP=Physical: requires physical device access.\nMost web vulnerabilities = N."
                     },
                     "attack_complexity": {
                         "type": "string",
-                        "enum": [
-                            "L",
-                            "H"
-                        ],
-                        "description": "CVSS Attack Complexity:\nL=Low, H=High"
+                        "enum": ["L", "H"],
+                        "description": "CVSS Attack Complexity — how reliably the attack can be repeated.\nL=Low: attack works consistently with no special conditions (SQLi, IDOR, open redirect, auth bypass, XSS, path traversal, most web vulns).\nH=High: requires specific conditions outside attacker control (race condition with narrow window, MitM required, target must have specific non-default config).\nDefault for most web vulns = L."
                     },
                     "privileges_required": {
                         "type": "string",
-                        "enum": [
-                            "N",
-                            "L",
-                            "H"
-                        ],
-                        "description": "CVSS Privileges Required:\nN=None, L=Low, H=High"
+                        "enum": ["N", "L", "H"],
+                        "description": "CVSS Privileges Required — authentication level needed BEFORE exploiting.\nN=None: no login required (unauthenticated endpoint, public API, login-page SQLi).\nL=Low: any authenticated user can exploit (IDOR between regular users, stored XSS by normal user).\nH=High: only admin/privileged role can exploit (admin panel XSS, admin-only IDOR)."
                     },
                     "user_interaction": {
                         "type": "string",
-                        "enum": [
-                            "N",
-                            "R"
-                        ],
-                        "description": "CVSS User Interaction:\nN=None, R=Required"
+                        "enum": ["N", "R"],
+                        "description": "CVSS User Interaction — must a VICTIM perform an action for the exploit to work?\nN=None: attacker exploits directly with no victim interaction (SQLi, SSRF, IDOR, path traversal, auth bypass, server-side injection, unauthenticated RCE).\nR=Required: victim must click a link, visit a page, or take an action (reflected XSS, CSRF, open redirect, phishing-based attacks, DOM XSS via crafted URL).\nIMPORTANT: SQLi/SSRF/IDOR = N. Reflected XSS/CSRF/open redirect = R."
                     },
                     "scope": {
                         "type": "string",
-                        "enum": [
-                            "U",
-                            "C"
-                        ],
-                        "description": "CVSS Scope:\nU=Unchanged, C=Changed"
+                        "enum": ["U", "C"],
+                        "description": "CVSS Scope — does the vulnerability's impact extend beyond the vulnerable component?\nU=Unchanged: impact stays within the vulnerable component/service (SQLi, IDOR, path traversal, auth bypass, reflected XSS same-session, open redirect, most web vulns). DEFAULT for most findings.\nC=Changed: attacker can impact OTHER components or OTHER users beyond the vulnerable service (stored XSS that steals cookies of OTHER users in their sessions, SSRF that reaches internal network services, XXE with OOB that contacts external systems, privilege escalation to OS level).\nWARNING: Do NOT use C just because the vuln is serious. Reflected XSS = U. Stored XSS affecting other users = C. Open redirect = U. SSRF to cloud metadata = C."
                     },
                     "confidentiality": {
                         "type": "string",
-                        "enum": [
-                            "N",
-                            "L",
-                            "H"
-                        ],
-                        "description": "CVSS Confidentiality Impact:\nN=None, L=Low, H=High"
+                        "enum": ["N", "L", "H"],
+                        "description": "CVSS Confidentiality Impact — what sensitive data can be read?\nN=None: no data read (pure injection with no data leak, availability-only impact).\nL=Low: some non-critical info exposed. Use L for: username enumeration, version disclosure, error stack traces, path disclosure, email addresses, public user metadata, wp-json user listing, HTTP headers leaking framework info.\nH=High: sensitive/private data compromised. Use H for: password/credential theft, session token theft, full database dump via SQLi, private user data (SSN, payment info), source code disclosure, admin data access via IDOR.\nDO NOT use H for username enumeration or version disclosure — these are L."
                     },
                     "integrity": {
                         "type": "string",
-                        "enum": [
-                            "N",
-                            "L",
-                            "H"
-                        ],
-                        "description": "CVSS Integrity Impact:\nN=None, L=Low, H=High"
+                        "enum": ["N", "L", "H"],
+                        "description": "CVSS Integrity Impact — what data can be modified?\nN=None: attacker cannot modify any data (read-only IDOR, info disclosure, open redirect).\nL=Low: limited data modification (minor stored XSS affecting only attacker's own account, parameter tampering with bounded effect).\nH=High: critical data/config can be modified or created (admin account creation, password change of any user, RCE writing files, mass data modification, SQLi UPDATE/DELETE, CSRF changing sensitive settings)."
                     },
                     "availability": {
                         "type": "string",
-                        "enum": [
-                            "N",
-                            "L",
-                            "H"
-                        ],
-                        "description": "CVSS Availability Impact:\nN=None, L=Low, H=High"
+                        "enum": ["N", "L", "H"],
+                        "description": "CVSS Availability Impact — can the attacker disrupt service?\nN=None: no availability impact (information disclosure, redirect, read-only IDOR — the vast majority of web vulns).\nL=Low: degraded performance or intermittent service interruption.\nH=High: full service crash or DoS (RCE killing the process, ReDoS causing 100% CPU, billion laugh XML, GraphQL DoS query).\nMost web vulnerabilities = N for availability."
                     },
                     "endpoint": {
                         "type": "string",
@@ -805,6 +775,94 @@
                 },
                 "required": [
                     "target_path"
+                ]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "http_observe",
+            "description": "Send a raw HTTP request from inside the sandbox and receive the full response (status line, ALL headers, body excerpt). Use this to establish baselines, test redirect behavior, observe exact server responses, and diff two responses to detect behavioral changes caused by input variation. This is the primary tool for Observer-Hypothesizer testing — always establish a baseline first, then probe with minimal variation.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "url": {
+                        "type": "string",
+                        "description": "Full URL to request (e.g. https://example.com/api/user?id=1)"
+                    },
+                    "method": {
+                        "type": "string",
+                        "description": "HTTP method: GET, POST, PUT, PATCH, DELETE, HEAD, OPTIONS. Default: GET"
+                    },
+                    "headers": {
+                        "type": "object",
+                        "description": "Additional request headers as key-value pairs (e.g. {\"Authorization\": \"Bearer token\", \"Content-Type\": \"application/json\"})"
+                    },
+                    "body": {
+                        "type": "string",
+                        "description": "Request body for POST/PUT/PATCH requests"
+                    },
+                    "save_as": {
+                        "type": "string",
+                        "description": "Name to store this response as a baseline (e.g. 'baseline_normal', 'baseline_auth'). Stored in session for later diffing."
+                    },
+                    "compare_to": {
+                        "type": "string",
+                        "description": "Name of a previously saved baseline to diff against. Shows what changed between the baseline and this response."
+                    },
+                    "follow_redirects": {
+                        "type": "boolean",
+                        "description": "Whether to follow redirects. Default: false — keep false to observe Location header for redirect-based vulnerabilities (open redirect, SSRF via redirect)."
+                    },
+                    "timeout": {
+                        "type": "integer",
+                        "description": "Request timeout in seconds. Default: 15"
+                    }
+                },
+                "required": [
+                    "url"
+                ]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "record_hypothesis",
+            "description": "Record or update a security hypothesis about the target. Use BEFORE testing a theory (status='pending'), DURING testing (status='testing'), and AFTER getting a result (status='confirmed' or 'refuted'). This keeps your investigation focused and avoids re-testing disproven theories.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "claim": {
+                        "type": "string",
+                        "description": "The security hypothesis claim. E.g. 'The /api/user endpoint is vulnerable to IDOR via user_id parameter' or 'Login form is vulnerable to SQLi in username field'."
+                    },
+                    "test_plan": {
+                        "type": "string",
+                        "description": "What specific test/payload to run to verify or refute this hypothesis. E.g. 'Send GET /api/user?user_id=2 while authenticated as user 1. If response returns user 2 data, IDOR is confirmed.'"
+                    },
+                    "status": {
+                        "type": "string",
+                        "enum": ["pending", "testing", "confirmed", "refuted"],
+                        "description": "Current status: 'pending'=not yet tested, 'testing'=currently verifying, 'confirmed'=vulnerability proven, 'refuted'=tested and not vulnerable."
+                    },
+                    "hypothesis_id": {
+                        "type": "string",
+                        "description": "ID of an existing hypothesis to update (e.g. 'h_5_2'). If omitted, a new hypothesis is created."
+                    },
+                    "evidence": {
+                        "type": "string",
+                        "description": "Evidence supporting or refuting the hypothesis. Include HTTP response snippets, diff results, or tool output that proves/disproves the claim."
+                    },
+                    "phase": {
+                        "type": "string",
+                        "description": "Pipeline phase where this hypothesis was formed (RECON/ANALYSIS/EXPLOIT). Default: current phase."
+                    }
+                },
+                "required": [
+                    "claim",
+                    "status"
                 ]
             }
         }

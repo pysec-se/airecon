@@ -42,6 +42,20 @@
                 "gospider",
                 "waymore",
                 "hakrawler"
+            ],
+            "live_host_probe": [
+                "httpx",
+                "httprobe",
+                "dnsx",
+                "nrich"
+            ],
+            "directory_bruteforce": [
+                "gobuster",
+                "feroxbuster",
+                "ffuf",
+                "wfuzz",
+                "dirsearch",
+                "dirb"
             ]
         },
         "vulnerability_scanning": {

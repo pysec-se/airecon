@@ -1,13 +1,15 @@
-[
+{
+  "chains": [
   {
+    "id": "ssrf_cloud_metadata",
     "name": "SSRF to Cloud Metadata",
+    "description": "Escalate SSRF to cloud metadata exfiltration and IAM credential theft",
+    "triggers": ["ssrf", "server-side request forgery", "redirect", "internal request"],
     "steps": [
-      "SSRF vulnerability",
-      "Access cloud metadata (169.254.169.254)",
-      "Steal IAM credentials"
-    ],
-    "required_findings": ["SSRF", "cloud"],
-    "severity": "CRITICAL"
+      {"description": "Confirm SSRF with callback to attacker-controlled server", "tool_hint": "http_observe"},
+      {"description": "Access cloud metadata at 169.254.169.254/latest/meta-data/", "tool_hint": "http_observe"},
+      {"description": "Steal IAM credentials from security-credentials/ endpoint", "tool_hint": "http_observe"}
+    ]
   },
   {
     "name": "SQLi to OS Command",
@@ -319,4 +321,5 @@
     "required_findings": ["enumeration", "login"],
     "severity": "MEDIUM"
   }
-]
+  ]
+}
