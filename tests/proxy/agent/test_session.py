@@ -1,4 +1,10 @@
-from airecon.proxy.agent.session import generate_session_id, _calculate_similarity, _is_duplicate_vulnerability, update_from_parsed_output
+from airecon.proxy.agent.session import (
+    generate_session_id,
+    _calculate_similarity,
+    _is_duplicate_vulnerability,
+    session_to_context,
+    update_from_parsed_output,
+)
 from airecon.proxy.agent.output_parser import ParsedOutput
 
 
@@ -114,6 +120,16 @@ def test_update_from_parsed_output_extracts_embedded_url(mock_session):
     assert "https://embedded.example.com/app.js" in mock_session.urls
 
 
+def test_update_from_parsed_output_ignores_non_actionable_severity_line(mock_session):
+    parsed = ParsedOutput(
+        tool="customscan",
+        summary="Status",
+        items=["[HIGH] scan completed successfully with no actionable issue"],
+    )
+    update_from_parsed_output(mock_session, parsed)
+    assert len(mock_session.vulnerabilities) == 0
+
+
 def test_update_from_parsed_output_vuln_pattern_ignores_negative_phrase(mock_session):
     parsed = ParsedOutput(
         tool="metasploit",
@@ -174,3 +190,54 @@ def test_update_from_parsed_output_vuln_pattern_keeps_not_patched_signal(mock_se
     update_from_parsed_output(mock_session, parsed)
     assert len(mock_session.vulnerabilities) == 1
     assert "not patched" in mock_session.vulnerabilities[0]["finding"].lower()
+
+
+def test_update_from_parsed_output_updates_causal_state(mock_session):
+    parsed = ParsedOutput(
+        tool="httpx",
+        summary="2 endpoints observed",
+        items=["https://example.com/admin [200]"],
+        causal_observations=[
+            {
+                "observation_type": "endpoint_accessible",
+                "entity": "https://example.com/admin",
+                "attribute": "status_class",
+                "value": "2xx",
+                "source_tool": "httpx",
+                "evidence": "https://example.com/admin [200]",
+                "confidence": 0.82,
+                "phase": "ANALYSIS",
+            }
+        ],
+    )
+    update_from_parsed_output(mock_session, parsed, command="httpx -u https://example.com/admin")
+
+    assert len(mock_session.causal_state.observations) == 1
+    assert len(mock_session.causal_state.hypotheses) >= 1
+    assert len(mock_session.causal_state.interventions) == 1
+    hyp = mock_session.causal_state.hypotheses[0]
+    assert hyp.posterior >= hyp.prior
+
+
+def test_session_to_context_includes_causal_block(mock_session):
+    parsed = ParsedOutput(
+        tool="naabu",
+        summary="open service observed",
+        items=["example.com:443"],
+        causal_observations=[
+            {
+                "observation_type": "service_exposed",
+                "entity": "example.com",
+                "attribute": "port",
+                "value": "443",
+                "source_tool": "naabu",
+                "evidence": "example.com:443",
+                "confidence": 0.80,
+                "phase": "RECON",
+            }
+        ],
+    )
+    update_from_parsed_output(mock_session, parsed, command="naabu -host example.com")
+    ctx = session_to_context(mock_session)
+    assert "<causal_reasoning" in ctx
+    assert "service_exposed" in ctx

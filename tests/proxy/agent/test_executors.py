@@ -4,6 +4,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 from airecon.proxy.agent.executors import _ExecutorMixin
+from airecon.proxy.agent.session import SessionData
 from airecon.proxy.agent.validators import _ValidatorMixin
 
 
@@ -84,6 +85,47 @@ async def test_execute_report_tool(agent, mocker):
 
     assert success
     assert result["finding_id"] == "VULN-1"
+
+
+@pytest.mark.asyncio
+async def test_execute_report_tool_marks_existing_vulnerability(agent, mocker):
+    mocker.patch(
+        "airecon.proxy.agent.executors.create_vulnerability_report",
+        return_value={"success": True, "finding_id": "VULN-2"},
+    )
+    agent._session = SessionData(target="example.com")
+    agent._session.vulnerabilities.append(
+        {"finding": "SQL injection in /login endpoint", "endpoint": "/login"}
+    )
+
+    success, _, _, _ = await agent._execute_report_tool(
+        "create_vulnerability_report",
+        {"title": "SQL injection in /login endpoint", "endpoint": "/login"},
+    )
+
+    assert success
+    assert agent._session.vulnerabilities[0].get("report_generated") is True
+
+
+@pytest.mark.asyncio
+async def test_execute_report_tool_does_not_append_unmatched_title(agent, mocker):
+    mocker.patch(
+        "airecon.proxy.agent.executors.create_vulnerability_report",
+        return_value={"success": True, "finding_id": "VULN-3"},
+    )
+    agent._session = SessionData(target="example.com")
+    agent._session.vulnerabilities.append(
+        {"finding": "Reflected XSS in search", "endpoint": "/search"}
+    )
+
+    success, _, _, _ = await agent._execute_report_tool(
+        "create_vulnerability_report",
+        {"title": "Remote code execution in admin panel", "endpoint": "/admin"},
+    )
+
+    assert success
+    assert len(agent._session.vulnerabilities) == 1
+    assert agent._session.vulnerabilities[0].get("report_generated") is not True
 
 
 # ── schemathesis behavioral tests ─────────────────────────────────────────────

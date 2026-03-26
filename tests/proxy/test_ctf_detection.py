@@ -7,7 +7,7 @@ Covers:
 """
 from __future__ import annotations
 
-from airecon.proxy.system import _is_ctf_target
+from airecon.proxy.system import _is_bugbounty_target, _is_ctf_target
 
 
 # ---------------------------------------------------------------------------
@@ -150,3 +150,29 @@ class TestCTFFalsePositives:
         assert _is_ctf_target(
             user_message="test LFI via /etc/passwd and check /flag path",
         ) is False
+
+
+class TestBugBountyDetection:
+    def test_explicit_bugbounty_message_triggers(self):
+        assert _is_bugbounty_target(
+            target="https://example.com",
+            user_message="jalankan bug bounty assessment eksternal",
+        ) is True
+
+    def test_bugbounty_platform_url_triggers(self):
+        assert _is_bugbounty_target(
+            target="https://hackerone.com/programs/example",
+            user_message="scan target ini",
+        ) is True
+
+    def test_public_domain_alone_does_not_auto_trigger(self):
+        assert _is_bugbounty_target(
+            target="https://example.com",
+            user_message="run normal recon",
+        ) is False
+
+    def test_disclosure_path_on_public_domain_triggers(self):
+        assert _is_bugbounty_target(
+            target="https://example.com/security",
+            user_message="mulai external assessment",
+        ) is True

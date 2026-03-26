@@ -143,6 +143,25 @@ class TestPlanChains:
         chains = plan_chains(vulns, existing_chain_ids=set(), iteration=5, max_chains=2)
         assert len(chains) <= 2
 
+    def test_uses_causal_hypotheses_as_additional_candidates(self) -> None:
+        chains = plan_chains(
+            vulnerabilities=[],
+            existing_chain_ids=set(),
+            iteration=11,
+            max_chains=3,
+            causal_hypotheses=[
+                {
+                    "hypothesis_id": "hyp_causal_1",
+                    "statement": "SQL injection is likely in login parameter id",
+                    "posterior": 0.87,
+                    "status": "supported",
+                    "evidence_refs": ["vulnerability_signal:[HIGH] SQLi candidate in /login"],
+                }
+            ],
+        )
+        assert chains
+        assert any("sql" in c.vuln_basis.lower() for c in chains)
+
     def test_chain_has_steps(self) -> None:
         vulns = [{"finding": "SQL injection confirmed in database"}]
         chains = plan_chains(vulns, existing_chain_ids=set(), iteration=10)

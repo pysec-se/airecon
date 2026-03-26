@@ -104,6 +104,47 @@ class TestSaveAndLoadSession:
         assert loaded.adaptive_num_predict_cap == 2048
         assert loaded.vram_crash_count == 3
 
+    def test_roundtrip_causal_state(self, tmp_sessions_dir):
+        session = SessionData(target="causal.example")
+        session.causal_state.record_observation(
+            {
+                "observation_type": "endpoint_accessible",
+                "entity": "https://causal.example/admin",
+                "attribute": "status_code",
+                "value": "200",
+                "source_tool": "httpx",
+                "confidence": 0.82,
+            }
+        )
+        session.causal_state.upsert_hypothesis(
+            {
+                "hypothesis_id": "hyp_test_1",
+                "statement": "Admin endpoint may allow privilege escalation.",
+                "prior": 0.5,
+                "posterior": 0.76,
+                "status": "supported",
+                "evidence_refs": ["endpoint_accessible:https://causal.example/admin [200]"],
+            }
+        )
+        session.causal_state.add_intervention(
+            {
+                "intervention_id": "iv_test_1",
+                "action": "httpx -u https://causal.example/admin",
+                "target": "https://causal.example/admin",
+                "observed_effect": "HTTP 200",
+                "success": True,
+                "confidence": 0.8,
+            }
+        )
+        save_session(session)
+
+        loaded = load_session(session.session_id)
+        assert loaded is not None
+        assert len(loaded.causal_state.observations) == 1
+        assert len(loaded.causal_state.hypotheses) == 1
+        assert len(loaded.causal_state.interventions) == 1
+        assert loaded.causal_state.hypotheses[0].posterior == pytest.approx(0.76, rel=1e-3)
+
     def test_load_nonexistent_returns_none(self, tmp_sessions_dir):
         result = load_session("nonexistent_session_id_xyz")
         assert result is None
