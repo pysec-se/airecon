@@ -63,6 +63,7 @@ class DockerEngine:
         )
         self._proc_lock = asyncio.Lock()  # Protect _current_proc access
         self._active_procs: set[asyncio.subprocess.Process] = set()
+        self._background_tasks: set[asyncio.Task] = set()  # Track background tasks to prevent leaks
 
     # ── Public properties ──
 
@@ -180,13 +181,26 @@ class DockerEngine:
                 await self.execute("sudo apt-get update -y -qq")
             except Exception as exc:
                 logger.debug("Background apt-get update failed (non-fatal): %s", exc)
+            finally:
+                # Remove from tracking when done
+                current_task = asyncio.current_task()
+                if current_task:
+                    self._background_tasks.discard(current_task)
 
-        asyncio.create_task(_bg_apt_update())
+        task = asyncio.create_task(_bg_apt_update())
+        self._background_tasks.add(task)
 
         return True
 
     async def stop_container(self) -> None:
         """Stop and remove the sandbox container."""
+        # Cancel all background tasks first to prevent leaks
+        for task in self._background_tasks:
+            task.cancel()
+        if self._background_tasks:
+            await asyncio.gather(*self._background_tasks, return_exceptions=True)
+            self._background_tasks.clear()
+        
         if self._container_name:
             proc = await asyncio.create_subprocess_exec(
                 "docker",
@@ -203,6 +217,13 @@ class DockerEngine:
 
     async def _stop_existing(self) -> None:
         """Stop any existing container with our name."""
+        # Cancel all background tasks first to prevent leaks
+        for task in self._background_tasks:
+            task.cancel()
+        if self._background_tasks:
+            await asyncio.gather(*self._background_tasks, return_exceptions=True)
+            self._background_tasks.clear()
+        
         if self._container_name:
             proc = await asyncio.create_subprocess_exec(
                 "docker",
