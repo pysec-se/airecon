@@ -103,13 +103,14 @@ async def _create_browser() -> Browser:
             await _state.playwright.stop()
         _state.playwright = None
 
-    _state.playwright = await async_playwright().start()
+    playwright = await async_playwright().start()
+    _state.playwright = playwright
 
     # Try connecting to the Chromium CDP server inside Docker first
     retries = 3
     for attempt in range(retries):
         try:
-            _state.browser = await _state.playwright.chromium.connect_over_cdp(
+            _state.browser = await playwright.chromium.connect_over_cdp(
                 "http://localhost:9222",
                 timeout=3000,
             )
@@ -120,7 +121,7 @@ async def _create_browser() -> Browser:
                     f"Could not connect to browser in Docker Sandbox after {retries} attempts. "
                     f"Falling back to local host browser. Error: {e}")
                 try:
-                    _state.browser = await _state.playwright.chromium.launch(
+                    _state.browser = await playwright.chromium.launch(
                         headless=True,
                         args=[
                             '--no-sandbox',
@@ -273,22 +274,23 @@ class BrowserInstance:
     async def _create_context(self, url: str | None = None, auth_cookies: list[dict] | None = None) -> dict[str, Any]:
         if self._browser is None:
             raise RuntimeError("Browser not initialized")
-        self.context = await self._browser.new_context(
+        context = await self._browser.new_context(
             viewport={"width": 1280, "height": 720},
             user_agent="Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36",
             ignore_https_errors=True,  # nosec B501 — intentional for pentest targets with expired/self-signed certs
         )
+        self.context = context
 
         # Restore authentication cookies if provided (from resumed session)
         if auth_cookies:
             try:
-                await self.context.add_cookies(auth_cookies)  # type: ignore[arg-type]
+                await context.add_cookies(auth_cookies)  # type: ignore[arg-type]
                 logger.info(
                     f"Restored {len(auth_cookies)} auth cookies from session")
             except Exception as e:
                 logger.warning(f"Failed to restore auth cookies: {e}")
 
-        page = await self.context.new_page()
+        page = await context.new_page()
         tab_id = f"tab_{self._next_tab_id}"
         self._next_tab_id += 1
         self.pages[tab_id] = page
@@ -304,12 +306,17 @@ class BrowserInstance:
         page = self.pages[tab_id]
         delay = get_config().browser_page_load_delay
         await asyncio.sleep(delay)
+        
+        # FIX #8 (Medium): Surface screenshot failures to caller
+        screenshot_b64 = ""
+        screenshot_failure = None
         try:
             screenshot_bytes = await page.screenshot(type="png", full_page=False, timeout=5000)
             screenshot_b64 = base64.b64encode(screenshot_bytes).decode("utf-8")
         except Exception as e:
-            logger.warning(f"Screenshot failed: {e}")
-            screenshot_b64 = ""
+            screenshot_failure = f"Screenshot failed: {type(e).__name__}: {e}"
+            logger.warning(screenshot_failure)
+        
         url = page.url
         title = await page.title()
         viewport = page.viewport_size
@@ -329,7 +336,8 @@ class BrowserInstance:
                 "url": tab_page.url,
                 "title": await tab_page.title() if not tab_page.is_closed() else "Closed",
             }
-        return {
+        
+        result = {
             "screenshot": screenshot_b64,
             "url": url,
             "title": title,
@@ -338,6 +346,12 @@ class BrowserInstance:
             "tab_id": tab_id,
             "all_tabs": all_tabs,
         }
+        
+        # Add screenshot failure flag if applicable
+        if screenshot_failure:
+            result["screenshot_failure"] = screenshot_failure
+        
+        return result
 
     def launch(self, url: str | None = None) -> dict[str, Any]:
         with self._execution_lock:
@@ -508,10 +522,14 @@ class BrowserInstance:
         await asyncio.sleep(duration)
         return await self._get_page_state(tab_id)
 
-    def execute_js(self, js_code: str, tab_id: str |
-                   None = None) -> dict[str, Any]:
+    def execute_js(
+        self,
+        js_code: str,
+        tab_id: str | None = None,
+        parallel: bool = False,
+    ) -> dict[str, Any]:
         with self._execution_lock:
-            return self._run_async(self._execute_js(js_code, tab_id))
+            return self._run_async(self._execute_js(js_code, tab_id, parallel=parallel))
 
     async def _execute_js(self, js_code: str, tab_id: str | None = None,
                           parallel: bool = False) -> dict[str, Any]:
@@ -532,15 +550,17 @@ class BrowserInstance:
         else:
             # Execute in all tabs concurrently
             tasks = []
+            task_tab_ids: list[str] = []
             for tid, page in self.pages.items():
                 if not page.is_closed():
+                    task_tab_ids.append(tid)
                     tasks.append(self._execute_js_single(page, js_code, tid))
             results = await asyncio.gather(*tasks, return_exceptions=True)
             result = {
                 "parallel_results": {
                     tid: res if not isinstance(res, Exception) else {
                         "error": str(res)}
-                    for tid, res in zip(self.pages.keys(), results)
+                    for tid, res in zip(task_tab_ids, results)
                 }
             }
         result_str = str(result)
@@ -1154,14 +1174,22 @@ class BrowserTabManager:
         result.setdefault("message", f"Waited {duration}s")
         return result
 
-    def execute_js(self, js_code: str, tab_id: str |
-                   None = None) -> dict[str, Any]:
+    def execute_js(
+        self,
+        js_code: str,
+        tab_id: str | None = None,
+        parallel: bool = False,
+    ) -> dict[str, Any]:
         result = self._safe_action(
             "execute_js",
             self._ensure_launched().execute_js,
             js_code,
-            tab_id)
-        result.setdefault("message", "JavaScript executed successfully")
+            tab_id,
+            parallel)
+        if parallel:
+            result.setdefault("message", "JavaScript executed in parallel across all open tabs")
+        else:
+            result.setdefault("message", "JavaScript executed successfully")
         return result
 
     def double_click(self, coordinate: str, tab_id: str |
@@ -1313,6 +1341,7 @@ def browser_action(
     text: str | None = None,
     tab_id: str | None = None,
     js_code: str | None = None,
+    parallel: bool = False,
     duration: float | None = None,
     key: str | None = None,
     file_path: str | None = None,
@@ -1354,7 +1383,7 @@ def browser_action(
         elif action == "wait":
             return _manager.wait_browser(duration, tab_id)  # type: ignore[arg-type]
         elif action == "execute_js":
-            return _manager.execute_js(js_code, tab_id)  # type: ignore[arg-type]
+            return _manager.execute_js(js_code, tab_id, parallel=parallel)  # type: ignore[arg-type]
         elif action == "double_click":
             return _manager.double_click(coordinate, tab_id)  # type: ignore[arg-type]
         elif action == "hover":

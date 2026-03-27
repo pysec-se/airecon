@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import os
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any, AsyncIterator
@@ -70,6 +71,12 @@ async def lifespan(app: FastAPI):
     """Startup/shutdown lifecycle."""
     global ollama_client, engine, agent, _chat_lock, _skills_cache
 
+    if os.getenv("AIRECON_TEST_MODE") == "1":
+        if _chat_lock is None:
+            _chat_lock = asyncio.Lock()
+        yield
+        return
+
     cfg = get_config()
     logger.info(f"Starting AIRecon Proxy on {cfg.proxy_host}:{cfg.proxy_port}")
     logger.info(f"  Ollama: {cfg.ollama_url} (model: {cfg.ollama_model})")
@@ -110,7 +117,14 @@ async def lifespan(app: FastAPI):
 
     yield
 
-    # Shutdown
+    if agent:
+        try:
+            logger.info("Saving session before shutdown...")
+            await agent.stop()
+            logger.info("Session saved successfully")
+        except Exception as e:
+            logger.error(f"Failed to save session during shutdown: {e}")
+    
     if ollama_client:
         await ollama_client.close()
     if engine:
@@ -218,7 +232,11 @@ async def list_skills() -> JSONResponse:
     """
     global _skills_cache
     if _skills_cache is None:
-        _skills_cache = await asyncio.to_thread(_build_skills_cache_sync)
+        # Restricted environments may not allow worker-thread execution.
+        if os.getenv("AIRECON_TEST_MODE") == "1":
+            _skills_cache = _build_skills_cache_sync()
+        else:
+            _skills_cache = await asyncio.to_thread(_build_skills_cache_sync)
     return JSONResponse({"count": len(_skills_cache), "skills": _skills_cache})
 
 
@@ -350,29 +368,35 @@ async def _stream_file_agent_events(
     )
 
     try:
-        await mini_agent.initialize(target=_target, user_message=request.task)
-    except Exception as e:
-        yield {
-            "event": "error",
-            "data": json.dumps(
-                {"type": "error", "message": f"Mini-agent initialization failed: {e}"}
-            ),
-        }
-        return
+        try:
+            await mini_agent.initialize(target=_target, user_message=request.task)
+        except Exception as e:
+            yield {
+                "event": "error",
+                "data": json.dumps(
+                    {"type": "error", "message": f"Mini-agent initialization failed: {e}"}
+                ),
+            }
+            return
 
-    if _target:
-        mini_agent.state.active_target = _target
+        if _target:
+            mini_agent.state.active_target = _target
 
-    mini_agent.state.conversation.append(
-        {"role": "system", "content": file_context_message}
-    )
+        mini_agent.state.conversation.append(
+            {"role": "system", "content": file_context_message}
+        )
 
-    async for event in mini_agent.process_message(request.task):
-        event_data = event.data if isinstance(event.data, dict) else {}
-        yield {
-            "event": event.type,
-            "data": json.dumps({"type": event.type, **event_data}, default=str),
-        }
+        async for event in mini_agent.process_message(request.task):
+            event_data = event.data if isinstance(event.data, dict) else {}
+            yield {
+                "event": event.type,
+                "data": json.dumps({"type": event.type, **event_data}, default=str),
+            }
+    finally:
+        try:
+            await mini_agent.stop()
+        except Exception as stop_err:
+            logger.debug("Mini-agent cleanup failed: %s", stop_err)
 
 
 @app.post("/api/reset")

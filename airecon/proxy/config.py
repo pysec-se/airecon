@@ -8,6 +8,7 @@ import logging
 import os
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Any
 
 logger = logging.getLogger("airecon.proxy.config")
 
@@ -104,7 +105,24 @@ DEFAULT_CONFIG = {
     # Soft timeout (iterations) — force RECON→ANALYSIS after this many iterations
     # regardless of depth criteria, to prevent infinite RECON loops.
     "pipeline_recon_soft_timeout": 30,
+    # Context management - dynamic thresholds based on ollama_num_ctx.
+    # Default: ollama_num_ctx // 128 (1024 for 131K context, 256 for 32K).
+    "agent_max_conversation_messages": None,  # Calculated below
+    # Trigger LLM compression at 80% of max conversation messages.
+    "agent_compression_trigger_ratio": 0.8,
+    # Keep last N messages uncompressed during tool result compression.
+    "agent_uncompressed_keep_count": 20,
+    # LLM compression context window (small to save VRAM during compression).
+    "agent_llm_compression_num_ctx": 8192,
+    # LLM compression output length.
+    "agent_llm_compression_num_predict": 1024,
 }
+
+# Calculate dynamic context thresholds based on ollama_num_ctx
+if DEFAULT_CONFIG["agent_max_conversation_messages"] is None:
+    DEFAULT_CONFIG["agent_max_conversation_messages"] = (
+        DEFAULT_CONFIG["ollama_num_ctx"] // 128
+    )
 
 
 @dataclass(frozen=True)
@@ -181,6 +199,14 @@ class Config:
     pipeline_recon_min_urls: int
     pipeline_recon_soft_timeout: int
 
+    # Context management - dynamic thresholds based on ollama_num_ctx
+    # These are calculated as ratios of ollama_num_ctx for adaptive behavior
+    agent_max_conversation_messages: int  # Default: ollama_num_ctx // 128
+    agent_compression_trigger_ratio: float  # Default: 0.8 (trigger at 80% of max)
+    agent_uncompressed_keep_count: int  # Default: 20 messages
+    agent_llm_compression_num_ctx: int  # Default: 8192
+    agent_llm_compression_num_predict: int  # Default: 1024
+
     @classmethod
     def load(cls, config_path: str | Path | None = None) -> Config:
         """Load config from specified path or default ~/.airecon/config.json."""
@@ -198,14 +224,21 @@ class Config:
             if not config_dir.exists():
                 config_dir.mkdir(parents=True, exist_ok=True)
 
-        current_config = DEFAULT_CONFIG.copy()
+        current_config: dict[str, Any] = {}
+        user_config: dict[str, Any] = {}
 
         # Load or Create
         if config_file.exists():
             try:
                 with open(config_file, "r") as f:
-                    user_config = json.load(f)
-                    # Merge user config into defaults
+                    loaded = json.load(f)
+                    if isinstance(loaded, dict):
+                        user_config = loaded
+                    else:
+                        logger.warning(
+                            "Config file %s is not a JSON object. Using defaults.",
+                            config_file,
+                        )
                     current_config.update(user_config)
             except Exception as e:
                 logger.error(
@@ -236,7 +269,7 @@ class Config:
 
         # Override with Environment Variables (Optional, for temporary
         # overrides)
-        for key in current_config:
+        for key in DEFAULT_CONFIG:
             env_key = f"AIRECON_{key.upper()}"
             if env_key in os.environ:
                 val = os.environ[env_key]
@@ -255,6 +288,16 @@ class Config:
                         logger.warning("AIRECON_%s env var %r is not a valid float — ignored", key.upper(), val)
                 else:
                     current_config[key] = val
+
+        # Dynamic context limit behavior:
+        # - If user did NOT explicitly set agent_max_conversation_messages,
+        #   auto-derive from ollama_num_ctx in load_with_defaults.
+        explicit_cap = "AIRECON_AGENT_MAX_CONVERSATION_MESSAGES" in os.environ
+        if not explicit_cap and "agent_max_conversation_messages" in current_config:
+            configured_cap = current_config.get("agent_max_conversation_messages")
+            explicit_cap = configured_cap != DEFAULT_CONFIG["agent_max_conversation_messages"]
+        if not explicit_cap:
+            current_config["agent_max_conversation_messages"] = None
 
         return cls.load_with_defaults(current_config)
 
@@ -287,6 +330,9 @@ class Config:
                 continue
             expected_type = type(default_val)
             val = merged[key]
+            if key == "agent_max_conversation_messages" and val is None:
+                # Explicit sentinel: auto-derive from ollama_num_ctx later.
+                continue
             if not isinstance(val, expected_type):
                 try:
                     if expected_type is bool:
@@ -308,26 +354,49 @@ class Config:
                     merged[key] = default_val
 
         # Bounds validation: reset out-of-range values to defaults.
+        # FIX #3 (Critical): Added comprehensive bounds validation for all
+        # numeric config fields to prevent crashes from invalid manual edits.
         _BOUNDS: dict[str, tuple[float | None, float | None]] = {
+            # Vulnerability/reporting
             "vuln_similarity_threshold": (0.0, 1.0),
+            
+            # Timeouts (must be positive)
             "ollama_timeout": (1.0, None),
             "command_timeout": (1.0, None),
-            "agent_max_tool_iterations": (1, None),
+            "browser_action_timeout": (5, None),
+            
+            # Agent loop controls (must be positive integers)
+            "agent_max_tool_iterations": (100, None),  # Min 100 to be useful
             "agent_repeat_tool_call_limit": (1, None),
             "agent_missing_tool_retry_limit": (0, None),
             "agent_plan_revision_interval": (1, None),
-            "agent_exploration_intensity": (0.0, 1.0),
-            "agent_exploration_temperature": (0.0, 2.0),
             "agent_stagnation_threshold": (1, None),
             "agent_tool_diversity_window": (3, None),
             "agent_max_same_tool_streak": (1, None),
-            "ollama_num_ctx": (1024, None),
-            "ollama_num_ctx_small": (1024, None),
-            "ollama_num_predict": (1, None),
-            "ollama_max_concurrent_requests": (1, None),
-            "ollama_num_keep": (0, None),
+            
+            # Exploration (0.0-1.0 ratio or 0.0-2.0 temperature)
+            "agent_exploration_intensity": (0.0, 1.0),
+            "agent_exploration_temperature": (0.0, 2.0),
+            
+            # Context management (FIX #3: Added new fields)
+            "ollama_num_ctx": (4096, 262144),  # 4K-256K (reasonable LLM context range)
+            "ollama_num_ctx_small": (1024, 65536),  # 1K-64K
+            "ollama_num_predict": (1, 65536),  # Must be positive, max 64K
+            "ollama_max_concurrent_requests": (1, 10),
+            "ollama_num_keep": (0, 32768),
             "ollama_repeat_penalty": (1.0, 2.0),
-            "browser_action_timeout": (5, None),
+            
+            # New context management fields (FIX #3: Added bounds)
+            "agent_max_conversation_messages": (100, 10000),  # 100-10K messages
+            "agent_compression_trigger_ratio": (0.5, 0.95),  # 50%-95%
+            "agent_uncompressed_keep_count": (5, 100),  # 5-100 messages
+            "agent_llm_compression_num_ctx": (1024, 32768),  # 1K-32K
+            "agent_llm_compression_num_predict": (256, 8192),  # 256-8K
+            
+            # Browser
+            "browser_page_load_delay": (0.0, 10.0),  # 0-10 seconds
+            
+            # Pipeline phase requirements
             "pipeline_recon_min_subdomains": (0, None),
             "pipeline_recon_min_urls": (0, None),
             "pipeline_recon_soft_timeout": (5, None),
@@ -338,12 +407,22 @@ class Config:
                 continue
             out_of_range = (lo is not None and bval < lo) or (hi is not None and bval > hi)
             if out_of_range:
-                default_bval = DEFAULT_CONFIG[bkey]
+                default_bval = DEFAULT_CONFIG.get(bkey)
+                if default_bval is None:
+                    # If no default, use lower bound as fallback
+                    default_bval = lo
                 logger.warning(
                     "Config: '%s' value %r is out of allowed range [%s, %s] — using default %r",
                     bkey, bval, lo, hi, default_bval,
                 )
                 merged[bkey] = default_bval
+
+        if merged.get("agent_max_conversation_messages") is None:
+            try:
+                ctx_val = int(merged.get("ollama_num_ctx", DEFAULT_CONFIG["ollama_num_ctx"]))
+            except (TypeError, ValueError):
+                ctx_val = int(DEFAULT_CONFIG["ollama_num_ctx"])
+            merged["agent_max_conversation_messages"] = max(100, min(10000, ctx_val // 128))
 
         return cls(**merged)
 

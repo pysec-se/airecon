@@ -13,7 +13,7 @@ from urllib.parse import urlparse
 
 from .config import get_workspace_root
 
-_CVE_RE = re.compile(r'^CVE-\d{4}-\d{4,7}$', re.IGNORECASE)
+_CVE_RE = re.compile(r'^CVE-(19[89]|20\d{2})-\d{4,7}$', re.IGNORECASE)
 
 logger = logging.getLogger("airecon.proxy.reporting")
 

@@ -6,7 +6,7 @@
 
 # AIRecon
 
-**AI-Powered Autonomous Penetration Testing Agent**
+**AI-Assisted Penetration Testing Agent**
 
 [![version](https://img.shields.io/badge/version-v0.1.6--beta-red.svg)](https://github.com/pikpikcu/airecon/releases)
 [![python](https://img.shields.io/badge/python-3.12%2B-blue.svg)](https://www.python.org/)
@@ -17,13 +17,11 @@
 
 ---
 
-AIRecon is an autonomous penetration testing agent that combines a self-hosted **Ollama LLM** with a **Kali Linux Docker sandbox**, native **Caido proxy integration**, a structured **RECON → ANALYSIS → EXPLOIT → REPORT pipeline**, and a real-time **Textual TUI** — completely offline, no API keys required.
+AIRecon combines a self-hosted **Ollama LLM** with a **Kali Linux Docker sandbox**, native **Caido proxy integration**, a structured **RECON → ANALYSIS → EXPLOIT → REPORT pipeline**, and a real-time **Textual TUI**.
 
 ## Why AIRecon?
 
-Commercial API-based models (OpenAI GPT-4, Claude, Gemini) become prohibitively expensive for recursive, autonomous recon workflows that can require thousands of LLM calls per session.
-
-AIRecon is built **100% for local, private operation**.
+AIRecon is designed for local-first workflows where model execution and tool orchestration run in your own environment.
 
 | Feature | AIRecon | Cloud-based agents |
 |---------|---------|-------------------|
@@ -47,7 +45,7 @@ Structured 4-phase state machine: **RECON → ANALYSIS → EXPLOIT → REPORT**.
 
 <div class="feature-card" markdown>
 ### Ollama Stability
-Multi-level VRAM crash recovery (4 tiers), proactive context monitoring at ≥80%, dynamic compression, OOM-safe summarization.
+Includes VRAM/OOM recovery paths, context monitoring, and conversation compression controls.
 </div>
 
 <div class="feature-card" markdown>
@@ -57,30 +55,62 @@ Anti-stagnation with temperature boost, tool diversity tracking, same-tool strea
 
 <div class="feature-card" markdown>
 ### Docker Sandbox
-Full Kali Linux container — 80+ preinstalled tools: subfinder, nuclei, sqlmap, dalfox, ffuf, semgrep, Playwright, and more.
+Kali Linux container with preinstalled recon and testing tools (for example: subfinder, nuclei, sqlmap, dalfox, ffuf, semgrep, and Playwright).
 </div>
 
 <div class="feature-card" markdown>
 ### Skills System
-57 built-in skill files loaded on-demand. Extended by **[airecon-skills](https://github.com/pikpikcu/airecon-skills)** community library.
+Built-in skill files are loaded on demand and can be extended with **[airecon-skills](https://github.com/pikpikcu/airecon-skills)**.
 </div>
 
 <div class="feature-card" markdown>
-### Caido Native
-5 built-in tools: list, replay, automate (`§FUZZ§`), findings, scope. Connects at `127.0.0.1:48080` automatically.
+### Caido Integration
+Built-in tools: list, replay, automate (`§FUZZ§`), findings, and scope. Default endpoint: `127.0.0.1:48080`.
 </div>
 
 <div class="feature-card" markdown>
 ### Browser Automation
-Headless Chromium via Playwright. Full auth support: form login, TOTP/2FA, OAuth, cookie injection, state persistence.
+Headless Chromium via Playwright, with session/cookie support and authentication helper flows.
 </div>
 
 <div class="feature-card" markdown>
 ### Session Memory
-All findings persisted to disk. Resume any session with `airecon start --session <id>`. Tested endpoints memory prevents re-testing after context truncation.
+Findings and session state are persisted to disk. Sessions can be resumed with `airecon start --session <id>`.
+</div>
+
+<div class="feature-card" markdown>
+### Security Controls
+Includes command validation, symlink safety checks, CVE format validation, and session-save locking.
+</div>
+
+<div class="feature-card" markdown>
+### Stability Focused
+Config-based context limits, tool result truncation (50KB), incremental pruning, per-request timeouts, browser cleanup with force kill.
 </div>
 
 </div>
+
+---
+
+## Recent Improvements (v0.1.6-beta)
+
+### Security and Reliability Updates
+- ✅ Session save locking (`asyncio.Lock`) to reduce concurrent write issues
+- ✅ Symlink/TOCTOU protections in file operations
+- ✅ Command validation hardening and safety checks
+
+### Stability Improvements
+- ✅ Session save on TUI exit paths
+- ✅ Per-request timeouts in fuzzing paths
+- ✅ Browser cleanup fallbacks for failed shutdowns
+- ✅ Config-based context management
+- ✅ Tool output truncation limits
+- ✅ Command history pruning improvements
+
+### Code Quality
+- ✅ Removed 51 lines of verbose comments
+- ✅ Simplified docstrings
+- ⚠️ Test suite is under active stabilization. See [Stability & Quality Status](stability.md).
 
 ---
 
@@ -100,7 +130,7 @@ airecon start
 ```
 
 !!! tip "Recommended model"
-    **qwen3:32b** (20 GB VRAM) is the recommended minimum. For best quality use **qwen3.5:122b** (48+ GB VRAM).
+    **qwen3:32b** (20 GB VRAM) is a practical minimum. **qwen3.5:122b** (48+ GB VRAM) generally performs better on long, complex runs.
 
 !!! warning "Minimum model size"
     Models below **30B parameters** frequently hallucinate tool output, ignore scope rules, and produce incomplete function calls. `qwen3:14b` is **not recommended** for real engagements.
@@ -127,7 +157,7 @@ RECON ──────────────────────► ANAL
                                create_vulnerability_report
 ```
 
-Each phase has specific objectives, recommended tools, and automatic transition criteria. Phase enforcement is **soft** — the agent is guided but never blocked.
+Each phase has specific objectives, recommended tools, and transition criteria. Phase enforcement is guidance-based, not strict hard-blocking.
 
 ---
 
@@ -140,6 +170,7 @@ Each phase has specific objectives, recommended tools, and automatic transition 
 | [Features](features.md) | Deep dive into every feature — pipeline, browser auth, fuzzing, skills, anti-context-loss |
 | [Tools Reference](tools.md) | Complete reference for all 31 native tools |
 | [Creating Skills](development/creating_skills.md) | Write your own skill files, use the airecon-skills community library |
+| [Stability & Quality Status](stability.md) | Current validation snapshot, known blockers, and release-stability criteria |
 | [Changelog](changelog.md) | Version history and release notes |
 
 ---

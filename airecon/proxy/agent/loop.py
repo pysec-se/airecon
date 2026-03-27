@@ -8,6 +8,8 @@ import os
 import re
 import shlex
 import warnings
+from collections import deque
+from dataclasses import asdict as _asdict
 from pathlib import Path
 from typing import Any, AsyncIterator
 from urllib.parse import urlparse
@@ -21,6 +23,9 @@ from ..system import (
     auto_load_skills_for_technologies,
     get_system_prompt,
 )
+from .chain_planner import ChainStep as _ChainStep
+from .chain_planner import ExploitChain as _ExploitChain
+from .chain_planner import build_chain_context, plan_chains
 from .executors import _ExecutorMixin
 from .file_reference import (
     build_injection_message,
@@ -30,6 +35,11 @@ from .file_reference import (
     workspace_name_for_ref,
 )
 from .formatters import _FormatterMixin
+from .loop_context import _ContextMixin
+from .loop_exploration import _MEANINGFUL_EVIDENCE_THRESHOLD, _ExplorationMixin
+from .loop_inference import _InferenceMixin
+from .loop_objectives import _ObjectivesMixin
+from .loop_supervision import _SupervisionMixin
 from .models import MAX_TOOL_ITERATIONS, AgentEvent, AgentState
 from .output_parser import parse_tool_output
 from .pipeline import PipelineEngine, PipelinePhase
@@ -44,10 +54,6 @@ from .session import (
     update_from_parsed_output,
 )
 from .tool_defs import get_tool_definitions
-from dataclasses import asdict as _asdict
-from .chain_planner import ChainStep as _ChainStep
-from .chain_planner import ExploitChain as _ExploitChain
-from .chain_planner import build_chain_context, plan_chains
 from .validators import _ValidatorMixin
 from .waf_detector import (
     build_waf_bypass_context,
@@ -56,11 +62,6 @@ from .waf_detector import (
     rank_bypass_strategies,
 )
 from .workspace import _WorkspaceMixin
-from .loop_inference import _InferenceMixin
-from .loop_exploration import _ExplorationMixin, _MEANINGFUL_EVIDENCE_THRESHOLD
-from .loop_objectives import _ObjectivesMixin
-from .loop_supervision import _SupervisionMixin
-from .loop_context import _ContextMixin
 
 _tools_meta_path = Path(__file__).parent.parent / "data" / "tools_meta.json"
 try:
@@ -146,6 +147,7 @@ class AgentLoop(
         # Hash-based dedup: stores MD5(tool_name+args) to block re-execution of
         # identical commands
         self._executed_cmd_hashes: set[str] = set()
+        self._executed_cmd_order: deque[str] = deque()
         self._initial_messages: list[dict[str, Any]] = []
         self._stop_requested: bool = False
         self._consecutive_failures: int = 0
@@ -168,8 +170,8 @@ class AgentLoop(
         self._recovery_force_tool_calls: int = 0
         self._session: SessionData | None = None
         self._pending_output_merges: dict[str, list[str]] = {}
-        # Tools blocked for this agent (e.g. depth control)
         self._blocked_tools: set[str] = set()
+        self._session_lock = asyncio.Lock()
         # If set, overrides config in process_message
         self._override_max_iterations: int | None = None
         self._ctf_mode: bool = False  # True when target is CTF/XBOW/localhost
@@ -205,9 +207,29 @@ class AgentLoop(
         self._budget_pressure_level: int = 0
 
     async def stop(self) -> None:
+        """Stop agent loop and save session."""
         logger.warning("Stopping Agent Loop...")
         self._stop_requested = True
-        if self.engine:
+        
+        if self._session and self._session.target:
+            try:
+                logger.info("Saving session data (subdomains: %d, live_hosts: %d, vulns: %d)...",
+                           len(self._session.subdomains),
+                           len(self._session.live_hosts),
+                           len(self._session.vulnerabilities))
+                
+                self._sync_token_usage_to_session()
+                self._sync_recovery_state_to_session()
+                
+                async with self._session_lock:
+                    from .session import save_session
+                    save_session(self._session)
+                logger.info("Session saved to ~/.airecon/sessions/%s.json",
+                           self._session.session_id)
+            except Exception as e:
+                logger.error("Failed to save session during stop: %s", e)
+        
+        if self.engine and not self._is_subagent:
             await self.engine.force_stop()
         if self._token_snapshot_task and not self._token_snapshot_task.done():
             self._token_snapshot_resave_requested = True
@@ -217,9 +239,6 @@ class AgentLoop(
                     timeout=2.0,
                 )
             except asyncio.TimeoutError:
-                # Shield prevented cancellation — cancel explicitly so the
-                # infinite _save_worker loop does not run as an orphan task
-                # holding file handles after process shutdown.
                 logger.debug("Token snapshot flush timed out — cancelling task.")
                 self._token_snapshot_task.cancel()
                 try:
@@ -322,12 +341,10 @@ class AgentLoop(
             try:
                 while session_to_save and session_to_save.target:
                     try:
-                        await asyncio.to_thread(save_session, session_to_save)
+                        async with self._session_lock:
+                            await asyncio.to_thread(save_session, session_to_save)
                     except Exception as exc:
-                        logger.debug(
-                            "Failed to persist token usage snapshot: %s",
-                            exc,
-                        )
+                        logger.debug("Failed to persist token usage snapshot: %s", exc)
                     if not self._token_snapshot_resave_requested:
                         break
                     self._token_snapshot_resave_requested = False
@@ -339,7 +356,12 @@ class AgentLoop(
             loop = asyncio.get_running_loop()
         except RuntimeError:
             try:
-                save_session(session)
+                # No running event loop: asyncio.Lock cannot be acquired here.
+                # Best effort save if lock is not currently held by an async task.
+                if not self._session_lock.locked():
+                    save_session(session)
+                else:
+                    logger.debug("Session save skipped - lock held")
             except Exception as exc:
                 logger.debug("Failed to persist token usage snapshot: %s", exc)
             return
@@ -430,12 +452,26 @@ class AgentLoop(
             return True, msg
 
         self._executed_cmd_hashes.add(cmd_hash)
-        # Prevent unbounded memory growth over 2000-iteration sessions.
-        # When the set exceeds 5000 entries, clear it — this temporarily
-        # allows re-execution of very old commands which is acceptable.
+        self._executed_cmd_order.append(cmd_hash)
+        
+        # FIX #6 (Medium): Incremental pruning to prevent memory growth
+        # Old behavior: clear() all when >5000 (causes re-execution of old commands)
+        # New behavior: prune oldest 2500 when >5000 (preserves recent history)
+        # This prevents memory bloat while maintaining dedup effectiveness.
         if len(self._executed_cmd_hashes) > 5000:
-            self._executed_cmd_hashes.clear()
-            logger.debug("_executed_cmd_hashes pruned (>5000 entries)")
+            before = len(self._executed_cmd_hashes)
+            while len(self._executed_cmd_order) > 2500:
+                oldest = self._executed_cmd_order.popleft()
+                self._executed_cmd_hashes.discard(oldest)
+            while len(self._executed_cmd_order) > len(self._executed_cmd_hashes):
+                self._executed_cmd_order.popleft()
+            after = len(self._executed_cmd_hashes)
+            if after != before:
+                logger.debug(
+                    "_executed_cmd_hashes incrementally pruned: %d → %d entries (kept newest 2500)",
+                    before, after
+                )
+        
         return False, ""
 
     async def initialize(
@@ -552,6 +588,7 @@ class AgentLoop(
             self.state.conversation = list(self._initial_messages)
         self._executed_tool_counts.clear()
         self._executed_cmd_hashes.clear()
+        self._executed_cmd_order.clear()
         self._last_output_file = None
         self._stagnation_iterations = 0
         self._recent_tool_names.clear()

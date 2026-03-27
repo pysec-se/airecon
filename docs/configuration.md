@@ -6,6 +6,9 @@
 2. [Full Config Reference](#2-full-config-reference)
 3. [Ollama Settings](#3-ollama-settings)
 4. [Agent Behavior](#4-agent-behavior)
+   - [Context Management (NEW)](#context-management-new-in-v016-beta)
+   - [Exploration Engine](#exploration-engine)
+   - [Tool Execution](#tool-execution)
 5. [Docker Sandbox](#5-docker-sandbox)
 6. [Server Settings](#6-server-settings)
 7. [Safety Settings](#7-safety-settings)
@@ -59,6 +62,15 @@ code ~/.airecon/config.json
     "docker_auto_build": true,
     "tool_response_role": "tool",
     "deep_recon_autostart": true,
+    
+    // Context Management (NEW in v0.1.6-beta)
+    "agent_max_conversation_messages": 1024,
+    "agent_compression_trigger_ratio": 0.8,
+    "agent_uncompressed_keep_count": 20,
+    "agent_llm_compression_num_ctx": 8192,
+    "agent_llm_compression_num_predict": 1024,
+    
+    // Agent Behavior
     "agent_max_tool_iterations": 800,
     "agent_repeat_tool_call_limit": 2,
     "agent_missing_tool_retry_limit": 2,
@@ -209,6 +221,88 @@ When enabled, the TUI shows the model's internal reasoning process in the thinki
 ---
 
 ## 4. Agent Behavior
+
+### Context Management (NEW in v0.1.6-beta)
+
+These settings control how AIRecon manages conversation context to prevent VRAM crashes and optimize memory usage.
+
+### `agent_max_conversation_messages`
+**Type:** int | **Default:** `ollama_num_ctx // 128` (1024 for 131K context)
+
+Maximum number of conversation messages before truncation. Automatically calculated from `ollama_num_ctx` unless explicitly set.
+
+```json
+// Auto-calculated (recommended)
+"agent_max_conversation_messages": null
+
+// Manual override for 32K context
+"agent_max_conversation_messages": 256
+
+// Manual override for 131K context
+"agent_max_conversation_messages": 1024
+```
+
+---
+
+### `agent_compression_trigger_ratio`
+**Type:** float (0.5–0.95) | **Default:** `0.8`
+
+Triggers LLM-based compression when conversation reaches this percentage of `agent_max_conversation_messages`.
+
+```json
+// Compress earlier (at 70% full)
+"agent_compression_trigger_ratio": 0.7
+
+// Compress later (at 90% full)
+"agent_compression_trigger_ratio": 0.9
+```
+
+---
+
+### `agent_uncompressed_keep_count`
+**Type:** int (5–100) | **Default:** `20`
+
+Number of most recent messages to keep uncompressed during tool result compression.
+
+```json
+// Keep more context uncompressed
+"agent_uncompressed_keep_count": 30
+
+// Aggressive compression
+"agent_uncompressed_keep_count": 10
+```
+
+---
+
+### `agent_llm_compression_num_ctx`
+**Type:** int (1024–32768) | **Default:** `8192`
+
+Context window size used during LLM-based compression calls. Kept small to save VRAM.
+
+```json
+// For very low VRAM
+"agent_llm_compression_num_ctx": 4096
+
+// For better compression quality
+"agent_llm_compression_num_ctx": 16384
+```
+
+---
+
+### `agent_llm_compression_num_predict`
+**Type:** int (256–8192) | **Default:** `1024`
+
+Maximum tokens for compression output. Controls how detailed the compressed summary is.
+
+```json
+// Shorter summaries
+"agent_llm_compression_num_predict": 512
+
+// More detailed summaries
+"agent_llm_compression_num_predict": 2048
+```
+
+---
 
 ### `deep_recon_autostart`
 **Type:** bool | **Default:** `true`

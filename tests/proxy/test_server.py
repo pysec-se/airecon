@@ -2,11 +2,11 @@
 
 from __future__ import annotations
 
-from pathlib import Path
+import asyncio
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
-from starlette.testclient import TestClient
+import httpx
 
 import airecon.proxy.server as srv
 
@@ -24,6 +24,7 @@ def _patch_server_globals(tmp_path):
     lock = asyncio.Lock()
 
     with (
+        patch.dict("os.environ", {"AIRECON_TEST_MODE": "1"}, clear=False),
         patch.object(srv, "agent", mock_agent),
         patch.object(srv, "ollama_client", mock_ollama),
         patch.object(srv, "engine", mock_engine),
@@ -84,8 +85,29 @@ def _make_mock_engine() -> MagicMock:
 
 
 # Helper: create TestClient WITHOUT starting lifespan (we manage globals ourselves)
-def _client() -> TestClient:
-    return TestClient(srv.app, raise_server_exceptions=True)
+class _OneShotClient:
+    """Open/close TestClient per request to avoid leaked background tasks."""
+
+    def request(self, method: str, url: str, **kwargs):
+        async def _do_request():
+            transport = httpx.ASGITransport(app=srv.app, raise_app_exceptions=True)
+            async with httpx.AsyncClient(
+                transport=transport,
+                base_url="http://testserver",
+            ) as client:
+                return await client.request(method, url, **kwargs)
+
+        return asyncio.run(_do_request())
+
+    def get(self, url: str, **kwargs):
+        return self.request("GET", url, **kwargs)
+
+    def post(self, url: str, **kwargs):
+        return self.request("POST", url, **kwargs)
+
+
+def _client() -> _OneShotClient:
+    return _OneShotClient()
 
 
 # ── GET /api/status ───────────────────────────────────────────────────────────
@@ -160,12 +182,12 @@ class TestListTools:
 # ── GET /api/skills ───────────────────────────────────────────────────────────
 
 class TestListSkills:
-    def test_empty_skills_dir(self, tmp_path, monkeypatch):
+    def test_empty_skills_dir(self):
         """When skills dir doesn't exist, returns count=0."""
-        fake_parent = tmp_path / "proxy"
-        fake_parent.mkdir()
-        # Point __file__ resolution to a dir with no skills/
-        with patch.object(Path, "exists", return_value=False):
+        with (
+            patch.object(srv, "_skills_cache", None),
+            patch.object(srv, "_build_skills_cache_sync", return_value=[]),
+        ):
             r = _client().get("/api/skills")
         assert r.status_code == 200
         assert r.json()["count"] == 0

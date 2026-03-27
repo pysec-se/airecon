@@ -191,3 +191,27 @@ class TestLoadWithDefaultsTypeCoercion:
         assert cfg.ollama_timeout == 300.0
         assert isinstance(cfg.ollama_timeout, float)
         assert cfg.docker_auto_build is False
+
+    def test_agent_max_conversation_auto_derives_from_ollama_ctx(self, tmp_path):
+        """When not explicitly configured, cap must follow ollama_num_ctx."""
+        config_file = tmp_path / "config.json"
+        config_file.write_text(json.dumps({"ollama_num_ctx": 8192}), encoding="utf-8")
+        cfg = Config.load(config_file)
+        assert cfg.ollama_num_ctx == 8192
+        assert cfg.agent_max_conversation_messages == 100  # max(100, 8192//128)
+
+    def test_agent_max_conversation_explicit_value_is_preserved(self, tmp_path):
+        """Explicit cap should override auto-derivation."""
+        config_file = tmp_path / "config.json"
+        config_file.write_text(
+            json.dumps(
+                {
+                    "ollama_num_ctx": 8192,
+                    "agent_max_conversation_messages": 333,
+                }
+            ),
+            encoding="utf-8",
+        )
+        cfg = Config.load(config_file)
+        assert cfg.ollama_num_ctx == 8192
+        assert cfg.agent_max_conversation_messages == 333

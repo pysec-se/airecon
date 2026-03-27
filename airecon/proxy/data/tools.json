@@ -125,6 +125,10 @@
                         "type": "string",
                         "description": "JavaScript code to execute."
                     },
+                    "parallel": {
+                        "type": "boolean",
+                        "description": "For action=execute_js only: when true, run JS concurrently across all open tabs (do not set tab_id)."
+                    },
                     "duration": {
                         "type": "number",
                         "description": "Duration to wait in seconds."

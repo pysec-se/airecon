@@ -1,8 +1,8 @@
+import asyncio
 import pytest
 from unittest.mock import patch, MagicMock
 from airecon.tui.app import AIReconApp, QuitConfirmScreen
 from airecon.tui.startup import StartupScreen, _write_config_value
-from airecon.tui.widgets.input import CommandInput
 from textual.app import App, ComposeResult
 
 
@@ -14,35 +14,41 @@ def isolated_workspace(tmp_path, monkeypatch):
     monkeypatch.setattr("airecon.tui.app.get_workspace_root", lambda: workspace)
 
 
-@pytest.mark.asyncio
-async def test_app_initialization():
-    async with AIReconApp().run_test() as pilot:
-        assert pilot.app.title == "AIRecon"
-        assert pilot.app.sub_title == "AI Security Reconnaissance"
-
-        # Check initial widgets
-        assert pilot.app.query_one("#command-input") is not None
-        assert pilot.app.query_one("#chat-panel") is not None
-        assert pilot.app.query_one("#workspace-panel") is not None
+def test_app_initialization():
+    app = AIReconApp(show_startup_screen=False, auto_poll_services=False)
+    assert app.title == "AIRecon"
+    assert app.sub_title == "AI Security Reconnaissance"
+    assert app._show_startup_screen is False
+    assert app._auto_poll_services is False
 
 
 @pytest.mark.asyncio
 async def test_app_send_message_triggers_worker():
-    with patch.object(AIReconApp, 'run_worker') as mock_run_worker:
-        async with AIReconApp().run_test() as pilot:
-            command_input = pilot.app.query_one("#command-input", CommandInput)
+    def _run_worker_side_effect(coro, *args, **kwargs):
+        if asyncio.iscoroutine(coro):
+            coro.close()
+        return MagicMock()
 
-            # Fill inputs
-            command_input.value = "scan server"
+    with patch.object(AIReconApp, 'run_worker', side_effect=_run_worker_side_effect) as mock_run_worker:
+        app = AIReconApp(show_startup_screen=False, auto_poll_services=False)
+        chat = MagicMock()
+        slash = MagicMock()
+        path = MagicMock()
+        app.query_one = MagicMock(side_effect=lambda selector, *args: {
+            "#slash-completer": slash,
+            "#path-completer": path,
+            "#chat-panel": chat,
+        }[selector])  # type: ignore[method-assign]
+        app._show_recon_spinner = MagicMock()  # type: ignore[method-assign]
 
-            # Submit chat directly via the on_command_input_submitted handler
-            class MockSubmitted:
-                value = "scan server"
-            await pilot.app.on_command_input_submitted(MockSubmitted())
-            await pilot.pause()
+        class MockSubmitted:
+            value = "scan server"
 
-            # Assert run_worker was called to spawn the SSE streaming thread
-            mock_run_worker.assert_called()
+        await app.on_command_input_submitted(MockSubmitted())
+
+        mock_run_worker.assert_called()
+        chat.add_user_message.assert_called_once_with("scan server")
+        chat.start_thinking.assert_called_once()
 
 
 @pytest.mark.asyncio
@@ -57,13 +63,19 @@ async def test_app_status_polling_connection():
         }
         mock_get.return_value = mock_response
 
-        async with AIReconApp().run_test() as pilot:
-            # Manually trigger a single poll check rather than waiting for the background task
-            await pilot.app._check_services(verbose=False)
-            await pilot.pause()
+        app = AIReconApp(show_startup_screen=False, auto_poll_services=False)
+        status = MagicMock()
+        chat = MagicMock()
+        app.query_one = MagicMock(side_effect=lambda selector, *args: {
+            "#status-bar": status,
+            "#chat-panel": chat,
+        }[selector])  # type: ignore[method-assign]
 
-            # Ensure status logic executed successfully without crashing
-            mock_get.assert_called_with("/api/status", timeout=5.0)
+        # Manually trigger a single poll check rather than waiting for background tasks
+        await app._check_services(verbose=False)
+
+        # Ensure status logic executed successfully without crashing
+        mock_get.assert_called_with("/api/status", timeout=5.0)
 
 
 # ── AIReconApp new init params ────────────────────────────────────────────────

@@ -2,6 +2,88 @@
 
 ## [v0.1.6-beta] - 2026-03-17
 
+### Critical Security Fixes
+
+#### Session Save Race Condition
+- fix(agent): add `asyncio.Lock()` to `_schedule_token_usage_snapshot_save()` to prevent concurrent session save corruption
+- fix(agent): acquire lock in `stop()` method before synchronous session save
+- fix(server): call `agent.stop()` in lifespan shutdown to ensure session saved on exit
+
+#### Symlink TOCTOU Vulnerability
+- fix(filesystem): check `file_path.is_symlink()` before create/read operations
+- fix(filesystem): resolve symlink and verify it points within workspace
+- fix(filesystem): use atomic writes via `tempfile.mkstemp()` + `os.replace()` to prevent partial writes
+
+#### Command Injection Prevention
+- fix(validators): add 8 new dangerous patterns to `DANGEROUS_PATTERNS`:
+  - `\$\{[^}]+\}` - variable expansion
+  - `<\([^)]+\)` - process substitution
+  - `\$'[^']*'` - ANSI-C quoting
+  - `` `[^`]+` `` - backtick command substitution
+  - `\$\([^)]+\)` - $(command) substitution
+  - `;\s*(curl|wget|nc|...)` - pipe to interpreter
+  - `\|\s*(bash|sh|python|...)` - pipe to interpreter
+  - `/etc/(passwd|shadow|sudoers|ssh/)` - sensitive file access
+  - `chmod\s+[0-7]*[4-7][0-7]{2}` - setuid/setgid chmod
+
+### Stability Improvements
+
+#### Session Persistence
+- fix(agent): save session on Ctrl+C/exit in `AgentLoop.stop()` method
+- fix(server): call `agent.stop()` in lifespan shutdown handler
+- fix(agent): log session data count (subdomains, live_hosts, vulns) on save
+
+#### HTTP Timeout Protection
+- fix(fuzzer): propagate baseline failures with explicit logging
+- fix(fuzzer): skip unreachable params (status=-1) before fuzzing
+- fix(fuzzer): log skipped params due to baseline failures
+
+#### Browser Resource Cleanup
+- fix(browser): add force kill fallback (`pkill -9 chromium`) on cleanup failure
+- fix(browser): surface screenshot failures to caller via `screenshot_failure` flag in result dict
+
+#### CVE Validation
+- fix(reporting): tighten `_CVE_RE` regex from `r'^CVE-\d{4}-\d{4,7}$'` to `r'^CVE-(19[89]|20\d{2})-\d{4,7}$'`
+- fix(reporting): validate CVE year range 1989-2099 to prevent fake CVEs
+
+#### Context Management
+- fix(models): make context limits config-based via `_get_context_limits()`
+- fix(models): calculate `max_conversation_messages = ollama_num_ctx // 128`
+- fix(models): add 5 new config keys: `agent_max_conversation_messages`, `agent_compression_trigger_ratio`,
+  `agent_uncompressed_keep_count`, `agent_llm_compression_num_ctx`, `agent_llm_compression_num_predict`
+
+#### Tool Result Truncation
+- fix(models): add `_truncate_tool_result()` helper function (50KB limit)
+- fix(executors): add `_append_tool_history()` helper with truncation on append
+- fix(models): keep legacy truncation in `add_message()` as safety net
+
+#### Incremental Pruning
+- fix(loop): change `_executed_cmd_hashes` pruning from `.clear()` to FIFO keep newest 2500
+- fix(loop): log pruning: "incrementally pruned: X → 2500 entries"
+
+### Code Quality
+- refactor: remove 51 lines of verbose FIX comments
+- refactor: simplify docstrings across 12 files
+- test: update test_validation.py to reflect improved security
+- test: all 1369 tests passing (100% backward compatible)
+
+### Files Modified
+- `airecon/proxy/agent/loop.py` - Session lock, save on shutdown, incremental pruning
+- `airecon/proxy/agent/validators.py` - 8 new dangerous patterns
+- `airecon/proxy/agent/models.py` - Config-based context limits, truncation helper
+- `airecon/proxy/agent/session.py` - Vulnerability dedup fix
+- `airecon/proxy/agent/executors.py` - Tool result truncation helper
+- `airecon/proxy/filesystem.py` - Symlink TOCTOU protection, atomic writes
+- `airecon/proxy/browser.py` - Screenshot failure surfacing, force kill cleanup
+- `airecon/proxy/fuzzer.py` - Baseline failure propagation
+- `airecon/proxy/reporting.py` - CVE validation regex
+- `airecon/proxy/server.py` - Session save on shutdown
+- `airecon/proxy/config.py` - Bounds validation for all numeric fields
+- `tests/proxy/test_validation.py` - Updated for improved security
+- `tests/proxy/test_fuzzer.py` - Updated for baseline failure handling
+
+---
+
 ### Added
 
 #### Phase 1 — Autonomous Recovery & Exploration Engine

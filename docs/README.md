@@ -8,6 +8,7 @@ Welcome to the AIRecon documentation.
 - [Tools Reference](tools.md) — Complete reference for all 31 native tools, Docker sandbox tools, and git-cloned scripts
 - [Installation & Setup](installation.md) — Step-by-step installation guide with hardware requirements
 - [Configuration Reference](configuration.md) — All config options with examples, presets, and environment variable overrides
+- [Stability & Quality Status](stability.md) — Current validation snapshot, blockers, and realistic stability criteria
 
 ## Extending AIRecon
 
@@ -23,6 +24,7 @@ Welcome to the AIRecon documentation.
 | Understand the pipeline phases | [features.md → Pipeline Phases](features.md#pipeline-phases) |
 | Connect to Caido | [features.md → Caido Integration](features.md#caido-integration) |
 | Set up browser auth | [features.md → Browser Authentication](features.md#browser-authentication) |
+| Check current stability status | [stability.md](stability.md) |
 | Add your own skill | [Creating Skills](development/creating_skills.md) |
 | Troubleshoot startup issues | [Installation → Troubleshooting](installation.md#11-troubleshooting) |
 

@@ -598,8 +598,8 @@ class _ObjectivesMixin:
                 )
 
         # Auto-generate hypotheses from high-signal evidence.
-        # This activates the hypothesis engine — previously it was never populated
-        # from tool results, making the entire hypothesis_queue dead code.
+        # This populates hypothesis_queue from tool results, enabling the
+        # hypothesis engine to track and test security findings across iterations.
         if success:
             self._auto_form_hypotheses(phase, tool_name, arguments, blob)
 
@@ -668,9 +668,8 @@ class _ObjectivesMixin:
     ) -> None:
         """Auto-populate hypothesis_queue from high-signal tool output.
 
-        Previously the hypothesis engine was structurally complete but never
-        received input from tool results — making it dead code.  This method
-        bridges the gap: it is called at the end of every successful
+        This method bridges the gap between evidence collection and hypothesis
+        tracking: it is called at the end of every successful
         _record_evidence_from_result and converts CVE findings, vulnerability
         keyword signals, and open port discoveries into testable hypotheses.
 

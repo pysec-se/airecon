@@ -18,7 +18,7 @@ from ..fuzzer import FUZZ_PAYLOADS as _FUZZ_PAYLOAD_KEYS
 from ..reporting import create_vulnerability_report
 from ..web_search import web_search
 from .command_parse import extract_primary_binary
-from .models import ToolExecution
+from .models import ToolExecution, _truncate_tool_result
 from .session import _is_duplicate_vulnerability
 
 if TYPE_CHECKING:
@@ -178,6 +178,32 @@ class _ExecutorMixin:
         _session: SessionData | None
         _last_output_file: str | None
         _executed_tool_counts: dict[tuple[str, str], int]
+
+    def _append_tool_history(
+        self,
+        tool_name: str,
+        arguments: dict[str, Any],
+        result: dict[str, Any],
+        duration: float,
+        status: str,
+    ) -> None:
+        """Append tool execution to history with result truncation.
+        
+        FIX #7 (Medium): Truncate oversized results on append to prevent
+        memory growth between tool execution and add_message().
+        """
+        # Truncate result before appending
+        truncated_result = _truncate_tool_result(result)
+        
+        self.state.tool_history.append(
+            ToolExecution(
+                tool_name=tool_name, arguments=arguments,
+                result=truncated_result, duration=duration,
+                status=status,
+            )
+        )
+        self.state.tool_counts["exec"] += 1
+        self.state.tool_counts["total"] += 1
 
     def _extract_command_binary(self, command: str) -> str:
         """Extract executable binary from command, stripping wrappers."""
@@ -419,15 +445,14 @@ class _ExecutorMixin:
                 "truncated": True,
             }
 
-        self.state.tool_history.append(
-            ToolExecution(
-                tool_name=tool_name, arguments=arguments,
-                result=history_result, duration=duration,
-                status="success" if success else "error",
-            )
+        # FIX #7 (Medium): Use helper method for truncation on append
+        self._append_tool_history(
+            tool_name=tool_name,
+            arguments=arguments,
+            result=history_result,
+            duration=duration,
+            status="success" if success else "error",
         )
-        self.state.tool_counts["exec"] += 1
-        self.state.tool_counts["total"] += 1
 
         if success:
             self._executed_tool_counts[args_key] = self._executed_tool_counts.get(
@@ -734,15 +759,73 @@ class _ExecutorMixin:
             vuln_types = [v for v in _raw_vuln_types if isinstance(v, str) and v in _valid_vuln_types] or list(_valid_vuln_types)
         else:
             vuln_types = list(_valid_vuln_types)
+        def _as_bool(value: Any, default: bool = True) -> bool:
+            if value is None:
+                return default
+            if isinstance(value, bool):
+                return value
+            if isinstance(value, (int, float)):
+                return bool(value)
+            if isinstance(value, str):
+                return value.strip().lower() in {"1", "true", "yes", "y", "on"}
+            return default
+        def _as_str_list(value: Any) -> list[str] | None:
+            if not isinstance(value, list):
+                return None
+            cleaned = [str(v).strip() for v in value if str(v).strip()]
+            return cleaned or None
+        enable_phase2 = _as_bool(arguments.get("phase2"), default=True)
+        ssrf_params = _as_str_list(arguments.get("ssrf_params"))
+        graphql_endpoints = _as_str_list(arguments.get("graphql_endpoints"))
+        race_params = _as_str_list(arguments.get("race_params"))
+        auth_login_url_raw = arguments.get("auth_login_url")
+        auth_login_url = (
+            auth_login_url_raw.strip()
+            if isinstance(auth_login_url_raw, str) and auth_login_url_raw.strip()
+            else None
+        )
+        auth_username = arguments.get("auth_username")
+        auth_password = arguments.get("auth_password")
+        auth_extra_fields_raw = arguments.get("auth_extra_fields")
+        auth_extra_fields: dict[str, str] | None = None
+        if isinstance(auth_extra_fields_raw, dict):
+            auth_extra_fields = {
+                str(k): str(v)
+                for k, v in auth_extra_fields_raw.items()
+                if str(k).strip()
+            }
 
         try:
-            fuzzer = Fuzzer(target=target, method=method, headers=self._build_fuzz_headers())
-            results = await fuzzer.fuzz_parameters(params, vuln_types)
+            async with Fuzzer(
+                target=target,
+                method=method,
+                headers=self._build_fuzz_headers(),
+                auth_login_url=auth_login_url,
+            ) as fuzzer:
+                if isinstance(auth_username, str) and isinstance(auth_password, str):
+                    fuzzer.set_auth_credentials(
+                        auth_username,
+                        auth_password,
+                        auth_extra_fields,
+                        login_url=auth_login_url,
+                    )
+                await fuzzer.fuzz_parameters(params, vuln_types)
+                phase2_findings: list[Any] = []
+                if enable_phase2:
+                    phase2_findings = await fuzzer.run_phase2_advanced_tests(
+                        ssrf_params=ssrf_params,
+                        graphql_endpoints=graphql_endpoints,
+                        race_params=race_params,
+                    )
+                results = list(fuzzer.results)
 
             if not results:
                 res_dict = {
                     "success": True,
-                    "result": "No vulnerabilities found with confidence > 0.60."}
+                    "result": "No vulnerabilities found with confidence > 0.60.",
+                    "phase2_enabled": enable_phase2,
+                    "phase2_findings": len(phase2_findings) if enable_phase2 else 0,
+                }
             else:
                 findings_list = []
                 for r in results:
@@ -751,7 +834,12 @@ class _ExecutorMixin:
                         f"Severity: {r.severity} | Conf: {r.confidence:.2f} | "
                         f"Evidence: {r.evidence}"
                     )
-                res_dict = {"success": True, "findings": findings_list}
+                res_dict = {
+                    "success": True,
+                    "findings": findings_list,
+                    "phase2_enabled": enable_phase2,
+                    "phase2_findings": len(phase2_findings) if enable_phase2 else 0,
+                }
 
             try:
                 self._save_tool_output(tool_name, arguments, res_dict)
@@ -856,16 +944,82 @@ class _ExecutorMixin:
         target = arguments.get("target", "")
         params = arguments.get("params") or None
         vuln_types = arguments.get("vuln_types") or None
+        def _as_bool(value: Any, default: bool = True) -> bool:
+            if value is None:
+                return default
+            if isinstance(value, bool):
+                return value
+            if isinstance(value, (int, float)):
+                return bool(value)
+            if isinstance(value, str):
+                return value.strip().lower() in {"1", "true", "yes", "y", "on"}
+            return default
+        def _as_str_list(value: Any) -> list[str] | None:
+            if not isinstance(value, list):
+                return None
+            cleaned = [str(v).strip() for v in value if str(v).strip()]
+            return cleaned or None
+        enable_phase2 = _as_bool(arguments.get("phase2"), default=True)
+        enable_phase3 = _as_bool(arguments.get("phase3"), default=True)
+        ssrf_params = _as_str_list(arguments.get("ssrf_params"))
+        graphql_endpoints = _as_str_list(arguments.get("graphql_endpoints"))
+        race_params = _as_str_list(arguments.get("race_params"))
+        store_params = _as_str_list(arguments.get("store_params"))
+        trigger_paths = _as_str_list(arguments.get("trigger_paths"))
+        auth_login_url_raw = arguments.get("auth_login_url")
+        auth_login_url = (
+            auth_login_url_raw.strip()
+            if isinstance(auth_login_url_raw, str) and auth_login_url_raw.strip()
+            else None
+        )
+        auth_username = arguments.get("auth_username")
+        auth_password = arguments.get("auth_password")
+        auth_extra_fields_raw = arguments.get("auth_extra_fields")
+        auth_extra_fields: dict[str, str] | None = None
+        if isinstance(auth_extra_fields_raw, dict):
+            auth_extra_fields = {
+                str(k): str(v)
+                for k, v in auth_extra_fields_raw.items()
+                if str(k).strip()
+            }
+        tester = None
 
         try:
             from ..fuzzer import InteractiveRealTimeTester
             tester = InteractiveRealTimeTester(
                 target, threads=10, timeout=20,
                 headers=self._build_fuzz_headers(),
+                auth_login_url=auth_login_url,
             )
+            if isinstance(auth_username, str) and isinstance(auth_password, str):
+                tester.fuzzer.set_auth_credentials(
+                    auth_username,
+                    auth_password,
+                    auth_extra_fields,
+                    login_url=auth_login_url,
+                )
             async for event in tester.stream_fuzz(params=params, vuln_types=vuln_types):
                 pass
+            phase2_findings: list[Any] = []
+            phase3_findings: list[Any] = []
+            if enable_phase2:
+                phase2_findings = await tester.fuzzer.run_phase2_advanced_tests(
+                    ssrf_params=ssrf_params,
+                    graphql_endpoints=graphql_endpoints,
+                    race_params=race_params,
+                )
+            if enable_phase3:
+                phase3_findings = await tester.fuzzer.run_phase3_advanced_tests(
+                    store_params=store_params or params,
+                    trigger_paths=trigger_paths,
+                )
+            if phase2_findings or phase3_findings:
+                tester._findings.extend(phase2_findings + phase3_findings)
             summary = tester.get_summary()
+            summary["phase2_enabled"] = enable_phase2
+            summary["phase3_enabled"] = enable_phase3
+            summary["phase2_findings"] = len(phase2_findings)
+            summary["phase3_findings"] = len(phase3_findings)
 
             findings_list = []
             for f in getattr(tester, "_findings", []):
@@ -890,6 +1044,12 @@ class _ExecutorMixin:
             logger.error("deep_fuzz error: %s", e)
             res_dict = {"success": False, "error": str(e)}
             success = False
+        finally:
+            if tester is not None:
+                try:
+                    await tester.fuzzer.close()
+                except Exception as _close_err:
+                    logger.debug("Could not close deep_fuzz tester: %s", _close_err)
 
         duration = time.time() - start_time
         self.state.tool_history.append(

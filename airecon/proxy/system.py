@@ -347,7 +347,7 @@ _PHASE_ENTRY_SKILLS: dict[str, list[str]] = {
     ],
     "EXPLOIT": [
         "tools/advanced_fuzzing.md",
-        "payloads/exploitation.md",  # Added to ensure exploitation techniques always available
+        "vulnerabilities/exploitation.md",  # Existing file: guaranteed exploit tradecraft context
     ],
     "REPORT": [],
 }
@@ -415,7 +415,7 @@ def auto_load_skills_for_message(
     loaded_skills: list[str] = []
     loaded_paths: set[str] = set()
 
-    def _load_skill(skill_rel: str) -> bool:
+    def _load_skill(skill_rel: str, *, guaranteed_skill: bool = False) -> bool:
         if skill_rel in loaded_paths:
             return False
         # Check session-level dedup (prevent re-loading skills from earlier messages)
@@ -428,6 +428,11 @@ def auto_load_skills_for_message(
                 return False
         skill_file = skills_dir / skill_rel
         if not skill_file.exists():
+            if guaranteed_skill:
+                logger.warning(
+                    "Phase-guaranteed skill path is invalid and was skipped: %s",
+                    skill_rel,
+                )
             return False
         try:
             content = skill_file.read_text(encoding="utf-8", errors="replace")
@@ -453,7 +458,7 @@ def auto_load_skills_for_message(
 
     # Load guaranteed phase skills first
     for skill_rel in guaranteed:
-        _load_skill(skill_rel)
+        _load_skill(skill_rel, guaranteed_skill=True)
 
     # Fill remaining slots with top keyword-matched skills
     keyword_count = 0
@@ -525,8 +530,35 @@ def auto_load_skills_for_technologies(
         key=lambda s: (-skill_scores[s], s),
     )
 
+    def _tech_skill_budget(ctx_tokens: int) -> tuple[int, int, int]:
+        """Return per-skill and total char budgets for tech skill injection.
+
+        Goals:
+        - Keep strong domain depth (near-expert guidance) for large-context models.
+        - Prevent context bloat on smaller local Ollama setups.
+        """
+        ctx = max(4096, int(ctx_tokens or 0))
+        if ctx >= 131072:
+            return 22000, 7000, 66000
+        if ctx >= 65536:
+            return 18000, 6000, 54000
+        if ctx >= 32768:
+            return 14000, 4500, 42000
+        if ctx >= 16384:
+            return 11000, 3500, 30000
+        return 9000, 3000, 22000
+
+    try:
+        cfg = get_config()
+        tech_limit, generic_limit, total_limit = _tech_skill_budget(
+            int(getattr(cfg, "ollama_num_ctx", 32768) or 32768)
+        )
+    except Exception:
+        tech_limit, generic_limit, total_limit = _tech_skill_budget(32768)
+
     parts: list[str] = []
     loaded_names: list[str] = []
+    used_chars = 0
     for skill_rel in sorted_skills[:3]:
         # Skip skills already injected this session (dedup by rel-path)
         if skill_rel in already_loaded:
@@ -535,10 +567,27 @@ def auto_load_skills_for_technologies(
         if skill_file.exists():
             try:
                 content = skill_file.read_text(encoding="utf-8", errors="replace")
-                limit = 20000 if skill_rel.startswith("technologies/") or skill_rel.startswith("frameworks/") else 4000
+                limit = tech_limit if (
+                    skill_rel.startswith("technologies/")
+                    or skill_rel.startswith("frameworks/")
+                ) else generic_limit
                 if len(content) > limit:
                     content = content[:limit] + f"\n... (truncated, use read_file for full: {skill_file.absolute().as_posix()})"
-                parts.append(f"[AUTO-LOADED TECH SKILL: {skill_rel}]\n{content}")
+                block = f"[AUTO-LOADED TECH SKILL: {skill_rel}]\n{content}"
+                remaining = total_limit - used_chars
+                if remaining <= 0:
+                    break
+                if len(block) > remaining:
+                    if remaining < 1200:
+                        break
+                    notice = (
+                        f"\n... (truncated by adaptive total tech-skill budget "
+                        f"{total_limit} chars; use read_file for full content)"
+                    )
+                    keep = max(0, remaining - len(notice))
+                    block = block[:keep] + notice
+                parts.append(block)
+                used_chars += len(block)
                 # Return relative path (not stem) so dedup and telemetry use the
                 # same stable identifier format.
                 loaded_names.append(skill_rel)
