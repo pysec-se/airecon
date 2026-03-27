@@ -480,10 +480,14 @@
             "category_id", "group_id", "invoice_id", "ticket_id", "message_id"
         ],
         "SSRF": [
-            "url", "redirect", "next", "return", "goto", "link", "src", "source",
-            "dest", "destination", "host", "callback", "webhook", "proxy", "target",
-            "endpoint", "api", "feed", "import", "export", "uri", "domain",
-            "return_url", "continue", "hook"
+            "url", "link", "src", "source", "host", "webhook", "proxy",
+            "endpoint", "api", "feed", "import", "export", "uri", "domain", "hook"
+        ],
+        "OPEN_REDIRECT": [
+            "redirect", "next", "return", "goto", "dest", "destination", "callback",
+            "return_url", "continue", "target", "redir", "aredirurl", "returnurl",
+            "redirecturl", "nexturl", "gotourl", "out", "back", "to", "r", "u",
+            "ret", "go", "q", "jump", "forward", "location", "from", "nav"
         ],
         "PATH_TRAVERSAL": [
             "file", "path", "filepath", "page", "include", "template", "view",

@@ -83,6 +83,114 @@ _PORT_HINTS: dict[int, str] = _load_port_hints()
 _TECH_HINTS: dict[str, str] = _load_tech_hints()
 
 # Nmap/httpx open port pattern: "80/tcp  open" or "port 80 open" or "[80]"
+# Detects raw HTTP responses in curl -i / curl -v output
+_HTTP_RESPONSE_START_RE = re.compile(r"^\s*HTTP/[12](?:\.\d)?\s+\d{3}", re.MULTILINE)
+
+# Security-relevant response headers to surface prominently
+_SEC_HEADERS = (
+    "location",
+    "set-cookie",
+    "access-control-allow-origin",
+    "access-control-allow-credentials",
+    "content-security-policy",
+    "x-frame-options",
+    "www-authenticate",
+    "server",
+    "x-powered-by",
+    "x-aspnet-version",
+    "x-aspnetmvc-version",
+    "x-generator",
+)
+
+# Schemes in Location header that indicate security issues
+# Non-https schemes that indicate potentially dangerous redirects
+# http:// removed — standard HTTP redirects are normal, not suspicious
+# Only javascript:, data:, vbscript:, // (protocol-relative) are meaningful attack vectors
+_SUSPICIOUS_REDIRECT_SCHEMES = ("javascript:", "data:", "vbscript:", "//")
+
+
+def _extract_http_response_summary(raw_output: str) -> str | None:
+    """Parse raw HTTP response (from curl -i) and return a structured security summary.
+
+    Surfaces security-relevant headers so Ollama does not need to read raw text.
+    Called automatically whenever execute tool output looks like an HTTP response.
+    Returns None if the output is not a raw HTTP response.
+    """
+    if not _HTTP_RESPONSE_START_RE.search(raw_output[:200]):
+        return None
+
+    # When curl follows redirects, there may be multiple response blocks.
+    # Split on HTTP/ to get all blocks; we want the LAST one (final response).
+    blocks = re.split(r"(?m)(?=^HTTP/)", raw_output.strip())
+    blocks = [b for b in blocks if b.strip()]
+    target_block = blocks[-1] if blocks else raw_output
+
+    lines = target_block.splitlines()
+    status_line = lines[0].strip() if lines else ""
+
+    # Parse headers until blank line
+    headers: dict[str, str] = {}
+    body_start = len(lines)
+    for i, line in enumerate(lines[1:], 1):
+        if not line.strip():
+            body_start = i + 1
+            break
+        if ":" in line:
+            name, _, val = line.partition(":")
+            key = name.strip().lower()
+            # Concatenate duplicate headers (e.g. multiple Set-Cookie)
+            if key in headers:
+                headers[key] = headers[key] + "; " + val.strip()
+            else:
+                headers[key] = val.strip()
+
+    body_lines = lines[body_start:]
+    body_excerpt = "\n".join(body_lines).strip()[:500]
+
+    parts: list[str] = [f"[HTTP RESPONSE] {status_line}"]
+
+    # Surface security-relevant headers first
+    for h in _SEC_HEADERS:
+        val = headers.get(h)
+        if not val:
+            continue
+        if h == "location":
+            annotation = ""
+            val_lower = val.lower()
+            if any(val_lower.startswith(s) for s in _SUSPICIOUS_REDIRECT_SCHEMES):
+                annotation = " [POSSIBLE OPEN REDIRECT — non-https scheme]"
+            elif not val_lower.startswith("https://"):
+                annotation = " [redirect target is not https]"
+            parts.append(f"  Location: {val}{annotation}")
+        elif h == "set-cookie":
+            flags: list[str] = []
+            val_lower = val.lower()
+            if "httponly" not in val_lower:
+                flags.append("no HttpOnly")
+            if "secure" not in val_lower:
+                flags.append("no Secure")
+            if "samesite" not in val_lower:
+                flags.append("no SameSite")
+            flag_note = f" [WEAK: {', '.join(flags)}]" if flags else ""
+            parts.append(f"  Set-Cookie: {val}{flag_note}")
+        elif h == "access-control-allow-origin":
+            note = " [CORS: check if reflects Origin header + credentials=true]" if val in ("*", ) else ""
+            parts.append(f"  Access-Control-Allow-Origin: {val}{note}")
+        else:
+            parts.append(f"  {h}: {val}")
+
+    # Show which security headers are ABSENT
+    absent = [h for h in ("content-security-policy", "x-frame-options") if h not in headers]
+    if absent:
+        parts.append(f"  [MISSING security headers: {', '.join(absent)}]")
+
+    # Body excerpt
+    if body_excerpt:
+        parts.append(f"  Body ({len(body_excerpt)} chars shown): {body_excerpt[:300]}")
+
+    return "\n".join(parts)
+
+
 _PORT_OPEN_RE = re.compile(
     r"\b(\d{2,5})/(?:tcp|udp)\s+open"      # nmap: 80/tcp  open
     r"|\bport\s+(\d{2,5})\s+open"           # generic: port 80 open
@@ -276,6 +384,19 @@ class _FormatterMixin:
                     for ln in re.sub(r"[ \t]+", " ", stdout).splitlines()
                     if ln.strip()
                 )
+
+            # Detect raw HTTP response (curl -i output) and surface security summary
+            _http_summary = _extract_http_response_summary(stdout)
+            if _http_summary:
+                # Prepend structured summary; keep first 2000 chars of raw output
+                # so Ollama can verify headers/body independently if needed.
+                body = _http_summary + "\n\nRAW:\n" + stdout.strip()[:2000]
+                if len(body) > MAX_TOTAL:
+                    body = body[:MAX_TOTAL] + "\n... (truncated)"
+                hints = _extract_security_hints(stdout)
+                if hints:
+                    body += "\n\n[SECURITY CONTEXT — act on these]\n" + "\n".join(hints)
+                return body
 
             # Try structured parsing first
             parsed = parse_tool_output(command, stdout)

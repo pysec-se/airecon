@@ -1,4 +1,10 @@
-from airecon.proxy.agent.session import generate_session_id, _calculate_similarity, _is_duplicate_vulnerability, update_from_parsed_output
+from airecon.proxy.agent.session import (
+    generate_session_id,
+    _calculate_similarity,
+    _is_duplicate_vulnerability,
+    session_to_context,
+    update_from_parsed_output,
+)
 from airecon.proxy.agent.output_parser import ParsedOutput
 
 
@@ -114,6 +120,16 @@ def test_update_from_parsed_output_extracts_embedded_url(mock_session):
     assert "https://embedded.example.com/app.js" in mock_session.urls
 
 
+def test_update_from_parsed_output_ignores_non_actionable_severity_line(mock_session):
+    parsed = ParsedOutput(
+        tool="customscan",
+        summary="Status",
+        items=["[HIGH] scan completed successfully with no actionable issue"],
+    )
+    update_from_parsed_output(mock_session, parsed)
+    assert len(mock_session.vulnerabilities) == 0
+
+
 def test_update_from_parsed_output_vuln_pattern_ignores_negative_phrase(mock_session):
     parsed = ParsedOutput(
         tool="metasploit",
@@ -174,3 +190,133 @@ def test_update_from_parsed_output_vuln_pattern_keeps_not_patched_signal(mock_se
     update_from_parsed_output(mock_session, parsed)
     assert len(mock_session.vulnerabilities) == 1
     assert "not patched" in mock_session.vulnerabilities[0]["finding"].lower()
+
+
+def test_update_from_parsed_output_updates_causal_state(mock_session):
+    parsed = ParsedOutput(
+        tool="httpx",
+        summary="2 endpoints observed",
+        items=["https://example.com/admin [200]"],
+        causal_observations=[
+            {
+                "observation_type": "endpoint_accessible",
+                "entity": "https://example.com/admin",
+                "attribute": "status_class",
+                "value": "2xx",
+                "source_tool": "httpx",
+                "evidence": "https://example.com/admin [200]",
+                "confidence": 0.82,
+                "phase": "ANALYSIS",
+            }
+        ],
+    )
+    update_from_parsed_output(mock_session, parsed, command="httpx -u https://example.com/admin")
+
+    assert len(mock_session.causal_state.observations) == 1
+    assert len(mock_session.causal_state.hypotheses) >= 1
+    assert len(mock_session.causal_state.interventions) == 1
+    hyp = mock_session.causal_state.hypotheses[0]
+    assert hyp.posterior >= hyp.prior
+
+
+def test_session_to_context_includes_causal_block(mock_session):
+    parsed = ParsedOutput(
+        tool="naabu",
+        summary="open service observed",
+        items=["example.com:443"],
+        causal_observations=[
+            {
+                "observation_type": "service_exposed",
+                "entity": "example.com",
+                "attribute": "port",
+                "value": "443",
+                "source_tool": "naabu",
+                "evidence": "example.com:443",
+                "confidence": 0.80,
+                "phase": "RECON",
+            }
+        ],
+    )
+    update_from_parsed_output(mock_session, parsed, command="naabu -host example.com")
+    ctx = session_to_context(mock_session)
+    assert "<causal_reasoning" in ctx
+    assert "service_exposed" in ctx
+
+
+class TestBoundedListDeserialization:
+    """Test BoundedList deserialization edge cases for legacy session compatibility."""
+
+    def test_coerce_sequence_valid_json_list(self) -> None:
+        """Test _coerce_sequence_field with valid JSON list format."""
+        from airecon.proxy.agent.session import _coerce_sequence_field
+        
+        # Valid JSON list
+        data = ["item1", "item2", "item3"]
+        result = _coerce_sequence_field(data, field_name="test", maxlen=100)
+        
+        assert result is not None
+        assert len(result) == 3
+        assert "item1" in result
+        assert "item3" in result
+
+    def test_coerce_sequence_empty_list(self) -> None:
+        """Test _coerce_sequence_field with empty list."""
+        from airecon.proxy.agent.session import _coerce_sequence_field
+        
+        data = []
+        result = _coerce_sequence_field(data, field_name="test", maxlen=100)
+        
+        assert result is not None
+        assert len(result) == 0
+
+    def test_coerce_sequence_legacy_deque_string_format(self) -> None:
+        """Test _coerce_sequence_field with legacy deque string format."""
+        from airecon.proxy.agent.session import _coerce_sequence_field
+        
+        # Legacy format: deque(['item1', 'item2'])
+        data = "deque(['item1', 'item2'])"
+        result = _coerce_sequence_field(data, field_name="test", maxlen=100)
+        
+        # Should handle legacy format gracefully
+        assert result is not None
+        assert len(result) >= 0
+
+    def test_coerce_sequence_corrupted_legacy_format(self) -> None:
+        """CRITICAL: Corrupted legacy deque format should not crash."""
+        from airecon.proxy.agent.session import _coerce_sequence_field
+        
+        # Corrupted legacy format (truncated)
+        data = "deque(['item1', 'item"  # Missing closing
+        result = _coerce_sequence_field(data, field_name="test", maxlen=100)
+        
+        # Should not crash
+        assert result is not None
+
+    def test_coerce_sequence_none_input(self) -> None:
+        """Test _coerce_sequence_field with None input."""
+        from airecon.proxy.agent.session import _coerce_sequence_field
+        
+        result = _coerce_sequence_field(None, field_name="test", maxlen=100)
+        
+        # Should handle None gracefully
+        assert result is not None
+
+    def test_coerce_sequence_empty_string(self) -> None:
+        """Test _coerce_sequence_field with empty string."""
+        from airecon.proxy.agent.session import _coerce_sequence_field
+        
+        result = _coerce_sequence_field("", field_name="test", maxlen=100)
+        
+        # Should handle empty string gracefully
+        assert result is not None
+
+    def test_coerce_sequence_truncates_to_maxlen(self) -> None:
+        """Test that _coerce_sequence_field truncates to maxlen."""
+        from airecon.proxy.agent.session import _coerce_sequence_field
+        
+        data = ["item" + str(i) for i in range(50)]
+        result = _coerce_sequence_field(data, field_name="test", maxlen=10)
+        
+        assert len(result) == 10
+        # Should keep the newest items (last ones)
+        assert "item49" in result

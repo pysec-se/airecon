@@ -311,3 +311,11 @@ class TestGenericSmartParserExtended:
         parsed = parse_tool_output("somerandombinary -v", stdout)
         assert parsed is not None
         assert parsed.total_count > 0
+
+    def test_unknown_tool_adaptive_parser_prefers_structured_candidate(self):
+        stdout = "10.0.0.1:80\n10.0.0.2:443\n"
+        parsed = parse_tool_output("mysteryscan --fast target.local", stdout)
+        assert parsed is not None
+        assert parsed.tool == "mysteryscan"
+        assert parsed.parse_quality == "adaptive"
+        assert parsed.total_count == 2

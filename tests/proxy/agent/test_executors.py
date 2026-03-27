@@ -4,6 +4,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 from airecon.proxy.agent.executors import _ExecutorMixin
+from airecon.proxy.agent.session import SessionData
 from airecon.proxy.agent.validators import _ValidatorMixin
 
 
@@ -84,6 +85,47 @@ async def test_execute_report_tool(agent, mocker):
 
     assert success
     assert result["finding_id"] == "VULN-1"
+
+
+@pytest.mark.asyncio
+async def test_execute_report_tool_marks_existing_vulnerability(agent, mocker):
+    mocker.patch(
+        "airecon.proxy.agent.executors.create_vulnerability_report",
+        return_value={"success": True, "finding_id": "VULN-2"},
+    )
+    agent._session = SessionData(target="example.com")
+    agent._session.vulnerabilities.append(
+        {"finding": "SQL injection in /login endpoint", "endpoint": "/login"}
+    )
+
+    success, _, _, _ = await agent._execute_report_tool(
+        "create_vulnerability_report",
+        {"title": "SQL injection in /login endpoint", "endpoint": "/login"},
+    )
+
+    assert success
+    assert agent._session.vulnerabilities[0].get("report_generated") is True
+
+
+@pytest.mark.asyncio
+async def test_execute_report_tool_does_not_append_unmatched_title(agent, mocker):
+    mocker.patch(
+        "airecon.proxy.agent.executors.create_vulnerability_report",
+        return_value={"success": True, "finding_id": "VULN-3"},
+    )
+    agent._session = SessionData(target="example.com")
+    agent._session.vulnerabilities.append(
+        {"finding": "Reflected XSS in search", "endpoint": "/search"}
+    )
+
+    success, _, _, _ = await agent._execute_report_tool(
+        "create_vulnerability_report",
+        {"title": "Remote code execution in admin panel", "endpoint": "/admin"},
+    )
+
+    assert success
+    assert len(agent._session.vulnerabilities) == 1
+    assert agent._session.vulnerabilities[0].get("report_generated") is not True
 
 
 # ── schemathesis behavioral tests ─────────────────────────────────────────────
@@ -194,3 +236,161 @@ def test_browser_action_has_auth_param_descriptions():
     props = _browser_tool_fn()["parameters"]["properties"]
     for param in ("username", "password", "totp_secret", "cookies", "oauth_url"):
         assert param in props, f"browser_action missing param description: {param}"
+
+
+# ── http_observe tool tests ───────────────────────────────────────────────────
+
+class DummyStateWithBaselines(DummyState):
+    def __init__(self):
+        super().__init__()
+        self.http_baselines: dict = {}
+
+
+class AgentWithBaselines(DummyAgent):
+    def __init__(self):
+        super().__init__()
+        self.state = DummyStateWithBaselines()
+
+
+@pytest.fixture
+def agent_with_baselines():
+    return AgentWithBaselines()
+
+
+@pytest.mark.asyncio
+async def test_http_observe_missing_url(agent_with_baselines):
+    success, duration, result, _ = await agent_with_baselines._execute_http_observe_tool(
+        "http_observe", {}
+    )
+    assert success is False
+    assert "url" in result["error"]
+
+
+@pytest.mark.asyncio
+async def test_http_observe_basic_get(agent_with_baselines, mocker):
+    raw_response = (
+        "HTTP/1.1 200 OK\r\n"
+        "Content-Type: text/html\r\n"
+        "Server: nginx\r\n"
+        "\r\n"
+        "<html>hello</html>"
+    )
+    mock_exec = AsyncMock(return_value={
+        "success": True, "stdout": raw_response, "error": "", "stderr": "",
+    })
+    agent_with_baselines.engine = mocker.MagicMock()
+    agent_with_baselines.engine.execute_tool = mock_exec
+
+    success, duration, result, _ = await agent_with_baselines._execute_http_observe_tool(
+        "http_observe", {"url": "https://example.com/"}
+    )
+    assert success is True
+    assert result["status_code"] == 200
+    assert result["headers"].get("content-type") == "text/html"
+    assert result["headers"].get("server") == "nginx"
+    assert "<html>hello</html>" in result["body"]
+
+
+@pytest.mark.asyncio
+async def test_http_observe_save_as_stores_baseline(agent_with_baselines, mocker):
+    raw_response = "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\n\r\nhello"
+    mock_exec = AsyncMock(return_value={
+        "success": True, "stdout": raw_response, "error": "", "stderr": "",
+    })
+    agent_with_baselines.engine = mocker.MagicMock()
+    agent_with_baselines.engine.execute_tool = mock_exec
+
+    _, _, result, _ = await agent_with_baselines._execute_http_observe_tool(
+        "http_observe", {"url": "https://example.com/", "save_as": "my_baseline"}
+    )
+    assert result.get("saved_as") == "my_baseline"
+    assert "my_baseline" in agent_with_baselines.state.http_baselines
+    assert agent_with_baselines.state.http_baselines["my_baseline"]["status_code"] == 200
+
+
+@pytest.mark.asyncio
+async def test_http_observe_compare_to_missing_baseline(agent_with_baselines, mocker):
+    raw_response = "HTTP/1.1 200 OK\r\n\r\nbody"
+    mock_exec = AsyncMock(return_value={
+        "success": True, "stdout": raw_response, "error": "", "stderr": "",
+    })
+    agent_with_baselines.engine = mocker.MagicMock()
+    agent_with_baselines.engine.execute_tool = mock_exec
+
+    _, _, result, _ = await agent_with_baselines._execute_http_observe_tool(
+        "http_observe", {"url": "https://example.com/", "compare_to": "nonexistent"}
+    )
+    assert "diff_error" in result
+    assert "nonexistent" in result["diff_error"]
+
+
+@pytest.mark.asyncio
+async def test_http_observe_diff_detects_status_change(agent_with_baselines, mocker):
+    # First: establish baseline (200)
+    raw_200 = "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\n\r\nnormal body"
+    # Second: probe returns 302
+    raw_302 = "HTTP/1.1 302 Found\r\nLocation: javascript:alert(1)\r\n\r\n"
+    mock_exec = AsyncMock(side_effect=[
+        {"success": True, "stdout": raw_200, "error": "", "stderr": ""},
+        {"success": True, "stdout": raw_302, "error": "", "stderr": ""},
+    ])
+    agent_with_baselines.engine = mocker.MagicMock()
+    agent_with_baselines.engine.execute_tool = mock_exec
+
+    await agent_with_baselines._execute_http_observe_tool(
+        "http_observe", {"url": "https://t.com/", "save_as": "base"}
+    )
+    _, _, result, _ = await agent_with_baselines._execute_http_observe_tool(
+        "http_observe", {"url": "https://t.com/?next=javascript:alert(1)", "compare_to": "base"}
+    )
+    diff = result["diff"]
+    assert diff["status_code_changed"]["from"] == 200
+    assert diff["status_code_changed"]["to"] == 302
+    assert diff["significant_change"] is True
+    assert "location" in diff.get("security_headers_present", {})
+    assert diff["security_headers_present"]["location"] == "javascript:alert(1)"
+
+
+def test_parse_http_response_basic():
+    raw = "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n\r\n{\"key\":\"val\"}"
+    parsed = AgentWithBaselines._parse_http_response(raw)
+    assert parsed["status_code"] == 200
+    assert parsed["headers"]["content-type"] == "application/json"
+    assert '{"key":"val"}' in parsed["body"]
+
+
+def test_parse_http_response_empty():
+    parsed = AgentWithBaselines._parse_http_response("")
+    assert parsed["status_code"] == 0
+    assert parsed["body"] == ""
+
+
+def test_parse_http_response_last_block_wins():
+    """curl -i with a redirect shows 301 then 200 — we want the final 200."""
+    raw = (
+        "HTTP/1.1 301 Moved Permanently\r\nLocation: /new\r\n\r\n"
+        "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\n\r\nfinal body"
+    )
+    parsed = AgentWithBaselines._parse_http_response(raw)
+    assert parsed["status_code"] == 200
+    assert "final body" in parsed["body"]
+
+
+def test_diff_http_responses_no_change():
+    baseline = {"status_code": 200, "headers": {"x-foo": "bar"}, "body": "hello", "body_size_bytes": 5}
+    current = {"status_code": 200, "headers": {"x-foo": "bar"}, "body": "hello", "body_size_bytes": 5}
+    diff = AgentWithBaselines._diff_http_responses(baseline, current)
+    assert diff["significant_change"] is False
+    assert "status_code_changed" not in diff
+
+
+def test_http_observe_in_tools_json():
+    """http_observe must be present in tools.json with correct structure."""
+    tools_path = Path(__file__).parents[3] / "airecon/proxy/data/tools.json"
+    tools = json.loads(tools_path.read_text())
+    names = [t.get("function", {}).get("name") for t in tools]
+    assert "http_observe" in names
+    tool = next(t for t in tools if t.get("function", {}).get("name") == "http_observe")
+    assert tool["type"] == "function"
+    assert "url" in tool["function"]["parameters"]["properties"]
+    assert "url" in tool["function"]["parameters"]["required"]

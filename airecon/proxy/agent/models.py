@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import heapq
 import logging
 import re
 from dataclasses import dataclass, field
@@ -12,13 +13,25 @@ MAX_TOOL_ITERATIONS = 2000
 MAX_TOOL_HISTORY = 100
 MAX_OBJECTIVES = 64
 MAX_EVIDENCE = 200
+MAX_HYPOTHESES = 32
+MAX_CAUSAL_OBSERVATIONS = 2000
+MAX_CAUSAL_INTERVENTIONS = 300
+MAX_CAUSAL_HYPOTHESES = 256
+MAX_CAUSAL_EDGES = 512
 FLAG_PATTERN = re.compile(r"flag\{[^}]+\}", re.IGNORECASE)
 
+# Compiled once at module level — used by add_message() to strip <think> leakage.
+# Exact-tag match only: <think> not <thinking> (word-boundary via end-of-tag check).
+_THINK_BLOCK_RE = re.compile(r"<think>.*?</think>", re.DOTALL | re.IGNORECASE)
+# Unclosed <think> that leaked at end of stream — strip from open tag to string end.
+_THINK_OPEN_RE = re.compile(r"<think>(?!</think>).*$", re.DOTALL | re.IGNORECASE)
+
 # Jaccard similarity threshold for evidence deduplication.
-# Two evidence entries with token-overlap >= this value are treated as duplicates.
-# 0.70 is more forgiving than 0.75 — reduces false-negatives where the same
-# finding is described with slightly different wording (e.g. word order swap).
 _EVIDENCE_SIMILARITY_THRESHOLD: float = 0.70
+
+# Severity multipliers for evidence prioritization (CRITICAL=5:2.0x, HIGH=4:1.5x, etc.)
+# Moved to module level to avoid recreation on every add_evidence() call
+_SEVERITY_MULTIPLIER: dict[int, float] = {5: 2.0, 4: 1.5, 3: 1.0, 2: 0.7, 1: 0.5}
 
 
 def jaccard_similarity(a: str, b: str) -> float:
@@ -36,6 +49,43 @@ def jaccard_similarity(a: str, b: str) -> float:
     return len(tokens_a & tokens_b) / len(tokens_a | tokens_b)
 
 
+def _calculate_objective_confidence(
+    summary: str,
+    artifact: str | None,
+    source_tool: str,
+    severity: int = 3,
+) -> float:
+    """Calculate objective confidence score based on evidence quality.
+    
+    Replaces subjective confidence with objective scoring based on:
+    - Has artifact/file output (+0.2)
+    - Has severity tag (+0.1)
+    - Has HTTP proof (+0.15)
+    - Detailed description (>100 chars, +0.05)
+    
+    Returns: Confidence score between 0.5 and 1.0
+    """
+    score = 0.5  # Base score
+    
+    if artifact:  # Has file output
+        score += 0.2
+    
+    if re.search(r"\b(CRITICAL|HIGH|MEDIUM|LOW)\b", summary, re.IGNORECASE):  # Severity tag
+        score += 0.1
+    
+    if re.search(r"\b(http|https|status|response|→)\b", summary.lower()):  # HTTP proof
+        score += 0.15
+    
+    if len(summary) > 100:  # Detailed description
+        score += 0.05
+    
+    # Severity-based adjustment (CRITICAL findings get slight boost if well-documented)
+    if severity >= 4 and len(summary) > 80:
+        score += 0.05
+    
+    return min(score, 1.0)
+
+
 @dataclass
 class ToolExecution:
     tool_name: str
@@ -49,6 +99,255 @@ class ToolExecution:
 class AgentEvent:
     type: str  # "text", "tool_start", "tool_end", "error", "done", "thinking"
     data: dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass
+class CausalObservation:
+    """Structured observation captured from tool/runtime output."""
+
+    observation_type: str
+    entity: str
+    attribute: str = ""
+    value: str = ""
+    source_tool: str = ""
+    evidence: str = ""
+    confidence: float = 0.5
+    phase: str = ""
+    timestamp: str = ""
+
+    def fingerprint(self) -> str:
+        """Stable key for deduplication."""
+        return "|".join(
+            [
+                self.observation_type.strip().lower(),
+                self.entity.strip().lower(),
+                self.attribute.strip().lower(),
+                self.value.strip().lower(),
+            ]
+        )
+
+    @classmethod
+    def from_dict(cls, raw: dict[str, Any]) -> "CausalObservation":
+        return cls(
+            observation_type=str(raw.get("observation_type", "")).strip(),
+            entity=str(raw.get("entity", "")).strip(),
+            attribute=str(raw.get("attribute", "")).strip(),
+            value=str(raw.get("value", "")).strip(),
+            source_tool=str(raw.get("source_tool", "")).strip(),
+            evidence=str(raw.get("evidence", "")).strip()[:600],
+            confidence=max(0.0, min(float(raw.get("confidence", 0.5) or 0.5), 1.0)),
+            phase=str(raw.get("phase", "")).strip().upper(),
+            timestamp=str(raw.get("timestamp", "")).strip(),
+        )
+
+
+@dataclass
+class CausalHypothesis:
+    """Causal hypothesis with posterior confidence."""
+
+    hypothesis_id: str
+    statement: str
+    prior: float = 0.5
+    posterior: float = 0.5
+    status: str = "pending"  # pending|supported|refuted
+    evidence_refs: list[str] = field(default_factory=list)
+    updated_at: str = ""
+
+    @classmethod
+    def from_dict(cls, raw: dict[str, Any]) -> "CausalHypothesis":
+        return cls(
+            hypothesis_id=str(raw.get("hypothesis_id", "")).strip(),
+            statement=str(raw.get("statement", "")).strip(),
+            prior=max(0.0, min(float(raw.get("prior", 0.5) or 0.5), 1.0)),
+            posterior=max(0.0, min(float(raw.get("posterior", 0.5) or 0.5), 1.0)),
+            status=str(raw.get("status", "pending")).strip().lower(),
+            evidence_refs=[
+                str(x).strip()
+                for x in (raw.get("evidence_refs", []) or [])
+                if str(x).strip()
+            ][:30],
+            updated_at=str(raw.get("updated_at", "")).strip(),
+        )
+
+
+@dataclass
+class CausalEdge:
+    """Directed relation between entities/hypotheses in the causal graph."""
+
+    cause: str
+    effect: str
+    relation: str = "supports"
+    confidence: float = 0.5
+
+    @classmethod
+    def from_dict(cls, raw: dict[str, Any]) -> "CausalEdge":
+        return cls(
+            cause=str(raw.get("cause", "")).strip(),
+            effect=str(raw.get("effect", "")).strip(),
+            relation=str(raw.get("relation", "supports")).strip().lower(),
+            confidence=max(0.0, min(float(raw.get("confidence", 0.5) or 0.5), 1.0)),
+        )
+
+
+@dataclass
+class CausalIntervention:
+    """Intervention/action and observed causal effect."""
+
+    intervention_id: str
+    action: str
+    target: str = ""
+    expected_effect: str = ""
+    observed_effect: str = ""
+    success: bool | None = None
+    confidence: float = 0.5
+    timestamp: str = ""
+
+    @classmethod
+    def from_dict(cls, raw: dict[str, Any]) -> "CausalIntervention":
+        return cls(
+            intervention_id=str(raw.get("intervention_id", "")).strip(),
+            action=str(raw.get("action", "")).strip(),
+            target=str(raw.get("target", "")).strip(),
+            expected_effect=str(raw.get("expected_effect", "")).strip(),
+            observed_effect=str(raw.get("observed_effect", "")).strip(),
+            success=raw.get("success"),
+            confidence=max(0.0, min(float(raw.get("confidence", 0.5) or 0.5), 1.0)),
+            timestamp=str(raw.get("timestamp", "")).strip(),
+        )
+
+
+@dataclass
+class CausalState:
+    """Persistent causal reasoning state for a session."""
+
+    observations: list[CausalObservation] = field(default_factory=list)
+    hypotheses: list[CausalHypothesis] = field(default_factory=list)
+    edges: list[CausalEdge] = field(default_factory=list)
+    interventions: list[CausalIntervention] = field(default_factory=list)
+    posterior: dict[str, float] = field(default_factory=dict)
+
+    def record_observation(self, observation: CausalObservation | dict[str, Any]) -> bool:
+        """Record an observation if it is not a duplicate."""
+        obs = (
+            observation
+            if isinstance(observation, CausalObservation)
+            else CausalObservation.from_dict(observation)
+        )
+        if not obs.observation_type or not obs.entity:
+            return False
+        fp = obs.fingerprint()
+        for existing in self.observations:
+            if existing.fingerprint() == fp:
+                return False
+        if not obs.timestamp:
+            obs.timestamp = datetime.now(timezone.utc).isoformat()
+        self.observations.append(obs)
+        if len(self.observations) > MAX_CAUSAL_OBSERVATIONS:
+            self.observations = self.observations[-MAX_CAUSAL_OBSERVATIONS:]
+        return True
+
+    def add_intervention(self, intervention: CausalIntervention | dict[str, Any]) -> None:
+        """Append intervention history with bounded capacity."""
+        iv = (
+            intervention
+            if isinstance(intervention, CausalIntervention)
+            else CausalIntervention.from_dict(intervention)
+        )
+        if not iv.intervention_id:
+            iv.intervention_id = f"iv_{len(self.interventions)+1}"
+        if not iv.timestamp:
+            iv.timestamp = datetime.now(timezone.utc).isoformat()
+        self.interventions.append(iv)
+        if len(self.interventions) > MAX_CAUSAL_INTERVENTIONS:
+            self.interventions = self.interventions[-MAX_CAUSAL_INTERVENTIONS:]
+
+    def add_edge(self, edge: CausalEdge | dict[str, Any]) -> bool:
+        """Record a causal edge if not already present."""
+        ce = edge if isinstance(edge, CausalEdge) else CausalEdge.from_dict(edge)
+        if not ce.cause or not ce.effect:
+            return False
+        for existing in self.edges:
+            if (
+                existing.cause == ce.cause
+                and existing.effect == ce.effect
+                and existing.relation == ce.relation
+            ):
+                # Keep strongest confidence for repeated edges.
+                if ce.confidence > existing.confidence:
+                    existing.confidence = ce.confidence
+                return False
+        self.edges.append(ce)
+        if len(self.edges) > MAX_CAUSAL_EDGES:
+            self.edges = self.edges[-MAX_CAUSAL_EDGES:]
+        return True
+
+    def upsert_hypothesis(self, hypothesis: CausalHypothesis | dict[str, Any]) -> None:
+        """Insert or update a causal hypothesis by id."""
+        h = (
+            hypothesis
+            if isinstance(hypothesis, CausalHypothesis)
+            else CausalHypothesis.from_dict(hypothesis)
+        )
+        if not h.hypothesis_id:
+            h.hypothesis_id = f"hyp_{len(self.hypotheses)+1}"
+        h.updated_at = datetime.now(timezone.utc).isoformat()
+        for idx, existing in enumerate(self.hypotheses):
+            if existing.hypothesis_id == h.hypothesis_id:
+                self.hypotheses[idx] = h
+                break
+        else:
+            self.hypotheses.append(h)
+            if len(self.hypotheses) > MAX_CAUSAL_HYPOTHESES:
+                self.hypotheses = self.hypotheses[-MAX_CAUSAL_HYPOTHESES:]
+        self.posterior[h.hypothesis_id] = h.posterior
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "observations": [o.__dict__ for o in self.observations],
+            "hypotheses": [h.__dict__ for h in self.hypotheses],
+            "edges": [e.__dict__ for e in self.edges],
+            "interventions": [i.__dict__ for i in self.interventions],
+            "posterior": {
+                str(k): max(0.0, min(float(v), 1.0))
+                for k, v in self.posterior.items()
+            },
+        }
+
+    @classmethod
+    def from_dict(cls, raw: dict[str, Any]) -> "CausalState":
+        if not isinstance(raw, dict):
+            return cls()
+        state = cls(
+            observations=[
+                CausalObservation.from_dict(x)
+                for x in (raw.get("observations", []) or [])
+                if isinstance(x, dict)
+            ],
+            hypotheses=[
+                CausalHypothesis.from_dict(x)
+                for x in (raw.get("hypotheses", []) or [])
+                if isinstance(x, dict)
+            ],
+            edges=[
+                CausalEdge.from_dict(x)
+                for x in (raw.get("edges", []) or [])
+                if isinstance(x, dict)
+            ],
+            interventions=[
+                CausalIntervention.from_dict(x)
+                for x in (raw.get("interventions", []) or [])
+                if isinstance(x, dict)
+            ],
+            posterior={},
+        )
+        raw_post = raw.get("posterior", {})
+        if isinstance(raw_post, dict):
+            state.posterior = {
+                str(k): max(0.0, min(float(v), 1.0))
+                for k, v in raw_post.items()
+                if str(k).strip()
+            }
+        return state
 
 
 @dataclass
@@ -83,6 +382,29 @@ class AgentState:
     # Tracks cumulative tool usage per pipeline phase for soft budget enforcement.
     # Structure: {phase_name: {tool_name: call_count}}
     phase_tool_usage: dict[str, dict[str, int]] = field(default_factory=dict)
+    # Tracks per-phase tool effectiveness to adapt budget pressure dynamically.
+    # Structure:
+    # {
+    #   phase_name: {
+    #     tool_name: {
+    #       "calls": int,
+    #       "successes": int,
+    #       "meaningful_hits": int,  # calls that produced >=1 meaningful evidence
+    #     }
+    #   }
+    # }
+    tool_effectiveness: dict[str, dict[str, dict[str, int]]] = field(default_factory=dict)
+    # Stores named HTTP baselines captured via http_observe.
+    # Key: save_as label (e.g. "baseline_login"), Value: parsed response dict
+    # {status, headers, body_excerpt, response_time, size, url, method}
+    http_baselines: dict[str, dict[str, Any]] = field(default_factory=dict)
+    # Hypothesis Engine: queue of security hypotheses the agent is tracking.
+    # Each entry: {id, claim, test_plan, status, evidence_refs, iteration_formed, phase}
+    # status: "pending" | "confirmed" | "refuted" | "testing"
+    hypothesis_queue: list[dict[str, Any]] = field(default_factory=list)
+    # Exploit Chain Planner: active multi-step attack chains.
+    # Each entry: {chain_id, name, steps, current_step, status, phase_formed}
+    exploit_chains: list[dict[str, Any]] = field(default_factory=list)
 
     def add_message(
         self,
@@ -91,6 +413,14 @@ class AgentState:
         tool_calls: list[dict[str, Any]] | None = None,
         thinking: str | None = None,
     ) -> None:
+        # Strip any <think>...</think> blocks that leaked into content_acc from
+        # the streaming parser (AIRecon pattern: strip reasoning before storing).
+        # Thinking content is already captured separately in thinking_acc.
+        if role == "assistant" and content and "<think" in content:
+            content = _THINK_BLOCK_RE.sub("", content)
+            # Handle unclosed <think> at end of stream
+            content = _THINK_OPEN_RE.sub("", content).strip()
+
         msg: dict[str, Any] = {"role": role, "content": content}
         if tool_calls:
             msg["tool_calls"] = tool_calls
@@ -185,10 +515,16 @@ class AgentState:
         Returns True if the evidence was added, False if it was rejected as a
         duplicate (exact match or Jaccard similarity >= threshold within the
         same phase).
+        
+        Uses objective confidence scoring if confidence < 0.70 (replaces subjective with objective).
         """
         clean_summary = " ".join(str(summary).strip().split())
         if not clean_summary:
             return False
+
+        # MEDIUM FIX #5: Use objective confidence scoring instead of subjective
+        if confidence < 0.70:
+            confidence = _calculate_objective_confidence(clean_summary, artifact, source_tool, severity)
 
         phase_key = phase.upper()
         tags = tags or []
@@ -239,18 +575,18 @@ class AgentState:
             }
         )
         if len(self.evidence_log) > MAX_EVIDENCE:
-            # Prioritized truncation: keep high-confidence entries regardless of
-            # age.  Pure FIFO ([-MAX_EVIDENCE:]) would silently discard early
-            # high-value findings (e.g. a confirmed SQLi found at iteration 5)
-            # when the evidence log fills up after 200+ iterations.
-            # Strategy: use heapq.nlargest to pick top MAX_EVIDENCE by confidence
-            # in O(n log k), then restore chronological order so context injection
-            # stays coherent. Avoids two full sorts on the whole list.
-            import heapq
+            # Severity-weighted prioritized truncation: keep high-severity +
+            # high-confidence entries regardless of age.
+            # Pure FIFO would discard early high-value findings when log fills up.
+            # Uses module-level _SEVERITY_MULTIPLIER for performance.
+            def _evidence_score(e: dict) -> float:
+                conf = float(e.get("confidence", 0.0))
+                sev = int(e.get("severity", 3))
+                return conf * _SEVERITY_MULTIPLIER.get(sev, 1.0)
             kept = heapq.nlargest(
                 MAX_EVIDENCE,
                 self.evidence_log,
-                key=lambda e: float(e.get("confidence", 0.0)),
+                key=_evidence_score,
             )
             kept.sort(key=lambda e: int(e.get("iteration", 0)))
             self.evidence_log = kept
@@ -261,9 +597,237 @@ class AgentState:
         bucket = self.phase_tool_usage.setdefault(phase, {})
         bucket[tool_name] = bucket.get(tool_name, 0) + 1
 
+    def record_tool_outcome(
+        self,
+        phase: str,
+        tool_name: str,
+        *,
+        success: bool,
+        meaningful_evidence_delta: int = 0,
+    ) -> None:
+        """Record tool outcome quality for adaptive budget steering.
+
+        A "meaningful hit" means the call produced at least one new evidence item
+        with confidence >= meaningful threshold (tracked by caller).
+        """
+        phase_bucket = self.tool_effectiveness.setdefault(phase, {})
+        metrics = phase_bucket.setdefault(
+            tool_name,
+            {"calls": 0, "successes": 0, "meaningful_hits": 0},
+        )
+        metrics["calls"] += 1
+        if success:
+            metrics["successes"] += 1
+        if meaningful_evidence_delta > 0:
+            metrics["meaningful_hits"] += 1
+
+    def get_tool_effectiveness(self, phase: str, tool_name: str) -> dict[str, float]:
+        """Return normalized effectiveness metrics for a phase/tool pair."""
+        raw = self.tool_effectiveness.get(phase, {}).get(tool_name, {})
+        calls = int(raw.get("calls", 0))
+        successes = int(raw.get("successes", 0))
+        hits = int(raw.get("meaningful_hits", 0))
+        if calls <= 0:
+            return {
+                "calls": 0.0,
+                "success_rate": 0.0,
+                "hit_rate": 0.0,
+            }
+        return {
+            "calls": float(calls),
+            "success_rate": round(successes / calls, 3),
+            "hit_rate": round(hits / calls, 3),
+        }
+
     def get_phase_tool_count(self, phase: str, tool_name: str) -> int:
         """Return how many times tool_name was used in the given phase."""
         return self.phase_tool_usage.get(phase, {}).get(tool_name, 0)
+
+    # ------------------------------------------------------------------
+    # Exploit Chain state helpers
+    # ------------------------------------------------------------------
+
+    def get_active_chains(self) -> list[dict[str, Any]]:
+        """Return chains with status 'planning' or 'active'."""
+        return [c for c in self.exploit_chains if c.get("status") in ("planning", "active")]
+
+    def update_chain_step(
+        self,
+        chain_id: str,
+        evidence: str = "",
+    ) -> bool:
+        """Advance the current step of a chain by ID. Returns True if found."""
+        for chain in self.exploit_chains:
+            if chain.get("chain_id") == chain_id:
+                steps = chain.get("steps", [])
+                idx = chain.get("current_step_index", 0)
+                if idx < len(steps):
+                    steps[idx]["status"] = "done"
+                    if evidence:
+                        steps[idx]["evidence"] = evidence[:300]
+                    chain["current_step_index"] = idx + 1
+                    if chain.get("status") == "planning":
+                        chain["status"] = "active"
+                if chain.get("current_step_index", 0) >= len(steps):
+                    chain["status"] = "completed"
+                return True
+        return False
+
+    # ------------------------------------------------------------------
+    # Hypothesis Engine
+    # ------------------------------------------------------------------
+
+    def add_hypothesis(
+        self,
+        claim: str,
+        test_plan: str,
+        phase: str = "RECON",
+        tags: list[str] | None = None,
+    ) -> str:
+        """Record a new security hypothesis.
+
+        Returns the hypothesis ID (h_<iteration>_<index>).
+        Does not add if a semantically identical claim already exists (Jaccard >= 0.80).
+        """
+        claim = claim.strip()
+        if not claim:
+            return ""
+
+        # Dedup by Jaccard similarity on claim text
+        for existing in self.hypothesis_queue:
+            if jaccard_similarity(claim.lower(), str(existing.get("claim", "")).lower()) >= 0.80:
+                return str(existing.get("id", ""))
+
+        hyp_id = f"h_{self.iteration}_{len(self.hypothesis_queue)}"
+        self.hypothesis_queue.append(
+            {
+                "id": hyp_id,
+                "claim": claim,
+                "test_plan": test_plan.strip(),
+                "status": "pending",
+                "evidence_refs": [],
+                "iteration_formed": self.iteration,
+                "phase": phase.upper(),
+                "tags": tags or [],
+                "updated_at": datetime.now(timezone.utc).isoformat(),
+            }
+        )
+        if len(self.hypothesis_queue) > MAX_HYPOTHESES:
+            # Drop refuted first (highest key), then confirmed, keep pending/testing
+            self.hypothesis_queue = sorted(
+                self.hypothesis_queue,
+                key=lambda h: (
+                    0 if str(h.get("status", "")) in ("pending", "testing") else
+                    1 if str(h.get("status", "")) == "confirmed" else 2,
+                    int(h.get("iteration_formed", 0)),
+                ),
+            )[:MAX_HYPOTHESES]
+        return hyp_id
+
+    def update_hypothesis(
+        self,
+        hyp_id: str,
+        status: str,
+        evidence_summary: str | None = None,
+    ) -> bool:
+        """Update the status of a hypothesis by ID.
+
+        status: "testing" | "confirmed" | "refuted"
+        Returns True if found and updated.
+        """
+        for hyp in self.hypothesis_queue:
+            if hyp.get("id") == hyp_id:
+                hyp["status"] = status
+                hyp["updated_at"] = datetime.now(timezone.utc).isoformat()
+                if evidence_summary:
+                    refs = hyp.setdefault("evidence_refs", [])
+                    if evidence_summary not in refs:
+                        refs.append(evidence_summary[:200])
+                return True
+        return False
+
+    def get_pending_hypotheses(self, max_items: int = 5) -> list[dict[str, Any]]:
+        """Return pending hypotheses sorted by oldest-first (most urgent)."""
+        pending = [
+            h for h in self.hypothesis_queue
+            if str(h.get("status", "pending")) in ("pending", "testing")
+        ]
+        pending.sort(key=lambda h: int(h.get("iteration_formed", 0)))
+        return pending[:max_items]
+
+    def resolve_hypotheses_from_evidence(self) -> int:
+        """Auto-confirm hypotheses whose claim matches recent HIGH/CRITICAL evidence.
+
+        Returns count of hypotheses newly confirmed.
+        """
+        confirmed_count = 0
+        high_evidence = [
+            e for e in self.evidence_log
+            if int(e.get("severity", 1)) >= 4
+            and float(e.get("confidence", 0.0)) >= 0.75
+        ]
+        for hyp in self.hypothesis_queue:
+            if str(hyp.get("status", "")) not in ("pending", "testing"):
+                continue
+            claim_lower = str(hyp.get("claim", "")).lower()
+            for ev in high_evidence:
+                summary_lower = str(ev.get("summary", "")).lower()
+                if jaccard_similarity(claim_lower, summary_lower) >= 0.35:
+                    hyp["status"] = "confirmed"
+                    hyp["updated_at"] = datetime.now(timezone.utc).isoformat()
+                    refs = hyp.setdefault("evidence_refs", [])
+                    ref = str(ev.get("summary", ""))[:200]
+                    if ref not in refs:
+                        refs.append(ref)
+                    confirmed_count += 1
+                    break
+        return confirmed_count
+
+    def build_hypothesis_context(self, max_pending: int = 4) -> str:
+        """Build XML context block for pending hypotheses to inject into conversation."""
+        pending = self.get_pending_hypotheses(max_items=max_pending)
+        confirmed = [
+            h for h in self.hypothesis_queue
+            if str(h.get("status", "")) == "confirmed"
+        ][-3:]  # Last 3 confirmed
+        refuted = [
+            h for h in self.hypothesis_queue
+            if str(h.get("status", "")) == "refuted"
+        ][-2:]  # Last 2 refuted (avoid re-testing)
+
+        if not pending and not confirmed:
+            return ""
+
+        lines = ['<hypothesis_queue>']
+        if pending:
+            lines.append("  <pending>")
+            for h in pending:
+                hid = h.get("id", "")
+                claim = h.get("claim", "")
+                plan = h.get("test_plan", "")
+                status = h.get("status", "pending")
+                lines.append(f'    <hypothesis id="{hid}" status="{status}">')
+                lines.append(f'      <claim>{claim}</claim>')
+                if plan:
+                    lines.append(f'      <test_plan>{plan}</test_plan>')
+                lines.append('    </hypothesis>')
+            lines.append("  </pending>")
+        if confirmed:
+            lines.append("  <confirmed>")
+            for h in confirmed:
+                lines.append(f'    - [{h.get("id", "")}] {h.get("claim", "")}')
+            lines.append("  </confirmed>")
+        if refuted:
+            lines.append("  <refuted_do_not_retry>")
+            for h in refuted:
+                lines.append(f'    - [{h.get("id", "")}] {h.get("claim", "")}')
+            lines.append("  </refuted_do_not_retry>")
+        lines.append(
+            "  <instruction>Pick one PENDING hypothesis and execute its test_plan "
+            "via tool call. Use record_hypothesis to update status after testing.</instruction>"
+        )
+        lines.append('</hypothesis_queue>')
+        return "\n".join(lines)
 
     def get_phase_context(
         self,
@@ -507,8 +1071,13 @@ class AgentState:
             "[SYSTEM: PHASE GATE",
             "[SYSTEM: AGGRESSIVE EXPLORATION",
             "[SYSTEM: QUALITY SCOREBOARD",
+            "[SYSTEM: CAIDO REMINDER",    # periodic reminder, keep only latest
+            "[SYSTEM: UNVERIFIED CLAIM",  # claim validation warnings (ephemeral)
             "<reflector ",                # XML reflector messages
             "<mentor_analysis>",          # XML mentor messages
+            "<hypothesis_queue",          # Hypothesis engine context (regenerated each iter)
+            "<exploit_chain_plan>",       # Exploit chain context (regenerated each iter)
+            "<waf_bypass ",               # WAF bypass context (injected on WAF detection)
         )
         # These prefixes carry recovery/orientation state that must survive
         # across truncations — never collapse them to a single message.
@@ -516,6 +1085,7 @@ class AgentState:
             "[SYSTEM: RECOVERY STATE",
             "[SYSTEM: PINNED CONTEXT",
             "[SYSTEM: RECOVERY MODE",
+            "[SYSTEM: COMPRESSION SUMMARY",  # iterative LLM compression summary
         )
 
         core_system: list[dict] = []
@@ -634,11 +1204,88 @@ class AgentState:
 
         rebuilt = must_keep + \
             ([separator] if dropped_count > 0 else []) + trimmed
-        self.conversation = core_system + ephemeral_system + protected_system + rebuilt
+        repaired = self._repair_tool_pairs(
+            core_system + ephemeral_system + protected_system + rebuilt
+        )
+        self.conversation = repaired
         logger.info(
             "Truncated (pair-preserving): %d messages (dropped %d older messages)",
             len(self.conversation), dropped_count,
         )
+
+    @staticmethod
+    def _repair_tool_pairs(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        """Fix orphaned tool_call / tool_result pairs after truncation.
+
+        Port of AIRecon agent context_compressor._sanitize_tool_pairs() —
+        uses ID-based matching (not positional) for correctness.
+
+        Two failure modes:
+        1. tool result references a call_id whose assistant tool_call was removed
+           → drop the orphaned result (API rejects unknown call_ids)
+        2. assistant message has tool_calls whose results were dropped
+           → insert stub result per call so Ollama doesn't see an unclosed call
+        """
+        # Pass 1: collect all call_ids declared by assistant messages
+        surviving_call_ids: set[str] = set()
+        for msg in messages:
+            if msg.get("role") == "assistant":
+                for tc in msg.get("tool_calls") or []:
+                    cid = (
+                        tc.get("id", "") if isinstance(tc, dict)
+                        else getattr(tc, "id", "") or ""
+                    )
+                    if cid:
+                        surviving_call_ids.add(cid)
+
+        # Pass 2: collect all call_ids already answered by tool messages
+        result_call_ids: set[str] = set()
+        for msg in messages:
+            if msg.get("role") == "tool":
+                cid = msg.get("tool_call_id", "")
+                if cid:
+                    result_call_ids.add(cid)
+
+        # 1. Remove tool results whose call_id has no matching assistant tool_call
+        orphaned_results = result_call_ids - surviving_call_ids
+        if orphaned_results:
+            messages = [
+                m for m in messages
+                if not (
+                    m.get("role") == "tool"
+                    and m.get("tool_call_id") in orphaned_results
+                )
+            ]
+            logger.debug(
+                "Pair repair: dropped %d orphaned tool result(s) %s",
+                len(orphaned_results), orphaned_results,
+            )
+
+        # 2. Insert stub results for assistant tool_calls that have no result
+        missing_results = surviving_call_ids - result_call_ids
+        if missing_results:
+            patched: list[dict[str, Any]] = []
+            for msg in messages:
+                patched.append(msg)
+                if msg.get("role") == "assistant":
+                    for tc in msg.get("tool_calls") or []:
+                        cid = (
+                            tc.get("id", "") if isinstance(tc, dict)
+                            else getattr(tc, "id", "") or ""
+                        )
+                        if cid in missing_results:
+                            patched.append({
+                                "role": "tool",
+                                "tool_call_id": cid,
+                                "content": (
+                                    "[Tool result unavailable — "
+                                    "earlier context was compressed]"
+                                ),
+                            })
+                            logger.debug("Pair repair: inserted stub for call_id=%s", cid)
+            messages = patched
+
+        return messages
 
     # ------------------------------------------------------------------
     # Smart context compression helper (Priority 5)

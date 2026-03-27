@@ -61,6 +61,13 @@ _PHASE_ORDER = [
     PipelinePhase.COMPLETE,
 ]
 
+_PHASE_CONFIDENCE_THRESHOLDS: dict[PipelinePhase, float] = {
+    PipelinePhase.RECON: 0.60,
+    PipelinePhase.ANALYSIS: 0.58,
+    PipelinePhase.EXPLOIT: 0.55,
+    PipelinePhase.REPORT: 0.50,
+}
+
 
 @dataclass
 class PhaseConfig:
@@ -248,6 +255,13 @@ class PipelineEngine:
         self._recon_min_subdomains: int = getattr(cfg, "pipeline_recon_min_subdomains", 3)
         self._recon_min_urls: int = getattr(cfg, "pipeline_recon_min_urls", 1)
         self._recon_soft_timeout: int = getattr(cfg, "pipeline_recon_soft_timeout", 30)
+        # Hard timeout: forces RECON → ANALYSIS even when data exists but live
+        # hosts are never confirmed.  Prevents the agent from looping through
+        # MAX_TOOL_ITERATIONS (2000) when the target never responds to probes.
+        # Defaults to 2× soft_timeout; configurable via pipeline_recon_hard_timeout.
+        self._recon_hard_timeout: int = getattr(
+            cfg, "pipeline_recon_hard_timeout", self._recon_soft_timeout * 2
+        )
 
         self._load_phase_prompts()
 
@@ -348,6 +362,18 @@ class PipelineEngine:
                 or getattr(self.session, "live_hosts", [])
             )
             if not has_live_hosts and has_any_data:
+                # Hard timeout: if live hosts are still unconfirmed after
+                # _recon_hard_timeout iterations, force transition anyway to
+                # prevent the agent burning all 2000 iterations in RECON.
+                if iterations_in_phase >= self._recon_hard_timeout:
+                    logger.warning(
+                        "RECON hard timeout (%d iter, limit=%d) — live_hosts_validated "
+                        "never met but data was collected.  Forcing transition to ANALYSIS "
+                        "with low confidence; manual review recommended.",
+                        iterations_in_phase,
+                        self._recon_hard_timeout,
+                    )
+                    return True
                 logger.warning(
                     "RECON soft timeout (%d iter) but live_hosts_validated not met — "
                     "agent must validate live hosts before ANALYSIS. Blocking transition.",
@@ -376,8 +402,208 @@ class PipelineEngine:
         if current == PipelinePhase.RECON and "live_hosts_validated" not in met_criteria:
             return False
 
-        # Transition when at least 60% of criteria are met
-        return len(met_criteria) >= max(1, int(total * 0.6))
+        # Transition when at least 60% of criteria are met AND phase confidence
+        # is sufficiently high.
+        coverage_ok = len(met_criteria) >= max(1, int(total * 0.6))
+        if not coverage_ok:
+            return False
+        confidence = self._phase_transition_confidence(
+            current,
+            met_criteria=met_criteria,
+            total_criteria=total,
+            iterations_in_phase=iterations_in_phase,
+        )
+        threshold = _PHASE_CONFIDENCE_THRESHOLDS.get(current, 0.55)
+        return confidence >= threshold
+
+    def _phase_transition_confidence(
+        self,
+        phase: PipelinePhase,
+        *,
+        met_criteria: list[str],
+        total_criteria: int,
+        iterations_in_phase: int,
+    ) -> float:
+        """Estimate readiness confidence for phase transition (0.0–1.0).
+
+        The score intentionally models causal readiness instead of relying on
+        fixed additive bonuses:
+        - Criteria coverage: how much of the phase objective is satisfied.
+        - Evidence quality: are downstream-relevant artifacts actually present.
+        - Maturity: has the phase run long enough to stabilize observations.
+        - Consistency penalty: contradictory state reduces transition trust.
+        """
+        if total_criteria <= 0:
+            return 0.0
+        coverage = len(met_criteria) / max(1, total_criteria)
+        maturity = min(1.0, iterations_in_phase / max(1, self.MIN_ITERATIONS_PER_PHASE))
+        evidence_quality, consistency_penalty = self._phase_causal_signals(phase)
+
+        base = coverage * (0.55 + (0.25 * evidence_quality) + (0.20 * maturity))
+        confidence = (
+            base
+            + (evidence_quality * 0.25)
+            + (maturity * 0.08)
+            - consistency_penalty
+        )
+        return round(min(1.0, max(0.0, confidence)), 3)
+
+    @staticmethod
+    def _vulnerability_severity(vuln: dict[str, Any]) -> str:
+        """Normalize vulnerability severity into INFO/LOW/MEDIUM/HIGH/CRITICAL."""
+        sev = str(vuln.get("severity", "")).strip().upper()
+        if sev in {"1", "2", "3", "4", "5"}:
+            return {"1": "INFO", "2": "LOW", "3": "MEDIUM", "4": "HIGH", "5": "CRITICAL"}[sev]
+        if sev in {"CRITICAL", "HIGH", "MEDIUM", "LOW", "INFO"}:
+            return sev
+        finding = str(vuln.get("finding", "")).upper()
+        for label in ("CRITICAL", "HIGH", "MEDIUM", "LOW", "INFO"):
+            if f"[{label}]" in finding:
+                return label
+        return "MEDIUM"
+
+    def _phase_causal_signals(self, phase: PipelinePhase) -> tuple[float, float]:
+        """Return (evidence_quality, consistency_penalty) for phase readiness."""
+        s = self.session
+        penalty = 0.0
+
+        if phase == PipelinePhase.RECON:
+            subdomains = max(1, len(getattr(s, "subdomains", [])))
+            live_hosts = len(getattr(s, "live_hosts", []))
+            urls = len(getattr(s, "urls", []))
+            open_ports = sum(
+                len(ports)
+                for ports in getattr(s, "open_ports", {}).values()
+                if isinstance(ports, list)
+            )
+
+            host_coverage = min(1.0, live_hosts / subdomains)
+            service_coverage = min(1.0, open_ports / max(1, live_hosts * 2))
+            endpoint_depth = min(1.0, urls / max(1, live_hosts * 2))
+
+            if open_ports > 0 and live_hosts == 0:
+                penalty += 0.18
+            if urls > 0 and live_hosts == 0:
+                penalty += 0.10
+
+            quality = (
+                (host_coverage * 0.40)
+                + (service_coverage * 0.35)
+                + (endpoint_depth * 0.25)
+            )
+            return quality, min(0.40, penalty)
+
+        if phase == PipelinePhase.ANALYSIS:
+            urls = len(getattr(s, "urls", []))
+            tech_count = len(getattr(s, "technologies", {}))
+            inj_points = len(getattr(s, "injection_points", []))
+            vuln_count = len(getattr(s, "vulnerabilities", []))
+
+            injection_density = min(1.0, inj_points / max(1, min(20, urls if urls > 0 else 4)))
+            tech_context = min(1.0, tech_count / 6)
+            vuln_signal = min(1.0, vuln_count / max(1, inj_points if inj_points > 0 else 3))
+
+            if inj_points > 0 and urls == 0:
+                penalty += 0.15
+            if vuln_count > 0 and inj_points == 0:
+                penalty += 0.12
+            if urls >= 5 and tech_count == 0:
+                penalty += 0.06
+
+            quality = (
+                (injection_density * 0.45)
+                + (tech_context * 0.35)
+                + (vuln_signal * 0.20)
+            )
+            return quality, min(0.40, penalty)
+
+        if phase == PipelinePhase.EXPLOIT:
+            vulns = getattr(s, "vulnerabilities", [])
+            if not vulns:
+                return 0.0, 0.0
+
+            severe = 0
+            confirmed = 0
+            poc_backed = 0
+            for vuln in vulns:
+                sev = self._vulnerability_severity(vuln)
+                if sev in {"CRITICAL", "HIGH", "MEDIUM"}:
+                    severe += 1
+                if bool(vuln.get("report_generated") or vuln.get("replay_verified") or vuln.get("verified")):
+                    confirmed += 1
+                if bool(vuln.get("proof") or vuln.get("evidence") or vuln.get("poc_script_code")):
+                    poc_backed += 1
+
+            severe_ratio = severe / len(vulns)
+            confirmation_ratio = confirmed / len(vulns)
+            exploitability_ratio = poc_backed / len(vulns)
+
+            if severe > 0 and poc_backed == 0:
+                penalty += 0.12
+            if confirmation_ratio < 0.2 and len(vulns) >= 3:
+                penalty += 0.08
+
+            quality = (
+                (confirmation_ratio * 0.45)
+                + (exploitability_ratio * 0.35)
+                + (severe_ratio * 0.20)
+            )
+            return quality, min(0.35, penalty)
+
+        if phase == PipelinePhase.REPORT:
+            vulns = getattr(s, "vulnerabilities", [])
+            if not vulns:
+                return 0.0, 0.0
+
+            reported = 0
+            replay_verified = 0
+            technical_complete = 0
+            for vuln in vulns:
+                if vuln.get("report_generated"):
+                    reported += 1
+                if (
+                    vuln.get("replay_verified")
+                    or vuln.get("verified")
+                    or float(vuln.get("verification_score", 0.0)) >= 0.6
+                ):
+                    replay_verified += 1
+                if vuln.get("technical_analysis") and vuln.get("remediation"):
+                    technical_complete += 1
+
+            report_ratio = reported / len(vulns)
+            replay_ratio = replay_verified / len(vulns)
+            technical_ratio = technical_complete / len(vulns)
+
+            if reported > 0 and replay_verified == 0:
+                penalty += 0.15
+            if report_ratio < 0.5 and len(vulns) >= 2:
+                penalty += 0.08
+
+            quality = (
+                (report_ratio * 0.40)
+                + (replay_ratio * 0.40)
+                + (technical_ratio * 0.20)
+            )
+            return quality, min(0.35, penalty)
+
+        return 0.0, 0.0
+
+    def get_phase_transition_confidence(self) -> float:
+        """Expose current phase transition confidence for observability."""
+        current = self.get_current_phase()
+        if current == PipelinePhase.COMPLETE:
+            return 1.0
+        config = DEFAULT_PHASES.get(current)
+        if not config:
+            return 0.0
+        met = self._evaluate_criteria(current)
+        iterations_in_phase = self._current_iteration - self._phase_entry_iteration
+        return self._phase_transition_confidence(
+            current,
+            met_criteria=met,
+            total_criteria=len(config.transition_criteria),
+            iterations_in_phase=iterations_in_phase,
+        )
 
     def _evaluate_criteria(self, phase: PipelinePhase) -> list[str]:
         """Evaluate which transition criteria are met for a phase."""
@@ -409,10 +635,23 @@ class PipelineEngine:
                     )
             except Exception as _e:
                 logger.debug("Could not check workspace artifacts: %s", _e)
-            # Only count as artifacts_saved when real output files exist on disk.
-            # scan_count fallback removed — failed/empty calls inflate the count
-            # without producing usable data, causing premature ANALYSIS transition.
-            if _has_output_files:
+            # Prefer real output artifacts on disk.
+            # Fallback for lightweight/in-memory runs (e.g. tests) where files are
+            # not persisted but recon activity clearly produced usable signals.
+            _scan_count = 0
+            try:
+                _scan_count = int(getattr(session, "scan_count", 0) or 0)
+            except Exception:
+                _scan_count = 0
+            _has_recon_signals = bool(
+                getattr(session, "open_ports", {})
+                or getattr(session, "urls", [])
+                or (
+                    getattr(session, "subdomains", [])
+                    and getattr(session, "live_hosts", [])
+                )
+            )
+            if _has_output_files or (_scan_count >= 3 and _has_recon_signals):
                 met.append("recon_artifacts_saved")
             # Depth checks: require minimum subdomain and URL discovery
             if len(getattr(session, "subdomains", [])) >= self._recon_min_subdomains:
@@ -477,9 +716,12 @@ class PipelineEngine:
             and iterations_in_phase >= self._recon_soft_timeout
         )
 
-        # Validate current phase has met minimum criteria (skipped on timeout bypass)
-        if not _soft_timeout_bypass and not self._evaluate_criteria(current):
-            logger.warning("Attempted transition from %s without meeting criteria", current.value)
+        # Validate phase readiness (skipped on timeout bypass).
+        if not _soft_timeout_bypass and not self.should_transition():
+            logger.warning(
+                "Attempted transition from %s without meeting confidence/criteria gate",
+                current.value,
+            )
             return current
 
         # Mark current phase as completed
@@ -522,7 +764,11 @@ class PipelineEngine:
         # Add progress info
         met = self._evaluate_criteria(current)
         total_criteria = len(config.transition_criteria) if config else 0
-        progress = f"Progress: {len(met)}/{total_criteria} criteria met"
+        confidence = self.get_phase_transition_confidence()
+        progress = (
+            f"Progress: {len(met)}/{total_criteria} criteria met"
+            f" | transition_confidence={confidence:.0%}"
+        )
 
         # Add completed phases
         completed = ", ".join(

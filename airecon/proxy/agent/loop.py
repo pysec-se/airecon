@@ -21,7 +21,7 @@ from ..system import (
     auto_load_skills_for_technologies,
     get_system_prompt,
 )
-from .executors import _RECON_PORT_SCAN_BINS, _ExecutorMixin
+from .executors import _ExecutorMixin
 from .file_reference import (
     build_injection_message,
     parse_refs,
@@ -31,13 +31,11 @@ from .file_reference import (
 )
 from .formatters import _FormatterMixin
 from .models import MAX_TOOL_ITERATIONS, AgentEvent, AgentState
-from .owasp import classify_owasp, severity_for_evidence
 from .output_parser import parse_tool_output
-from .pipeline import _PHASE_TOOL_BUDGETS, PipelineEngine, PipelinePhase
+from .pipeline import PipelineEngine, PipelinePhase
 from .session import (
     SessionData,
     find_prior_session,
-    get_untested_injection_points,
     load_session,
     merge_prior_findings,
     record_tested_endpoint,
@@ -46,8 +44,23 @@ from .session import (
     update_from_parsed_output,
 )
 from .tool_defs import get_tool_definitions
-from .validators import _ValidatorMixin, has_dangerous_patterns
+from dataclasses import asdict as _asdict
+from .chain_planner import ChainStep as _ChainStep
+from .chain_planner import ExploitChain as _ExploitChain
+from .chain_planner import build_chain_context, plan_chains
+from .validators import _ValidatorMixin
+from .waf_detector import (
+    build_waf_bypass_context,
+    detect_waf_from_response,
+    merge_waf_profiles,
+    rank_bypass_strategies,
+)
 from .workspace import _WorkspaceMixin
+from .loop_inference import _InferenceMixin
+from .loop_exploration import _ExplorationMixin, _MEANINGFUL_EVIDENCE_THRESHOLD
+from .loop_objectives import _ObjectivesMixin
+from .loop_supervision import _SupervisionMixin
+from .loop_context import _ContextMixin
 
 _tools_meta_path = Path(__file__).parent.parent / "data" / "tools_meta.json"
 try:
@@ -57,43 +70,25 @@ except (OSError, json.JSONDecodeError) as _e:
     warnings.warn(f"tools_meta.json unavailable ({_e}); tool catalog features disabled.")
     _TOOLS_META = {}
 
-_ab_signals_path = Path(__file__).parent.parent / "data" / "ab_signals.json"
-try:
-    with open(_ab_signals_path, "r") as f:
-        _AB_SIGNALS_DATA = json.load(f)
-except (OSError, json.JSONDecodeError) as _e:
-    warnings.warn(f"ab_signals.json unavailable ({_e}); A→B signal method disabled.")
-    _AB_SIGNALS_DATA = {"signals": [], "min_severity": 3}
-
 
 logger = logging.getLogger("airecon.agent")
-
-# Minimum confidence for evidence to count as "meaningful" for stagnation tracking.
-# Low-confidence traces (e.g., execute command log at 0.55) must NOT reset stagnation
-# counter — stagnation should only reset on real security findings.
-_MEANINGFUL_EVIDENCE_THRESHOLD = 0.65
 
 # Maximum retries for empty Ollama responses before surfacing error.
 # Each retry waits 5s × attempt (5s, 10s, 15s, 20s).
 _MAX_EMPTY_RETRIES = 4
 
-# Vulnerability tool hints used in ANALYSIS phase objective marking.
-# Loaded from tools_meta.json (single source of truth).
-_ANALYSIS_VULN_TOOLS: frozenset[str] = frozenset(
-    _TOOLS_META.get("analysis_phase_vuln_tools", [])
-)
 
-# Safe command prefixes for watchdog shell-command extraction.
-# Built from tools_meta.json at import time; never hardcoded in Python.
-_watchdog_prefixes = _TOOLS_META.get("watchdog_safe_command_prefixes", [])
-_WATCHDOG_COMMAND_PREFIX_RE: re.Pattern[str] = re.compile(
-    r"^(?:" + "|".join(re.escape(p) for p in _watchdog_prefixes) + r")\b",
-    re.IGNORECASE,
-) if _watchdog_prefixes else re.compile(r"(?!)")
-
-
-class AgentLoop(_ValidatorMixin, _FormatterMixin,
-                _WorkspaceMixin, _ExecutorMixin):
+class AgentLoop(
+    _ValidatorMixin,
+    _FormatterMixin,
+    _WorkspaceMixin,
+    _ExecutorMixin,
+    _InferenceMixin,
+    _ExplorationMixin,
+    _ObjectivesMixin,
+    _SupervisionMixin,
+    _ContextMixin,
+):
     # Extracts embedded <tool_call>…</tool_call> blocks from model text output
     _TOOL_CALL_RE = re.compile(
         r"<tool_call>\s*(\{.*?\})\s*</tool_call>",
@@ -141,36 +136,6 @@ class AgentLoop(_ValidatorMixin, _FormatterMixin,
     # Max number of times the same CTF-local challenge can be seen before CTF
     # mode kicks in
     _CTF_MAX_ITERATIONS = 150
-    _PHASE_OBJECTIVES: dict[str, list[str]] = {
-        "RECON": [
-            "Enumerate subdomains/hosts (passive sources first, then active validation)",
-            "Filter to LIVE hosts only — validate with HTTP probing before any scanning",
-            "Port scan and fingerprint ONLY the validated live hosts (two-pass: discover ports, then enrich with service detection)",
-            "Crawl and map all endpoints, routes, and parameters on confirmed live services",
-            "Persist all recon artifacts to output/ files for downstream tools to consume",
-        ],
-        "ANALYSIS": [
-            "Map technologies, endpoints, and parameters",
-            "Identify meaningful injection points or misconfigurations",
-            "Correlate findings into exploit candidates",
-        ],
-        "EXPLOIT": [
-            "Enumerate all application routes: /, /login, /api, /admin, /register, /dashboard, /api/v1/",
-            "Test authentication: try default/common credentials, enumerate valid usernames",
-            "Test authorization: modify session cookies, tokens, or IDs to access other accounts (IDOR)",
-            "Test injection vectors: SQLi, XSS, SSTI, command injection on ALL discovered inputs",
-            "Extract flags, sensitive data, or unauthorized capability from confirmed vulnerabilities",
-        ],
-        "REPORT": [
-            "Create vulnerability reports for confirmed findings",
-            "Document impact and remediation guidance",
-            "Mark task complete when evidence is sufficient",
-        ],
-    }
-    _EXPLOIT_HEAVY_TOOLS = frozenset({
-        "quick_fuzz", "advanced_fuzz", "deep_fuzz",
-        "schemathesis_fuzz", "create_vulnerability_report",
-    })
     def __init__(self, ollama: OllamaClient, engine: DockerEngine) -> None:
         self.ollama = ollama
         self.engine = engine
@@ -192,6 +157,9 @@ class AgentLoop(_ValidatorMixin, _FormatterMixin,
         self._last_evidence_count: int = 0
         self._watchdog_forced_calls: int = 0
         self._empty_response_retry_count: int = 0
+        # Tracks the phase at the previous iteration to detect phase transitions
+        # and reset stagnation counters when the pipeline advances.
+        self._prev_phase: PipelinePhase | None = None
         # Mentor supervision: counts individual tool executions since last
         # mentor analysis injection (throttle: every 3 tools OR HIGH/CRITICAL).
         self._mentor_tool_call_count: int = 0
@@ -227,6 +195,14 @@ class AgentLoop(_ValidatorMixin, _FormatterMixin,
         # main event loop on every completion.
         self._token_snapshot_task: asyncio.Task[None] | None = None
         self._token_snapshot_resave_requested: bool = False
+        # Accumulated iterative compression summary (AIRecon-style).
+        # Updated each time _enforce_char_budget triggers LLM compression.
+        # On re-compression the prior summary is included so the LLM can
+        # PRESERVE + ADD rather than summarising from scratch.
+        self._compression_summary: str = ""
+        # Budget pressure cascade level (0=none, 1=70%, 2=85%, 3=95%, 4=forced REPORT).
+        # Each threshold fires exactly once per session.
+        self._budget_pressure_level: int = 0
 
     async def stop(self) -> None:
         logger.warning("Stopping Agent Loop...")
@@ -282,6 +258,42 @@ class AgentLoop(_ValidatorMixin, _FormatterMixin,
             usage.get("cumulative_completion", 0) or 0
         )
         self._session.token_last_used = int(usage.get("used", 0) or 0)
+        self._sync_recovery_state_to_session()
+
+    def _sync_recovery_state_from_session(self) -> None:
+        """Hydrate adaptive recovery state from persisted session."""
+        if not self._session:
+            return
+        sess_ctx = int(getattr(self._session, "adaptive_num_ctx", 0) or 0)
+        sess_cap = int(getattr(self._session, "adaptive_num_predict_cap", 0) or 0)
+        sess_crashes = int(getattr(self._session, "vram_crash_count", 0) or 0)
+
+        if sess_ctx > 0:
+            if self._adaptive_num_ctx > 0:
+                self._adaptive_num_ctx = min(self._adaptive_num_ctx, sess_ctx)
+            else:
+                self._adaptive_num_ctx = sess_ctx
+
+        if sess_cap > 0:
+            self._adaptive_num_predict_cap = sess_cap
+
+        if self._adaptive_num_ctx > 0 and self._adaptive_num_predict_cap > 0:
+            self._adaptive_num_predict_cap = min(
+                self._adaptive_num_predict_cap,
+                max(512, self._adaptive_num_ctx // 4),
+            )
+
+        self._vram_crash_count = max(self._vram_crash_count, sess_crashes)
+
+    def _sync_recovery_state_to_session(self) -> None:
+        """Persist adaptive recovery state into session."""
+        if not self._session:
+            return
+        self._session.adaptive_num_ctx = max(0, int(self._adaptive_num_ctx or 0))
+        self._session.adaptive_num_predict_cap = max(
+            0, int(self._adaptive_num_predict_cap or 0)
+        )
+        self._session.vram_crash_count = max(0, int(self._vram_crash_count or 0))
 
     def _has_scan_work(self) -> bool:
         """Return True if the current session has done actual scanning work.
@@ -462,14 +474,17 @@ class AgentLoop(_ValidatorMixin, _FormatterMixin,
         # the EXECUTE_COMMAND_AVAILABLE pattern.
         from ..caido_client import CaidoClient
         _caido_token = await CaidoClient._get_token()
+        self._caido_available: bool = bool(_caido_token)
         if _caido_token:
             self.state.add_message(
                 "system",
                 "[SYSTEM: CAIDO_PROXY=available port=48080] "
-                "Caido web proxy is running. MANDATORY first step: call caido_set_scope "
-                "to limit capture to the target. Then use caido_sitemap and "
-                "caido_list_requests during RECON/ANALYSIS to enumerate proxy-captured "
-                "paths and HTTP history."
+                "Caido web proxy is running and capturing ALL HTTP traffic automatically. "
+                "Call caido_list_requests NOW (no scope setup needed) to retrieve captured "
+                "requests — this reveals real app endpoints, auth flows, cookies, hidden "
+                "parameters, and injection points that active scanning cannot find. "
+                "After reviewing captured requests, use caido_set_scope to focus future "
+                "captures, then periodically call caido_list_requests to check for new traffic."
             )
         else:
             self.state.add_message(
@@ -517,6 +532,7 @@ class AgentLoop(_ValidatorMixin, _FormatterMixin,
         else:
             self._session = SessionData(target="")
             logger.info("Created new session %s", self._session.session_id)
+        self._sync_recovery_state_from_session()
         self._sync_token_usage_from_session()
 
         self.pipeline = PipelineEngine(self._session)
@@ -541,6 +557,9 @@ class AgentLoop(_ValidatorMixin, _FormatterMixin,
         self._recent_tool_names.clear()
         self._last_evidence_count = 0
         self._watchdog_forced_calls = 0
+        self._adaptive_num_ctx = 0
+        self._vram_crash_count = 0
+        self._adaptive_num_predict_cap = 0
         # Create a new session on reset (keeps the old one on disk)
         self._session = SessionData(target="")
         self.pipeline = PipelineEngine(self._session)
@@ -824,16 +843,30 @@ class AgentLoop(_ValidatorMixin, _FormatterMixin,
             # Auto-load relevant skills based on user message keywords.
             # Use current phase (important for resumed sessions), fallback RECON.
             _skill_phase = self._skill_phase_for_message_start()
+            # Pass session.loaded_skills for dedup (prevent re-loading same skills)
+            _session_skills = None
+            if self._session:
+                _session_skills = set(self._session.loaded_skills)
             skill_context, loaded_skills = auto_load_skills_for_message(
-                user_message, phase=_skill_phase)
+                user_message,
+                phase=_skill_phase,
+                session_loaded_skills=_session_skills,
+            )
             if loaded_skills:
                 for s in loaded_skills:
-                    if s not in self.state.skills_used:
-                        self.state.skills_used.append(s)
+                    _skill_name = Path(str(s)).stem
+                    if _skill_name not in self.state.skills_used:
+                        self.state.skills_used.append(_skill_name)
+                # Track loaded skills in session for dedup across messages
+                if self._session:
+                    for skill_rel in loaded_skills:
+                        if skill_rel not in self._session.loaded_skills:
+                            self._session.loaded_skills.append(skill_rel)
 
             if skill_context:
+                # Tag skill messages with iteration for _prune_stale_skills to work correctly
                 self.state.conversation.append(
-                    {"role": "system", "content": skill_context}
+                    {"role": "system", "content": skill_context, "iteration": self.state.iteration}
                 )
 
             # Reset per-message state
@@ -856,9 +889,34 @@ class AgentLoop(_ValidatorMixin, _FormatterMixin,
             )
             self._watchdog_forced_calls = 0
             self._empty_response_retry_count = 0
+            self._prev_phase = None
             # NOTE: Do NOT clear _executed_tool_counts here — dedup must persist
             # across messages within the same session. It is only cleared in
             # reset().
+
+            # Follow-up after TASK_COMPLETE: reset pipeline and clear stale state
+            # so the model doesn't inherit old REPORT-phase objectives when the
+            # user asks for a new focused task (e.g., "focus on XSS").
+            if (
+                self._session
+                and getattr(self._session, "current_phase", "") == "COMPLETE"
+                and self.pipeline
+            ):
+                self.pipeline.set_phase(PipelinePhase.RECON)
+                self.state.objective_queue.clear()
+                # Compact evidence_log: keep only high-confidence findings so
+                # follow-up context isn't flooded with noise from the prior scan.
+                _HC_THRESHOLD = 0.8
+                self.state.evidence_log = [
+                    e for e in self.state.evidence_log
+                    if e.get("confidence", 0) >= _HC_THRESHOLD
+                ][-30:]
+                self._last_evidence_count = len(self.state.evidence_log)
+                logger.info(
+                    "Follow-up after TASK_COMPLETE: phase reset to RECON, "
+                    "objective_queue cleared, evidence_log compacted to %d entries.",
+                    len(self.state.evidence_log),
+                )
 
             while self.state.iteration < self.state.max_iterations:
                 if self._stop_requested:
@@ -870,6 +928,91 @@ class AgentLoop(_ValidatorMixin, _FormatterMixin,
 
                 self.state.increment_iteration()
                 current_phase = self._get_current_phase()
+
+                # ── BUDGET PRESSURE CASCADE ──────────────────────────────────
+                # As the agent approaches MAX_TOOL_ITERATIONS, inject escalating
+                # urgency messages so it prioritises and consolidates findings
+                # rather than discovering indefinitely.  Each threshold fires once.
+                _budget_ratio = self.state.iteration / max(self.state.max_iterations, 1)
+                if _budget_ratio >= 1.0 and self._budget_pressure_level < 4:
+                    self._budget_pressure_level = 4
+                    logger.warning(
+                        "Budget exhausted at iteration %d/%d — forcing REPORT phase.",
+                        self.state.iteration, self.state.max_iterations,
+                    )
+                    if self.pipeline and current_phase.value != "REPORT":
+                        self.pipeline.set_phase(PipelinePhase.REPORT)
+                    self.state.conversation.append({
+                        "role": "system",
+                        "content": (
+                            "[SYSTEM: BUDGET EXHAUSTED] You have used all available "
+                            "iterations. STOP all testing immediately. Your ONLY task "
+                            "now is to call the report tool and write the final report "
+                            "with everything you have found."
+                        ),
+                    })
+                elif _budget_ratio >= 0.95 and self._budget_pressure_level < 3:
+                    self._budget_pressure_level = 3
+                    remaining = self.state.max_iterations - self.state.iteration
+                    logger.info(
+                        "Budget pressure L3 (95%%) at iteration %d, %d remaining.",
+                        self.state.iteration, remaining,
+                    )
+                    self.state.conversation.append({
+                        "role": "system",
+                        "content": (
+                            f"[SYSTEM: BUDGET CRITICAL — {remaining} iterations left] "
+                            "STOP all new discovery. You must now: (1) call the report "
+                            "tool with all confirmed findings, (2) advance to REPORT "
+                            "phase if not already there. No more scanning or fuzzing."
+                        ),
+                    })
+                elif _budget_ratio >= 0.85 and self._budget_pressure_level < 2:
+                    self._budget_pressure_level = 2
+                    remaining = self.state.max_iterations - self.state.iteration
+                    logger.info(
+                        "Budget pressure L2 (85%%) at iteration %d, %d remaining.",
+                        self.state.iteration, remaining,
+                    )
+                    self.state.conversation.append({
+                        "role": "system",
+                        "content": (
+                            f"[SYSTEM: BUDGET WARNING — {remaining} iterations left] "
+                            "Begin consolidating findings for the report. Finish any "
+                            "in-progress tests, then switch to REPORT phase. Do not "
+                            "start new discovery chains."
+                        ),
+                    })
+                elif _budget_ratio >= 0.70 and self._budget_pressure_level < 1:
+                    self._budget_pressure_level = 1
+                    remaining = self.state.max_iterations - self.state.iteration
+                    logger.info(
+                        "Budget pressure L1 (70%%) at iteration %d, %d remaining.",
+                        self.state.iteration, remaining,
+                    )
+                    self.state.conversation.append({
+                        "role": "system",
+                        "content": (
+                            f"[SYSTEM: BUDGET NOTICE — {remaining} iterations left] "
+                            "Prioritise your highest-value untested attack vectors only. "
+                            "Avoid retrying already-tested paths or broad enumeration."
+                        ),
+                    })
+
+                # Reset stagnation counters on phase transition so ANALYSIS/
+                # EXPLOIT don't start with an inflated stagnation count inherited
+                # from the previous phase — that would trigger aggressive
+                # exploration immediately after transition.
+                if self._prev_phase is not None and current_phase != self._prev_phase:
+                    logger.debug(
+                        "Phase transition %s → %s: stagnation counter reset.",
+                        self._prev_phase.value,
+                        current_phase.value,
+                    )
+                    self._stagnation_iterations = 0
+                    self._recent_tool_names.clear()
+                self._prev_phase = current_phase
+
                 self._sync_phase_objectives(current_phase)
                 self._update_objectives_from_session(current_phase)
 
@@ -917,6 +1060,104 @@ class AgentLoop(_ValidatorMixin, _FormatterMixin,
                             self.state.conversation.append(
                                 {"role": "system", "content": quality_ctx}
                             )
+
+                    # Hypothesis Engine: auto-resolve confirmed hypotheses from
+                    # evidence, then inject pending hypotheses context.
+                    # Run on every focus trigger so the LLM always knows what to
+                    # test next and never re-tests a refuted hypothesis.
+                    self.state.resolve_hypotheses_from_evidence()
+                    self.state.conversation = [
+                        msg for msg in self.state.conversation
+                        if not msg.get("content", "").startswith("<hypothesis_queue")
+                    ]
+                    hyp_ctx = self.state.build_hypothesis_context(max_pending=4)
+                    if hyp_ctx:
+                        self.state.conversation.append(
+                            {"role": "system", "content": hyp_ctx}
+                        )
+
+                    # Exploit Chain Planner: plan chains from confirmed vulns in
+                    # EXPLOIT phase. Also includes confirmed hypotheses as synthetic
+                    # vulnerabilities so hypothesis-driven findings can spawn chains
+                    # even before the session vulnerability list is populated.
+                    _confirmed_hyp_vulns: list[dict[str, Any]] = [
+                        {
+                            "finding": h.get("claim", ""),
+                            "type": next(iter(h.get("tags", ["unknown"])), "unknown"),
+                            "severity": "HIGH",
+                            "proof": "; ".join(
+                                str(r) for r in h.get("evidence_refs", [])
+                            )[:200],
+                        }
+                        for h in self.state.hypothesis_queue
+                        if h.get("status") == "confirmed"
+                    ]
+                    _session_vulns = (
+                        list(self._session.vulnerabilities) if self._session else []
+                    )
+                    _all_vulns_for_chains = _session_vulns + _confirmed_hyp_vulns
+                    if current_phase.value == "EXPLOIT" and _all_vulns_for_chains:
+                        try:
+                            _existing_ids = {
+                                str(c.get("chain_id", ""))
+                                for c in self.state.exploit_chains
+                            }
+                            _new_chains = plan_chains(
+                                vulnerabilities=_all_vulns_for_chains,
+                                existing_chain_ids=_existing_ids,
+                                iteration=self.state.iteration,
+                                max_chains=3,
+                                causal_hypotheses=[
+                                    h.__dict__
+                                    for h in getattr(
+                                        getattr(self._session, "causal_state", None),
+                                        "hypotheses",
+                                        [],
+                                    )
+                                ],
+                            )
+                            for _nc in _new_chains:
+                                # Serialise ExploitChain to dict for state storage
+                                self.state.exploit_chains.append(_asdict(_nc))
+                                logger.info(
+                                    "Exploit chain planned: %s (basis: %s)",
+                                    _nc.name, _nc.vuln_basis[:60],
+                                )
+                            # Inject chain context
+                            _ec_objs: list[_ExploitChain] = []
+                            for _cd in self.state.exploit_chains:
+                                try:
+                                    # Re-hydrate from dict for build_chain_context
+                                    _steps = [
+                                        _ChainStep(**s) if isinstance(s, dict) else s
+                                        for s in _cd.get("steps", [])
+                                    ]
+                                    _chain_obj = _ExploitChain(
+                                        chain_id=str(_cd.get("chain_id", "")),
+                                        name=str(_cd.get("name", "")),
+                                        description=str(_cd.get("description", "")),
+                                        steps=_steps,
+                                        current_step_index=int(_cd.get("current_step_index", 0)),
+                                        status=str(_cd.get("status", "planning")),
+                                        phase_formed=str(_cd.get("phase_formed", "EXPLOIT")),
+                                        vuln_basis=str(_cd.get("vuln_basis", "")),
+                                        iteration_formed=int(_cd.get("iteration_formed", 0)),
+                                    )
+                                    _ec_objs.append(_chain_obj)
+                                except Exception as _chain_hydrate_err:
+                                    logger.debug("Chain hydration error: %s", _chain_hydrate_err)
+                            chain_ctx = build_chain_context(_ec_objs, max_chains=2)
+                            if chain_ctx:
+                                self.state.conversation = [
+                                    m for m in self.state.conversation
+                                    if not m.get("content", "").startswith("<exploit_chain_plan>")
+                                ]
+                                self.state.conversation.append({
+                                    "role": "system",
+                                    "content": chain_ctx,
+                                })
+                        except Exception as _cp_err:
+                            logger.debug("Chain planner error: %s", _cp_err)
 
                 explore_ctx = self._build_exploration_directive(current_phase)
                 if explore_ctx:
@@ -1067,6 +1308,11 @@ class AgentLoop(_ValidatorMixin, _FormatterMixin,
                             # so the LLM doesn't need to recall from early
                             # conversation turns.
                             session_info = "\n" + session_to_context(s)
+                            # Append ApplicationModel context when it has structural data
+                            # (endpoints, auth map, roles, API schema from http_observe).
+                            _app_ctx = s.app_model.build_context()
+                            if _app_ctx:
+                                session_info += "\n" + _app_ctx
 
                     self.state.conversation.append(
                         {
@@ -1353,6 +1599,23 @@ class AgentLoop(_ValidatorMixin, _FormatterMixin,
                 if self.state.iteration % 5 == 0 and self._has_scan_work():
                     save_session(self._session)  # type: ignore[arg-type]
 
+                # --- PROGRESSIVE CONTEXT SUMMARIZATION ---
+                # Every 20 iterations: compress old tool outputs to 1-line summaries
+                # and pin confirmed findings so they survive subsequent truncation.
+                if self.state.iteration > 0 and self.state.iteration % 20 == 0:
+                    self._compress_old_tool_outputs()
+                    pinned = self._build_compressed_findings_summary()
+                    if pinned:
+                        # Replace any existing pinned context (keep only latest)
+                        self.state.conversation = [
+                            m for m in self.state.conversation
+                            if not m.get("content", "").startswith("[SYSTEM: PINNED CONTEXT")
+                        ]
+                        self.state.conversation.append({
+                            "role": "system",
+                            "content": pinned,
+                        })
+
                 # --- CONTEXT MANAGEMENT (adaptive interval + progressive truncation) ---
                 # Dynamic interval: compress more aggressively as context fills.
                 # Use session-level override if set, else fall back to config.
@@ -1373,6 +1636,11 @@ class AgentLoop(_ValidatorMixin, _FormatterMixin,
                 else:
                     _ctx_interval = 15
                 if self.state.iteration % _ctx_interval == 0:
+                    # Prune stale skills before context compression (recover 10K-30K tokens)
+                    # Remove skill messages older than 10 iterations that aren't relevant to current phase
+                    if self.state.iteration >= 20:  # Only prune after warm-up period
+                        self._prune_stale_skills(max_age_iterations=10)
+                    
                     # LLM compression is only safe when we have headroom.
                     # Calling ollama.complete() when context is >65% full risks
                     # OOM inside the compression call itself.
@@ -1441,6 +1709,39 @@ class AgentLoop(_ValidatorMixin, _FormatterMixin,
                                 {"role": "system", "content": history_ctx}
                             )
 
+                # Periodic Caido reminder: inject if Caido is available but not yet
+                # used. After iteration 30, Ollama is deep enough that repeating
+                # this hint is no longer useful. Replace any existing reminder to
+                # avoid accumulation (dedup by prefix).
+                _caido_list_used = self.state.tool_counts.get("caido_list_requests", 0)
+                _caido_send_used = self.state.tool_counts.get("caido_send_request", 0)
+                _caido_auto_used = self.state.tool_counts.get("caido_automate", 0)
+                if (
+                    getattr(self, "_caido_available", False)
+                    and 0 < self.state.iteration <= 30
+                    and self.state.iteration % 5 == 0
+                    and _caido_list_used == 0
+                    and _caido_send_used == 0
+                    and _caido_auto_used == 0
+                ):
+                    self.state.conversation = [
+                        msg for msg in self.state.conversation
+                        if not msg.get("content", "").startswith(
+                            "[SYSTEM: CAIDO REMINDER"
+                        )
+                    ]
+                    self.state.conversation.append({
+                        "role": "system",
+                        "content": (
+                            "[SYSTEM: CAIDO REMINDER] "
+                            "Caido proxy is active and has captured HTTP traffic, "
+                            "but you have NOT called caido_list_requests yet. "
+                            "Call it NOW with filter=target to retrieve all captured "
+                            "requests. Real traffic reveals hidden endpoints, auth tokens, "
+                            "injection parameters, and app behavior that scanners miss."
+                        ),
+                    })
+
                 if self.state.is_approaching_limit() and not self.state.warnings_sent:
                     self.state.warnings_sent = True
                     remaining = self.state.max_iterations - self.state.iteration
@@ -1495,7 +1796,9 @@ class AgentLoop(_ValidatorMixin, _FormatterMixin,
                             "Proactive context trim: %.0f%% used (%d/%d tokens)",
                             _usage_ratio * 100, _ctx_used, adaptive_num_ctx,
                         )
+                        # Build both summaries BEFORE truncation (they read session state)
                         _critical_ctx = self._build_critical_findings_context()
+                        _handoff_ctx = self._build_handoff_summary()
                         if self._ctf_mode:
                             # CTF: drop to 10-15 messages — keep recent work only
                             _proactive_trim = 10 if _usage_ratio >= 0.80 else 15
@@ -1503,6 +1806,12 @@ class AgentLoop(_ValidatorMixin, _FormatterMixin,
                             _proactive_trim = 50 if _usage_ratio < 0.90 else 35
                         self.state.truncate_conversation(
                             max_messages=_proactive_trim)
+                        # Inject handoff summary first (orientation), then findings (specifics)
+                        # AIRecon pattern: structured summary survives truncation as anchor
+                        if _handoff_ctx:
+                            self.state.conversation.append(
+                                {"role": "system", "content": _handoff_ctx}
+                            )
                         if _critical_ctx:
                             self.state.conversation.append(
                                 {"role": "system", "content": _critical_ctx}
@@ -1518,14 +1827,14 @@ class AgentLoop(_ValidatorMixin, _FormatterMixin,
                 # exceed the token budget (1 token ≈ 3 chars).  This runs
                 # every iteration and catches large tool outputs that
                 # message-count truncation misses.
-                self._enforce_char_budget(
+                await self._enforce_char_budget(
                     num_ctx=adaptive_num_ctx,
                     num_predict=adaptive_num_predict,
                 )
 
                 # --- STREAM RECOVERY LOOP ---
                 # Up to 6 attempts total:
-                #   VRAM crash  → up to 3 retries with escalating truncation
+                #   VRAM crash  → up to 4 retries with escalating truncation
                 #                 (ctx and message budget shrink each time)
                 #   Connection refused → 4 retries with longer backoff (10s/30s/60s/120s)
                 #   Timeout          → 1 retry (already waited; model may finish faster)
@@ -1534,6 +1843,20 @@ class AgentLoop(_ValidatorMixin, _FormatterMixin,
                 _vram_retries_this_iter = 0  # VRAM retries within this iteration
                 for _stream_attempt in range(6):
                     try:
+                        _requested_num_keep = self._cfg_int(cfg, "ollama_num_keep", 8192)
+                        _safe_num_keep = self._fit_num_keep_to_ctx(
+                            _requested_num_keep,
+                            adaptive_num_ctx,
+                            adaptive_num_predict,
+                        )
+                        if _safe_num_keep != _requested_num_keep:
+                            logger.debug(
+                                "Clamped num_keep %d -> %d (ctx=%d, predict=%d)",
+                                _requested_num_keep,
+                                _safe_num_keep,
+                                adaptive_num_ctx,
+                                adaptive_num_predict,
+                            )
                         async for chunk in self.ollama.chat_stream(
                             messages=self._messages_for_ollama(),
                             tools=self._tools_ollama,
@@ -1542,8 +1865,7 @@ class AgentLoop(_ValidatorMixin, _FormatterMixin,
                                 "temperature": adaptive_temperature,
                                 "num_predict": adaptive_num_predict,
                                 # Protect system prompt from Ollama KV-cache eviction
-                                "num_keep": self._cfg_int(
-                                    cfg, "ollama_num_keep", 8192),
+                                "num_keep": _safe_num_keep,
                                 # Prevent repetition loops in long sessions
                                 "repeat_penalty": self._cfg_float(
                                     cfg, "ollama_repeat_penalty", 1.05),
@@ -1675,7 +1997,7 @@ class AgentLoop(_ValidatorMixin, _FormatterMixin,
                             "timeout" in err_lower or "timed out" in err_lower
                         )
 
-                        if _is_vram_crash and _vram_retries_this_iter < 3:
+                        if _is_vram_crash and _vram_retries_this_iter < 4:
                             # Multi-level VRAM recovery — each crash reduces
                             # context window and message budget further.
                             # The reduced context persists for ALL future
@@ -1711,6 +2033,7 @@ class AgentLoop(_ValidatorMixin, _FormatterMixin,
                                 min(adaptive_num_predict, self._adaptive_num_predict_cap),
                                 _new_ctx,
                             )
+                            self._sync_recovery_state_to_session()
                             logger.warning(
                                 "VRAM crash #%d — ctx → %d tokens, msgs → %d",
                                 self._vram_crash_count, _new_ctx, _max_msgs,
@@ -1893,10 +2216,13 @@ class AgentLoop(_ValidatorMixin, _FormatterMixin,
                                 if m.get("role") != "system"
                             ][-20:]
                             _before = len(self.state.conversation)
-                            self.state.conversation = _sys_msgs + _recent_msgs
+                            # Repair orphaned tool pairs BEFORE sending to Ollama
+                            # (AIRecon pattern: prevent Ollama from receiving orphaned tool results)
+                            _repaired = AgentState._repair_tool_pairs(_sys_msgs + _recent_msgs)
+                            self.state.conversation = _repaired
                             logger.warning(
                                 "Empty response retry 3: compacted conversation "
-                                "%d → %d messages to reduce context size",
+                                "%d → %d messages (pair-repaired) to reduce context size",
                                 _before, len(self.state.conversation),
                             )
                         yield AgentEvent(
@@ -2134,19 +2460,86 @@ class AgentLoop(_ValidatorMixin, _FormatterMixin,
                     "assistant", content_acc, tool_calls_acc, thinking_acc
                 )
 
+                # HIGH FIX #2 (MODIFIED): Softer conversation claim validation
+                # Only interrupt confident false claims about SPECIFIC vulnerabilities
+                if self._session and content_acc:
+                    # Check if claim is confident (not hedged)
+                    hedge_words = [
+                        "might", "could", "possibly", "appears", "suggests",
+                        "may", "potentially", "likely", "probable", "seems"
+                    ]
+                    is_confident = not any(hedge in content_acc.lower() for hedge in hedge_words)
+                    
+                    # Only validate confident claims (allow hypotheses in hedged language)
+                    if is_confident:
+                        # Extract SPECIFIC vulnerability claims (require endpoint + vuln type)
+                        # Pattern requires: vuln type + "in/at" + endpoint (prevents false positives)
+                        vuln_claim_patterns = [
+                            r"(sql\s*(injection)?|xss|ssrf|idor|rce|lfi|rfi|xxe|command\s+injection)\s+(in|at|on|found\s+in|detected\s+at)\s+([^\s,.!?]+)",
+                        ]
+                        for pattern in vuln_claim_patterns:
+                            matches = re.findall(pattern, content_acc.lower())
+                            for match in matches:
+                                # Extract the full claim: vuln_type + endpoint
+                                if isinstance(match, tuple) and len(match) >= 4:
+                                    vuln_type = match[0].strip()
+                                    endpoint = match[3].strip()  # group3=endpoint (group2=preposition)
+                                    claim_text = f"{vuln_type} in {endpoint}"
+                                else:
+                                    continue  # Skip malformed matches
+                                
+                                # Check if claim matches session.vulnerabilities
+                                if claim_text and self._session.vulnerabilities:
+                                    has_evidence = any(
+                                        vuln_type in " ".join(
+                                            [
+                                                str(v.get("finding", "")),
+                                                str(v.get("title", "")),
+                                                str(v.get("evidence", "")),
+                                                str(v.get("proof", "")),
+                                            ]
+                                        ).lower()
+                                        and endpoint in " ".join(
+                                            [
+                                                str(v.get("finding", "")),
+                                                str(v.get("title", "")),
+                                                str(v.get("evidence", "")),
+                                                str(v.get("proof", "")),
+                                            ]
+                                        ).lower()
+                                        for v in self._session.vulnerabilities
+                                    )
+                                    if not has_evidence:
+                                        # Inject gentle correction (only for specific confident false claims)
+                                        self.state.conversation.append({
+                                            "role": "system",
+                                            "content": f"[SYSTEM: UNVERIFIED CLAIM] You claimed '{claim_text}' but no tool output supports this. Consider using hedged language like 'might be' or 'appears to be' if not confirmed, or provide tool evidence."
+                                        })
+
                 # --- AUTO-LOAD SKILLS FROM LLM OUTPUT (not just user message) ---
                 _llm_output_for_skills = (
                     content_acc + " " + thinking_acc).strip()
                 if _llm_output_for_skills:
+                    # Pass session.loaded_skills for dedup
+                    _session_skills_2 = None
+                    if self._session:
+                        _session_skills_2 = set(self._session.loaded_skills)
                     _new_skill_ctx, _new_loaded_skills = auto_load_skills_for_message(
                         _llm_output_for_skills,
                         phase=self._get_current_phase().value,
+                        session_loaded_skills=_session_skills_2,
                     )
 
                     if _new_loaded_skills:
                         for s in _new_loaded_skills:
-                            if s not in self.state.skills_used:
-                                self.state.skills_used.append(s)
+                            _skill_name = Path(str(s)).stem
+                            if _skill_name not in self.state.skills_used:
+                                self.state.skills_used.append(_skill_name)
+                        # Track loaded skills in session for dedup across messages
+                        if self._session:
+                            for skill_rel in _new_loaded_skills:
+                                if skill_rel not in self._session.loaded_skills:
+                                    self._session.loaded_skills.append(skill_rel)
 
                     if _new_skill_ctx:
                         # Avoid injecting the same skill context twice in a
@@ -2156,8 +2549,9 @@ class AgentLoop(_ValidatorMixin, _FormatterMixin,
                             self._loaded_skill_hashes: set[int] = set()
                         if _skill_key not in self._loaded_skill_hashes:
                             self._loaded_skill_hashes.add(_skill_key)
+                            # Tag skill messages with iteration for _prune_stale_skills
                             self.state.conversation.append(
-                                {"role": "system", "content": _new_skill_ctx}
+                                {"role": "system", "content": _new_skill_ctx, "iteration": self.state.iteration}
                             )
                             logger.debug(
                                 "Auto-loaded skill from LLM output keywords"
@@ -2765,7 +3159,10 @@ class AgentLoop(_ValidatorMixin, _FormatterMixin,
                         )
                         if isinstance(stdout, str) and stdout.strip():
                             _techs_before = dict(self._session.technologies)
-                            parsed_out = parse_tool_output(raw_command, stdout)
+                            _phase_for_parse = self._get_current_phase().value
+                            parsed_out = parse_tool_output(
+                                raw_command, stdout, phase=_phase_for_parse
+                            )
                             if parsed_out and parsed_out.total_count > 0:
                                 update_from_parsed_output(
                                     self._session, parsed_out, raw_command
@@ -2797,6 +3194,11 @@ class AgentLoop(_ValidatorMixin, _FormatterMixin,
                                     )
 
                     phase_after_tool = self._get_current_phase()
+                    meaningful_before = sum(
+                        1
+                        for e in self.state.evidence_log
+                        if float(e.get("confidence", 0.0)) >= _MEANINGFUL_EVIDENCE_THRESHOLD
+                    )
                     self._record_evidence_from_result(
                         phase=phase_after_tool.value,
                         tool_name=tool_name,
@@ -2814,6 +3216,112 @@ class AgentLoop(_ValidatorMixin, _FormatterMixin,
                         output_file,
                     )
                     self._update_objectives_from_session(phase_after_tool)
+                    meaningful_after = sum(
+                        1
+                        for e in self.state.evidence_log
+                        if float(e.get("confidence", 0.0)) >= _MEANINGFUL_EVIDENCE_THRESHOLD
+                    )
+                    self.state.record_tool_outcome(
+                        phase_after_tool.value,
+                        tool_name,
+                        success=bool(success),
+                        meaningful_evidence_delta=max(0, meaningful_after - meaningful_before),
+                    )
+
+                    # --- EXPLOIT CHAIN ADVANCEMENT ---
+                    # When a tool call succeeds in EXPLOIT phase, check if it
+                    # matches any active chain's current step tool_hint.
+                    # If so, advance that chain to the next step.
+                    if (
+                        success
+                        and phase_after_tool.value == "EXPLOIT"
+                        and self.state.exploit_chains
+                    ):
+                        try:
+                            for _cd in self.state.exploit_chains:
+                                if _cd.get("status") not in ("planning", "active"):
+                                    continue
+                                _cs_idx = int(_cd.get("current_step_index", 0))
+                                _steps = _cd.get("steps", [])
+                                if _cs_idx >= len(_steps):
+                                    continue
+                                _cur_step = _steps[_cs_idx]
+                                _hint = str(_cur_step.get("tool_hint", "")).lower()
+                                # For 'execute', match the binary name extracted from
+                                # the command args — since all shell commands share the
+                                # same tool_name="execute", matching tool_name alone
+                                # would never advance shell-based chain steps.
+                                _match_token = tool_name.lower()
+                                if _match_token == "execute" and isinstance(arguments, dict):
+                                    _raw_cmd = str(arguments.get("command", "")).strip()
+                                    _stripped = re.sub(r"^cd\s+\S+\s*&&\s*", "", _raw_cmd).strip()
+                                    _binary = _stripped.split()[0].lower() if _stripped else ""
+                                    _shell_builtins = {"cd", "echo", "export", "source", ".", "for", "while", "if"}
+                                    if _binary and _binary not in _shell_builtins:
+                                        _match_token = _binary
+                                if _hint and (_match_token in _hint or tool_name.lower() in _hint):
+                                    # Advance the serialised chain dict directly
+                                    _cur_step["status"] = "done"
+                                    _next_idx = _cs_idx + 1
+                                    _chain_name = _cd.get("name", "?")
+                                    _vuln_basis = str(_cd.get("vuln_basis", "")).lower().strip()
+                                    if _next_idx >= len(_steps):
+                                        _cd["status"] = "completed"
+                                        _cd["current_step_index"] = _next_idx
+                                        logger.info(
+                                            "Exploit chain '%s' COMPLETED after %d steps",
+                                            _chain_name, len(_steps),
+                                        )
+                                        # Mark linked hypothesis confirmed
+                                        if _vuln_basis and self.state.hypothesis_queue:
+                                            _vb_words = {
+                                                w for w in _vuln_basis.split() if len(w) >= 4
+                                            }
+                                            for _hyp in self.state.hypothesis_queue:
+                                                if _hyp.get("status") not in ("pending", "testing"):
+                                                    continue
+                                                _hwords = set(
+                                                    str(_hyp.get("claim", "")).lower().split()
+                                                )
+                                                if _vb_words & _hwords:
+                                                    self.state.update_hypothesis(
+                                                        str(_hyp.get("id", "")),
+                                                        "confirmed",
+                                                        f"Exploit chain '{_chain_name}' completed all steps",
+                                                    )
+                                                    break
+                                    else:
+                                        _cd["current_step_index"] = _next_idx
+                                        _cd["status"] = "active"
+                                        _steps[_next_idx]["status"] = "in_progress"
+                                        logger.info(
+                                            "Exploit chain '%s' advanced to step %d/%d: %s",
+                                            _chain_name,
+                                            _next_idx + 1,
+                                            len(_steps),
+                                            _steps[_next_idx].get("description", "")[:60],
+                                        )
+                                        # Mark linked hypothesis as actively testing
+                                        if _vuln_basis and self.state.hypothesis_queue:
+                                            _vb_words = {
+                                                w for w in _vuln_basis.split() if len(w) >= 4
+                                            }
+                                            for _hyp in self.state.hypothesis_queue:
+                                                if _hyp.get("status") != "pending":
+                                                    continue
+                                                _hwords = set(
+                                                    str(_hyp.get("claim", "")).lower().split()
+                                                )
+                                                if _vb_words & _hwords:
+                                                    self.state.update_hypothesis(
+                                                        str(_hyp.get("id", "")),
+                                                        "testing",
+                                                        f"Exploit chain '{_chain_name}' in progress (step {_next_idx + 1}/{len(_steps)})",
+                                                    )
+                                                    break
+                                    break  # Advance one chain at a time
+                        except Exception as _chain_adv_e:
+                            logger.debug("Chain advancement error: %s", _chain_adv_e)
 
                     # Track per-phase tool usage and inject soft budget warning
                     self.state.record_tool_use(phase_after_tool.value, tool_name)
@@ -2821,6 +3329,121 @@ class AgentLoop(_ValidatorMixin, _FormatterMixin,
                         tool_name, phase_after_tool.value)
                     if budget_note:
                         content_str = budget_note + "\n\n" + content_str
+
+                    # WAF Detection Hook: run on http_observe and execute results.
+                    # Detects WAF signatures in response headers/body, stores
+                    # profile in session.waf_profiles, injects bypass context.
+                    if (
+                        success
+                        and tool_name in ("http_observe", "execute")
+                        and self._session
+                    ):
+                        _waf_headers: dict[str, str] = result.get("headers", {}) or {}
+                        _waf_body: str = str(result.get("body_excerpt") or result.get("stdout") or "")[:3000]
+                        _waf_status: int = int(result.get("status_code") or 0)
+                        if _waf_headers or _waf_body:
+                            try:
+                                _waf_url = arguments.get("url") or arguments.get("command", "")
+                                try:
+                                    _waf_host = urlparse(str(_waf_url)).netloc or str(_waf_url)
+                                except Exception:
+                                    _waf_host = str(_waf_url)[:50]
+                                if not _waf_host or " " in _waf_host:
+                                    _url_match = re.search(r"https?://[^\s\"']+", str(_waf_url))
+                                    if _url_match:
+                                        _waf_host = urlparse(_url_match.group(0)).netloc
+                                _waf_host = str(_waf_host).strip()[:120]
+                                _waf_profile = detect_waf_from_response(
+                                    host=_waf_host,
+                                    status_code=_waf_status,
+                                    headers=_waf_headers,
+                                    body_excerpt=_waf_body,
+                                    iteration=self.state.iteration,
+                                )
+                                _existing = self._session.waf_profiles.get(_waf_host)
+                                _merged = merge_waf_profiles(
+                                    _existing,
+                                    _waf_profile,
+                                    host=_waf_host,
+                                    status_code=_waf_status,
+                                    iteration=self.state.iteration,
+                                )
+                                if _merged:
+                                    _old_stats = {}
+                                    if isinstance(_existing, dict):
+                                        _old_stats = _existing.get("strategy_stats", {}) or {}
+                                    # Track strategy effectiveness heuristically from command patterns.
+                                    # This gives per-host memory for ranking future bypass attempts.
+                                    if tool_name == "execute" and isinstance(arguments, dict):
+                                        _cmd_lower = str(arguments.get("command", "")).lower()
+                                        _prior_strategies = []
+                                        if isinstance(_existing, dict):
+                                            _prior_strategies = list(_existing.get("bypass_strategies", []))
+                                        _matched_strategy = ""
+                                        for _st in _prior_strategies:
+                                            _st_l = str(_st).lower()
+                                            if "header" in _st_l and any(h in _cmd_lower for h in ("x-forwarded-for", "user-agent", "-h ")):
+                                                _matched_strategy = str(_st)
+                                                break
+                                            if "encoding" in _st_l and ("%25" in _cmd_lower or "%2f" in _cmd_lower or "%27" in _cmd_lower):
+                                                _matched_strategy = str(_st)
+                                                break
+                                            if "case variation" in _st_l and any(k in _cmd_lower for k in ("union", "select", "script")):
+                                                _matched_strategy = str(_st)
+                                                break
+                                            if "verb" in _st_l and any(m in _cmd_lower for m in ("-x post", "-x put", "-x patch", "-x delete")):
+                                                _matched_strategy = str(_st)
+                                                break
+                                        if _matched_strategy:
+                                            _stat = _old_stats.setdefault(
+                                                _matched_strategy,
+                                                {"attempts": 0, "successes": 0},
+                                            )
+                                            _stat["attempts"] = int(_stat.get("attempts", 0)) + 1
+                                            if _waf_status and _waf_status not in (403, 406, 412, 429, 501, 999):
+                                                _stat["successes"] = int(_stat.get("successes", 0)) + 1
+                                    _ranked = rank_bypass_strategies(_merged, _old_stats)[:8]
+                                    _merged.bypass_strategies = _ranked
+                                    _history: list[dict[str, Any]] = []
+                                    if isinstance(_existing, dict) and isinstance(_existing.get("history"), list):
+                                        _history = list(_existing["history"])
+                                    _history.append({
+                                        "iteration": self.state.iteration,
+                                        "status_code": _waf_status,
+                                        "tool": tool_name,
+                                        "confidence": round(_merged.confidence, 3),
+                                        "waf_name": _merged.waf_name,
+                                    })
+                                    self._session.waf_profiles[_waf_host] = {
+                                        "host": _waf_host,
+                                        "waf_name": _merged.waf_name,
+                                        "confidence": _merged.confidence,
+                                        "evidence": _merged.evidence,
+                                        "detected_at": self.state.iteration,
+                                        "bypass_strategies": _ranked,
+                                        "strategy_stats": _old_stats,
+                                        "history": _history[-15:],
+                                    }
+                                    _waf_ctx = build_waf_bypass_context(_merged)
+                                    if _waf_ctx:
+                                        # Replace any existing WAF bypass context for this host
+                                        self.state.conversation = [
+                                            m for m in self.state.conversation
+                                            if not m.get("content", "").startswith(
+                                                f'<waf_bypass host="{_waf_host}"'
+                                            )
+                                        ]
+                                        self.state.conversation.append({
+                                            "role": "system",
+                                            "content": _waf_ctx,
+                                        })
+                                        logger.info(
+                                            "WAF detected on %s: %s (conf=%.0f%%)",
+                                            _waf_host, _merged.waf_name,
+                                            _merged.confidence * 100,
+                                        )
+                            except Exception as _waf_e:
+                                logger.debug("WAF detection error: %s", _waf_e)
 
                     if not success and self._consecutive_failures >= 3:
                         alt_suggestion = self._suggest_alternative_tool(
@@ -2934,304 +3557,6 @@ class AgentLoop(_ValidatorMixin, _FormatterMixin,
                 type="error", data={"message": f"Fatal Agent Error: {str(e)}"}
             )
             yield AgentEvent(type="done", data={})
-
-    # Max chars for a single tool result in conversation history.
-    # Scales down with context window size: 8% of num_ctx * 3 chars/token,
-    # floored at 3000 chars, ceiling at 15000 chars (~4K tokens).
-    # Smaller cap = fewer OOM crashes; full output always saved to file.
-    _MAX_TOOL_RESULT_CHARS: int = 15_000
-
-    def _inject_exploit_vuln_context(self) -> None:
-        """Inject a pinned vulnerability summary at the start of EXPLOIT phase.
-
-        Ensures the model has direct, unambiguous access to ALL confirmed
-        vulnerabilities from ANALYSIS — preventing loss of critical targets due
-        to context truncation. This message is prepended using the
-        protected_system bucket so it survives _enforce_char_budget().
-        """
-        if not self._session:
-            return
-
-        vulns = self._session.vulnerabilities or []
-        injection_pts = self._session.injection_points or []
-
-        if not vulns and not injection_pts:
-            logger.debug("No vulnerabilities or injection points to pin for EXPLOIT phase")
-            return
-
-        lines = ["[SYSTEM: EXPLOIT PHASE — CONFIRMED ATTACK SURFACE]",
-                 "Exploit each item below systematically. Do NOT re-discover — go straight to exploitation.\n"]
-
-        if vulns:
-            lines.append("## Confirmed Vulnerabilities:")
-            for i, v in enumerate(vulns[:25], 1):
-                title = v.get("title", "Unknown")
-                url = v.get("url") or v.get("evidence", "")
-                sev = v.get("severity", "")
-                param = v.get("parameter", "")
-                detail = f" (param: {param})" if param else ""
-                lines.append(f"  {i}. [{sev}] {title}{detail} — {url}")
-
-        if injection_pts:
-            lines.append("\n## Injection Points (test for SQLi/XSS/SSTI/SSRF):")
-            for j, ip in enumerate(injection_pts[:20], 1):
-                url = ip.get("url", "")
-                param = ip.get("parameter", "")
-                method = ip.get("method", "GET")
-                itype = ip.get("type_hint", "")
-                lines.append(f"  {j}. {method} {url} — param: {param} [{itype}]")
-
-        lines.append(
-            "\nPriority order: CRITICAL > HIGH > MEDIUM. "
-            "Confirm each exploit with proof-of-concept output showing actual impact."
-        )
-
-        vuln_ctx = "\n".join(lines)
-        self.state.conversation.append({
-            "role": "system",
-            "content": vuln_ctx,
-            "_bucket": "protected_system",
-        })
-        logger.info(
-            "EXPLOIT context pinned: %d vulns + %d injection points",
-            len(vulns), len(injection_pts),
-        )
-
-    def _compact_phase_context(self, from_phase: str) -> None:
-        """Compress raw tool results from a completed phase to free KV cache space.
-
-        When transitioning (e.g. RECON→ANALYSIS), the bulk of old raw tool
-        outputs (full nmap/subfinder/httpx dumps) is no longer needed verbatim.
-        We keep the last 15 messages intact and collapse old tool output to
-        short stubs, reclaiming tens of thousands of context tokens.
-
-        Findings (vulnerabilities, structured data) are never touched — they
-        live in session state (self._session), not as raw conversation messages.
-        """
-        msgs = self.state.conversation
-        keep_recent = 15
-        cutoff = max(0, len(msgs) - keep_recent)
-        compacted_tools = 0
-        compacted_thinking = 0
-        chars_freed = 0
-
-        for i, msg in enumerate(msgs[:cutoff]):
-            role = msg.get("role")
-            content = str(msg.get("content", ""))
-
-            if role == "tool" and len(content) > 400:
-                stub = content[:200].rstrip()
-                freed = len(content) - len(stub)
-                msg["content"] = (
-                    stub
-                    + f" ...[{from_phase} phase output compacted — {freed} chars freed]"
-                )
-                chars_freed += freed
-                compacted_tools += 1
-
-            elif role == "assistant" and msg.get("thinking"):
-                thinking_len = len(str(msg["thinking"]))
-                msg.pop("thinking", None)
-                chars_freed += thinking_len
-                compacted_thinking += 1
-
-        if compacted_tools or compacted_thinking:
-            logger.info(
-                "Phase transition compaction (%s→next): %d tool msgs, "
-                "%d thinking strips, ~%d chars freed",
-                from_phase, compacted_tools, compacted_thinking, chars_freed,
-            )
-
-    def _messages_for_ollama(self) -> list[dict[str, Any]]:
-        """Return a view of the conversation with thinking stripped from old messages.
-
-        Thinking traces from previous iterations are already encoded in their
-        corresponding content/tool_calls and provide no additional value when
-        replayed to Ollama — they only consume KV cache tokens.
-
-        Strategy: keep thinking only in the LAST assistant message (most recent turn).
-        This recovers 50-200K tokens in long sessions without losing any information.
-        _enforce_char_budget() handles the stateful strip when budget is exceeded;
-        this method handles the API-call view for every iteration.
-        """
-        msgs = self.state.conversation
-        last_assistant_idx = -1
-        for i, m in enumerate(msgs):
-            if m.get("role") == "assistant":
-                last_assistant_idx = i
-
-        if last_assistant_idx == -1:
-            return list(msgs)
-
-        result = []
-        for i, msg in enumerate(msgs):
-            if (
-                msg.get("role") == "assistant"
-                and i != last_assistant_idx
-                and msg.get("thinking")
-            ):
-                msg = {k: v for k, v in msg.items() if k != "thinking"}
-            result.append(msg)
-        return result
-
-    def _get_tool_result_cap(self) -> int:
-        """Return per-message tool result cap scaled to current context window."""
-        # CTF mode: hard cap at 1500 chars — each tool result must be tiny so
-        # the rolling conversation window can hold 15-20 results without overflow.
-        if self._ctf_mode:
-            return 1500
-        ctx = self._adaptive_num_ctx if self._adaptive_num_ctx > 0 else get_config().ollama_num_ctx
-        # 8% of estimated token budget in chars (1 token ≈ 3 chars)
-        # With 128K ctx: 128000 * 0.08 * 3 = ~30K → capped at 15K
-        cap = max(3_000, min(self._MAX_TOOL_RESULT_CHARS, int(ctx * 0.08 * 3)))
-        return cap
-
-    def _cap_tool_result(self, content: str) -> str:
-        """Truncate a large tool result before adding it to conversation.
-
-        Keeps the first 70 % and last 10 % of the content so that both the
-        command summary and the tail (often a final summary/stats line) are
-        preserved.  Cap scales down when VRAM-crash mode is active.
-        """
-        cap = self._get_tool_result_cap()
-        if len(content) <= cap:
-            return content
-        head = int(cap * 0.70)
-        tail = int(cap * 0.10)
-        omitted = len(content) - head - tail
-        return (
-            content[:head]
-            + f"\n... [{omitted} chars omitted — use read_file to see full output] ...\n"
-            + content[-tail:]
-        )
-
-    def _enforce_char_budget(
-        self, num_ctx: int, num_predict: int | None = None
-    ) -> None:
-        """Hard pre-call guard: compress conversation if total chars exceed token budget.
-
-        Runs before every Ollama call. Prevents OOM from large tool outputs
-        accumulating across iterations even after message-count truncation.
-
-        Ollama's num_ctx is the TOTAL KV cache for both input AND output tokens.
-        The effective input budget = num_ctx - num_predict. Using the full num_ctx
-        as the budget causes silent context truncation by Ollama when the input
-        exceeds (num_ctx - num_predict), stripping the system prompt and causing
-        hallucination. We subtract the output reservation to trigger compression
-        before Ollama does its own (destructive) truncation.
-
-        Budget = (num_ctx - num_predict) * 3 chars (1 token ≈ 3 chars).
-        At 128K ctx / 32K predict: (131072-32768)*3 = ~294K chars input budget.
-        """
-        cfg = get_config()
-        effective_predict = (
-            self._fit_num_predict_to_ctx(num_predict, num_ctx)
-            if num_predict is not None
-            else self._fit_num_predict_to_ctx(
-                getattr(cfg, "ollama_num_predict", 32768), num_ctx
-            )
-        )
-        # Reserve tokens for tool definitions sent in the API call.
-        # With 20 tools × ~250 tokens avg = ~5000 tokens not visible in
-        # conversation messages but counted by Ollama toward the KV cache.
-        _tools_count = len(self._tools_ollama) if self._tools_ollama is not None else 20
-        _tools_overhead = _tools_count * 250
-        effective_input_ctx = max(1024, num_ctx - effective_predict - _tools_overhead)
-        budget = effective_input_ctx * 3
-        total = sum(
-            len(str(m.get("content") or ""))
-            + len(str(m.get("tool_calls") or ""))
-            + len(str(m.get("thinking") or ""))   # thinking traces count toward budget
-            for m in self.state.conversation
-        )
-        if total <= budget:
-            return
-
-        logger.warning(
-            "Pre-call char budget exceeded: %d chars > %d budget (num_ctx=%d) — compressing",
-            total, budget, num_ctx,
-        )
-
-        # Pass 0: strip thinking from ALL assistant messages except the most recent 3.
-        # Thinking traces accumulate rapidly (1500+ tokens each) and are invisible to
-        # the old total calculation, silently overflowing the context window and causing
-        # Ollama to truncate the system prompt → hallucination / scope loss.
-        # The thinking is already captured in content/tool_calls — safe to drop from history.
-        assistant_indices = [
-            i for i, m in enumerate(self.state.conversation)
-            if m.get("role") == "assistant" and m.get("thinking")
-        ]
-        # Keep thinking only in the most recent 3 assistant turns
-        for idx in assistant_indices[:-3]:
-            thinking_len = len(str(self.state.conversation[idx].get("thinking", "")))
-            self.state.conversation[idx].pop("thinking", None)
-            total -= thinking_len
-            if total <= budget:
-                logger.info("Budget restored after thinking strip (%d msgs)", len(assistant_indices))
-                return
-
-        # Pass 1: compress tool/user messages over compress_cap chars.
-        # EXCEPTION: the first user message contains the original task/scope instruction
-        # (e.g. "pentest target.com"). Never compress it — trimming it causes scope loss
-        # and out-of-scope behavior on the next LLM call.
-        compress_cap = max(300, budget // max(1, len(self.state.conversation)))
-        first_user_seen = False
-        for msg in self.state.conversation:
-            role = msg.get("role")
-            if role == "user" and not first_user_seen:
-                first_user_seen = True
-                continue  # protect original task message
-            if role in ("tool", "user"):
-                content = str(msg.get("content", ""))
-                if len(content) > compress_cap:
-                    msg["content"] = content[:compress_cap] + f"...[hard-trimmed {len(content)} chars]"
-
-        # Recheck after pass 1
-        total = sum(
-            len(str(m.get("content") or ""))
-            + len(str(m.get("thinking") or ""))
-            for m in self.state.conversation
-        )
-        if total <= budget:
-            return
-
-        # Pass 2: drop oldest non-critical messages until we fit.
-        # CTF mode: drop aggressively to 8 messages — the agent needs a clean
-        # window more than it needs full history. Normal: drop to half.
-        _min_msgs = 8 if self._ctf_mode else 15
-        target_msgs = max(_min_msgs, len(self.state.conversation) // (3 if self._ctf_mode else 2))
-        self.state.truncate_conversation(max_messages=target_msgs)
-        logger.warning(
-            "Pre-call char budget: after truncation → %d messages",
-            len(self.state.conversation),
-        )
-
-    def _append_tool_result(
-        self,
-        tool_name: str,
-        content_str: str,
-        success: bool,
-        tool_call_id: str | None = None,
-    ) -> None:
-        cfg = get_config()
-        content_str = self._cap_tool_result(content_str)
-        if cfg.tool_response_role.lower() == "tool":
-            tool_msg: dict[str, Any] = {
-                "role": "tool",
-                "name": tool_name,
-                "content": content_str,
-            }
-            if tool_call_id:
-                tool_msg["tool_call_id"] = tool_call_id
-            self.state.conversation.append(tool_msg)
-        else:
-            status = "successfully" if success else "with errors"
-            self.state.conversation.append(
-                {
-                    "role": "user",
-                    "content": f"[SYSTEM: Tool '{tool_name}' executed {status}]\nOutput:\n{content_str}",
-                }
-            )
 
     # URL-extracting regex for _record_tested_endpoint
     _URL_RE = re.compile(r"https?://[^\s\"']+", re.IGNORECASE)
@@ -3527,1233 +3852,6 @@ class AgentLoop(_ValidatorMixin, _FormatterMixin,
         # Generic fallback
         return "Try using a completely different tool. Run 'which <tool>' to verify availability."
 
-    @staticmethod
-    def _cfg_bool(cfg: Any, key: str, default: bool) -> bool:
-        try:
-            val = getattr(cfg, key, default)
-            if isinstance(val, bool):
-                return val
-            if isinstance(val, str):
-                return val.lower() in ("1", "true", "yes", "on")
-            return bool(val)
-        except Exception:
-            return default
-
-    @staticmethod
-    def _cfg_int(cfg: Any, key: str, default: int) -> int:
-        try:
-            return int(getattr(cfg, key, default))
-        except Exception:
-            return default
-
-    @staticmethod
-    def _cfg_float(cfg: Any, key: str, default: float) -> float:
-        try:
-            return float(getattr(cfg, key, default))
-        except Exception:
-            return default
-
-    @staticmethod
-    def _fit_num_predict_to_ctx(num_predict: int, num_ctx: int) -> int:
-        """Clamp output reservation to fit inside the active context window.
-
-        Ensures we always keep meaningful prompt/input space and avoids
-        pathological settings (e.g. num_predict ~= num_ctx) that trigger
-        aggressive truncation and unstable model behavior.
-        """
-        _ctx = max(1024, int(num_ctx))
-        _requested = max(256, int(num_predict))
-        _prompt_reserve = 1024 if _ctx >= 4096 else max(256, _ctx // 4)
-        _max_by_prompt = max(256, _ctx - _prompt_reserve)
-        _max_by_ratio = max(512, int(_ctx * 0.40))
-        return max(256, min(_requested, _max_by_prompt, _max_by_ratio))
-
-    def _get_iteration_num_predict(
-        self, cfg: Any, current_phase: Any, num_ctx: int
-    ) -> int:
-        """Compute the real num_predict used this iteration.
-
-        Combines phase/tool adaptivity, crash-time cap, and context-fit guardrails.
-        """
-        _phase_name = current_phase.value if current_phase else "RECON"
-        _requested = self._get_adaptive_num_predict(cfg, _phase_name)
-        if self._adaptive_num_predict_cap > 0:
-            _requested = min(_requested, self._adaptive_num_predict_cap)
-        return self._fit_num_predict_to_ctx(_requested, num_ctx)
-
-    # Tools that need minimal reasoning — reduce token budget to speed up iteration.
-    _SHALLOW_TOOLS: frozenset[str] = frozenset({
-        "list_files", "read_file", "create_file", "get_console_logs",
-        "get_network_logs", "view_source", "caido_list_requests",
-    })
-    # Tools / phases that need maximum reasoning depth.
-    _DEEP_TOOLS: frozenset[str] = frozenset({
-        "advanced_fuzz", "deep_fuzz", "schemathesis_fuzz",
-        "spawn_agent", "create_vulnerability_report", "code_analysis",
-    })
-
-    def _should_use_thinking(
-        self, cfg: Any, current_phase: Any
-    ) -> bool:
-        """Decide whether to enable thinking for this iteration.
-
-        Thinking is expensive: ~1500 tokens and 1-3s overhead per iteration.
-        It's only needed when the model must reason deeply — not for routine
-        RECON tool calls like 'run subfinder'.
-
-        Rules:
-        - Always OFF if model/config disables it globally.
-        - Always ON in ANALYSIS and EXPLOIT (complex reasoning required).
-        - Always ON during stagnation, recovery, or repeated failures.
-        - Always ON for deep tools (advanced_fuzz, spawn_agent, etc.).
-        - RECON / REPORT routine iterations: OFF after iter 8 to save tokens.
-        """
-        if not (
-            self._cfg_bool(cfg, "ollama_enable_thinking", True)
-            and self.ollama.supports_thinking
-        ):
-            return False
-
-        stagnation_threshold = self._cfg_int(cfg, "agent_stagnation_threshold", 2)
-        _is_struggling = (
-            self._stagnation_iterations >= stagnation_threshold
-            or self._recovery_force_tool_calls > 0
-            or self._consecutive_failures >= 2
-            or self._no_tool_iterations >= 1
-            or self._watchdog_forced_calls > 0
-        )
-
-        # CTF mode: thinking is expensive VRAM-wise on 122B models.
-        # Only think when genuinely stuck or at periodic checkpoints (every 5 iter).
-        # Routine CTF iterations (curl, read, enumerate) do not need deep reasoning.
-        if self._ctf_mode:
-            if _is_struggling:
-                return True
-            last_tool = self._recent_tool_names[-1] if self._recent_tool_names else ""
-            if last_tool in self._DEEP_TOOLS:
-                return True
-            # Periodic thinking every 5 iterations to reassess strategy
-            return self.state.iteration % 5 == 0
-
-        # Normal mode: always think for ANALYSIS and EXPLOIT
-        from airecon.proxy.agent.pipeline import (
-            PipelinePhase,  # local import to avoid cycle
-        )
-        if current_phase and current_phase in (
-            PipelinePhase.ANALYSIS, PipelinePhase.EXPLOIT
-        ):
-            return True
-
-        # Always think when struggling or in recovery
-        if _is_struggling:
-            return True
-
-        # Always think for deep tools
-        last_tool = self._recent_tool_names[-1] if self._recent_tool_names else ""
-        if last_tool in self._DEEP_TOOLS:
-            return True
-
-        # RECON / REPORT: disable thinking after warm-up (iter > 8)
-        # to save tokens per iteration on routine tool calls.
-        if self.state.iteration > 8:
-            return False
-
-        return True
-
-    def _get_adaptive_num_predict(self, cfg: Any, phase: str) -> int:
-        """Return an adaptive num_predict based on phase complexity and last tool.
-
-        SHALLOW (fast iteration):  4 096 tokens   — file ops, listing, log reads
-        MEDIUM  (default):         8 192 tokens   — recon, analysis tasks
-        DEEP    (max reasoning):  16 384 tokens   — exploit dev, reporting, stagnation
-        CTF mode caps at 8 192 to prevent thinking-block VRAM explosion.
-        """
-        base = self._cfg_int(cfg, "ollama_num_predict", 32768)
-        last_tool = self._recent_tool_names[-1] if self._recent_tool_names else ""
-        stagnation_threshold = self._cfg_int(cfg, "agent_stagnation_threshold", 2)
-
-        # CTF mode: cap tightly — each iteration must be fast and lean.
-        # Large thinking blocks in EXPLOIT phase are the primary VRAM killer.
-        if self._ctf_mode:
-            if (
-                self._stagnation_iterations >= stagnation_threshold
-                or self._consecutive_failures >= 2
-            ):
-                return min(base, 8192)   # deep think only when truly stuck
-            return min(base, 4096)       # routine CTF iteration: minimal budget
-
-        # Normal mode: tiered budget
-        if (
-            self._stagnation_iterations >= stagnation_threshold
-            or phase in ("EXPLOIT", "REPORT")
-            or last_tool in self._DEEP_TOOLS
-        ):
-            return min(base, 16384)   # deep — capped to prevent VRAM OOM
-
-        if last_tool in self._SHALLOW_TOOLS:
-            return min(base, 4096)    # shallow: fast
-
-        # ANALYSIS or RECON with non-trivial tools — medium budget
-        return min(base, 8192)
-
-    def _get_iteration_temperature(self, cfg: Any) -> float:
-        base_temp = self._cfg_float(cfg, "ollama_temperature", 0.15)
-        if not self._cfg_bool(cfg, "agent_exploration_mode", True):
-            return base_temp
-        exploration_temp = self._cfg_float(
-            cfg, "agent_exploration_temperature", 0.35
-        )
-        stagnation_threshold = self._cfg_int(cfg, "agent_stagnation_threshold", 2)
-        if (
-            self._stagnation_iterations >= stagnation_threshold
-            or self._consecutive_failures >= 2
-            or self._no_tool_iterations >= 1
-        ):
-            return max(base_temp, exploration_temp)
-        return base_temp
-
-    def _track_tool_usage(
-        self, tool_name: str, arguments: dict | None = None
-    ) -> None:
-        # In CTF mode, track command-level diversity for execute tools.
-        # All shell commands go through the "execute" tool, so tracking only
-        # tool_name gives same_tool_streak=always-high even when the agent is
-        # genuinely using curl, python3, for-loops, sqlmap, etc.
-        # We use the primary binary name (first token after `cd ... &&`) as the
-        # diversity unit so the exploration directive only fires when the agent
-        # truly repeats the same binary — not just `execute`.
-        track_as = tool_name
-        if self._ctf_mode and tool_name == "execute" and arguments:
-            cmd = str(arguments.get("command", "")).strip()
-            # Strip common `cd /workspace/... &&` prefix
-            _ws_prefix = re.sub(r"^cd\s+\S+\s*&&\s*", "", cmd).strip()
-            # First token of the remaining command = binary name
-            _binary = _ws_prefix.split()[0] if _ws_prefix else ""
-            # Normalise shell built-ins and generic wrappers to "execute"
-            if _binary and _binary not in ("cd", "echo", "export", "source", ".", "for", "while", "if"):
-                track_as = _binary
-        self._recent_tool_names.append(track_as)
-        cfg = get_config()
-        window = max(3, self._cfg_int(cfg, "agent_tool_diversity_window", 8))
-        if len(self._recent_tool_names) > window:
-            self._recent_tool_names = self._recent_tool_names[-window:]
-
-    def _get_same_tool_streak(self) -> int:
-        if not self._recent_tool_names:
-            return 0
-        streak = 1
-        last = self._recent_tool_names[-1]
-        for tn in reversed(self._recent_tool_names[:-1]):
-            if tn != last:
-                break
-            streak += 1
-        return streak
-
-    def _refresh_exploration_state(self) -> None:
-        # Count only meaningful evidence to avoid execute-command traces
-        # (confidence=0.55) masking true stagnation. Stagnation resets only
-        # when real security findings (CVEs, URLs, signals, artifacts) appear.
-        meaningful_now = sum(
-            1 for e in self.state.evidence_log
-            if e.get("confidence", 0) >= _MEANINGFUL_EVIDENCE_THRESHOLD
-        )
-        if meaningful_now > self._last_evidence_count:
-            self._stagnation_iterations = 0
-        else:
-            self._stagnation_iterations += 1
-        self._last_evidence_count = meaningful_now
-
-    def _build_exploration_directive(self, phase: PipelinePhase) -> str:
-        cfg = get_config()
-        if not self._cfg_bool(cfg, "agent_exploration_mode", True):
-            return ""
-
-        intensity = self._cfg_float(cfg, "agent_exploration_intensity", 0.8)
-        stagnation_threshold = self._cfg_int(cfg, "agent_stagnation_threshold", 2)
-        max_same_streak = self._cfg_int(cfg, "agent_max_same_tool_streak", 3)
-        same_tool_streak = self._get_same_tool_streak()
-        window = max(3, self._cfg_int(cfg, "agent_tool_diversity_window", 8))
-        recent = self._recent_tool_names[-window:]
-        unique_recent = len(set(recent)) if recent else 0
-
-        should_push = (
-            self._stagnation_iterations >= stagnation_threshold
-            or self._consecutive_failures >= 2
-            or self._no_tool_iterations >= 1
-            or same_tool_streak >= max_same_streak
-        )
-        if not should_push:
-            return ""
-
-        tactic_map: dict[PipelinePhase, list[str]] = {
-            PipelinePhase.RECON: [
-                "Never scan a host that hasn't been validated alive first — validate before any active enumeration.",
-                "Breadth-first: map the full attack surface before going deep on any single target.",
-                "Switch discovery families when stalled: passive OSINT → active probing → content discovery → parameter mining.",
-                "If tool output isn't advancing coverage, write a custom script in tools/ to correlate or extract from existing artifacts.",
-                "No passive intelligence yet? Use search with dork operators to find exposed configs, forgotten endpoints, and certificate subdomains.",
-                "No proxy data yet? Set scope and route traffic through proxy capture before active scanning.",
-                "Check archived sources (certificate logs, web archives) for subdomains and endpoints not in current DNS.",
-            ],
-            PipelinePhase.ANALYSIS: [
-                "Mutate parameters aggressively (encoding, type confusion, boundary values).",
-                "Correlate endpoints, auth flows, and object IDs for privilege escalation paths.",
-                "Generate at least one non-obvious hypothesis and test it immediately.",
-                "If testing requires many variants (IDs/roles/auth states), write a script to automate and log all results.",
-                "Source code or repository accessible? Run static analysis now — finds injection sinks and hardcoded secrets faster than manual testing.",
-                "Run parameter discovery on ALL confirmed endpoints — hidden params are the most commonly missed attack surface.",
-                "Mine proxy HTTP history for undocumented endpoints, auth token patterns, and IDOR candidates.",
-            ],
-            PipelinePhase.EXPLOIT: [
-                "Rotate payload families every failed attempt — change the attack class, not just the payload.",
-                "Prefer impact proof over scanner output: state change, data access, or privilege gain.",
-                "Chain medium findings into one higher-impact attack path.",
-                "When exploitation is multi-step, write a PoC script in tools/ instead of manual repetition.",
-                "JavaScript-heavy target? Switch to browser automation for DOM-based attacks, OAuth flows, and client-side logic.",
-                "High-value complex finding? Spawn a specialist subagent for focused iterations instead of diluting the main session.",
-            ],
-            PipelinePhase.REPORT: [
-                "Convert strongest evidence into reproducible PoC steps with exact inputs.",
-                "Document what failed and why to avoid false positives.",
-            ],
-            PipelinePhase.COMPLETE: [],
-        }
-        tactics = tactic_map.get(phase, [])[:5]
-        if not tactics:
-            return ""
-
-        pressure = "HIGH" if intensity >= 0.75 else "MEDIUM"
-        lines = [
-            f"[SYSTEM: AGGRESSIVE EXPLORATION MODE — {pressure}]",
-            f"Phase={phase.value} | stagnation={self._stagnation_iterations} | "
-            f"same_tool_streak={same_tool_streak} | diversity={unique_recent}/{max(1, len(recent))}",
-            "You must avoid rigid repetitive behavior. Execute a novel, high-value next action now.",
-            "Exploration tactics:",
-        ]
-        for tactic in tactics:
-            lines.append(f"- {tactic}")
-
-        if same_tool_streak >= max_same_streak:
-            lines.append(
-                "[Suggestion]: Consider switching to a different tool family to break the current pattern."
-            )
-        if self._no_tool_iterations >= 1:
-            lines.append("MANDATORY: reply with tool_call, not planning text.")
-
-        lines.append(
-            "Keep tests in-scope and non-destructive unless explicitly authorized."
-        )
-        return "\n".join(lines)
-
-    def _get_current_phase(self) -> PipelinePhase:
-        if self.pipeline:
-            return self.pipeline.get_current_phase()
-        return PipelinePhase.RECON
-
-    def _sync_phase_objectives(self, phase: PipelinePhase) -> None:
-        defaults = self._PHASE_OBJECTIVES.get(phase.value, [])
-        self.state.ensure_phase_objectives(phase.value, defaults)
-
-    def _update_objectives_from_session(self, phase: PipelinePhase) -> None:
-        if not self._session:
-            return
-        defaults = self._PHASE_OBJECTIVES.get(phase.value, [])
-        if len(defaults) < 3:
-            return
-
-        s = self._session
-        if phase == PipelinePhase.RECON:
-            # defaults[0] = enumerate subdomains/hosts
-            if s.subdomains or s.live_hosts:
-                self.state.mark_objective(phase.value, defaults[0], "done")
-            # defaults[1] = filter to LIVE hosts (httpx/dnsx ran and populated live_hosts)
-            if s.live_hosts and len(defaults) > 1:
-                self.state.mark_objective(phase.value, defaults[1], "done")
-            # defaults[2] = port scan live hosts
-            if s.open_ports and len(defaults) > 2:
-                self.state.mark_objective(phase.value, defaults[2], "done")
-            # defaults[3] = discover directories/URLs on live hosts
-            if s.urls and len(defaults) > 3:
-                self.state.mark_objective(phase.value, defaults[3], "done")
-            # defaults[4] = persist recon artifacts
-            if s.scan_count >= 3 and len(defaults) > 4:
-                self.state.mark_objective(phase.value, defaults[4], "done")
-        elif phase == PipelinePhase.ANALYSIS:
-            if s.technologies or s.urls:
-                self.state.mark_objective(phase.value, defaults[0], "done")
-            if s.injection_points:
-                self.state.mark_objective(phase.value, defaults[1], "done")
-            if s.vulnerabilities or len(self.state.evidence_log) >= 3:
-                self.state.mark_objective(phase.value, defaults[2], "done")
-        elif phase == PipelinePhase.EXPLOIT:
-            if s.vulnerabilities:
-                self.state.mark_objective(phase.value, defaults[0], "done")
-            if any(
-                v.get("proof") or v.get("evidence") or v.get("poc_script_code")
-                for v in s.vulnerabilities
-            ):
-                self.state.mark_objective(phase.value, defaults[1], "done")
-            if self._consecutive_failures <= 1 and self.state.tool_counts.get("total", 0) >= 3:
-                self.state.mark_objective(phase.value, defaults[2], "done")
-        elif phase == PipelinePhase.REPORT:
-            if any(v.get("report_generated") for v in s.vulnerabilities):
-                self.state.mark_objective(phase.value, defaults[0], "done")
-            if s.vulnerabilities:
-                self.state.mark_objective(phase.value, defaults[1], "done")
-            if "REPORT" in s.completed_phases:
-                self.state.mark_objective(phase.value, defaults[2], "done")
-
-    def _update_objectives_from_tool(
-        self,
-        phase: PipelinePhase,
-        tool_name: str,
-        arguments: dict[str, Any],
-        success: bool,
-        result: dict[str, Any],
-        output_file: str | None,
-    ) -> None:
-        if not success:
-            return
-        defaults = self._PHASE_OBJECTIVES.get(phase.value, [])
-        if len(defaults) < 3:
-            return
-
-        cmd = ""
-        if tool_name == "execute":
-            cmd = str(arguments.get("command", "")).lower()
-
-        if phase == PipelinePhase.RECON:
-            if tool_name in ("execute", "web_search", "browser_action"):
-                self.state.mark_objective(phase.value, defaults[0], "done")
-            if cmd and any(b in cmd for b in _RECON_PORT_SCAN_BINS):
-                self.state.mark_objective(phase.value, defaults[1], "done")
-            if output_file and output_file.startswith("output/"):
-                self.state.mark_objective(phase.value, defaults[2], "done")
-
-        elif phase == PipelinePhase.ANALYSIS:
-            if tool_name in ("execute", "read_file", "browser_action", "web_search"):
-                self.state.mark_objective(phase.value, defaults[0], "done")
-            if cmd and any(hint in cmd for hint in _ANALYSIS_VULN_TOOLS):
-                self.state.mark_objective(phase.value, defaults[1], "done")
-            if self.state.evidence_log:
-                self.state.mark_objective(phase.value, defaults[2], "done")
-
-        elif phase == PipelinePhase.EXPLOIT:
-            if tool_name in self._EXPLOIT_HEAVY_TOOLS or tool_name == "execute":
-                self.state.mark_objective(phase.value, defaults[0], "done")
-            if output_file or re.search(
-                r"(FLAG\{[^}\n]+\}|CVE-\d{4}-\d+)",
-                self._extract_result_text(result),
-                re.IGNORECASE,
-            ):
-                self.state.mark_objective(phase.value, defaults[1], "done")
-            if self._consecutive_failures <= 1:
-                self.state.mark_objective(phase.value, defaults[2], "done")
-
-        elif phase == PipelinePhase.REPORT:
-            result_text = self._extract_result_text(result)
-            _is_report_tool = tool_name == "create_vulnerability_report"
-            _has_report_content = bool(re.search(
-                r"\b(vulnerability report|executive summary|CVSS|severity[:\s]|"
-                r"remediation|proof.of.concept|PoC|report generated|report written|"
-                r"risk rating|findings? documented)\b",
-                result_text,
-                re.IGNORECASE,
-            ))
-            _is_report_output = bool(
-                output_file
-                and re.search(r"report|finding|vuln", output_file, re.IGNORECASE)
-            )
-            if _is_report_tool or _has_report_content or _is_report_output:
-                self.state.mark_objective(phase.value, defaults[0], "done")
-                self.state.mark_objective(phase.value, defaults[1], "done")
-            if output_file and output_file.startswith("output/"):
-                self.state.mark_objective(phase.value, defaults[2], "done")
-
-    def _extract_result_text(self, result: dict[str, Any] | Any) -> str:
-        if result is None:
-            return ""
-        if isinstance(result, str):
-            return result
-        if not isinstance(result, dict):
-            return str(result)
-
-        parts: list[str] = []
-        for key in (
-            "stdout", "stderr", "result", "summary", "error", "message",
-            "note", "findings",
-        ):
-            value = result.get(key)
-            if isinstance(value, str):
-                parts.append(value)
-            elif isinstance(value, list):
-                list_lines = [str(x) for x in value[:8]]
-                if list_lines:
-                    parts.append("\n".join(list_lines))
-            elif isinstance(value, dict):
-                for sub_key in ("summary", "result", "error", "message", "note"):
-                    sub_val = value.get(sub_key)
-                    if isinstance(sub_val, str):
-                        parts.append(sub_val)
-        merged = "\n".join(p for p in parts if p).strip()
-        return merged[:7000]
-
-    def _enrich_evidence(
-        self,
-        summary: str,
-        base_tags: list[str],
-        confidence: float,
-        tool_name: str,
-    ) -> tuple[list[str], int]:
-        """Auto-classify OWASP categories and compute severity for an evidence entry."""
-        owasp_tags = classify_owasp(summary, base_tags, tool_name)
-        enriched_tags = list(dict.fromkeys(base_tags + owasp_tags))
-        sev = severity_for_evidence(summary, enriched_tags, confidence, tool_name)
-        return enriched_tags, sev
-
-    def _record_evidence_from_result(
-        self,
-        phase: str,
-        tool_name: str,
-        arguments: dict[str, Any],
-        result: dict[str, Any],
-        success: bool,
-        output_file: str | None,
-    ) -> None:
-        if output_file:
-            _t, _s = self._enrich_evidence(f"Artifact saved to {output_file}", ["artifact", "file"], 0.9, tool_name)
-            self.state.add_evidence(
-                phase=phase,
-                source_tool=tool_name,
-                summary=f"Artifact saved to {output_file}",
-                confidence=0.9,
-                artifact=output_file,
-                tags=_t,
-                severity=_s,
-            )
-
-        blob = self._extract_result_text(result)
-        if not blob:
-            return
-
-        if not success:
-            err = str(result.get("error", "")).strip() if isinstance(result, dict) else ""
-            if err:
-                _summary = f"Execution error observed: {err[:240]}"
-                _t, _s = self._enrich_evidence(_summary, ["error"], 0.4, tool_name)
-                self.state.add_evidence(
-                    phase=phase,
-                    source_tool=tool_name,
-                    summary=_summary,
-                    confidence=0.4,
-                    tags=_t,
-                    severity=_s,
-                )
-            return
-
-        for flag in re.findall(r"(?:FLAG|flag)\{[^}\n]{1,200}\}", blob):
-            _summary = f"Flag pattern captured: {flag}"
-            _t, _s = self._enrich_evidence(_summary, ["flag", "ctf"], 1.0, tool_name)
-            self.state.add_evidence(
-                phase=phase,
-                source_tool=tool_name,
-                summary=_summary,
-                confidence=1.0,
-                tags=_t,
-                severity=_s,
-            )
-
-        for cve in re.findall(r"CVE-\d{4}-\d{4,7}", blob, re.IGNORECASE):
-            _summary = f"CVE reference discovered: {cve.upper()}"
-            _t, _s = self._enrich_evidence(_summary, ["cve", "vulnerability"], 0.75, tool_name)
-            self.state.add_evidence(
-                phase=phase,
-                source_tool=tool_name,
-                summary=_summary,
-                confidence=0.75,
-                tags=_t,
-                severity=_s,
-            )
-
-        url_matches = list(
-            dict.fromkeys(
-                re.findall(r"https?://[^\s\"'<>]+", blob, re.IGNORECASE)
-            )
-        )
-        for url in url_matches[:4]:
-            _summary = f"Interesting URL collected: {url}"
-            _t, _s = self._enrich_evidence(_summary, ["url", "endpoint"], 0.65, tool_name)
-            self.state.add_evidence(
-                phase=phase,
-                source_tool=tool_name,
-                summary=_summary,
-                confidence=0.65,
-                tags=_t,
-                severity=_s,
-            )
-
-        port_hits = list(
-            dict.fromkeys(
-                re.findall(
-                    r"\b\d{1,5}/(?:tcp|udp)\b|\b(?:\d{1,3}\.){3}\d{1,3}:\d{1,5}\b",
-                    blob,
-                    re.IGNORECASE,
-                )
-            )
-        )
-        for hit in port_hits[:4]:
-            _summary = f"Service/port evidence: {hit}"
-            _t, _s = self._enrich_evidence(_summary, ["network", "recon"], 0.7, tool_name)
-            self.state.add_evidence(
-                phase=phase,
-                source_tool=tool_name,
-                summary=_summary,
-                confidence=0.7,
-                tags=_t,
-                severity=_s,
-            )
-
-        high_signal_lines = []
-        signal_re = re.compile(
-            r"(?i)(vulnerab|injection|xss|sqli|idor|ssrf|rce|auth bypass|token|secret|credential)"
-        )
-        for line in blob.splitlines():
-            line = line.strip()
-            if not line or len(line) < 12:
-                continue
-            if signal_re.search(line):
-                high_signal_lines.append(line[:260])
-            if len(high_signal_lines) >= 3:
-                break
-        for line in high_signal_lines:
-            _summary = f"Security signal: {line}"
-            _t, _s = self._enrich_evidence(_summary, ["signal"], 0.7, tool_name)
-            self.state.add_evidence(
-                phase=phase,
-                source_tool=tool_name,
-                summary=_summary,
-                confidence=0.7,
-                tags=_t,
-                severity=_s,
-            )
-
-        if tool_name == "execute":
-            cmd = str(arguments.get("command", "")).strip()
-            if cmd:
-                _summary = f"Executed command: {cmd[:220]}"
-                _t, _s = self._enrich_evidence(_summary, ["execution", "trace"], 0.55, tool_name)
-                self.state.add_evidence(
-                    phase=phase,
-                    source_tool=tool_name,
-                    summary=_summary,
-                    confidence=0.55,
-                    tags=_t,
-                    severity=_s,
-                )
-
-    def _build_phase_gate_note(self, tool_name: str, success: bool) -> str:
-        phase = self._get_current_phase()
-        phase_name = phase.value
-        phase_evidence = [
-            e for e in self.state.evidence_log
-            if str(e.get("phase", "")).upper() == phase_name
-        ]
-        cfg = get_config()
-        explore_mode = self._cfg_bool(cfg, "agent_exploration_mode", True)
-        intensity = self._cfg_float(cfg, "agent_exploration_intensity", 0.8)
-        min_required_evidence = 1 if explore_mode and intensity >= 0.7 else 2
-
-        if (
-            phase in (PipelinePhase.RECON, PipelinePhase.ANALYSIS)
-            and tool_name in self._EXPLOIT_HEAVY_TOOLS
-            and len(phase_evidence) < min_required_evidence
-        ):
-            return (
-                f"[SYSTEM: PHASE GATE]\n"
-                f"You used exploit-heavy tool '{tool_name}' while phase is {phase_name} "
-                "with insufficient evidence.\n"
-                "Before further exploitation, collect stronger artifacts first "
-                "(live hosts, open ports, endpoints, injection points)."
-            )
-
-        if (
-            phase == PipelinePhase.EXPLOIT
-            and not success
-            and self._consecutive_failures >= 2
-        ):
-            return (
-                "[SYSTEM: PHASE GATE]\n"
-                "Exploit attempts are failing repeatedly. Pivot strategy now:\n"
-                "- Switch tool family (web -> network, or network -> browser)\n"
-                "- Use evidence_log to choose a different vector\n"
-                "- Avoid repeating same payload/command."
-            )
-        return ""
-
-    def _check_tool_budget(self, tool_name: str, phase: str) -> str:
-        """Return a soft budget warning if this tool is over/near its phase limit.
-
-        Uses _PHASE_TOOL_BUDGETS from pipeline.py. Returns empty string when no
-        constraint exists or budget is not yet reached. Never blocks execution.
-        """
-        budget = _PHASE_TOOL_BUDGETS.get(phase, {}).get(tool_name)
-        if budget is None:
-            return ""
-        usage = self.state.get_phase_tool_count(phase, tool_name)
-        if budget == 0 and usage >= 1:
-            return (
-                f"[TOOL BUDGET] '{tool_name}' is not recommended in {phase} phase "
-                f"(used {usage}×). Switch to a phase-appropriate tool."
-            )
-        if usage >= budget:
-            return (
-                f"[TOOL BUDGET] '{tool_name}' has exhausted its {phase} phase budget "
-                f"({usage}/{budget}). Switch approach or tool family."
-            )
-        if budget > 0 and usage >= int(budget * 0.75):
-            return (
-                f"[TOOL BUDGET] '{tool_name}' is at {usage}/{budget} of {phase} budget. "
-                "Plan remaining calls carefully."
-            )
-        return ""
-
-    def _extract_shell_command_candidate(
-        self,
-        content_acc: str,
-        thinking_acc: str = "",
-    ) -> str | None:
-        """Extract a safe shell command from hallucinated text/code blocks."""
-        def _safe(cmd: str) -> str | None:
-            cleaned = cmd.strip().lstrip("$").strip()
-            if not cleaned:
-                return None
-            # Multi-line scripts (from ```bash blocks) can be legitimately long.
-            # Allow up to 8000 chars; single-line commands rarely exceed 2000.
-            if len(cleaned) > 8000:
-                return None
-            has_danger, _ = has_dangerous_patterns(cleaned)
-            if has_danger:
-                return None
-            return cleaned
-
-        for block in self._FAKE_CMD_BLOCK_RE.findall(content_acc):
-            if not block:
-                continue
-            lines = [ln.strip() for ln in block.splitlines() if ln.strip()]
-            if not lines:
-                continue
-
-            # Collect ALL lines from the block once the first valid command is
-            # found.  Earlier behaviour broke after the first non-continuation
-            # line, so a multi-line script like:
-            #   echo "Test 1"
-            #   curl -s -k "https://…/users/1"
-            #   echo "Test 2"
-            #   curl -s -k "https://…/users/2"
-            # would be truncated to only the first curl.  Now we keep every
-            # line from the first matched prefix onward, preserving the full
-            # script so the watchdog can execute it intact.
-            picked: list[str] = []
-            found_first = False
-            for line in lines:
-                if line.startswith("#"):
-                    continue
-                line = line.lstrip("-*0123456789. ").strip()
-                if not found_first:
-                    if not _WATCHDOG_COMMAND_PREFIX_RE.match(line.lstrip("$")):
-                        continue
-                    found_first = True
-                picked.append(line.rstrip("\\").strip())
-
-            if picked:
-                # Join as a newline-separated script so bash executes every
-                # command in order (not space-joined into one broken line).
-                candidate = "\n".join(p for p in picked if p)
-                safe = _safe(candidate)
-                if safe:
-                    return safe
-
-        # Scan raw text lines — content first, then thinking block.
-        # qwen3 thinking blocks often contain the intended command wrapped in
-        # backticks (e.g. `nmap -sV target`) or after a colon ("Run: nmap ...").
-        # Strip those wrappers before matching.
-        _backtick_re = re.compile(r"`([^`]+)`")
-        _run_prefix_re = re.compile(
-            r"(?:run|execute|use|call|try|invoke)\s*:?\s*(.+)", re.IGNORECASE
-        )
-        for raw_line in (content_acc + "\n" + thinking_acc).splitlines():
-            line = raw_line.strip().lstrip("-*0123456789. ").strip()
-            if not line:
-                continue
-
-            # Try stripping backtick wrapping first
-            bt_match = _backtick_re.search(line)
-            candidates = [bt_match.group(1).strip()] if bt_match else []
-            # Try stripping "Run: ..." prefix
-            rp_match = _run_prefix_re.match(line)
-            if rp_match:
-                candidates.append(rp_match.group(1).strip().lstrip("`").rstrip("`").strip())
-            # Raw line as fallback
-            candidates.append(line.lstrip("$").strip())
-
-            for candidate_line in candidates:
-                if _WATCHDOG_COMMAND_PREFIX_RE.match(candidate_line):
-                    safe = _safe(candidate_line)
-                    if safe:
-                        return safe
-
-        return None
-
-    def _reflector_infer_tool_hint(self, content_lower: str) -> str:
-        """Return a tool call hint derived from the LLM's own text and the
-        known tool registry — never hardcodes specific tool names or commands.
-
-        Strategy (in order):
-        1. Scan known tool names from _tools_ollama and return the first one
-           mentioned in the LLM's text as a generic call stub.
-        2. Fall back to a phase-agnostic generic stub so the LLM knows the
-           expected call format without being steered toward a specific tool.
-        """
-        if self._tools_ollama:
-            for tool_def in self._tools_ollama:
-                name = str(tool_def.get("function", {}).get("name", ""))
-                if name and name.lower() in content_lower:
-                    return f"{name}({{...}})"
-        return 'execute({"command": "<command>"})'
-
-    _OBJECTIVE_PATCH_RE = re.compile(
-        r"<objective_patch[^>]*>(.*?)</objective_patch>",
-        re.DOTALL | re.IGNORECASE,
-    )
-
-    def _apply_objective_patch(
-        self, content: str, current_phase: "PipelinePhase"
-    ) -> int:
-        """Parse <objective_patch>[...]</objective_patch> from LLM response text
-        and apply delta ops to objective_queue via patch_objectives().
-
-        The LLM emits this block to add, remove, modify, or reorder objectives
-        mid-session without triggering a full regeneration.  The block is parsed
-        and stripped from content *before* add_message() so conversation history
-        stays clean.
-
-        Returns the number of changes applied (0 if no valid block found).
-        """
-        match = self._OBJECTIVE_PATCH_RE.search(content)
-        if not match:
-            return 0
-        raw = match.group(1).strip()
-        try:
-            ops = json.loads(raw)
-        except (json.JSONDecodeError, ValueError) as e:
-            logger.debug("objective_patch JSON parse error: %s", e)
-            return 0
-        if not isinstance(ops, list):
-            ops = [ops]
-        # Default phase to current if the LLM omitted it
-        for op in ops:
-            if isinstance(op, dict) and not op.get("phase"):
-                op["phase"] = current_phase.value
-        changed = self.state.patch_objectives(ops)
-        if changed:
-            logger.info(
-                "Objective patch applied: %d change(s) (phase=%s)",
-                changed,
-                current_phase.value,
-            )
-        return changed
-
-
-    def _build_reflector_message(
-        self,
-        content_acc: str,
-        attempt: int,
-        phase: PipelinePhase,
-    ) -> str:
-        """Build a targeted XML-structured correction for text-only LLM responses.
-
-        Two escalation levels before watchdog takes over:
-          attempt=1 — gentle reminder with a specific tool suggestion
-          attempt=2 — firm warning, explicit format requirement
-        Inspired by PentAGI's Reflector agent pattern.
-        """
-        phase_str = phase.value
-        content_lower = content_acc.lower()
-
-        # Dynamically infer tool hint from LLM text + known tool registry.
-        # No hardcoded tool names — source of truth is _tools_ollama (data/tools.json).
-        tool_hint = self._reflector_infer_tool_hint(content_lower)
-
-        if attempt == 1:
-            issue = "You responded with analysis text but did not call any tool."
-            action = (
-                f"Call a tool NOW to continue the assessment. "
-                f"Based on your analysis, try: {tool_hint}"
-            )
-        else:
-            issue = (
-                f"REFLECTOR (attempt {attempt}): Text-only response received again. "
-                "No tool call was made."
-            )
-            action = (
-                f"You MUST include a tool_call in your response — no more text planning. "
-                f"Execute immediately: {tool_hint}"
-            )
-
-        return (
-            f'<reflector phase="{phase_str}" attempt="{attempt}">\n'
-            f"  <issue>{issue}</issue>\n"
-            f"  <required_action>{action}</required_action>\n"
-            f"  <escalation_warning>Watchdog auto-execution activates after"
-            f" {max(3, self._no_tool_iterations + 1)} uncorrected iterations."
-            f" Avoid it by calling a tool now.</escalation_warning>\n"
-            f"</reflector>"
-        )
-
-    def _get_ab_signals(self, evidence_summary: str) -> dict[str, Any] | None:
-        """Return the first matching A→B signal entry dict for the given finding.
-
-        Loads signal rules from data/ab_signals.json at runtime — never
-        hardcoded in Python.  Checks all keywords (any-match, case-insensitive)
-        then suppresses false positives via negative_keywords.
-        Returns the full entry dict so callers can render test_vectors,
-        chain_with, kill_conditions, and apply objective_patches.
-        Only the first match fires to avoid flooding the mentor block.
-        """
-        summary_lower = evidence_summary.lower()
-        for entry in _AB_SIGNALS_DATA.get("signals", []):
-            if not any(kw in summary_lower for kw in entry.get("keywords", [])):
-                continue
-            # Suppress if any negative keyword is present
-            if any(nkw in summary_lower for nkw in entry.get("negative_keywords", [])):
-                continue
-            return entry
-        return None
-
-
-    def _build_mentor_analysis(
-        self,
-        current_phase: PipelinePhase,
-        tool_name: str,
-        evidence_added: bool,
-    ) -> str:
-        """Build a post-tool XML mentor analysis block.
-
-        Injected after high-value tool results to guide the LLM toward the
-        best next action. Rule-based (no extra LLM call) — derived from the
-        current evidence log and pending objectives.
-        Inspired by PentAGI's Mentor Supervision system.
-        A→B Signal Method inspired by shuvonsec/claude-bug-bounty Rule #11.
-        """
-        phase_str = current_phase.value
-        pending, _, recent_evidence = self.state.get_phase_context(
-            phase_str, max_objectives=3, max_evidence=3
-        )
-
-        # Build progress assessment
-        total_ev = len(self.state.evidence_log)
-        phase_ev = sum(
-            1 for e in self.state.evidence_log
-            if str(e.get("phase", "")).upper() == phase_str.upper()
-        )
-        high_sev = sum(
-            1 for e in self.state.evidence_log
-            if int(e.get("severity", 1)) >= 4
-        )
-
-        progress_parts = [f"{phase_ev} evidence item(s) in {phase_str} phase"]
-        if high_sev:
-            progress_parts.append(f"{high_sev} HIGH/CRITICAL finding(s) confirmed")
-        progress = ", ".join(progress_parts) + "."
-
-        # Latest finding summary
-        latest_summary = ""
-        if recent_evidence:
-            ev = recent_evidence[0]
-            sev = int(ev.get("severity", 1))
-            sev_label = {5: "CRITICAL", 4: "HIGH", 3: "MEDIUM", 2: "LOW"}.get(sev, "INFO")
-            latest_summary = f"Latest: [{sev_label}] {ev.get('summary', '')[:120]}"
-
-        # Identify issues and next steps from pending objectives
-        if pending:
-            next_obj = pending[0].get("title", "")
-            next_steps = f"Next objective: {next_obj}"
-        else:
-            next_steps = (
-                "All objectives for this phase appear complete. "
-                "Consider transitioning to the next phase or deepening current findings."
-            )
-
-        # Identify potential issues
-        issues = ""
-        if total_ev == 0:
-            issues = "No evidence collected yet — surface mapping incomplete."
-        elif high_sev == 0 and phase_str.upper() in ("ANALYSIS", "EXPLOIT"):
-            issues = "No HIGH/CRITICAL findings yet — increase test depth or pivot attack vector."
-
-        # A→B Signal: look up follow-up tests based on the latest finding type.
-        # Only fire when severity >= min_severity to avoid noise on low-value evidence.
-        ab_signal: dict[str, Any] | None = None
-        if recent_evidence:
-            last_ev = recent_evidence[0]
-            last_sev = int(last_ev.get("severity", 1))
-            _min_sev = int(_AB_SIGNALS_DATA.get("min_severity", 3))
-            if last_sev >= _min_sev:
-                ab_signal = self._get_ab_signals(last_ev.get("summary", ""))
-                # Auto-apply objective patches immediately when signal fires
-                if ab_signal and ab_signal.get("objective_patches"):
-                    # Inject current phase as default for add ops that omit it;
-                    # copy each dict to avoid mutating the shared JSON-loaded object.
-                    _patches = [
-                        dict(_p, phase=phase_str)
-                        if _p.get("op") == "add" and not _p.get("phase")
-                        else _p
-                        for _p in ab_signal["objective_patches"]
-                    ]
-                    self.state.patch_objectives(_patches)
-
-
-        lines = [f"<mentor_analysis phase=\"{phase_str}\" tool=\"{tool_name}\">"]
-        lines.append(f"  <progress_assessment>{progress}{(' ' + latest_summary) if latest_summary else ''}</progress_assessment>")
-        if issues:
-            lines.append(f"  <identified_issues>{issues}</identified_issues>")
-        lines.append(f"  <next_steps>{next_steps}</next_steps>")
-        if ab_signal:
-            signal_id = ab_signal.get("id", "")
-            owasp_id = ab_signal.get("owasp_id", "")
-            signal_attr = f' signal="{signal_id}"' if signal_id else ""
-            owasp_attr = f' owasp="{owasp_id}"' if owasp_id else ""
-            lines.append(f"  <followup_signals{signal_attr}{owasp_attr}>")
-            # Quick-start hints (text)
-            for hint in ab_signal.get("followup", []):
-                lines.append(f"    <hint>{hint}</hint>")
-            # Structured test vectors (label + payload)
-            if ab_signal.get("test_vectors"):
-                lines.append("    <test_vectors>")
-                for tv in ab_signal["test_vectors"]:
-                    lbl = tv.get("label", "")
-                    pay = tv.get("payload", "")
-                    lines.append(f'      <vector label="{lbl}">{pay}</vector>')
-                lines.append("    </test_vectors>")
-            # Chain-with: other signal IDs worth testing in parallel
-            if ab_signal.get("chain_with"):
-                chain_str = ", ".join(ab_signal["chain_with"])
-                lines.append(f"    <chain_with>{chain_str}</chain_with>")
-            # Kill conditions: when to stop pursuing this attack class
-            if ab_signal.get("kill_conditions"):
-                lines.append("    <kill_conditions>")
-                for kc in ab_signal["kill_conditions"]:
-                    lines.append(f"      <condition>{kc}</condition>")
-                lines.append("    </kill_conditions>")
-            lines.append("  </followup_signals>")
-        lines.append("</mentor_analysis>")
-        return "\n".join(lines)
-
-    def _build_watchdog_tool_call(
-        self,
-        content_acc: str,
-        thinking_acc: str,
-        phase: PipelinePhase,
-    ) -> dict[str, Any] | None:
-        """Build a fallback tool_call when model is stuck in text-only mode.
-
-        Priority:
-        1. Extract an actual shell command the LLM wrote in text → execute it.
-        2. No extractable command → return None so the caller injects a recovery
-           nudge and lets the model choose the next tool itself.
-        """
-        candidate_cmd = self._extract_shell_command_candidate(
-            content_acc=content_acc,
-            thinking_acc=thinking_acc,
-        )
-        if candidate_cmd:
-            return {
-                "id": f"watchdog_execute_{self.state.iteration}",
-                "type": "function",
-                "function": {
-                    "name": "execute",
-                    "arguments": {"command": candidate_cmd},
-                },
-            }
-
-        # No extractable command — return None so the caller injects a recovery
-        # nudge and lets the model choose the next tool itself.  Hardcoding a
-        # phase-specific tool here takes decision-making away from the LLM; the
-        # nudge path (see caller) is sufficient to break text-only loops while
-        # still leaving tool selection to the model.
-        return None
-
-    def _compute_quality_scores(self) -> dict[str, Any]:
-        """Compute lightweight quality scores for finding confidence tracking."""
-        evidence = self.state.evidence_log
-        tags = [tag for ev in evidence for tag in ev.get("tags", [])]
-
-        artifact_count = sum(
-            1 for ev in evidence if ev.get("artifact") or "artifact" in ev.get("tags", [])
-        )
-        execution_count = sum(
-            1 for ev in evidence if "execution" in ev.get("tags", []) or "trace" in ev.get("tags", [])
-        )
-        high_conf_count = sum(
-            1 for ev in evidence if float(ev.get("confidence", 0.0)) >= 0.75
-        )
-        signal_count = tags.count("signal")
-        cve_count = tags.count("cve")
-        flag_count = tags.count("flag")
-        error_count = tags.count("error")
-
-        vuln_count = len(self._session.vulnerabilities) if self._session else 0
-        report_count = 0
-        if self._session:
-            report_count = sum(
-                1 for v in self._session.vulnerabilities if v.get("report_generated")
-            )
-
-        evidence_score = min(
-            1.0,
-            (artifact_count * 0.18)
-            + (high_conf_count * 0.10)
-            + (max(0, len(evidence) - error_count) * 0.02),
-        )
-        reproducibility_score = min(
-            1.0,
-            (execution_count * 0.08)
-            + (artifact_count * 0.12)
-            + (report_count * 0.20),
-        )
-        impact_score = min(
-            1.0,
-            (flag_count * 0.50)
-            + (vuln_count * 0.15)
-            + (cve_count * 0.08)
-            + (signal_count * 0.04),
-        )
-        overall = (
-            (evidence_score * 0.40)
-            + (reproducibility_score * 0.35)
-            + (impact_score * 0.25)
-        )
-
-        return {
-            "evidence": round(evidence_score, 3),
-            "reproducibility": round(reproducibility_score, 3),
-            "impact": round(impact_score, 3),
-            "overall": round(overall, 3),
-            "counts": {
-                "evidence": len(evidence),
-                "artifacts": artifact_count,
-                "executions": execution_count,
-                "vulnerabilities": vuln_count,
-                "reports": report_count,
-                "flags": flag_count,
-            },
-        }
-
-    def _build_quality_scoreboard(self, phase: PipelinePhase) -> str:
-        scores = self._compute_quality_scores()
-        counts = scores.get("counts", {})
-        if int(counts.get("evidence", 0)) == 0 and self.state.iteration <= 1:
-            return ""
-
-        lines = [
-            "[SYSTEM: QUALITY SCOREBOARD]",
-            (
-                f"Phase={phase.value} | "
-                f"Evidence={scores['evidence']:.2f} | "
-                f"Reproducibility={scores['reproducibility']:.2f} | "
-                f"Impact={scores['impact']:.2f} | "
-                f"Overall={scores['overall']:.2f}"
-            ),
-            (
-                "Counts: "
-                f"evidence={counts.get('evidence', 0)}, "
-                f"artifacts={counts.get('artifacts', 0)}, "
-                f"executions={counts.get('executions', 0)}, "
-                f"vulns={counts.get('vulnerabilities', 0)}, "
-                f"reports={counts.get('reports', 0)}"
-            ),
-        ]
-
-        if phase in (PipelinePhase.EXPLOIT, PipelinePhase.REPORT):
-            if float(scores["reproducibility"]) < 0.45:
-                lines.append(
-                    "Gap: reproducibility is low. Run one concrete PoC command and save artifact output now."
-                )
-            if float(scores["impact"]) < 0.35:
-                lines.append(
-                    "Gap: impact proof is weak. Prioritize evidence showing real access/state change."
-                )
-        elif phase in (PipelinePhase.RECON, PipelinePhase.ANALYSIS):
-            if float(scores["evidence"]) < 0.30:
-                lines.append(
-                    "Gap: evidence coverage low. Collect fresh host/port/endpoint artifacts before pivoting."
-                )
-
-        return "\n".join(lines)
-
-    def _build_recovery_state_context(self) -> str:
-        """Build compact state snapshot for post-crash recovery retries."""
-        phase = self._get_current_phase()
-        quality = self._compute_quality_scores()
-        lines = [
-            "[SYSTEM: RECOVERY STATE]",
-            (
-                f"Phase={phase.value} | Iteration={self.state.iteration} | "
-                f"Target={self.state.active_target or 'none'}"
-            ),
-            (
-                f"Quality overall={quality['overall']:.2f} "
-                f"(evidence={quality['evidence']:.2f}, repro={quality['reproducibility']:.2f}, "
-                f"impact={quality['impact']:.2f})"
-            ),
-        ]
-
-        # Show more context to help the LLM resume correctly after a crash.
-        pending, completed, evidence = self.state.get_phase_context(
-            phase.value, max_objectives=5, max_evidence=6, filter_evidence_by_phase=False
-        )
-        if pending:
-            lines.append("Pending objectives:")
-            for obj in pending:
-                lines.append(f"- {obj.get('title', '')}")
-        if completed:
-            lines.append(f"Completed objectives ({len(completed)} total):")
-            for obj in completed[:3]:
-                lines.append(f"  ✓ {obj.get('title', '')}")
-
-        # Include last few tool calls WITH args so LLM knows what was being run.
-        recent_tools = list(reversed(self.state.tool_history))[:5]
-        if recent_tools:
-            lines.append("Recent tool calls (newest first):")
-            for entry in recent_tools:
-                status_icon = "✓" if entry.status == "success" else "✗"
-                args_hint = ""
-                args = getattr(entry, "arguments", None) or {}
-                if isinstance(args, dict):
-                    # Show the most informative arg: command > url > query > first key
-                    for key in ("command", "url", "query", "action", "target"):
-                        if key in args:
-                            val = str(args[key])[:80]
-                            args_hint = f" [{key}={val}]"
-                            break
-                    if not args_hint and args:
-                        first_key = next(iter(args))
-                        args_hint = f" [{first_key}={str(args[first_key])[:60]}]"
-                lines.append(f"  {status_icon} {entry.tool_name}{args_hint}")
-
-        if evidence:
-            lines.append("Recent evidence:")
-            for ev in evidence:
-                lines.append(f"- [{ev.get('source_tool', 'tool')}] {ev.get('summary', '')[:120]}")
-
-        lines.append(
-            "MANDATORY: first response after recovery must include at least one tool_call."
-        )
-        lines.append(
-            "Resume from the last failed/pending step above — do not restart from scratch."
-        )
-        return "\n".join(lines)
-
     def get_progress(self) -> dict[str, Any]:
         """Return progress data for the /api/progress endpoint."""
         session = self._session
@@ -4788,98 +3886,3 @@ class AgentLoop(_ValidatorMixin, _FormatterMixin,
                 "completed_phases": session.completed_phases,
             }
         return progress
-
-    def _build_critical_findings_context(self) -> str:
-        """Build critical findings context to pin before truncation."""
-        if not self._session:
-            return ""
-
-        s = self._session
-        parts = ["[SYSTEM: CRITICAL FINDINGS — DO NOT LOSE]"]
-
-        if s.subdomains:
-            parts.append(
-                f"SUBDOMAINS ({len(s.subdomains)}): {', '.join(s.subdomains[:20])}"
-            )
-            if len(s.subdomains) > 20:
-                parts.append(f"... and {len(s.subdomains) - 20} more")
-
-        if s.live_hosts:
-            parts.append(
-                f"LIVE HOSTS ({len(s.live_hosts)}): {', '.join(s.live_hosts[:15])}"
-            )
-        elif s.subdomains:
-            # Subdomains found but no live_hosts yet — warn the LLM to validate first
-            parts.append(
-                "WARNING: subdomains enumerated but NOT YET validated. "
-                "Run: httpx -l output/subdomains.txt -sc -o output/live_hosts.txt "
-                "to filter live hosts BEFORE port scanning or directory brute-force."
-            )
-
-        if s.open_ports:
-            port_summary = []
-            for host, ports in list(s.open_ports.items())[:10]:
-                port_summary.append(f"{host}:{','.join(map(str, ports[:5]))}")
-            parts.append(f"OPEN PORTS: {'; '.join(port_summary)}")
-
-        if s.urls:
-            parts.append(f"URLs ({len(s.urls)}): {', '.join(s.urls[:10])}")
-
-        if s.vulnerabilities:
-            vuln_vals = []
-            for v in s.vulnerabilities[:10]:
-                vt = v.get("title", v.get("finding", "Unknown"))
-                vf = v.get("flag")
-                if vf:
-                    vuln_vals.append(f"{vt} (FLAG: {vf})")
-                else:
-                    vuln_vals.append(vt)
-            parts.append(f"VULNERABILITIES: {'; '.join(vuln_vals)}")
-
-        # Injection points: show untested first so they don't get lost after
-        # context truncation — these are the highest-priority attack surface.
-        if s.injection_points:
-            untested = get_untested_injection_points(s)
-            all_ips = s.injection_points
-            tested_count = len(all_ips) - len(untested)
-            # Show up to 8 untested injection points; fallback to all if none untested
-            show = untested[:8] if untested else all_ips[:8]
-            ip_lines: list[str] = []
-            for pt in show:
-                path = urlparse(pt.get("url", "")).path or pt.get("url", "")
-                ip_lines.append(
-                    f"  [{pt.get('type_hint','?')}] {pt.get('parameter','?')} @ {path}"
-                )
-            untested_note = f"{len(untested)} UNTESTED" if untested else "all tested"
-            parts.append(
-                f"INJECTION POINTS ({len(all_ips)} total, {untested_note}, {tested_count} tested):\n"
-                + "\n".join(ip_lines)
-                + (f"\n  ... +{len(untested) - 8} more untested" if len(untested) > 8 else "")
-            )
-
-        if s.technologies:
-            tech_parts = [
-                f"{name}/{ver}" if ver else name
-                for name, ver in list(s.technologies.items())[:10]
-            ]
-            parts.append(f"TECHNOLOGIES: {', '.join(tech_parts)}")
-
-        if s.completed_phases:
-            parts.append(f"COMPLETED PHASES: {', '.join(s.completed_phases)}")
-
-        if s.tested_endpoints:
-            # Show last 20 tested endpoints so the LLM knows what NOT to repeat
-            shown = s.tested_endpoints[-20:]
-            remainder = len(s.tested_endpoints) - len(shown)
-            ep_note = (
-                f"... and {remainder} more already tested" if remainder > 0 else ""
-            )
-            parts.append(
-                f"ALREADY TESTED ENDPOINTS ({len(s.tested_endpoints)} total"
-                + (", showing last 20" if remainder > 0 else "")
-                + "):\n"
-                + "\n".join(f"  {ep}" for ep in shown)
-                + (f"\n  {ep_note}" if ep_note else "")
-            )
-
-        return "\n".join(parts)

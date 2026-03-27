@@ -7,10 +7,9 @@ import os
 import re
 import shlex
 import time
-from datetime import datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Callable
-from urllib.parse import urlparse
+from urllib.parse import parse_qs, urlparse
 
 from ..browser import browser_action
 from ..config import get_config, get_workspace_root
@@ -100,6 +99,44 @@ _RECON_PORT_SCAN_BINS: frozenset[str] = _load_recon_bins(
     "port_scan",
     frozenset({"nmap", "masscan", "naabu", "rustscan"}),
 )
+
+# Tools used specifically for live-host validation (HTTP probe, DNS resolution).
+# Distinct from port scanners — these confirm a host is alive and serving HTTP.
+_RECON_LIVE_HOST_BINS: frozenset[str] = _load_recon_bins(
+    "live_host_probe",
+    frozenset({"httpx", "httprobe", "dnsx"}),
+)
+
+# Tools used for endpoint/content discovery: URL crawling + directory bruteforce.
+# Combined into one set since both serve the "map application routes" objective.
+_RECON_CONTENT_DISCOVERY_BINS: frozenset[str] = (
+    _load_recon_bins("crawling", frozenset({"katana", "waybackurls", "gau", "hakrawler"}))
+    | _load_recon_bins("directory_bruteforce", frozenset({"gobuster", "feroxbuster", "ffuf", "dirsearch", "dirb"}))
+)
+
+def _load_airecon_tool_names() -> frozenset[str]:
+    """Return the set of AIRecon tool names from data/tools.json.
+
+    Used to catch hallucinations where the LLM calls an AIRecon tool
+    as a shell binary via execute (e.g. `web_search "site:..."` → exit 127).
+    """
+    try:
+        path = Path(__file__).resolve().parent.parent / "data" / "tools.json"
+        data = json.loads(path.read_text(encoding="utf-8"))
+        # tools.json is a list of {"type": "function", "function": {"name": ...}}
+        return frozenset(
+            str(t["function"]["name"])
+            for t in data
+            if isinstance(t, dict) and isinstance(t.get("function"), dict) and t["function"].get("name")
+        )
+    except Exception as exc:
+        logger.warning("Could not load tool names from tools.json: %s", exc)
+        return frozenset()
+
+
+# AIRecon tool names that must never be called as shell binaries via execute.
+_AIRECON_TOOL_NAMES: frozenset[str] = _load_airecon_tool_names()
+
 
 def _load_tool_flag_conflicts() -> dict[str, tuple[list[str], str]]:
     """Load tool flag conflict rules from data/tools_meta.json.
@@ -593,25 +630,75 @@ class _ExecutorMixin:
             # Mark matching vulnerability as reported so REPORT phase can
             # transition
             if success and self._session:
-                report_title = arguments.get("title", "")
+                report_title = str(arguments.get("title", "") or "").strip()
                 flag = arguments.get("flag", "")
+
+                def _token_set(text: str) -> set[str]:
+                    return {
+                        tok for tok in re.findall(r"[a-z0-9]{4,}", text.lower())
+                        if tok not in {"vulnerability", "report", "issue", "finding"}
+                    }
+
+                def _scope_hints(data: dict[str, Any]) -> set[str]:
+                    hints: set[str] = set()
+                    for key in ("url", "endpoint", "affected_endpoint", "target", "parameter"):
+                        raw = str(data.get(key, "") or "").strip().lower()
+                        if not raw:
+                            continue
+                        hints.add(raw)
+                        try:
+                            parsed = urlparse(raw)
+                            if parsed.netloc:
+                                hints.add(parsed.netloc.lower())
+                            if parsed.path:
+                                hints.add(parsed.path.lower())
+                        except Exception:
+                            pass
+                    return hints
+
+                report_scope = _scope_hints(arguments)
+                report_tokens = _token_set(report_title)
                 matched = False
                 for vuln in self._session.vulnerabilities:
-                    v_title = vuln.get("title", vuln.get("finding", ""))
-                    if report_title and v_title and v_title.lower() in report_title.lower():
+                    v_title = str(vuln.get("title") or vuln.get("finding") or "").strip()
+                    if not report_title or not v_title:
+                        continue
+
+                    v_lower = v_title.lower()
+                    r_lower = report_title.lower()
+                    strict_title_hit = (
+                        v_lower in r_lower
+                        or r_lower in v_lower
+                    )
+                    v_tokens = _token_set(v_title)
+                    overlap_ratio = (
+                        (len(report_tokens & v_tokens) / max(1, len(report_tokens)))
+                        if report_tokens
+                        else 0.0
+                    )
+
+                    vuln_scope = _scope_hints(vuln)
+                    scope_hit = False
+                    if report_scope and vuln_scope:
+                        scope_hit = any(
+                            rs in vs or vs in rs
+                            for rs in report_scope
+                            for vs in vuln_scope
+                        )
+
+                    # Avoid marking report_generated from weak title-only guesses.
+                    title_confident = strict_title_hit or overlap_ratio >= 0.75
+                    if title_confident and (scope_hit or strict_title_hit or overlap_ratio >= 0.90):
                         vuln["report_generated"] = True
                         if flag:
                             vuln["flag"] = flag
                         matched = True
-                if not matched and report_title:
-                    self._session.vulnerabilities.append({
-                        "title": report_title,
-                        "finding": report_title,
-                        "report_generated": True,
-                        "flag": flag,
-                        "source": "create_vulnerability_report",
-                        "timestamp": datetime.now().isoformat(),
-                    })
+
+                if success and report_title and not matched:
+                    logger.info(
+                        "Report created but not bound to existing vulnerability: title=%r",
+                        report_title[:120],
+                    )
         except Exception as e:
             success = False
             result = {"success": False, "error": str(e)}
@@ -1737,6 +1824,334 @@ class _ExecutorMixin:
     # Source Code Analysis (Semgrep)
     # ------------------------------------------------------------------
 
+    async def _exec_record_hypothesis(
+        self,
+        tool_name: str,
+        arguments: dict[str, Any],
+    ) -> tuple[bool, float, dict[str, Any], str | None]:
+        """Record or update a security hypothesis in AgentState.hypothesis_queue."""
+        start_time = time.time()
+
+        claim = str(arguments.get("claim", "")).strip()
+        status = str(arguments.get("status", "pending")).lower()
+        hyp_id = str(arguments.get("hypothesis_id", "")).strip()
+        evidence = str(arguments.get("evidence", "")).strip()
+        test_plan = str(arguments.get("test_plan", "")).strip()
+        phase = str(arguments.get("phase", "RECON")).upper()
+
+        valid_statuses = {"pending", "testing", "confirmed", "refuted"}
+        if status not in valid_statuses:
+            return False, time.time() - start_time, {
+                "success": False,
+                "error": f"Invalid status '{status}'. Must be one of: {sorted(valid_statuses)}",
+            }, None
+
+        if not claim:
+            return False, time.time() - start_time, {
+                "success": False,
+                "error": "record_hypothesis requires a non-empty 'claim'.",
+            }, None
+
+        # Update existing hypothesis if ID provided
+        if hyp_id:
+            updated = self.state.update_hypothesis(hyp_id, status, evidence or None)
+            duration = time.time() - start_time
+            if updated:
+                return True, duration, {
+                    "success": True,
+                    "action": "updated",
+                    "hypothesis_id": hyp_id,
+                    "status": status,
+                    "message": f"Hypothesis {hyp_id} updated to '{status}'.",
+                }, None
+            # ID not found — fall through to create a new one
+            logger.debug("Hypothesis ID '%s' not found — creating new entry.", hyp_id)
+
+        # Create new hypothesis
+        new_id = self.state.add_hypothesis(claim, test_plan, phase=phase)
+        if new_id and status != "pending":
+            self.state.update_hypothesis(new_id, status, evidence or None)
+
+        duration = time.time() - start_time
+        if not new_id:
+            return True, duration, {
+                "success": True,
+                "action": "deduplicated",
+                "message": "A semantically identical hypothesis already exists.",
+            }, None
+
+        return True, duration, {
+            "success": True,
+            "action": "created",
+            "hypothesis_id": new_id,
+            "status": status,
+            "message": (
+                f"Hypothesis '{claim[:80]}' recorded as '{status}'. "
+                f"ID: {new_id}. Use this ID to update status after testing."
+            ),
+        }, None
+
+    async def _execute_http_observe_tool(
+        self,
+        tool_name: str,
+        arguments: dict[str, Any],
+    ) -> tuple[bool, float, dict[str, Any], str | None]:
+        """Send a raw HTTP request via curl inside the Docker sandbox and return
+        the full response (status, headers, body). Supports baseline storage and
+        diff-based comparison for Observer-Hypothesizer testing."""
+        self._last_output_file = None
+        start_time = time.time()
+
+        url = self._str_arg(arguments, "url")
+        if not url:
+            return False, 0.0, {
+                "success": False,
+                "error": "http_observe requires a 'url' argument.",
+            }, None
+
+        method = (self._str_arg(arguments, "method") or "GET").upper()
+        headers: dict[str, str] = {}
+        raw_headers = arguments.get("headers")
+        if isinstance(raw_headers, dict):
+            headers = {str(k): str(v) for k, v in raw_headers.items()}
+        body = self._str_arg(arguments, "body")
+        save_as = self._str_arg(arguments, "save_as")
+        compare_to = self._str_arg(arguments, "compare_to")
+
+        _follow_raw = arguments.get("follow_redirects", False)
+        follow_redirects = (
+            _follow_raw if isinstance(_follow_raw, bool) else str(_follow_raw).lower() == "true"
+        )
+
+        _timeout_raw = arguments.get("timeout", 15)
+        try:
+            req_timeout = max(5, min(60, int(_timeout_raw)))
+        except (TypeError, ValueError):
+            req_timeout = 15
+
+        # Build curl command — runs inside Docker sandbox, no shell=True
+        cmd_parts = [
+            "curl", "-s", "-i",
+            "--max-time", str(req_timeout),
+            "-X", method,
+        ]
+        if not follow_redirects:
+            cmd_parts.append("--no-location")
+        for h_name, h_val in headers.items():
+            cmd_parts.extend(["-H", f"{h_name}: {h_val}"])
+        if body:
+            cmd_parts.extend(["--data-raw", body])
+        cmd_parts.append(url)
+
+        # Shell-safe join for Docker exec (we use shlex.join semantics)
+        curl_cmd = " ".join(shlex.quote(p) for p in cmd_parts)
+
+        try:
+            exec_result = await self.engine.execute_tool(
+                "execute",
+                {"command": curl_cmd, "timeout": req_timeout + 5},
+            )
+            raw_output = (
+                exec_result.get("stdout")
+                or exec_result.get("result")
+                or exec_result.get("output")
+                or ""
+            )
+            exec_error = exec_result.get("error") or exec_result.get("stderr") or ""
+            exec_success = bool(exec_result.get("success", True))
+        except Exception as _e:
+            duration = time.time() - start_time
+            return False, duration, {"success": False, "error": str(_e)}, None
+
+        # Parse raw HTTP response: split at blank line separating headers and body
+        parsed = self._parse_http_response(raw_output)
+        status_code = parsed["status_code"]
+        headers_out = parsed["headers"]
+        body_out = parsed["body"]
+        body_size = len(body_out.encode("utf-8", errors="replace"))
+
+        result: dict[str, Any] = {
+            "success": exec_success,
+            "url": url,
+            "method": method,
+            "status_code": status_code,
+            "status_line": parsed["status_line"],
+            "headers": headers_out,
+            "body": body_out[:4000],
+            "body_truncated": body_size > 4000,
+            "body_size_bytes": body_size,
+            "response_time_ms": int((time.time() - start_time) * 1000),
+        }
+        if exec_error and not exec_success:
+            result["error"] = exec_error[:500]
+
+        # Store as baseline if requested
+        if save_as and save_as.strip():
+            baseline_entry: dict[str, Any] = {
+                "status_code": status_code,
+                "status_line": parsed["status_line"],
+                "headers": headers_out,
+                "body": body_out[:4000],
+                "body_size_bytes": body_size,
+            }
+            self.state.http_baselines[save_as.strip()] = baseline_entry  # type: ignore[attr-defined]
+            result["saved_as"] = save_as.strip()
+
+        # Diff against a stored baseline if requested
+        if compare_to and compare_to.strip():
+            baseline = self.state.http_baselines.get(compare_to.strip())  # type: ignore[attr-defined]
+            if baseline is None:
+                result["diff_error"] = f"No baseline named '{compare_to}' found. Use save_as first."
+            else:
+                diff = self._diff_http_responses(baseline, result)
+                result["diff"] = diff
+                result["compared_to"] = compare_to.strip()
+
+        # Feed observed response into ApplicationModel for structural mapping.
+        # Extracts endpoint auth requirements, param names, roles, API schema.
+        if exec_success and self._session:
+            # Collect endpoint parameter names from URL query string and request body.
+            # Never use request header keys — those are transport metadata, not API params.
+            _url_params = list(parse_qs(urlparse(url).query).keys())
+            _body_params: list[str] = []
+            if body:
+                try:
+                    _body_json = json.loads(body)
+                    if isinstance(_body_json, dict):
+                        _body_params = list(_body_json.keys())
+                except (ValueError, TypeError):
+                    _body_params = list(parse_qs(body).keys())
+            param_names = _url_params + _body_params
+            self._session.app_model.update_from_response(
+                url=url,
+                method=method,
+                status_code=status_code,
+                headers=headers_out,
+                body_excerpt=body_out[:2000],
+                param_names=param_names,
+            )
+
+        duration = time.time() - start_time
+        self.state.tool_history.append(  # type: ignore[attr-defined]
+            ToolExecution(tool_name=tool_name, arguments=arguments,
+                          result=result, duration=duration,
+                          status="success" if exec_success else "error")
+        )
+        self.state.tool_counts["total"] += 1  # type: ignore[attr-defined]
+        return exec_success, duration, result, None
+
+    @staticmethod
+    def _parse_http_response(raw: str) -> dict[str, Any]:
+        """Parse raw curl -i output into structured components."""
+        if not raw:
+            return {"status_code": 0, "status_line": "", "headers": {}, "body": ""}
+
+        # curl -i may include multiple HTTP/1.1 100 Continue or redirect blocks.
+        # We want the LAST complete response block.
+        blocks = re.split(r"(?m)^HTTP/", raw)
+        # Reassemble the last block with its "HTTP/" prefix
+        last_block = ("HTTP/" + blocks[-1]) if len(blocks) > 1 else raw
+
+        lines = last_block.split("\r\n") if "\r\n" in last_block else last_block.split("\n")
+        status_line = lines[0].strip() if lines else ""
+
+        # Extract status code from status line (e.g. "HTTP/1.1 302 Found")
+        status_code = 0
+        m = re.match(r"HTTP/[\d.]+\s+(\d{3})", status_line)
+        if m:
+            status_code = int(m.group(1))
+
+        # Split headers from body at first blank line
+        headers: dict[str, str] = {}
+        body_lines: list[str] = []
+        in_body = False
+        for line in lines[1:]:
+            if in_body:
+                body_lines.append(line)
+            elif line.strip() == "":
+                in_body = True
+            else:
+                colon_idx = line.find(":")
+                if colon_idx > 0:
+                    h_name = line[:colon_idx].strip()
+                    h_val = line[colon_idx + 1:].strip()
+                    # Keep last value for duplicate headers (e.g. Set-Cookie)
+                    # but concatenate for multi-value display
+                    if h_name.lower() in headers:
+                        headers[h_name.lower()] = headers[h_name.lower()] + "; " + h_val
+                    else:
+                        headers[h_name.lower()] = h_val
+
+        body = "\n".join(body_lines)
+        return {
+            "status_code": status_code,
+            "status_line": status_line,
+            "headers": headers,
+            "body": body,
+        }
+
+    @staticmethod
+    def _diff_http_responses(
+        baseline: dict[str, Any],
+        current: dict[str, Any],
+    ) -> dict[str, Any]:
+        """Compute a structured diff between two HTTP responses."""
+        diff: dict[str, Any] = {}
+
+        # Status code change
+        b_code = baseline.get("status_code", 0)
+        c_code = current.get("status_code", 0)
+        if b_code != c_code:
+            diff["status_code_changed"] = {"from": b_code, "to": c_code}
+
+        # Header changes
+        b_headers = baseline.get("headers", {})
+        c_headers = current.get("headers", {})
+        all_keys = set(b_headers) | set(c_headers)
+        header_changes: dict[str, Any] = {}
+        for k in all_keys:
+            bv = b_headers.get(k)
+            cv = c_headers.get(k)
+            if bv != cv:
+                header_changes[k] = {"from": bv, "to": cv}
+        if header_changes:
+            diff["header_changes"] = header_changes
+
+        # Body size change
+        b_size = baseline.get("body_size_bytes", 0)
+        c_size = current.get("body_size_bytes", 0)
+        size_delta = c_size - b_size
+        if abs(size_delta) > 0:
+            diff["body_size_delta_bytes"] = size_delta
+
+        # Body content change summary (first 500 chars of each)
+        b_body = (baseline.get("body") or "")[:500]
+        c_body = (current.get("body") or "")[:500]
+        if b_body != c_body:
+            diff["body_changed"] = True
+            diff["body_baseline_excerpt"] = b_body[:200]
+            diff["body_current_excerpt"] = c_body[:200]
+        else:
+            diff["body_changed"] = False
+
+        # Security-relevant header highlights
+        security_headers = ["location", "set-cookie", "x-frame-options",
+                            "content-security-policy", "www-authenticate",
+                            "access-control-allow-origin", "x-powered-by", "server"]
+        notable: dict[str, str] = {}
+        for sh in security_headers:
+            if sh in c_headers:
+                notable[sh] = c_headers[sh]
+        if notable:
+            diff["security_headers_present"] = notable
+
+        diff["significant_change"] = bool(
+            diff.get("status_code_changed")
+            or diff.get("body_size_delta_bytes", 0) > 50
+            or diff.get("header_changes")
+        )
+        return diff
+
     async def _execute_code_analysis_tool(
         self,
         tool_name: str,
@@ -2103,9 +2518,26 @@ class _ExecutorMixin:
     ) -> tuple[bool, float, dict[str, Any], str | None]:
         self._last_output_file = None
 
+        # validate arg structure FIRST — before any other operation
+        # that assumes arguments is a dict (normalize_args, .get(), etc.).
+        # Malformed JSON from LLM (list or string instead of dict) must be caught
+        # here before it propagates and causes cryptic ValueError/AttributeError.
+        if not isinstance(arguments, dict):
+            logger.warning(
+                "Tool '%s' received non-dict arguments (type=%s) — rejecting",
+                tool_name, type(arguments).__name__,
+            )
+            return False, 0.0, {
+                "success": False,
+                "error": (
+                    f"Tool call rejected: arguments must be a JSON object (dict), "
+                    f"got {type(arguments).__name__}. "
+                    f"Example: {{\"name\": \"{tool_name}\", \"arguments\": {{\"key\": \"value\"}}}}"
+                ),
+            }, None
+
         args_key = self._normalize_args_for_dedup(tool_name, arguments)
-        count = self._executed_tool_counts.get(
-            args_key, 0)
+        count = self._executed_tool_counts.get(args_key, 0)
         limit = get_config().agent_repeat_tool_call_limit
 
         if self._is_recon_phase_repeat_blocked(tool_name, arguments, count):
@@ -2120,7 +2552,9 @@ class _ExecutorMixin:
 
         if count >= limit:
             return False, 0.0, {
-                "success": False, "error": f"Duplicate tool execution prevented (already ran {count}x)."}, None
+                "success": False,
+                "error": f"Duplicate tool execution prevented (already ran {count}x).",
+            }, None
 
         if tool_name == "advanced_fuzz":
             return await self._execute_advanced_fuzz_tool(tool_name, arguments)
@@ -2164,6 +2598,12 @@ class _ExecutorMixin:
         if tool_name == "code_analysis":
             return await self._execute_code_analysis_tool(tool_name, arguments)
 
+        if tool_name == "http_observe":
+            return await self._execute_http_observe_tool(tool_name, arguments)
+
+        if tool_name == "record_hypothesis":
+            return await self._exec_record_hypothesis(tool_name, arguments)
+
         if tool_name == "schemathesis_fuzz":
             return await self._execute_schemathesis_tool(tool_name, arguments)
 
@@ -2190,6 +2630,20 @@ class _ExecutorMixin:
             # Catch and reject with a correction hint instead of running a broken command.
             cmd_stripped = cmd.strip()
             _first_token = cmd_stripped.split()[0] if cmd_stripped.split() else ""
+            # Detect hallucination: LLM calling an AIRecon tool as a shell binary.
+            # e.g. `web_search "site:crt.sh ..."` → exit 127 "command not found".
+            # Intercept before Docker runs and redirect with a clear correction.
+            if _first_token in _AIRECON_TOOL_NAMES and _first_token != "execute":
+                return False, 0.0, {
+                    "success": False,
+                    "error": (
+                        f"Command rejected: '{_first_token}' is an AIRecon tool, "
+                        "not a shell binary. Do NOT call AIRecon tools via execute — "
+                        f"use the '{_first_token}' tool directly with its own arguments. "
+                        f"Example: {{\"name\": \"{_first_token}\", \"arguments\": {{...}}}}"
+                    ),
+                }, None
+
             if _first_token in _TOOL_FLAG_CONFLICTS:
                 _conflict_flags, _correct_tool = _TOOL_FLAG_CONFLICTS[_first_token]
                 # Use token-based matching (not substring) to avoid false positives

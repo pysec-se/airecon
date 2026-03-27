@@ -10,6 +10,8 @@ from __future__ import annotations
 from airecon.proxy.agent.output_parser import parse_tool_output
 from airecon.proxy.agent.session import (
     SessionData,
+    _extract_injection_points,
+    _load_redirect_path_indicators,
     get_untested_injection_points,
     injection_point_key,
     mark_injection_point_tested,
@@ -168,8 +170,22 @@ def test_mark_tested_no_duplicate():
 
 
 def test_injection_point_key_format():
+    # Trailing slash is stripped during normalization.
     key = injection_point_key("http://example.com/", "id", "GET")
-    assert key == "http://example.com/||id||GET"
+    assert key == "http://example.com||id||GET"
+
+
+def test_injection_point_key_normalizes_trailing_slash():
+    # /api/ and /api must produce the same dedup key.
+    key_with_slash = injection_point_key("http://example.com/api/", "id", "GET")
+    key_no_slash = injection_point_key("http://example.com/api", "id", "GET")
+    assert key_with_slash == key_no_slash
+
+
+def test_injection_point_key_normalizes_case():
+    key_upper = injection_point_key("HTTP://EXAMPLE.COM/api", "id", "GET")
+    key_lower = injection_point_key("http://example.com/api", "id", "GET")
+    assert key_upper == key_lower
 
 
 # ── session_to_context shows untested ────────────────────────────────────────
@@ -206,6 +222,7 @@ def test_tech_skill_loads_wordpress():
     ctx, names = auto_load_skills_for_technologies({"WordPress": "5.8.1"})
     assert ctx != ""
     assert len(names) > 0
+    assert all("/" in n for n in names)
 
 
 def test_tech_skill_loads_nginx():
@@ -267,3 +284,76 @@ def test_correlation_suggested_correlations_persisted():
 
     run_correlation(session)
     assert len(session.suggested_correlations) > 0
+
+
+# ── path-context reclassification (SSRF → OPEN_REDIRECT) ────────────────────
+
+def test_load_redirect_path_indicators_returns_nonempty():
+    """_load_redirect_path_indicators() must return indicators from patterns.json."""
+    indicators = _load_redirect_path_indicators()
+    assert isinstance(indicators, frozenset)
+    assert len(indicators) > 0
+    # "aredirurl" is in patterns.json open_redirect_url_param.indicators
+    assert "aredirurl" in indicators
+
+
+def test_extract_injection_points_ssrf_reclassified_to_open_redirect():
+    """?url= on /api/frontendweb.aredirurl → OPEN_REDIRECT, not SSRF.
+
+    This is the real-world bug: Ollama tested cloud metadata IPs instead of
+    javascript: protocol because the param was typed as SSRF.
+    """
+    pts = _extract_injection_points(
+        "https://myaccount.genexus.com/api/frontendweb.aredirurl?url=javascript:alert(1)"
+    )
+    assert len(pts) == 1
+    assert pts[0]["parameter"] == "url"
+    assert pts[0]["type_hint"] == "OPEN_REDIRECT"
+
+
+def test_extract_injection_points_ssrf_stays_ssrf_on_non_redirect_path():
+    """?url= on /fetch (no redirect indicator) must stay SSRF."""
+    pts = _extract_injection_points("https://example.com/fetch?url=http://internal/")
+    assert len(pts) == 1
+    assert pts[0]["parameter"] == "url"
+    assert pts[0]["type_hint"] == "SSRF"
+
+
+def test_extract_injection_points_uri_reclassified_on_forward_path():
+    """?uri= on /forward (path contains 'forward' indicator) → OPEN_REDIRECT.
+    'uri' maps to SSRF in PARAM_TYPE_MAP; the path context triggers reclassification.
+    """
+    pts = _extract_injection_points(
+        "https://example.com/forward?uri=http://attacker.com/"
+    )
+    url_type_params = [p for p in pts if p["parameter"] == "uri"]
+    assert url_type_params, "Expected 'uri' param in injection points"
+    assert url_type_params[0]["type_hint"] == "OPEN_REDIRECT"
+
+
+def test_extract_injection_points_ssrf_unaffected_when_no_path_indicator():
+    """?uri= on /api/webhook (no redirect indicator) stays SSRF."""
+    pts = _extract_injection_points(
+        "https://example.com/api/webhook?uri=http://internal/"
+    )
+    cb = [p for p in pts if p["parameter"] == "uri"]
+    assert cb, "Expected 'uri' param"
+    # uri maps to SSRF in PARAM_TYPE_MAP — /api/webhook has no redirect indicator
+    assert cb[0]["type_hint"] == "SSRF"
+
+
+def test_extract_injection_points_multiple_params_reclassified_selectively():
+    """On a redirect path, only SSRF-typed params are reclassified.
+    Other types (INJECT, IDOR) stay unchanged.
+    """
+    pts = _extract_injection_points(
+        "https://example.com/goto?url=http://x.com&id=42&q=search"
+    )
+    by_param = {p["parameter"]: p["type_hint"] for p in pts}
+    # "url" → SSRF in map, path has "goto" → OPEN_REDIRECT
+    assert by_param.get("url") == "OPEN_REDIRECT"
+    # "id" → IDOR (numeric value heuristic or _PARAM_TYPE_MAP), no reclassification
+    assert by_param.get("id") in ("IDOR", "INJECT")
+    # "q" → non-SSRF type (SQLi_XSS or INJECT), no reclassification
+    assert by_param.get("q") != "SSRF"
+    assert by_param.get("q") != "OPEN_REDIRECT"

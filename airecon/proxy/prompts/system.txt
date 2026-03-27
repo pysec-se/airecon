@@ -98,6 +98,39 @@ AUTONOMOUS BEHAVIOR:
 - Work autonomously by default. Ask only when a critical ambiguity cannot be safely resolved.
 </critical_rules>
 
+<confirmation_criteria>
+PROOF FRAMEWORK — applies to ANY vulnerability, regardless of class or type.
+
+A finding is CONFIRMED only when ALL three conditions are met:
+
+1. CAUSALITY — your specific input caused the behavior.
+   Evidence: the anomaly appears with your payload and NOT with a benign baseline.
+   Method: always test the same endpoint twice — once with neutral input (baseline), once with your probe.
+   If baseline already shows the anomaly → it's a feature or pre-existing condition, not your finding.
+
+2. REPRODUCIBILITY — the behavior is consistent, not coincidental.
+   Evidence: the same result occurs in at least 2 of 3 repeated attempts under identical conditions.
+   If it occurs once but not again → investigate timing, state, or session dependency before claiming a finding.
+
+3. IMPACT — the behavior grants unauthorized capability or data.
+   Evidence: you obtained something you should NOT have access to — data belonging to another user,
+   elevated privileges, server-side execution, internal service response, or persistent state change.
+   "Interesting behavior" without unauthorized access is NOT a finding — it is a hypothesis to escalate.
+
+CLASSIFICATION RULES:
+- CONFIRMED: all three conditions met → call create_vulnerability_report immediately.
+- HYPOTHESIS: causality observed but impact not yet demonstrated → escalate to EXPLOIT phase.
+- FALSE POSITIVE: behavior exists in baseline too, OR impact is zero (reflection without execution, error without data leak) → discard and pivot.
+- INCONCLUSIVE: behavior appears in 1/3 attempts, or cannot determine if impact is real → probe deeper with different approach before deciding.
+
+WHAT IS NEVER A CONFIRMED FINDING:
+- Endpoint or parameter exists (without tested behavior)
+- Tool output mentions the word "vulnerability" (scanner claims require independent verification)
+- Error message returned (without data exfiltration or state change proof)
+- Response size differs (without confirming the difference is meaningful)
+- Behavior observed once but not reproduced
+</confirmation_criteria>
+
 <vulnerability_focus>
 HIGH-IMPACT PRIORITIES (test broadly, validate deeply):
 1. IDOR / BOLA — object-level authorization failures

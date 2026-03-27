@@ -126,6 +126,16 @@ class TestMultiLevelEscalationLogic:
         assert ctx == max(4096, 8192 // 4)
         assert ctx == 4096
 
+    def test_retry_guard_allows_four_vram_retries(self):
+        retries = 0
+        allowed = []
+        for _ in range(5):
+            can_retry = retries < 4
+            allowed.append(can_retry)
+            if can_retry:
+                retries += 1
+        assert allowed == [True, True, True, True, False]
+
 
 # ─────────────────────────────────────────────────────────────
 # Proactive context monitoring logic
@@ -182,6 +192,24 @@ class TestProactiveContextMonitoring:
         adaptive_num_ctx = loop._adaptive_num_ctx if loop._adaptive_num_ctx > 0 else 131072
         loop.state.token_usage["limit"] = adaptive_num_ctx
         assert loop.state.token_usage["limit"] == 8192
+
+
+class TestNumKeepClamping:
+    def test_num_keep_is_clamped_when_ctx_shrinks(self):
+        loop = _make_loop()
+        safe = loop._fit_num_keep_to_ctx(num_keep=8192, num_ctx=4096, num_predict=1024)
+        # 4096 - 1024 - 256 = 2816 max safe keep
+        assert safe == 2816
+
+    def test_num_keep_kept_when_within_budget(self):
+        loop = _make_loop()
+        safe = loop._fit_num_keep_to_ctx(num_keep=2048, num_ctx=16384, num_predict=2048)
+        assert safe == 2048
+
+    def test_num_keep_never_negative(self):
+        loop = _make_loop()
+        safe = loop._fit_num_keep_to_ctx(num_keep=4096, num_ctx=1024, num_predict=900)
+        assert safe >= 0
 
 
 # ─────────────────────────────────────────────────────────────

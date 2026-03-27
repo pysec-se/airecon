@@ -190,3 +190,85 @@ async def test_execute_exit0_no_stdout_is_success(docker_engine, mocker):
 
     assert result["success"] is True
     assert result["exit_code"] == 0
+
+
+@pytest.mark.asyncio
+async def test_start_container_tracks_background_task(docker_engine, mocker):
+    """CRITICAL: Background apt-get update task should be tracked for cleanup."""
+    mocker.patch("shutil.which", return_value="/usr/bin/docker")
+
+    mock_proc = AsyncMock()
+    mock_proc.returncode = 0
+    mock_proc.communicate = AsyncMock(return_value=(b"abcdef1234567890\n", b""))
+    mocker.patch("asyncio.create_subprocess_exec", return_value=mock_proc)
+    mocker.patch("airecon.proxy.docker.get_workspace_root", return_value="/tmp/test")
+    mocker.patch.object(docker_engine, "execute", new_callable=AsyncMock)
+
+    await docker_engine.start_container()
+
+    # Background task should be tracked
+    assert len(docker_engine._background_tasks) == 1
+    task = list(docker_engine._background_tasks)[0]
+    assert isinstance(task, asyncio.Task)
+
+
+@pytest.mark.asyncio
+async def test_stop_container_cancels_background_tasks(docker_engine, mocker):
+    """CRITICAL: stop_container must cancel and await background tasks to prevent leaks."""
+    mocker.patch("shutil.which", return_value="/usr/bin/docker")
+
+    mock_proc = AsyncMock()
+    mock_proc.returncode = 0
+    mock_proc.communicate = AsyncMock(return_value=(b"abcdef1234567890\n", b""))
+    mock_proc.wait = AsyncMock()
+    mocker.patch("asyncio.create_subprocess_exec", return_value=mock_proc)
+    mocker.patch("airecon.proxy.docker.get_workspace_root", return_value="/tmp/test")
+    mocker.patch.object(docker_engine, "execute", new_callable=AsyncMock)
+
+    await docker_engine.start_container()
+    assert len(docker_engine._background_tasks) == 1
+
+    await docker_engine.stop_container()
+
+    # Background tasks should be cleared after stop
+    assert len(docker_engine._background_tasks) == 0
+    assert docker_engine._connected is False
+
+
+@pytest.mark.asyncio
+async def test_force_stop_with_straggler_processes(docker_engine, mocker):
+    """CRITICAL: force_stop must handle straggler processes gracefully."""
+    docker_engine._container_name = "test-container"
+    docker_engine._connected = True
+
+    # Mock active processes
+    mock_proc1 = AsyncMock()
+    mock_proc1.returncode = None
+    mock_proc1.kill = MagicMock(side_effect=ProcessLookupError("Process not found"))
+    mock_proc1.wait = AsyncMock()
+
+    mock_proc2 = AsyncMock()
+    mock_proc2.returncode = 0
+    mock_proc2.kill = MagicMock()
+    mock_proc2.wait = AsyncMock()
+
+    docker_engine._active_procs = {mock_proc1, mock_proc2}
+
+    # Mock docker exec command for pkill
+    mock_pkill_proc = AsyncMock()
+    mock_pkill_proc.wait = AsyncMock()
+    
+    call_count = [0]
+    def create_proc(*args, **kwargs):
+        call_count[0] += 1
+        # First call is pkill, second is docker rm (not used here)
+        return mock_pkill_proc
+    
+    mocker.patch("asyncio.create_subprocess_exec", side_effect=create_proc)
+
+    # force_stop should not raise even with straggler processes
+    await docker_engine.force_stop()
+
+    # All processes should be cleared
+    assert len(docker_engine._active_procs) == 0
+    # Note: force_stop doesn't set _connected=False, only stop_container does

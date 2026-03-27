@@ -42,6 +42,47 @@ Rank candidates by:
 - Reproducibility confidence
 - Chaining potential
 
+<validation_methodology>
+PROBE-INTERPRET-DECIDE loop — apply to every input vector, regardless of vulnerability class:
+
+STEP 1 — ESTABLISH BASELINE
+Before injecting anything, record the normal response: status code, body length, response time, key fields.
+This is your comparison baseline. Without it, you cannot determine if your probe caused anything.
+
+STEP 2 — MINIMAL PROBE
+Start with the smallest possible anomalous input that tests your hypothesis.
+A minimal probe isolates causality: if the application reacts, it reacted to YOUR specific input.
+Avoid multi-vector payloads on first attempt — they make root cause analysis harder.
+
+STEP 3 — READ THE DIFF, NOT THE RESPONSE
+Compare your probe response to the baseline. Ask:
+  - Did the status code change?
+  - Did the body grow or shrink significantly?
+  - Did the response time change meaningfully (> 2× baseline)?
+  - Did new fields, error text, or data appear that were absent in baseline?
+  - Did something disappear that was present in baseline?
+If NO diff → this vector does not react to your probe → pivot to a different approach.
+If DIFF present → you have a signal. Classify it.
+
+STEP 4 — CLASSIFY THE SIGNAL
+  STRONG SIGNAL: the diff contains data you should not have, system internals, or execution evidence.
+    → Reproduce it twice more. If consistent: escalate to EXPLOIT with this exact payload and conditions.
+  WEAK SIGNAL: the diff is present but ambiguous (generic error, size change without content change).
+    → Do NOT report yet. Design a follow-up probe that isolates whether the signal has real impact.
+  NO SIGNAL: response is identical to baseline.
+    → Document as tested, pivot to next vector.
+
+STEP 5 — ESCALATE OR PIVOT
+  After 2 probes with no strong signal → this vector/endpoint is likely not vulnerable to this class. Move on.
+  After 1 strong signal → reproduce and then escalate to EXPLOIT phase.
+  After 1 weak signal → one more targeted probe to resolve ambiguity, then decide.
+  Never spend more than 3 probes on the same vector without a signal — it is better to explore breadth.
+
+REMEMBER: you do not know in advance what vulnerability class will emerge.
+A behavioral diff is just a diff — your job is to determine if it represents real unauthorized impact.
+Novel findings often look like nothing in standard scanner output. Trust the diff, not the label.
+</validation_methodology>
+
 ANALYSIS QUALITY GATES:
 - Multiple high-confidence exploit candidates identified, or
 - A clear and testable attack path documented, and
@@ -54,6 +95,39 @@ PHASE DISCIPLINE:
 
 <capability_spotlight>
 SPECIALIZED CAPABILITIES FOR THIS PHASE:
+
+- http_observe (PRIMARY TOOL — use before any scanner):
+  Sends a raw HTTP request from inside the sandbox and returns status code, ALL headers,
+  and body. This is the foundation of the Observer-Hypothesizer method:
+
+  WORKFLOW:
+  1. OBSERVE: Call http_observe on the target endpoint to see the exact raw server response.
+     Use save_as="baseline" to store the normal response.
+  2. HYPOTHESIZE: Read the response carefully. What does each header reveal? What does the
+     status code mean? What parameters affect behavior?
+  3. PROBE: Send a minimal variant (change one thing). Use compare_to="baseline" to get
+     an automatic diff showing exactly what changed.
+  4. REASON: Is the diff security-relevant? A status change, a new Location header, a body
+     size delta, or a changed response field all tell you something.
+
+  CRITICAL BEHAVIORS TO OBSERVE WITH http_observe:
+  - Set follow_redirects=false to capture Location headers (open redirect, SSRF via redirect)
+  - Observe Set-Cookie carefully: HttpOnly? Secure? SameSite? Predictable value?
+  - Observe Access-Control-Allow-Origin: does it reflect your Origin header?
+  - Observe error responses: do they reveal framework, paths, SQL structure?
+  - For URL-accepting parameters (?url=, ?redirect=, ?next=, ?dest=): test with
+    javascript:, //attacker.com, data:text/html,<h1>test</h1> — observe Location header
+    in response to see what the server reflects without following the redirect.
+
+  EXAMPLE — testing open redirect:
+    1. http_observe url="https://target.com/login?next=/" save_as="baseline"
+    2. http_observe url="https://target.com/login?next=javascript:alert(1)" compare_to="baseline"
+    3. If diff shows Location: javascript:alert(1) → CONFIRMED open redirect
+
+  EXAMPLE — testing CORS:
+    1. http_observe url="https://api.target.com/user" headers={"Origin":"https://evil.com"}
+    2. If response has Access-Control-Allow-Origin: https://evil.com → CONFIRMED CORS misconfiguration
+
 - Static analysis (SAST): If source code, a Git repository, or a downloadable package
   is accessible, run SAST BEFORE manual testing. It finds hardcoded secrets,
   injection sinks, unsafe deserialization, and logic flaws faster than manual review.

@@ -127,3 +127,26 @@ def test_parse_metasploit_ignores_negative_vulnerable_claims():
     assert parsed.total_count == 1
     assert any("meterpreter session opened" in item.lower() for item in parsed.items)
     assert all("not vulnerable" not in item.lower() for item in parsed.items)
+
+
+def test_parse_tool_output_emits_causal_observations_with_phase():
+    output = """
+http://example.com/admin [200]
+http://example.com/login [403]
+    """
+    parsed = parse_tool_output("httpx -silent", output, phase="ANALYSIS")
+    assert parsed is not None
+    assert parsed.causal_observations
+    obs_types = {obs.get("observation_type") for obs in parsed.causal_observations}
+    assert "endpoint_observed" in obs_types
+    assert "endpoint_accessible" in obs_types
+    assert all(obs.get("phase") == "ANALYSIS" for obs in parsed.causal_observations)
+
+
+def test_parse_tool_output_fallback_has_causal_observation():
+    output = "Some unstructured but non-empty tool output"
+    parsed = parse_tool_output("custombinary --scan", output, phase="RECON")
+    assert parsed is not None
+    assert parsed.causal_observations
+    first = parsed.causal_observations[0]
+    assert first.get("observation_type") in {"tool_output_observed", "endpoint_discovered"}
