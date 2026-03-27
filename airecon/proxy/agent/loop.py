@@ -8,6 +8,7 @@ import os
 import re
 import shlex
 import warnings
+from collections import deque
 from pathlib import Path
 from typing import Any, AsyncIterator
 from urllib.parse import urlparse
@@ -146,6 +147,7 @@ class AgentLoop(
         # Hash-based dedup: stores MD5(tool_name+args) to block re-execution of
         # identical commands
         self._executed_cmd_hashes: set[str] = set()
+        self._executed_cmd_order: deque[str] = deque()
         self._initial_messages: list[dict[str, Any]] = []
         self._stop_requested: bool = False
         self._consecutive_failures: int = 0
@@ -450,20 +452,24 @@ class AgentLoop(
             return True, msg
 
         self._executed_cmd_hashes.add(cmd_hash)
+        self._executed_cmd_order.append(cmd_hash)
         
         # FIX #6 (Medium): Incremental pruning to prevent memory growth
         # Old behavior: clear() all when >5000 (causes re-execution of old commands)
         # New behavior: prune oldest 2500 when >5000 (preserves recent history)
         # This prevents memory bloat while maintaining dedup effectiveness.
         if len(self._executed_cmd_hashes) > 5000:
-            # Convert to list, keep newest 2500 entries (FIFO pruning)
-            entries = list(self._executed_cmd_hashes)
-            if len(entries) > 2500:
-                # Keep the most recent 2500 entries
-                self._executed_cmd_hashes = set(entries[-2500:])
+            before = len(self._executed_cmd_hashes)
+            while len(self._executed_cmd_order) > 2500:
+                oldest = self._executed_cmd_order.popleft()
+                self._executed_cmd_hashes.discard(oldest)
+            while len(self._executed_cmd_order) > len(self._executed_cmd_hashes):
+                self._executed_cmd_order.popleft()
+            after = len(self._executed_cmd_hashes)
+            if after != before:
                 logger.debug(
                     "_executed_cmd_hashes incrementally pruned: %d → %d entries (kept newest 2500)",
-                    len(entries), len(self._executed_cmd_hashes)
+                    before, after
                 )
         
         return False, ""
@@ -582,6 +588,7 @@ class AgentLoop(
             self.state.conversation = list(self._initial_messages)
         self._executed_tool_counts.clear()
         self._executed_cmd_hashes.clear()
+        self._executed_cmd_order.clear()
         self._last_output_file = None
         self._stagnation_iterations = 0
         self._recent_tool_names.clear()

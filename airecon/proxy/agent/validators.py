@@ -257,11 +257,6 @@ DANGEROUS_PATTERNS: list[tuple[str, str]] = [
     (r":\s*\(\s*\)\s*\{.*:\s*\|.*:\s*&", "Dangerous: fork bomb detected"),
     (r"pkill\s+-9", "Dangerous: killing critical processes"),
     (r">\s*/dev/sd[a-z]", "Dangerous: writing to disk device"),
-    (r"\$\{[^}]+\}", "Dangerous: variable expansion detected"),
-    (r"<\([^)]+\)", "Dangerous: process substitution detected"),
-    (r"\$'[^']*'", "Dangerous: ANSI-C quoting detected"),
-    (r"`[^`]+`", "Dangerous: backtick command substitution detected"),
-    (r"\$\([^)]+\)", "Dangerous: $(command) substitution detected"),
 ]
 
 

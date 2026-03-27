@@ -8,6 +8,7 @@ import logging
 import os
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Any
 
 logger = logging.getLogger("airecon.proxy.config")
 
@@ -223,14 +224,21 @@ class Config:
             if not config_dir.exists():
                 config_dir.mkdir(parents=True, exist_ok=True)
 
-        current_config = DEFAULT_CONFIG.copy()
+        current_config: dict[str, Any] = {}
+        user_config: dict[str, Any] = {}
 
         # Load or Create
         if config_file.exists():
             try:
                 with open(config_file, "r") as f:
-                    user_config = json.load(f)
-                    # Merge user config into defaults
+                    loaded = json.load(f)
+                    if isinstance(loaded, dict):
+                        user_config = loaded
+                    else:
+                        logger.warning(
+                            "Config file %s is not a JSON object. Using defaults.",
+                            config_file,
+                        )
                     current_config.update(user_config)
             except Exception as e:
                 logger.error(
@@ -261,7 +269,7 @@ class Config:
 
         # Override with Environment Variables (Optional, for temporary
         # overrides)
-        for key in current_config:
+        for key in DEFAULT_CONFIG:
             env_key = f"AIRECON_{key.upper()}"
             if env_key in os.environ:
                 val = os.environ[env_key]
@@ -280,6 +288,16 @@ class Config:
                         logger.warning("AIRECON_%s env var %r is not a valid float — ignored", key.upper(), val)
                 else:
                     current_config[key] = val
+
+        # Dynamic context limit behavior:
+        # - If user did NOT explicitly set agent_max_conversation_messages,
+        #   auto-derive from ollama_num_ctx in load_with_defaults.
+        explicit_cap = "AIRECON_AGENT_MAX_CONVERSATION_MESSAGES" in os.environ
+        if not explicit_cap and "agent_max_conversation_messages" in current_config:
+            configured_cap = current_config.get("agent_max_conversation_messages")
+            explicit_cap = configured_cap != DEFAULT_CONFIG["agent_max_conversation_messages"]
+        if not explicit_cap:
+            current_config["agent_max_conversation_messages"] = None
 
         return cls.load_with_defaults(current_config)
 
@@ -312,6 +330,9 @@ class Config:
                 continue
             expected_type = type(default_val)
             val = merged[key]
+            if key == "agent_max_conversation_messages" and val is None:
+                # Explicit sentinel: auto-derive from ollama_num_ctx later.
+                continue
             if not isinstance(val, expected_type):
                 try:
                     if expected_type is bool:
@@ -395,6 +416,13 @@ class Config:
                     bkey, bval, lo, hi, default_bval,
                 )
                 merged[bkey] = default_bval
+
+        if merged.get("agent_max_conversation_messages") is None:
+            try:
+                ctx_val = int(merged.get("ollama_num_ctx", DEFAULT_CONFIG["ollama_num_ctx"]))
+            except (TypeError, ValueError):
+                ctx_val = int(DEFAULT_CONFIG["ollama_num_ctx"])
+            merged["agent_max_conversation_messages"] = max(100, min(10000, ctx_val // 128))
 
         return cls(**merged)
 

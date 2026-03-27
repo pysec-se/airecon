@@ -166,6 +166,12 @@ class TestCompleteValidation:
         is_valid, error = validate_for_execution(cmd)
         assert is_valid is True
 
+    def test_allow_common_shell_substitution(self):
+        """Common shell substitutions should not be blanket-blocked."""
+        cmd = "echo $(pwd) && echo ${HOME}"
+        is_valid, error = validate_for_execution(cmd)
+        assert is_valid is True, f"Error: {error}"
+
     def test_reject_dangerous_combined(self):
         """Dangerous patterns should be caught."""
         cmd = "rm -rf /workspace/output && echo 'deleted'"

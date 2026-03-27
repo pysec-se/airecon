@@ -74,11 +74,13 @@ def _get_context_limits():
     """
     try:
         config = get_config()
+        dynamic_default = max(100, min(10000, int(config.ollama_num_ctx) // 128))
+        configured_max = int(config.agent_max_conversation_messages or 0)
+        max_conversation_messages = configured_max if configured_max > 0 else dynamic_default
+        trigger_ratio = max(0.5, min(0.95, float(config.agent_compression_trigger_ratio)))
         return {
-            "max_conversation_messages": config.agent_max_conversation_messages,
-            "compression_trigger": int(
-                config.agent_max_conversation_messages * config.agent_compression_trigger_ratio
-            ),
+            "max_conversation_messages": max_conversation_messages,
+            "compression_trigger": int(max_conversation_messages * trigger_ratio),
             "uncompressed_keep_count": config.agent_uncompressed_keep_count,
             "llm_compression_num_ctx": config.agent_llm_compression_num_ctx,
             "llm_compression_num_predict": config.agent_llm_compression_num_predict,

@@ -162,6 +162,46 @@ class TestBypassStrategies:
             # Just verify it doesn't crash
             assert len(test_payload) > 0
 
+    @pytest.mark.asyncio
+    async def test_cookie_bypass_strategy_is_executed(self) -> None:
+        engine = WAFBypassEngine()
+        mock_response = MagicMock()
+        mock_response.status_code = 200
+        mock_response.content = b"OK"
+        mock_response.text = "ok"
+        engine._send_request = AsyncMock(return_value=mock_response)
+        engine._is_bypass_successful = MagicMock(return_value=True)
+        result = await engine._apply_strategy(
+            url="http://example.com/test",
+            strategy={"name": "cookie_bypass", "cookies": {"a": "1", "b": "2"}},
+            payload="test",
+            param_name="id",
+            method="GET",
+            base_headers=None,
+        )
+        assert result["success"] is True
+        assert "cookie_header" in result
+
+    @pytest.mark.asyncio
+    async def test_parameter_pollution_strategy_is_executed(self) -> None:
+        engine = WAFBypassEngine()
+        mock_response = MagicMock()
+        mock_response.status_code = 200
+        mock_response.content = b"OK"
+        mock_response.text = "ok"
+        engine._send_parameter_pollution_request = AsyncMock(return_value=mock_response)
+        engine._is_bypass_successful = MagicMock(return_value=True)
+        result = await engine._apply_strategy(
+            url="http://example.com/test",
+            strategy={"name": "parameter_pollution", "technique": "duplicate_params"},
+            payload="test",
+            param_name="id",
+            method="GET",
+            base_headers=None,
+        )
+        assert result["success"] is True
+        assert result["technique"] == "duplicate_params"
+
 
 class TestBypassSuccessDetection:
     """Test bypass success detection logic."""

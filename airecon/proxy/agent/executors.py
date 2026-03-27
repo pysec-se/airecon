@@ -778,9 +778,37 @@ class _ExecutorMixin:
         ssrf_params = _as_str_list(arguments.get("ssrf_params"))
         graphql_endpoints = _as_str_list(arguments.get("graphql_endpoints"))
         race_params = _as_str_list(arguments.get("race_params"))
+        auth_login_url_raw = arguments.get("auth_login_url")
+        auth_login_url = (
+            auth_login_url_raw.strip()
+            if isinstance(auth_login_url_raw, str) and auth_login_url_raw.strip()
+            else None
+        )
+        auth_username = arguments.get("auth_username")
+        auth_password = arguments.get("auth_password")
+        auth_extra_fields_raw = arguments.get("auth_extra_fields")
+        auth_extra_fields: dict[str, str] | None = None
+        if isinstance(auth_extra_fields_raw, dict):
+            auth_extra_fields = {
+                str(k): str(v)
+                for k, v in auth_extra_fields_raw.items()
+                if str(k).strip()
+            }
 
         try:
-            async with Fuzzer(target=target, method=method, headers=self._build_fuzz_headers()) as fuzzer:
+            async with Fuzzer(
+                target=target,
+                method=method,
+                headers=self._build_fuzz_headers(),
+                auth_login_url=auth_login_url,
+            ) as fuzzer:
+                if isinstance(auth_username, str) and isinstance(auth_password, str):
+                    fuzzer.set_auth_credentials(
+                        auth_username,
+                        auth_password,
+                        auth_extra_fields,
+                        login_url=auth_login_url,
+                    )
                 await fuzzer.fuzz_parameters(params, vuln_types)
                 phase2_findings: list[Any] = []
                 if enable_phase2:
@@ -938,6 +966,22 @@ class _ExecutorMixin:
         race_params = _as_str_list(arguments.get("race_params"))
         store_params = _as_str_list(arguments.get("store_params"))
         trigger_paths = _as_str_list(arguments.get("trigger_paths"))
+        auth_login_url_raw = arguments.get("auth_login_url")
+        auth_login_url = (
+            auth_login_url_raw.strip()
+            if isinstance(auth_login_url_raw, str) and auth_login_url_raw.strip()
+            else None
+        )
+        auth_username = arguments.get("auth_username")
+        auth_password = arguments.get("auth_password")
+        auth_extra_fields_raw = arguments.get("auth_extra_fields")
+        auth_extra_fields: dict[str, str] | None = None
+        if isinstance(auth_extra_fields_raw, dict):
+            auth_extra_fields = {
+                str(k): str(v)
+                for k, v in auth_extra_fields_raw.items()
+                if str(k).strip()
+            }
         tester = None
 
         try:
@@ -945,7 +989,15 @@ class _ExecutorMixin:
             tester = InteractiveRealTimeTester(
                 target, threads=10, timeout=20,
                 headers=self._build_fuzz_headers(),
+                auth_login_url=auth_login_url,
             )
+            if isinstance(auth_username, str) and isinstance(auth_password, str):
+                tester.fuzzer.set_auth_credentials(
+                    auth_username,
+                    auth_password,
+                    auth_extra_fields,
+                    login_url=auth_login_url,
+                )
             async for event in tester.stream_fuzz(params=params, vuln_types=vuln_types):
                 pass
             phase2_findings: list[Any] = []

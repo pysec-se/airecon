@@ -158,6 +158,56 @@ class TestInteractiveRealTimeTester:
         assert "findings" in summary or "total" in summary or len(summary) > 0
 
 
+class TestAuthRecoverySafety:
+    """Auth recovery should not post credentials to non-login endpoints."""
+
+    @pytest.mark.asyncio
+    async def test_skip_auth_recovery_without_login_url(self) -> None:
+        fuzzer = Fuzzer(
+            "https://example.com/api/private",
+            enable_waf_bypass=False,
+            enable_rate_limit=False,
+            enable_auth_recovery=True,
+        )
+        try:
+            response = httpx.Response(
+                401,
+                text="Unauthorized",
+                request=httpx.Request("GET", "https://example.com/api/private"),
+            )
+            fuzzer.auth_manager.handle_auth_failure = AsyncMock(return_value=True)  # type: ignore[assignment]
+            out = await fuzzer._maybe_recover_auth(response, param="id", value="1")
+            assert out is response
+            fuzzer.auth_manager.handle_auth_failure.assert_not_called()  # type: ignore[union-attr]
+        finally:
+            await fuzzer.close()
+
+    @pytest.mark.asyncio
+    async def test_auth_recovery_uses_explicit_login_url(self) -> None:
+        fuzzer = Fuzzer(
+            "https://example.com/api/private",
+            enable_waf_bypass=False,
+            enable_rate_limit=False,
+            enable_auth_recovery=True,
+            auth_login_url="https://example.com/login",
+        )
+        try:
+            response = httpx.Response(
+                401,
+                text="Unauthorized",
+                request=httpx.Request("GET", "https://example.com/api/private"),
+            )
+            fuzzer.auth_manager.handle_auth_failure = AsyncMock(return_value=False)  # type: ignore[assignment]
+            out = await fuzzer._maybe_recover_auth(response, param="id", value="1")
+            assert out is response
+            fuzzer.auth_manager.handle_auth_failure.assert_awaited_once_with(  # type: ignore[union-attr]
+                response,
+                "https://example.com/login",
+            )
+        finally:
+            await fuzzer.close()
+
+
 class TestAdvancedPhaseProbes:
     """Tests for Phase 2 and Phase 3 advanced fuzzing probes."""
 

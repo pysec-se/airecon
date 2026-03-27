@@ -227,6 +227,7 @@ class Fuzzer:
         enable_waf_bypass: bool = True,
         enable_rate_limit: bool = True,
         enable_auth_recovery: bool = True,
+        auth_login_url: str | None = None,
     ):
         self.target = target
         self.wordlist = wordlist or FUZZ_POINTS
@@ -270,6 +271,7 @@ class Fuzzer:
             self.auth_manager = AuthManager(timeout=timeout)
         else:
             self.auth_manager = None
+        self.auth_login_url = auth_login_url.strip() if isinstance(auth_login_url, str) and auth_login_url.strip() else None
 
     async def close(self) -> None:
         """Release async resources owned by the fuzzer."""
@@ -314,11 +316,30 @@ class Fuzzer:
         username: str,
         password: str,
         extra_fields: dict[str, str] | None = None,
+        login_url: str | None = None,
     ) -> None:
         """Configure credentials for automatic auth recovery."""
         if not self.auth_manager:
             return
         self.auth_manager.set_credentials(username, password, extra_fields)
+        if isinstance(login_url, str) and login_url.strip():
+            self.auth_login_url = login_url.strip()
+
+    def set_auth_login_url(self, login_url: str) -> None:
+        """Configure login endpoint used during auth recovery."""
+        clean = login_url.strip()
+        if clean:
+            self.auth_login_url = clean
+
+    def _resolve_auth_login_url(self) -> str | None:
+        """Resolve safest login URL for automatic auth recovery."""
+        if self.auth_login_url:
+            return self.auth_login_url
+        parsed = urlparse(self.target)
+        path = parsed.path.lower()
+        if any(token in path for token in ("/login", "/signin", "/sign-in", "/auth", "/session")):
+            return self.target
+        return None
 
     def _refresh_cookie_header_from_auth(self) -> None:
         """Sync recovered session cookies into request headers."""
@@ -346,7 +367,15 @@ class Fuzzer:
         if response.status_code not in (401, 403):
             return response
 
-        recovered = await self.auth_manager.handle_auth_failure(response, self.target)
+        login_url = self._resolve_auth_login_url()
+        if not login_url:
+            logger.debug(
+                "Skipping auth recovery for %s: no login URL configured",
+                self.target,
+            )
+            return response
+
+        recovered = await self.auth_manager.handle_auth_failure(response, login_url)
         if not recovered:
             return response
 
@@ -2346,9 +2375,16 @@ class InteractiveRealTimeTester:
         timeout: int = 10,
         on_finding: Callable[[FuzzResult], None] | None = None,
         headers: dict[str, str] | None = None,
+        auth_login_url: str | None = None,
     ):
         self.target = target
-        self.fuzzer = Fuzzer(target=target, threads=threads, timeout=timeout, headers=headers)
+        self.fuzzer = Fuzzer(
+            target=target,
+            threads=threads,
+            timeout=timeout,
+            headers=headers,
+            auth_login_url=auth_login_url,
+        )
         self.chain_engine = ExploitChainEngine(self.fuzzer)
         self.on_finding = on_finding
         self._stop_event = asyncio.Event()
