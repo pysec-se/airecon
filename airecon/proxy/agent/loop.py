@@ -354,12 +354,10 @@ class AgentLoop(
             loop = asyncio.get_running_loop()
         except RuntimeError:
             try:
-                lock_acquired = self._session_lock.acquire(blocking=False)
-                if lock_acquired:
-                    try:
-                        save_session(session)
-                    finally:
-                        self._session_lock.release()
+                # No running event loop: asyncio.Lock cannot be acquired here.
+                # Best effort save if lock is not currently held by an async task.
+                if not self._session_lock.locked():
+                    save_session(session)
                 else:
                     logger.debug("Session save skipped - lock held")
             except Exception as exc:

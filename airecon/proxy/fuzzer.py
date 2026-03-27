@@ -26,9 +26,11 @@ import math
 import re
 import time
 import uuid
+from collections.abc import AsyncIterator as AsyncIteratorABC
+from collections.abc import Awaitable, Iterable
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, AsyncIterator, Callable
+from typing import Any, AsyncIterator, Callable, cast
 from urllib.parse import parse_qs, urlencode, urlparse, urlunparse
 
 import httpx
@@ -2134,19 +2136,34 @@ class ExploitChainEngine:
     async def _cached_probe(
         self,
         cache_key: str,
-        producer: Callable[[], AsyncIterator[FuzzResult] | list[FuzzResult] | Any],
+        producer: Callable[
+            [],
+            (
+                Awaitable[list[FuzzResult] | AsyncIterator[FuzzResult] | Iterable[FuzzResult] | None]
+                | AsyncIterator[FuzzResult]
+                | Iterable[FuzzResult]
+                | None
+            ),
+        ],
     ) -> list[FuzzResult]:
         if cache_key in self._special_probe_cache:
             return self._special_probe_cache[cache_key]
         produced = producer()
         if asyncio.iscoroutine(produced):
-            produced = await produced
-        if isinstance(produced, list):
+            produced = await cast(
+                Awaitable[list[FuzzResult] | AsyncIterator[FuzzResult] | Iterable[FuzzResult] | None],
+                produced,
+            )
+        if produced is None:
+            results: list[FuzzResult] = []
+        elif isinstance(produced, list):
             results = produced
-        elif hasattr(produced, "__aiter__"):
+        elif isinstance(produced, AsyncIteratorABC):
             results = [item async for item in produced]
+        elif isinstance(produced, Iterable):
+            results = list(produced)
         else:
-            results = list(produced) if produced else []
+            results = []
         self._special_probe_cache[cache_key] = results
         return results
 
@@ -2341,8 +2358,10 @@ class InteractiveRealTimeTester:
     async def probe_baseline(self, params: list[str]) -> dict[str, Any]:
         """Fetch baseline responses for all params before fuzzing begins."""
         probe_fn = getattr(self.fuzzer, "probe", None)
+        tasks: list[Awaitable[dict[str, Any]]]
         if callable(probe_fn):
-            tasks = [probe_fn(p) for p in params]
+            typed_probe = cast(Callable[[str], Awaitable[dict[str, Any]]], probe_fn)
+            tasks = [typed_probe(p) for p in params]
         else:
             tasks = [self.fuzzer._fetch_baseline(p) for p in params]
         results = await asyncio.gather(*tasks, return_exceptions=True)
