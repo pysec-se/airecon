@@ -1,7 +1,6 @@
 """Tests for loop.py output merge functionality."""
 
 import pytest
-from pathlib import Path
 from unittest.mock import MagicMock
 from airecon.proxy.agent.loop import AgentLoop
 

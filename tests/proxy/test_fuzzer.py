@@ -2,8 +2,8 @@
 from __future__ import annotations
 
 import pytest
-from unittest.mock import AsyncMock, MagicMock, patch
-from airecon.proxy.fuzzer import InteractiveRealTimeTester, RealTimeEvent
+from unittest.mock import AsyncMock, MagicMock
+from airecon.proxy.fuzzer import InteractiveRealTimeTester
 
 
 class TestInteractiveRealTimeTester:

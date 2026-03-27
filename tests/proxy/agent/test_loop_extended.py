@@ -274,7 +274,7 @@ class TestLoopStreamingWithMockedOllama:
     async def test_retry_partial_success_then_fail(self, loop, mocker):
         """Test retry logic: first attempt succeeds, second fails, should recover."""
         mocker.patch("airecon.proxy.agent.loop.get_system_prompt", return_value="SYS")
-        sleep_mock = mocker.patch("airecon.proxy.agent.loop.asyncio.sleep")
+        mocker.patch("airecon.proxy.agent.loop.asyncio.sleep")
         await loop.initialize(target="test.com", user_message="go")
 
         call_count = [0]
@@ -304,7 +304,7 @@ class TestLoopStreamingWithMockedOllama:
     async def test_retry_all_attempts_exhausted_emits_error(self, loop, mocker):
         """Test retry logic: all retry attempts fail, should emit error event."""
         mocker.patch("airecon.proxy.agent.loop.get_system_prompt", return_value="SYS")
-        sleep_mock = mocker.patch("airecon.proxy.agent.loop.asyncio.sleep")
+        mocker.patch("airecon.proxy.agent.loop.asyncio.sleep")
         await loop.initialize(target="test.com", user_message="go")
 
         async def _always_failing_stream(*args, **kwargs):
@@ -321,7 +321,6 @@ class TestLoopStreamingWithMockedOllama:
                 break
 
         # Should eventually emit an error after exhausting retries
-        error_events = [e for e in events if e.type == "error"]
         # At minimum should have tried and either errored or completed
         assert len(events) > 0
 
