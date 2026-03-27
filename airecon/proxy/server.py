@@ -368,29 +368,35 @@ async def _stream_file_agent_events(
     )
 
     try:
-        await mini_agent.initialize(target=_target, user_message=request.task)
-    except Exception as e:
-        yield {
-            "event": "error",
-            "data": json.dumps(
-                {"type": "error", "message": f"Mini-agent initialization failed: {e}"}
-            ),
-        }
-        return
+        try:
+            await mini_agent.initialize(target=_target, user_message=request.task)
+        except Exception as e:
+            yield {
+                "event": "error",
+                "data": json.dumps(
+                    {"type": "error", "message": f"Mini-agent initialization failed: {e}"}
+                ),
+            }
+            return
 
-    if _target:
-        mini_agent.state.active_target = _target
+        if _target:
+            mini_agent.state.active_target = _target
 
-    mini_agent.state.conversation.append(
-        {"role": "system", "content": file_context_message}
-    )
+        mini_agent.state.conversation.append(
+            {"role": "system", "content": file_context_message}
+        )
 
-    async for event in mini_agent.process_message(request.task):
-        event_data = event.data if isinstance(event.data, dict) else {}
-        yield {
-            "event": event.type,
-            "data": json.dumps({"type": event.type, **event_data}, default=str),
-        }
+        async for event in mini_agent.process_message(request.task):
+            event_data = event.data if isinstance(event.data, dict) else {}
+            yield {
+                "event": event.type,
+                "data": json.dumps({"type": event.type, **event_data}, default=str),
+            }
+    finally:
+        try:
+            await mini_agent.stop()
+        except Exception as stop_err:
+            logger.debug("Mini-agent cleanup failed: %s", stop_err)
 
 
 @app.post("/api/reset")

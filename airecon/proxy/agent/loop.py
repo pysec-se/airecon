@@ -9,6 +9,7 @@ import re
 import shlex
 import warnings
 from collections import deque
+from dataclasses import asdict as _asdict
 from pathlib import Path
 from typing import Any, AsyncIterator
 from urllib.parse import urlparse
@@ -22,6 +23,9 @@ from ..system import (
     auto_load_skills_for_technologies,
     get_system_prompt,
 )
+from .chain_planner import ChainStep as _ChainStep
+from .chain_planner import ExploitChain as _ExploitChain
+from .chain_planner import build_chain_context, plan_chains
 from .executors import _ExecutorMixin
 from .file_reference import (
     build_injection_message,
@@ -31,6 +35,11 @@ from .file_reference import (
     workspace_name_for_ref,
 )
 from .formatters import _FormatterMixin
+from .loop_context import _ContextMixin
+from .loop_exploration import _MEANINGFUL_EVIDENCE_THRESHOLD, _ExplorationMixin
+from .loop_inference import _InferenceMixin
+from .loop_objectives import _ObjectivesMixin
+from .loop_supervision import _SupervisionMixin
 from .models import MAX_TOOL_ITERATIONS, AgentEvent, AgentState
 from .output_parser import parse_tool_output
 from .pipeline import PipelineEngine, PipelinePhase
@@ -45,10 +54,6 @@ from .session import (
     update_from_parsed_output,
 )
 from .tool_defs import get_tool_definitions
-from dataclasses import asdict as _asdict
-from .chain_planner import ChainStep as _ChainStep
-from .chain_planner import ExploitChain as _ExploitChain
-from .chain_planner import build_chain_context, plan_chains
 from .validators import _ValidatorMixin
 from .waf_detector import (
     build_waf_bypass_context,
@@ -57,11 +62,6 @@ from .waf_detector import (
     rank_bypass_strategies,
 )
 from .workspace import _WorkspaceMixin
-from .loop_inference import _InferenceMixin
-from .loop_exploration import _ExplorationMixin, _MEANINGFUL_EVIDENCE_THRESHOLD
-from .loop_objectives import _ObjectivesMixin
-from .loop_supervision import _SupervisionMixin
-from .loop_context import _ContextMixin
 
 _tools_meta_path = Path(__file__).parent.parent / "data" / "tools_meta.json"
 try:
@@ -229,7 +229,7 @@ class AgentLoop(
             except Exception as e:
                 logger.error("Failed to save session during stop: %s", e)
         
-        if self.engine:
+        if self.engine and not self._is_subagent:
             await self.engine.force_stop()
         if self._token_snapshot_task and not self._token_snapshot_task.done():
             self._token_snapshot_resave_requested = True

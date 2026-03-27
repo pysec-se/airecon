@@ -138,6 +138,13 @@ _REPLAY_THRESHOLDS = {
     "strict_no_runtime": float(get_tuning("validator.replay.thresholds.strict_no_runtime", 0.48)),
     "non_strict": float(get_tuning("validator.replay.thresholds.non_strict", 0.38)),
 }
+_REPLAY_SEVERITY_OFFSETS = {
+    "CRITICAL": float(get_tuning("validator.replay.thresholds.severity_offset.critical", 0.10)),
+    "HIGH": float(get_tuning("validator.replay.thresholds.severity_offset.high", 0.06)),
+    "MEDIUM": float(get_tuning("validator.replay.thresholds.severity_offset.medium", 0.02)),
+    "LOW": float(get_tuning("validator.replay.thresholds.severity_offset.low", -0.02)),
+    "INFO": float(get_tuning("validator.replay.thresholds.severity_offset.info", -0.04)),
+}
 
 
 # ── Path / command validation ─────────────────────────────────────────────────
@@ -388,6 +395,70 @@ class _ValidatorMixin:
         val = arguments.get(key)
         return val if isinstance(val, str) else ""
 
+    @staticmethod
+    def _normalize_severity_label(value: str) -> str:
+        raw = (value or "").strip().upper()
+        if raw in ("CRIT",):
+            return "CRITICAL"
+        if raw in ("MODERATE",):
+            return "MEDIUM"
+        if raw in ("INFORMATIONAL",):
+            return "INFO"
+        return raw if raw in {"CRITICAL", "HIGH", "MEDIUM", "LOW", "INFO"} else ""
+
+    @staticmethod
+    def _severity_from_cvss_score(score: float) -> str:
+        if score >= 9.0:
+            return "CRITICAL"
+        if score >= 7.0:
+            return "HIGH"
+        if score >= 4.0:
+            return "MEDIUM"
+        if score > 0.0:
+            return "LOW"
+        return "INFO"
+
+    def _derive_report_severity(
+        self,
+        arguments: dict[str, Any],
+        matched_finding_severity: str = "",
+    ) -> str:
+        explicit = self._normalize_severity_label(self._str_arg(arguments, "severity"))
+        if explicit:
+            return explicit
+
+        matched = self._normalize_severity_label(matched_finding_severity)
+        if matched:
+            return matched
+
+        raw_cvss = arguments.get("cvss_score")
+        if raw_cvss is not None:
+            try:
+                return self._severity_from_cvss_score(float(raw_cvss))
+            except (TypeError, ValueError):
+                pass
+        return "MEDIUM"
+
+    @staticmethod
+    def _resolve_replay_threshold(
+        *,
+        is_strict_phase: bool,
+        has_runtime_context: bool,
+        severity: str,
+    ) -> float:
+        if is_strict_phase:
+            base = (
+                _REPLAY_THRESHOLDS["strict_with_runtime"]
+                if has_runtime_context
+                else _REPLAY_THRESHOLDS["strict_no_runtime"]
+            )
+            offset = _REPLAY_SEVERITY_OFFSETS.get(
+                severity,
+                _REPLAY_SEVERITY_OFFSETS["MEDIUM"],
+            )
+            return min(0.95, max(0.25, base + offset))
+        return _REPLAY_THRESHOLDS["non_strict"]
+
     _VALID_BROWSER_ACTIONS = frozenset({
         "launch", "goto", "click", "type", "scroll_down", "scroll_up", "back",
         "forward", "new_tab", "switch_tab", "close_tab", "wait", "execute_js",
@@ -458,6 +529,79 @@ class _ValidatorMixin:
         seen: set[str] = set()
         return [x for x in markers if not (x in seen or seen.add(x))]
 
+    @staticmethod
+    def _hosts_related(left: str, right: str) -> bool:
+        """Return True when two hosts point to the same target family."""
+        left = left.strip().lower()
+        right = right.strip().lower()
+        if not left or not right:
+            return False
+        return (
+            left == right
+            or left.endswith("." + right)
+            or right.endswith("." + left)
+        )
+
+    def _has_detected_waf_profile(self, hosts: list[str]) -> bool:
+        """Return True when session has WAF profile for target host(s)."""
+        session = getattr(self, "_session", None)
+        waf_profiles = getattr(session, "waf_profiles", None)
+        if not isinstance(waf_profiles, dict) or not waf_profiles:
+            return False
+
+        active_target = ""
+        try:
+            state = getattr(self, "state", None)
+            active_target = str(getattr(state, "active_target", "") or "").strip().lower()
+        except Exception:
+            active_target = ""
+
+        host_candidates = {
+            str(h).split(":")[0].strip().lower()
+            for h in hosts
+            if isinstance(h, str) and h.strip()
+        }
+        if active_target:
+            host_candidates.add(active_target.split(":")[0])
+        if not host_candidates:
+            return False
+
+        for raw_host, profile in waf_profiles.items():
+            host_key = str(raw_host).split(":")[0].strip().lower()
+            if not host_key:
+                continue
+
+            if host_candidates and not any(
+                self._hosts_related(host_key, candidate)
+                for candidate in host_candidates
+            ):
+                continue
+
+            if isinstance(profile, dict):
+                if profile.get("detected") is False:
+                    continue
+                marker_fields = (
+                    "name",
+                    "waf_name",
+                    "vendor",
+                    "signature",
+                    "fingerprint",
+                )
+                if any(str(profile.get(k, "")).strip() for k in marker_fields):
+                    return True
+                try:
+                    if float(profile.get("confidence", 0.0) or 0.0) > 0:
+                        return True
+                except (TypeError, ValueError):
+                    pass
+                if profile.get("signals"):
+                    return True
+                if profile:
+                    return True
+            elif profile:
+                return True
+        return False
+
     def _replay_verification_score(
         self,
         *,
@@ -497,17 +641,16 @@ class _ValidatorMixin:
             for pattern in waf_block_indicators
         )
         
-        # Check if WAF is detected for this target in session state
-        # Defensive: self.state may not exist in unit tests
-        has_waf_detected = False
-        try:
-            if hasattr(self, 'state') and self.state and hasattr(self.state, 'active_target') and self.state.active_target:
-                # WAF detection would be in session.waf_profiles but we don't have direct access here
-                # Instead, check runtime text for WAF mentions
-                has_waf_detected = bool(re.search(r"\b(waf|web.?application.?firewall|cloudflare|mod.?security|akamai|imperva|sucuri)\b", runtime_text))
-        except (AttributeError, IndexError):
-            # In unit tests or edge cases, skip WAF detection
-            pass
+        # Prefer direct session WAF profile evidence when available.
+        # Fallback to runtime text pattern matching for backward compatibility.
+        has_waf_detected = self._has_detected_waf_profile(hosts)
+        if not has_waf_detected:
+            has_waf_detected = bool(
+                re.search(
+                    r"\b(waf|web.?application.?firewall|cloudflare|mod.?security|akamai|imperva|sucuri)\b",
+                    runtime_text,
+                )
+            )
         
         # If WAF block detected without successful bypass, flag as potential false positive
         waf_false_positive = has_waf_block and not has_waf_detected
@@ -678,6 +821,16 @@ class _ValidatorMixin:
                 return False, "browser_action 'switch_tab' requires 'tab_id'."
             if action == "press_key" and not self._str_arg(arguments, "key").strip():
                 return False, "browser_action 'press_key' requires 'key'."
+            if action == "execute_js":
+                if not self._str_arg(arguments, "js_code").strip():
+                    return False, "browser_action 'execute_js' requires non-empty 'js_code'."
+                parallel = arguments.get("parallel", False)
+                if not isinstance(parallel, bool):
+                    return False, "browser_action 'execute_js' optional 'parallel' must be boolean."
+                if parallel and self._str_arg(arguments, "tab_id").strip():
+                    return False, (
+                        "browser_action 'execute_js' with parallel=true must not set 'tab_id'."
+                    )
 
         elif tool_name == "web_search":
             if not self._str_arg(arguments, "query").strip():
@@ -768,6 +921,7 @@ class _ValidatorMixin:
             )
 
             matching_finding = False
+            matched_finding_severity = ""
             if hasattr(self, "_session") and self._session and self._session.vulnerabilities:
                 for v in self._session.vulnerabilities:
                     vuln_finding = str(v.get("finding", "")).lower()
@@ -775,7 +929,11 @@ class _ValidatorMixin:
                         w in vuln_finding for w in report_finding.split() if len(w) > 4
                     ):
                         matching_finding = True
+                        raw_severity = v.get("severity")
+                        if isinstance(raw_severity, str):
+                            matched_finding_severity = raw_severity
                         break
+            report_severity = self._derive_report_severity(arguments, matched_finding_severity)
 
             if not poc_code:
                 return False, (
@@ -967,7 +1125,13 @@ class _ValidatorMixin:
                 matching_finding=matching_finding,
             )
             if not is_ctf:
-                if is_strict_phase and has_runtime_context and not runtime_bound:
+                if is_strict_phase and not has_runtime_context:
+                    return False, (
+                        "REPORT REJECTED: Runtime replay evidence is mandatory in EXPLOIT/REPORT phase. "
+                        "Do a real runtime replay (same target + payload) and include command/output evidence "
+                        "before submitting create_vulnerability_report."
+                    )
+                if is_strict_phase and not runtime_bound:
                     gap_hint = "; ".join(dict.fromkeys(replay_gaps[:3])) if replay_gaps else (
                         "ensure PoC host/payload/status are present in runtime replay evidence"
                     )
@@ -978,20 +1142,16 @@ class _ValidatorMixin:
                         "(host + payload + status/impact). "
                         f"Fix: {gap_hint}."
                     )
-                replay_threshold = (
-                    _REPLAY_THRESHOLDS["strict_with_runtime"]
-                    if (is_strict_phase and has_runtime_context)
-                    else (
-                        _REPLAY_THRESHOLDS["strict_no_runtime"]
-                        if is_strict_phase
-                        else _REPLAY_THRESHOLDS["non_strict"]
-                    )
+                replay_threshold = self._resolve_replay_threshold(
+                    is_strict_phase=is_strict_phase,
+                    has_runtime_context=has_runtime_context,
+                    severity=report_severity,
                 )
                 if replay_score < replay_threshold:
                     gap_hint = "; ".join(dict.fromkeys(replay_gaps[:3])) if replay_gaps else "add clearer replay evidence"
                     return False, (
                         "REPORT REJECTED: Replay verification confidence too low "
-                        f"({replay_score:.2f}/{replay_threshold:.2f}). "
+                        f"({replay_score:.2f}/{replay_threshold:.2f}, severity={report_severity}). "
                         "The report must prove an end-to-end exploit flow (request → payload → response → impact). "
                         f"Fix: {gap_hint}."
                     )

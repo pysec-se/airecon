@@ -21,7 +21,12 @@ from pathlib import Path
 from typing import Any, Iterable, TypeVar
 from urllib.parse import parse_qsl, urlencode, urlparse, urlunparse
 
-from .models import CausalHypothesis, CausalIntervention, CausalState, jaccard_similarity
+from .models import (
+    CausalHypothesis,
+    CausalIntervention,
+    CausalState,
+    jaccard_similarity,
+)
 from .output_parser import ParsedOutput
 from .tuning import get_tuning
 

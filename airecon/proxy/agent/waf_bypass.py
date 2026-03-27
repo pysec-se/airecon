@@ -152,7 +152,9 @@ class WAFBypassEngine:
         Returns:
             List of detected WAF names (may be empty).
         """
-        from .waf_detector import detect_waf_from_response  # lazy import avoids circular
+        from .waf_detector import (
+            detect_waf_from_response,  # lazy import avoids circular
+        )
 
         headers_lower = {k.lower(): v for k, v in headers.items()}
         host = headers_lower.get("host", "unknown")

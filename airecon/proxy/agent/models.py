@@ -505,11 +505,22 @@ class AgentState:
             self.tool_history = self.tool_history[-MAX_TOOL_HISTORY:]
 
         # FIX #7 (Medium): Tool result truncation now happens on append in executors.py
-        # This legacy check is kept as a safety net for old code paths
+        # Legacy fallback: incremental scan for new entries + periodic full rescan
+        # to catch edge paths that mutate older entries.
         if len(self.tool_history) > 50:
-            for entry in self.tool_history:
+            scan_pos = int(getattr(self, "_legacy_tool_history_scan_pos", 0) or 0)
+            scan_tick = int(getattr(self, "_legacy_tool_history_scan_tick", 0) or 0) + 1
+
+            if scan_pos < 0 or scan_pos > len(self.tool_history):
+                scan_pos = 0
+
+            # Full scan every 20 add_message calls as a low-cost safety net.
+            start_idx = 0 if (scan_tick % 20 == 0) else scan_pos
+            for entry in self.tool_history[start_idx:]:
                 if entry.result and isinstance(entry.result, dict):
                     entry.result = _truncate_tool_result(entry.result)
+            self._legacy_tool_history_scan_pos = len(self.tool_history)
+            self._legacy_tool_history_scan_tick = scan_tick
 
     def _smart_truncate_conversation(self) -> None:
         """Smart conversation truncation to prevent VRAM crashes.

@@ -522,10 +522,14 @@ class BrowserInstance:
         await asyncio.sleep(duration)
         return await self._get_page_state(tab_id)
 
-    def execute_js(self, js_code: str, tab_id: str |
-                   None = None) -> dict[str, Any]:
+    def execute_js(
+        self,
+        js_code: str,
+        tab_id: str | None = None,
+        parallel: bool = False,
+    ) -> dict[str, Any]:
         with self._execution_lock:
-            return self._run_async(self._execute_js(js_code, tab_id))
+            return self._run_async(self._execute_js(js_code, tab_id, parallel=parallel))
 
     async def _execute_js(self, js_code: str, tab_id: str | None = None,
                           parallel: bool = False) -> dict[str, Any]:
@@ -546,15 +550,17 @@ class BrowserInstance:
         else:
             # Execute in all tabs concurrently
             tasks = []
+            task_tab_ids: list[str] = []
             for tid, page in self.pages.items():
                 if not page.is_closed():
+                    task_tab_ids.append(tid)
                     tasks.append(self._execute_js_single(page, js_code, tid))
             results = await asyncio.gather(*tasks, return_exceptions=True)
             result = {
                 "parallel_results": {
                     tid: res if not isinstance(res, Exception) else {
                         "error": str(res)}
-                    for tid, res in zip(self.pages.keys(), results)
+                    for tid, res in zip(task_tab_ids, results)
                 }
             }
         result_str = str(result)
@@ -1168,14 +1174,22 @@ class BrowserTabManager:
         result.setdefault("message", f"Waited {duration}s")
         return result
 
-    def execute_js(self, js_code: str, tab_id: str |
-                   None = None) -> dict[str, Any]:
+    def execute_js(
+        self,
+        js_code: str,
+        tab_id: str | None = None,
+        parallel: bool = False,
+    ) -> dict[str, Any]:
         result = self._safe_action(
             "execute_js",
             self._ensure_launched().execute_js,
             js_code,
-            tab_id)
-        result.setdefault("message", "JavaScript executed successfully")
+            tab_id,
+            parallel)
+        if parallel:
+            result.setdefault("message", "JavaScript executed in parallel across all open tabs")
+        else:
+            result.setdefault("message", "JavaScript executed successfully")
         return result
 
     def double_click(self, coordinate: str, tab_id: str |
@@ -1327,6 +1341,7 @@ def browser_action(
     text: str | None = None,
     tab_id: str | None = None,
     js_code: str | None = None,
+    parallel: bool = False,
     duration: float | None = None,
     key: str | None = None,
     file_path: str | None = None,
@@ -1368,7 +1383,7 @@ def browser_action(
         elif action == "wait":
             return _manager.wait_browser(duration, tab_id)  # type: ignore[arg-type]
         elif action == "execute_js":
-            return _manager.execute_js(js_code, tab_id)  # type: ignore[arg-type]
+            return _manager.execute_js(js_code, tab_id, parallel=parallel)  # type: ignore[arg-type]
         elif action == "double_click":
             return _manager.double_click(coordinate, tab_id)  # type: ignore[arg-type]
         elif action == "hover":
