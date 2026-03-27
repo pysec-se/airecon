@@ -103,13 +103,14 @@ async def _create_browser() -> Browser:
             await _state.playwright.stop()
         _state.playwright = None
 
-    _state.playwright = await async_playwright().start()
+    playwright = await async_playwright().start()
+    _state.playwright = playwright
 
     # Try connecting to the Chromium CDP server inside Docker first
     retries = 3
     for attempt in range(retries):
         try:
-            _state.browser = await _state.playwright.chromium.connect_over_cdp(
+            _state.browser = await playwright.chromium.connect_over_cdp(
                 "http://localhost:9222",
                 timeout=3000,
             )
@@ -120,7 +121,7 @@ async def _create_browser() -> Browser:
                     f"Could not connect to browser in Docker Sandbox after {retries} attempts. "
                     f"Falling back to local host browser. Error: {e}")
                 try:
-                    _state.browser = await _state.playwright.chromium.launch(
+                    _state.browser = await playwright.chromium.launch(
                         headless=True,
                         args=[
                             '--no-sandbox',
@@ -273,22 +274,23 @@ class BrowserInstance:
     async def _create_context(self, url: str | None = None, auth_cookies: list[dict] | None = None) -> dict[str, Any]:
         if self._browser is None:
             raise RuntimeError("Browser not initialized")
-        self.context = await self._browser.new_context(
+        context = await self._browser.new_context(
             viewport={"width": 1280, "height": 720},
             user_agent="Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36",
             ignore_https_errors=True,  # nosec B501 — intentional for pentest targets with expired/self-signed certs
         )
+        self.context = context
 
         # Restore authentication cookies if provided (from resumed session)
         if auth_cookies:
             try:
-                await self.context.add_cookies(auth_cookies)  # type: ignore[arg-type]
+                await context.add_cookies(auth_cookies)  # type: ignore[arg-type]
                 logger.info(
                     f"Restored {len(auth_cookies)} auth cookies from session")
             except Exception as e:
                 logger.warning(f"Failed to restore auth cookies: {e}")
 
-        page = await self.context.new_page()
+        page = await context.new_page()
         tab_id = f"tab_{self._next_tab_id}"
         self._next_tab_id += 1
         self.pages[tab_id] = page

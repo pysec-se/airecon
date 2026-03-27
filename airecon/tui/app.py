@@ -99,12 +99,16 @@ class AIReconApp(App):
         proxy_url: str = "http://127.0.0.1:3000",
         no_proxy: bool = False,
         session_id: str | None = None,
+        show_startup_screen: bool = True,
+        auto_poll_services: bool = True,
         **kwargs,
     ) -> None:
         super().__init__(**kwargs)
         self.proxy_url = proxy_url.rstrip("/")
         self._no_proxy = no_proxy
         self._session_id = session_id
+        self._show_startup_screen = show_startup_screen
+        self._auto_poll_services = auto_poll_services
         # SSE streaming requires no read timeout; connect still has a limit
         _sse_timeout = httpx.Timeout(connect=10.0, read=None, write=10.0, pool=10.0)
         self._http = httpx.AsyncClient(base_url=self.proxy_url, timeout=_sse_timeout)
@@ -174,20 +178,24 @@ class AIReconApp(App):
         # Focus input
         self.query_one("#command-input", CommandInput).focus()
 
-        # Push startup screen — status polling starts only after it dismisses
-        from .startup import StartupScreen
+        if self._show_startup_screen:
+            # Push startup screen — status polling starts only after it dismisses
+            from .startup import StartupScreen
 
-        def _on_startup_done(success: bool | None) -> None:
+            def _on_startup_done(success: bool | None) -> None:
+                if self._auto_poll_services:
+                    self._status_task = asyncio.create_task(self._poll_services())
+
+            self.push_screen(
+                StartupScreen(
+                    proxy_url=self.proxy_url,
+                    no_proxy=self._no_proxy,
+                    session_id=self._session_id,
+                ),
+                _on_startup_done,
+            )
+        elif self._auto_poll_services:
             self._status_task = asyncio.create_task(self._poll_services())
-
-        self.push_screen(
-            StartupScreen(
-                proxy_url=self.proxy_url,
-                no_proxy=self._no_proxy,
-                session_id=self._session_id,
-            ),
-            _on_startup_done,
-        )
 
     async def on_unmount(self) -> None:
         """Save session and cleanup on exit."""

@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import os
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any, AsyncIterator
@@ -69,6 +70,12 @@ def _build_skills_cache_sync() -> list[dict]:
 async def lifespan(app: FastAPI):
     """Startup/shutdown lifecycle."""
     global ollama_client, engine, agent, _chat_lock, _skills_cache
+
+    if os.getenv("AIRECON_TEST_MODE") == "1":
+        if _chat_lock is None:
+            _chat_lock = asyncio.Lock()
+        yield
+        return
 
     cfg = get_config()
     logger.info(f"Starting AIRecon Proxy on {cfg.proxy_host}:{cfg.proxy_port}")
@@ -225,7 +232,11 @@ async def list_skills() -> JSONResponse:
     """
     global _skills_cache
     if _skills_cache is None:
-        _skills_cache = await asyncio.to_thread(_build_skills_cache_sync)
+        # Restricted environments may not allow worker-thread execution.
+        if os.getenv("AIRECON_TEST_MODE") == "1":
+            _skills_cache = _build_skills_cache_sync()
+        else:
+            _skills_cache = await asyncio.to_thread(_build_skills_cache_sync)
     return JSONResponse({"count": len(_skills_cache), "skills": _skills_cache})
 
 

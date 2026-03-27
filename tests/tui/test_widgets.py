@@ -1,26 +1,23 @@
 import pytest
-import tempfile
-from pathlib import Path
 from textual.app import App, ComposeResult
 from airecon.tui.widgets.chat import ChatPanel
-from airecon.tui.widgets.workspace import WorkspacePanel
 from airecon.tui.widgets.status import StatusBar
 
-# A dummy Textual app to host isolated widgets
-
-_WORKSPACE_DIR = Path(tempfile.mkdtemp(prefix="airecon_test_"))
-
-
-class WidgetTestApp(App):
+# Minimal app for chat widget tests
+class ChatWidgetTestApp(App):
     def compose(self) -> ComposeResult:
         yield ChatPanel(id="chat")
-        yield WorkspacePanel(_WORKSPACE_DIR, id="workspace")
+
+
+# Minimal app for status widget tests
+class StatusWidgetTestApp(App):
+    def compose(self) -> ComposeResult:
         yield StatusBar(id="status")
 
 
 @pytest.mark.asyncio
 async def test_chat_panel_add_messages():
-    async with WidgetTestApp().run_test() as pilot:
+    async with ChatWidgetTestApp().run_test() as pilot:
         chat = pilot.app.query_one("#chat", ChatPanel)
 
         chat.add_user_message("Test user message")
@@ -35,7 +32,7 @@ async def test_chat_panel_add_messages():
 
 @pytest.mark.asyncio
 async def test_chat_panel_tool_lifecycle():
-    async with WidgetTestApp().run_test() as pilot:
+    async with ChatWidgetTestApp().run_test() as pilot:
         chat = pilot.app.query_one("#chat", ChatPanel)
 
         # Start a mock tool call
@@ -61,7 +58,7 @@ async def test_chat_panel_tool_lifecycle():
 
 @pytest.mark.asyncio
 async def test_status_bar_updates():
-    async with WidgetTestApp().run_test() as pilot:
+    async with StatusWidgetTestApp().run_test() as pilot:
         status_bar = pilot.app.query_one("#status", StatusBar)
 
         # Update metrics
@@ -103,7 +100,7 @@ def test_status_bar_set_status_coerces_numeric_fields():
 
 @pytest.mark.asyncio
 async def test_status_bar_caido_active_shows_indicator():
-    async with WidgetTestApp().run_test() as pilot:
+    async with StatusWidgetTestApp().run_test() as pilot:
         status_bar = pilot.app.query_one("#status", StatusBar)
         status_bar.set_status(caido_active=True, caido_findings=5)
         await pilot.pause()
@@ -114,7 +111,7 @@ async def test_status_bar_caido_active_shows_indicator():
 
 @pytest.mark.asyncio
 async def test_status_bar_caido_inactive_hides_indicator():
-    async with WidgetTestApp().run_test() as pilot:
+    async with StatusWidgetTestApp().run_test() as pilot:
         status_bar = pilot.app.query_one("#status", StatusBar)
         status_bar.set_status(caido_active=False)
         await pilot.pause()

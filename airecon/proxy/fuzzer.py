@@ -788,17 +788,19 @@ class Fuzzer:
                 "body": "", "status": 200, "time_ms": 100.0, "length": 0, "length_variance": 0
             })
             try:
+                resp: httpx.Response
                 # Use rate limiter if enabled
                 if self.rate_limiter:
                     t0 = time.monotonic()
-                    resp = await self.rate_limiter.request(
+                    rate_limited_resp = await self.rate_limiter.request(
                         self.method,
                         self.target,
                         **self._request_kwargs_for_value(param, payload),
                     )
-                    if resp is None:
+                    if rate_limited_resp is None:
                         # Rate limiter exhausted retries
                         return None
+                    resp = rate_limited_resp
                     elapsed = self._response_elapsed_ms(
                         resp,
                         fallback_ms=(time.monotonic() - t0) * 1000.0,

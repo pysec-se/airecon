@@ -218,16 +218,17 @@ class ToolMessage(Vertical):
         # Spinner while running
         if self.status == "running":
             yield LoadingIndicator()
-            self._live_output = RichLog(
+            live_output = RichLog(
                 markup=False,
                 highlight=False,
                 auto_scroll=True,
                 classes="tool-live-output")
             # Force hide native scrollbar for this widget since CSS might not
             # apply deeply to RichLog contents
-            self._live_output.styles.scrollbar_size_vertical = 0
-            self._live_output.styles.scrollbar_size_horizontal = 0
-            yield self._live_output
+            live_output.styles.scrollbar_size_vertical = 0
+            live_output.styles.scrollbar_size_horizontal = 0
+            self._live_output = live_output
+            yield live_output
 
     def append_output(self, text: str) -> None:
         self._live_output_buffer += text

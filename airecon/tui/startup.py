@@ -13,7 +13,6 @@ from textual.app import ComposeResult
 from textual.containers import Vertical
 from textual.screen import Screen
 from textual.widgets import Label, Static
-from textual import work
 
 logger = logging.getLogger("airecon.startup")
 
@@ -105,7 +104,9 @@ class StartupScreen(Screen[bool]):
             self._step_states[sid] = ("pending", "")
             self._render_step(sid)
         self.set_interval(0.1, self._tick_spinner)
-        self._run_startup()
+        startup_task = self._run_startup()
+        if asyncio.iscoroutine(startup_task):
+            self.run_worker(startup_task, exclusive=True)
 
     # ── Rendering helpers ──────────────────────────────────────────
 
@@ -159,7 +160,6 @@ class StartupScreen(Screen[bool]):
 
     # ── Startup worker ─────────────────────────────────────────────
 
-    @work(exclusive=True)
     async def _run_startup(self) -> None:
         """Run all service checks sequentially, updating the UI live."""
         from airecon.proxy.config import get_config
