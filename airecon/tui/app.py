@@ -190,7 +190,17 @@ class AIReconApp(App):
         )
 
     async def on_unmount(self) -> None:
-        """Best-effort cleanup for test/exit paths that bypass action_quit."""
+        """Save session and cleanup on exit."""
+        # FIX: Save session before exit to prevent data loss
+        if hasattr(self, '_session_id') and self._session_id:
+            try:
+                from airecon.proxy.agent.session import load_session, save_session
+                session = load_session(self._session_id)
+                if session and session.target:
+                    save_session(session)
+            except Exception:
+                pass  # Best-effort save
+
         if self._status_task and not self._status_task.done():
             self._status_task.cancel()
             with contextlib.suppress(asyncio.CancelledError):

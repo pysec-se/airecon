@@ -304,12 +304,17 @@ class BrowserInstance:
         page = self.pages[tab_id]
         delay = get_config().browser_page_load_delay
         await asyncio.sleep(delay)
+        
+        # FIX #8 (Medium): Surface screenshot failures to caller
+        screenshot_b64 = ""
+        screenshot_failure = None
         try:
             screenshot_bytes = await page.screenshot(type="png", full_page=False, timeout=5000)
             screenshot_b64 = base64.b64encode(screenshot_bytes).decode("utf-8")
         except Exception as e:
-            logger.warning(f"Screenshot failed: {e}")
-            screenshot_b64 = ""
+            screenshot_failure = f"Screenshot failed: {type(e).__name__}: {e}"
+            logger.warning(screenshot_failure)
+        
         url = page.url
         title = await page.title()
         viewport = page.viewport_size
@@ -329,7 +334,8 @@ class BrowserInstance:
                 "url": tab_page.url,
                 "title": await tab_page.title() if not tab_page.is_closed() else "Closed",
             }
-        return {
+        
+        result = {
             "screenshot": screenshot_b64,
             "url": url,
             "title": title,
@@ -338,6 +344,12 @@ class BrowserInstance:
             "tab_id": tab_id,
             "all_tabs": all_tabs,
         }
+        
+        # Add screenshot failure flag if applicable
+        if screenshot_failure:
+            result["screenshot_failure"] = screenshot_failure
+        
+        return result
 
     def launch(self, url: str | None = None) -> dict[str, Any]:
         with self._execution_lock:

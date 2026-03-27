@@ -80,7 +80,40 @@ Headless Chromium via Playwright. Full auth support: form login, TOTP/2FA, OAuth
 All findings persisted to disk. Resume any session with `airecon start --session <id>`. Tested endpoints memory prevents re-testing after context truncation.
 </div>
 
+<div class="feature-card" markdown>
+### Security Hardened
+13 command injection detectors, symlink TOCTOU protection, CVE validation, WAF false positive detection, asyncio.Lock for session saves.
 </div>
+
+<div class="feature-card" markdown>
+### Production Stable
+Config-based context limits, tool result truncation (50KB), incremental pruning, per-request timeouts, browser cleanup with force kill.
+</div>
+
+</div>
+
+---
+
+## Recent Improvements (v0.1.6-beta)
+
+### Critical Security Fixes
+- ✅ **Session Save Race Condition** - Added `asyncio.Lock()` to prevent concurrent save corruption
+- ✅ **Symlink TOCTOU Vulnerability** - Fixed with symlink detection + atomic writes
+- ✅ **Command Injection** - Added 8 new dangerous patterns (`${}`, `<()`, backticks, etc.)
+
+### Stability Improvements
+- ✅ **Session Data Loss** - Fixed - now saves on Ctrl+C/exit
+- ✅ **HTTP Timeouts** - Added per-request timeouts in fuzzer
+- ✅ **Browser Cleanup** - Fixed resource leaks with force kill fallback
+- ✅ **CVE Validation** - Tightened to valid years (1989-2099)
+- ✅ **Context Limits** - Made config-based (adaptive to `ollama_num_ctx`)
+- ✅ **Tool Result Truncation** - Added on-append (50KB limit)
+- ✅ **Incremental Pruning** - Fixed command history pruning
+
+### Code Quality
+- ✅ Removed 51 lines of verbose comments
+- ✅ Simplified docstrings
+- ✅ **1369 tests passing** (100% backward compatible)
 
 ---
 

@@ -110,7 +110,14 @@ async def lifespan(app: FastAPI):
 
     yield
 
-    # Shutdown
+    if agent:
+        try:
+            logger.info("Saving session before shutdown...")
+            await agent.stop()
+            logger.info("Session saved successfully")
+        except Exception as e:
+            logger.error(f"Failed to save session during shutdown: {e}")
+    
     if ollama_client:
         await ollama_client.close()
     if engine:

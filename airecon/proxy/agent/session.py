@@ -429,6 +429,10 @@ def _is_duplicate_vulnerability(
     """Check if a vulnerability is a duplicate of an existing one.
 
     Uses vuln_similarity_threshold from config (default: 0.7).
+    
+    Returns True (is duplicate) if:
+    - new_vuln has empty finding field (invalid)
+    - finding matches existing vulnerability by similarity threshold
     """
     try:
         from ..config import get_config
@@ -439,10 +443,23 @@ def _is_duplicate_vulnerability(
 
     new_finding = new_vuln.get("finding", "")
     new_target = new_vuln.get("target", "")
+    
+    # FIX #1 (Critical): Reject empty findings immediately to prevent
+    # silent data loss. Empty findings cannot be meaningfully deduplicated.
+    if not new_finding or not str(new_finding).strip():
+        logger.warning(
+            "Skipping vulnerability with empty finding field: %s",
+            new_vuln.get("source", "unknown")
+        )
+        return True  # Treat as duplicate to prevent adding invalid entry
 
     for existing in existing_vulns:
         existing_finding = existing.get("finding", "")
         existing_target = existing.get("target", "")
+        
+        # Skip empty existing findings (shouldn't happen, but defensive check)
+        if not existing_finding or not str(existing_finding).strip():
+            continue
 
         # Check finding similarity — _calculate_similarity already returns 0.0
         # when the two findings mention different URL parameters, preventing

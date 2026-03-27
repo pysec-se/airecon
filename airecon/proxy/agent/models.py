@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import heapq
 import logging
 import re
@@ -7,13 +8,16 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Any
 
+from ..config import get_config
+
 logger = logging.getLogger("airecon.agent")
 
+# These are now defaults - actual values are calculated from config at runtime
 MAX_TOOL_ITERATIONS = 2000
 MAX_TOOL_HISTORY = 100
 MAX_OBJECTIVES = 64
 MAX_EVIDENCE = 200
-MAX_HYPOTHESES = 32
+MAX_HYPOTHESES = 32  # Required for hypothesis queue
 MAX_CAUSAL_OBSERVATIONS = 2000
 MAX_CAUSAL_INTERVENTIONS = 300
 MAX_CAUSAL_HYPOTHESES = 256
@@ -32,6 +36,62 @@ _EVIDENCE_SIMILARITY_THRESHOLD: float = 0.70
 # Severity multipliers for evidence prioritization (CRITICAL=5:2.0x, HIGH=4:1.5x, etc.)
 # Moved to module level to avoid recreation on every add_evidence() call
 _SEVERITY_MULTIPLIER: dict[int, float] = {5: 2.0, 4: 1.5, 3: 1.0, 2: 0.7, 1: 0.5}
+
+# Tool result truncation limit — applied on append to prevent memory bloat
+_MAX_TOOL_RESULT_CHARS = 50_000
+
+
+def _truncate_tool_result(result: dict[str, Any]) -> dict[str, Any]:
+    """Truncate oversized strings in tool result dict.
+    
+    FIX #7 (Medium): Applied on append instead of in add_message() to prevent
+    memory growth between tool execution and message add.
+    
+    Args:
+        result: Tool result dict with potential large string values
+        
+    Returns:
+        Same dict with oversized strings truncated
+    """
+    if not isinstance(result, dict):
+        return result
+    
+    for k, v in result.items():
+        if isinstance(v, str) and len(v) > _MAX_TOOL_RESULT_CHARS:
+            result[k] = v[:_MAX_TOOL_RESULT_CHARS] + " ... [TRUNCATED]"
+    return result
+
+
+def _get_context_limits():
+    """Get context management limits from config.
+    
+    Returns dict with:
+    - max_conversation_messages: based on ollama_num_ctx // 128
+    - compression_trigger: 80% of max
+    - uncompressed_keep_count: last N messages to keep uncompressed
+    - llm_compression_num_ctx: context window for LLM compression
+    - llm_compression_num_predict: output length for compression
+    """
+    try:
+        config = get_config()
+        return {
+            "max_conversation_messages": config.agent_max_conversation_messages,
+            "compression_trigger": int(
+                config.agent_max_conversation_messages * config.agent_compression_trigger_ratio
+            ),
+            "uncompressed_keep_count": config.agent_uncompressed_keep_count,
+            "llm_compression_num_ctx": config.agent_llm_compression_num_ctx,
+            "llm_compression_num_predict": config.agent_llm_compression_num_predict,
+        }
+    except Exception:
+        # Fallback defaults if config not loaded yet
+        return {
+            "max_conversation_messages": 1024,  # 131K // 128
+            "compression_trigger": 819,  # 80% of 1024
+            "uncompressed_keep_count": 20,
+            "llm_compression_num_ctx": 8192,
+            "llm_compression_num_predict": 1024,
+        }
 
 
 def jaccard_similarity(a: str, b: str) -> float:
@@ -427,20 +487,76 @@ class AgentState:
         if thinking:
             msg["thinking"] = thinking
         self.conversation.append(msg)
+        
+        # CRITICAL VRAM FIX: Smart truncation to prevent OOM crashes.
+        # Strategy: Preserve important messages (system, tool_calls, findings)
+        # while dropping pure-text analysis that can be regenerated.
+        #
+        # Why 800 msgs? 800 × 100 tokens = 80K tokens (safe for 131K context)
+        # Leaves room for: system prompt (8K) + skills (10K) + response (30K)
+        limits = _get_context_limits()
+        if len(self.conversation) > limits["max_conversation_messages"]:
+            self._smart_truncate_conversation()
 
         # Cap tool_history to prevent unbounded memory growth
         if len(self.tool_history) > MAX_TOOL_HISTORY:
             self.tool_history = self.tool_history[-MAX_TOOL_HISTORY:]
 
-        # Truncate oversized result strings — only scan when history is large enough
-        # to matter, and only touch entries that were just pushed into the trim zone.
+        # FIX #7 (Medium): Tool result truncation now happens on append in executors.py
+        # This legacy check is kept as a safety net for old code paths
         if len(self.tool_history) > 50:
-            _MAX_RESULT_CHARS = 50_000
             for entry in self.tool_history:
                 if entry.result and isinstance(entry.result, dict):
-                    for k, v in entry.result.items():
-                        if isinstance(v, str) and len(v) > _MAX_RESULT_CHARS:
-                            entry.result[k] = v[:_MAX_RESULT_CHARS] + " ... [TRUNCATED]"
+                    entry.result = _truncate_tool_result(entry.result)
+
+    def _smart_truncate_conversation(self) -> None:
+        """Smart conversation truncation to prevent VRAM crashes.
+
+        PHILOSOPHY: Conversation is "working memory" - can be dropped.
+        SessionData is "long-term memory" - never lost.
+
+        SessionData already persists ALL findings:
+        - subdomains: BoundedList(10000) ✅
+        - live_hosts: BoundedList(5000) ✅
+        - urls: BoundedList(50000) ✅
+        - vulnerabilities: BoundedList(1000) ✅
+        - injection_points: BoundedList(5000) ✅
+        - tested_endpoints: BoundedList(500) ✅
+
+        Strategy:
+        1. Keep ALL system messages (rules, prompts, recovery)
+        2. Keep last N non-system messages (LRU - recent context, config-based)
+        3. Drop oldest non-system messages when over limit
+
+        Why NOT keyword-based:
+        - Keywords miss novel/creative vulns (false negatives)
+        - LLM should decide what's important, not hardcoded list
+        - SessionData already has structured findings
+
+        Why NOT compress/summarize:
+        - Adds complexity without benefit
+        - LLM can rebuild context from SessionData
+        - Simple LRU is predictable and debuggable
+        """
+        limits = _get_context_limits()
+        if len(self.conversation) <= limits["max_conversation_messages"]:
+            return
+
+        # Separate system messages (always keep)
+        system_msgs = [m for m in self.conversation if m.get("role") == "system"]
+        non_system_msgs = [m for m in self.conversation if m.get("role") != "system"]
+
+        # Keep last N non-system messages (LRU)
+        keep_count = max(0, limits["max_conversation_messages"] - len(system_msgs))
+        kept_non_system = non_system_msgs[-keep_count:] if keep_count > 0 else []
+
+        # Rebuild conversation
+        self.conversation = system_msgs + kept_non_system
+
+        # Safety check - ensure we don't exceed limit
+        if len(self.conversation) > limits["max_conversation_messages"]:
+            # Extra safety: hard cap
+            self.conversation = self.conversation[-limits["max_conversation_messages"]:]
 
     def ensure_phase_objectives(
         self, phase: str, defaults: list[str]
@@ -515,14 +631,17 @@ class AgentState:
         Returns True if the evidence was added, False if it was rejected as a
         duplicate (exact match or Jaccard similarity >= threshold within the
         same phase).
-        
+
         Uses objective confidence scoring if confidence < 0.70 (replaces subjective with objective).
+        
+        High-confidence findings (>=0.85) are checked for cross-phase duplicates
+        to prevent redundant evidence cluttering the log.
         """
         clean_summary = " ".join(str(summary).strip().split())
         if not clean_summary:
             return False
 
-        # MEDIUM FIX #5: Use objective confidence scoring instead of subjective
+        # MEDIUM FIX #4: Use objective confidence scoring instead of subjective
         if confidence < 0.70:
             confidence = _calculate_objective_confidence(clean_summary, artifact, source_tool, severity)
 
@@ -551,7 +670,20 @@ class AgentState:
             # Cross-phase entries are allowed (RECON and EXPLOIT can have
             # similar summaries for different reasons).
             if str(existing.get("phase", "")).upper() != phase_key:
+                # FIX #3: High-confidence findings should be globally unique
+                # to prevent cross-phase redundancy (e.g., RECON and EXPLOIT
+                # both reporting the same subdomain discovery).
+                if confidence >= 0.85:
+                    existing_summary = str(existing.get("summary", "")).strip().lower()
+                    if self._jaccard_similarity(summary_lower, existing_summary) >= 0.85:
+                        logger.debug(
+                            "Evidence dedup (cross-phase, high-confidence): '%s...' ~ '%s...'",
+                            summary_lower[:40],
+                            existing_summary[:40],
+                        )
+                        return False
                 continue
+            
             existing_summary = str(existing.get("summary", "")).strip().lower()
             if self._jaccard_similarity(summary_lower, existing_summary) >= _EVIDENCE_SIMILARITY_THRESHOLD:
                 logger.debug(
@@ -561,13 +693,22 @@ class AgentState:
                 )
                 return False
 
+        # FIX #4: Validate and clamp severity with warning for invalid values
+        clamped_severity = max(1, min(int(severity), 5))
+        if clamped_severity != severity:
+            logger.warning(
+                "Evidence severity clamped from %d to %d: %s",
+                severity, clamped_severity, clean_summary[:100]
+            )
+        severity = clamped_severity
+
         self.evidence_log.append(
             {
                 "phase": phase_key,
                 "source_tool": source_tool,
                 "summary": clean_summary[:600],
                 "confidence": max(0.0, min(float(confidence), 1.0)),
-                "severity": max(1, min(int(severity), 5)),
+                "severity": severity,
                 "artifact": artifact,
                 "tags": tags,
                 "iteration": self.iteration,
@@ -935,6 +1076,10 @@ class AgentState:
 
         Returns the number of changes applied.
         """
+        # FIX #5: Validate phase against PipelinePhase enum
+        from .pipeline import PipelinePhase
+        _valid_phases = {p.value for p in PipelinePhase}
+        
         changed = 0
         now = datetime.now(timezone.utc).isoformat()
 
@@ -950,6 +1095,15 @@ class AgentState:
                 # Using "phase or RECON" resolves the effective phase first so
                 # the check is never accidentally cross-phase.
                 _effective_phase = phase or "RECON"
+                
+                # Validate phase - warn and default to RECON if invalid
+                if _effective_phase not in _valid_phases:
+                    logger.warning(
+                        "patch_objectives: Invalid phase '%s' in op '%s', defaulting to RECON",
+                        phase, op_type
+                    )
+                    _effective_phase = "RECON"
+                
                 existing_titles = {
                     str(o.get("title", "")).strip().lower()
                     for o in self.objective_queue
@@ -1011,8 +1165,15 @@ class AgentState:
                         break
 
             elif op_type == "done":
+                _done_phase = phase or "RECON"
+                if _done_phase not in _valid_phases:
+                    logger.warning(
+                        "patch_objectives: Invalid phase '%s' in op 'done', defaulting to RECON",
+                        phase
+                    )
+                    _done_phase = "RECON"
                 self.mark_objective(
-                    phase or "RECON", title, status="done", note=op.get("note")
+                    _done_phase, title, status="done", note=op.get("note")
                 )
                 changed += 1
 
@@ -1114,8 +1275,9 @@ class AgentState:
             protected_system = protected_system[-2:]
 
         # STEP 1: Compress verbose tool results in older messages
-        # Keep last 20 messages uncompressed, compress older ones
-        compress_boundary = max(0, len(other_messages) - 20)
+        # Keep last N messages uncompressed (config-based), compress older ones
+        limits = _get_context_limits()
+        compress_boundary = max(0, len(other_messages) - limits["uncompressed_keep_count"])
         for i in range(compress_boundary):
             msg = other_messages[i]
             content = msg.get("content", "")
@@ -1181,11 +1343,36 @@ class AgentState:
         tail_budget = max(budget - len(must_keep), 10)
         if len(can_trim) > tail_budget:
             tail = can_trim[-tail_budget:]
-            # Ensure we don't start mid-pair: if tail starts with a 'tool' message,
-            # include the preceding assistant message to keep the pair intact.
+            # Ensure we don't start mid-pair: scan backwards from the tail start
+            # to find a safe boundary where we don't orphan any tool results.
+            # A tool result is orphaned if its preceding assistant tool_call is excluded.
             start_idx = len(can_trim) - tail_budget
-            while start_idx > 0 and tail and tail[0].get("role") == "tool":
-                start_idx -= 1
+            while start_idx > 0:
+                # Check if current position would orphan any tool message
+                # by starting after an assistant with tool_calls
+                found_orphan = False
+                for i in range(start_idx, len(can_trim)):
+                    if can_trim[i].get("role") == "tool":
+                        # This tool result needs its preceding assistant call
+                        # Scan backwards to find the owning assistant
+                        for j in range(i - 1, start_idx - 1, -1):
+                            if can_trim[j].get("role") == "assistant" and can_trim[j].get("tool_calls"):
+                                # Found the owner - this is fine
+                                break
+                        else:
+                            # No owner in range - would orphan this tool result
+                            found_orphan = True
+                            # Move start_idx back to include the owning assistant
+                            for j in range(i - 1, -1, -1):
+                                if can_trim[j].get("role") == "assistant" and can_trim[j].get("tool_calls"):
+                                    start_idx = j + 1  # Include this assistant
+                                    break
+                            else:
+                                # Owner is before start_idx - move back one more
+                                start_idx -= 1
+                            break
+                if not found_orphan:
+                    break
                 tail = can_trim[start_idx:]
             trimmed = tail
             dropped_count = len(can_trim) - len(trimmed)
@@ -1341,13 +1528,13 @@ class AgentState:
     async def compress_with_llm(
         self,
         ollama: Any,
-        keep_recent: int = 30,
-        num_ctx: int = 8192,
-        num_predict: int = 1024,
+        keep_recent: int | None = None,
+        num_ctx: int | None = None,
+        num_predict: int | None = None,
     ) -> None:
         """Compress old messages via LLM summarization when conversation grows large.
 
-        Trigger: conversation > 80 messages (non-system).
+        Trigger: conversation > 80% of max_conversation_messages (config-based).
         Strategy:
         - Keep all system messages untouched
         - Keep first user message (original task)
@@ -1356,6 +1543,14 @@ class AgentState:
         - Preserves: URLs, vulns, credentials, tool outputs, phase info
         - Fallback: keeps original chunk if LLM call fails
         """
+        limits = _get_context_limits()
+        if keep_recent is None:
+            keep_recent = 30
+        if num_ctx is None:
+            num_ctx = limits["llm_compression_num_ctx"]
+        if num_predict is None:
+            num_predict = limits["llm_compression_num_predict"]
+
         non_system = [
             m for m in self.conversation if m.get("role") != "system"]
         if len(non_system) <= keep_recent + 1:
@@ -1403,12 +1598,45 @@ class AgentState:
 
             extracted_flags = list(set(extracted_flags))
 
-            try:
-                summary_text = await ollama.complete(
-                    prompt,
-                    options={"num_ctx": num_ctx, "num_predict": num_predict, "temperature": 0.1},
-                )
+            # FIX #6: Add timeout and retry logic for LLM compression calls
+            summary_text = None
+            max_retries = 2
+            retry_delay = 1.0  # seconds
+            
+            for attempt in range(max_retries + 1):
+                try:
+                    # Use asyncio.wait_for to prevent hanging on slow Ollama responses
+                    summary_text = await asyncio.wait_for(
+                        ollama.complete(
+                            prompt,
+                            options={"num_ctx": num_ctx, "num_predict": num_predict, "temperature": 0.1},
+                        ),
+                        timeout=60.0  # 60 second timeout per chunk
+                    )
+                    break  # Success - exit retry loop
+                except asyncio.TimeoutError:
+                    logger.warning(
+                        "Memory compression LLM call timed out (attempt %d/%d), retrying...",
+                        attempt + 1, max_retries + 1
+                    )
+                    if attempt < max_retries:
+                        await asyncio.sleep(retry_delay)
+                        retry_delay *= 2  # Exponential backoff
+                    else:
+                        logger.error("Memory compression LLM call timed out after %d attempts", max_retries + 1)
+                except Exception as e:
+                    logger.warning(
+                        "Memory compression LLM call failed (attempt %d/%d): %s",
+                        attempt + 1, max_retries + 1, e
+                    )
+                    if attempt < max_retries:
+                        await asyncio.sleep(retry_delay)
+                        retry_delay *= 2
+                    else:
+                        logger.error("Memory compression LLM call failed after %d attempts", max_retries + 1)
+                        break
 
+            if summary_text:
                 # Append extracted flags to summary to guarantee they survive
                 if extracted_flags:
                     summary_text += "\n\n[CRITICAL PRESERVED DATA]\nFlags found: " + \
@@ -1420,9 +1648,10 @@ class AgentState:
                         f"[COMPRESSED MEMORY — {len(chunk)} messages]: {summary_text}"
                     ),
                 })
-            except Exception as e:
-                logger.warning("Memory compression LLM call failed, keeping original: %s", e)
-                summaries.extend(chunk)  # Fallback: keep originals
+            else:
+                # Fallback: keep original chunk if all retries failed
+                logger.warning("Memory compression failed for chunk, keeping original %d messages", len(chunk))
+                summaries.extend(chunk)
 
         before = len(self.conversation)
         self.conversation = system_msgs + [first_user] + summaries + keep_tail

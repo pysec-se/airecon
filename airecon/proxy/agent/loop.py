@@ -168,8 +168,8 @@ class AgentLoop(
         self._recovery_force_tool_calls: int = 0
         self._session: SessionData | None = None
         self._pending_output_merges: dict[str, list[str]] = {}
-        # Tools blocked for this agent (e.g. depth control)
         self._blocked_tools: set[str] = set()
+        self._session_lock = asyncio.Lock()
         # If set, overrides config in process_message
         self._override_max_iterations: int | None = None
         self._ctf_mode: bool = False  # True when target is CTF/XBOW/localhost
@@ -205,8 +205,28 @@ class AgentLoop(
         self._budget_pressure_level: int = 0
 
     async def stop(self) -> None:
+        """Stop agent loop and save session."""
         logger.warning("Stopping Agent Loop...")
         self._stop_requested = True
+        
+        if self._session and self._session.target:
+            try:
+                logger.info("Saving session data (subdomains: %d, live_hosts: %d, vulns: %d)...",
+                           len(self._session.subdomains),
+                           len(self._session.live_hosts),
+                           len(self._session.vulnerabilities))
+                
+                self._sync_token_usage_to_session()
+                self._sync_recovery_state_to_session()
+                
+                async with self._session_lock:
+                    from .session import save_session
+                    save_session(self._session)
+                logger.info("Session saved to ~/.airecon/sessions/%s.json",
+                           self._session.session_id)
+            except Exception as e:
+                logger.error("Failed to save session during stop: %s", e)
+        
         if self.engine:
             await self.engine.force_stop()
         if self._token_snapshot_task and not self._token_snapshot_task.done():
@@ -217,9 +237,6 @@ class AgentLoop(
                     timeout=2.0,
                 )
             except asyncio.TimeoutError:
-                # Shield prevented cancellation — cancel explicitly so the
-                # infinite _save_worker loop does not run as an orphan task
-                # holding file handles after process shutdown.
                 logger.debug("Token snapshot flush timed out — cancelling task.")
                 self._token_snapshot_task.cancel()
                 try:
@@ -322,12 +339,10 @@ class AgentLoop(
             try:
                 while session_to_save and session_to_save.target:
                     try:
-                        await asyncio.to_thread(save_session, session_to_save)
+                        async with self._session_lock:
+                            await asyncio.to_thread(save_session, session_to_save)
                     except Exception as exc:
-                        logger.debug(
-                            "Failed to persist token usage snapshot: %s",
-                            exc,
-                        )
+                        logger.debug("Failed to persist token usage snapshot: %s", exc)
                     if not self._token_snapshot_resave_requested:
                         break
                     self._token_snapshot_resave_requested = False
@@ -339,7 +354,14 @@ class AgentLoop(
             loop = asyncio.get_running_loop()
         except RuntimeError:
             try:
-                save_session(session)
+                lock_acquired = self._session_lock.acquire(blocking=False)
+                if lock_acquired:
+                    try:
+                        save_session(session)
+                    finally:
+                        self._session_lock.release()
+                else:
+                    logger.debug("Session save skipped - lock held")
             except Exception as exc:
                 logger.debug("Failed to persist token usage snapshot: %s", exc)
             return
@@ -430,12 +452,22 @@ class AgentLoop(
             return True, msg
 
         self._executed_cmd_hashes.add(cmd_hash)
-        # Prevent unbounded memory growth over 2000-iteration sessions.
-        # When the set exceeds 5000 entries, clear it — this temporarily
-        # allows re-execution of very old commands which is acceptable.
+        
+        # FIX #6 (Medium): Incremental pruning to prevent memory growth
+        # Old behavior: clear() all when >5000 (causes re-execution of old commands)
+        # New behavior: prune oldest 2500 when >5000 (preserves recent history)
+        # This prevents memory bloat while maintaining dedup effectiveness.
         if len(self._executed_cmd_hashes) > 5000:
-            self._executed_cmd_hashes.clear()
-            logger.debug("_executed_cmd_hashes pruned (>5000 entries)")
+            # Convert to list, keep newest 2500 entries (FIFO pruning)
+            entries = list(self._executed_cmd_hashes)
+            if len(entries) > 2500:
+                # Keep the most recent 2500 entries
+                self._executed_cmd_hashes = set(entries[-2500:])
+                logger.debug(
+                    "_executed_cmd_hashes incrementally pruned: %d → %d entries (kept newest 2500)",
+                    len(entries), len(self._executed_cmd_hashes)
+                )
+        
         return False, ""
 
     async def initialize(

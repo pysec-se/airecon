@@ -153,6 +153,9 @@ def validate_target_path(
     - Path traversal attacks (../../../etc/passwd)
     - Symlink attacks (links to parent directories)
     - Shell metacharacters in paths
+    
+    FIX #2 (Critical): Added explicit symlink validation for each path component
+    to prevent traversal via symlinks in intermediate directories.
     """
     try:
         base_path = Path(base_dir).resolve()
@@ -162,6 +165,24 @@ def validate_target_path(
             target_path.relative_to(base_path)
         except ValueError:
             return False, f"Path traversal detected: {target} escapes {base_dir}"
+
+        # FIX #2: Check each path component for symlinks pointing outside workspace
+        # This prevents attacks where intermediate directories are symlinks
+        # Example: /workspace/legit -> /etc (symlink to parent dir)
+        current = base_path
+        for part in Path(target).parts:
+            next_path = current / part
+            if next_path.is_symlink():
+                # Resolve just this component to see where it points
+                resolved_link = next_path.resolve()
+                try:
+                    resolved_link.relative_to(base_path)
+                except ValueError:
+                    return False, (
+                        f"Symlink traversal detected: '{next_path}' is a symlink "
+                        f"pointing outside workspace to '{resolved_link}'"
+                    )
+            current = next_path
 
         dangerous_chars = [";", "|", "$", "`", "(", ")", "&", "<", ">", "\n", "\r"]
         if any(char in target for char in dangerous_chars):
@@ -229,14 +250,18 @@ def validate_paths_in_filesystem_args(
     return validate_target_path(file_path, base_dir)  # type: ignore[return-value]
 
 
-# Precompiled dangerous patterns for faster checking
+# Precompiled dangerous patterns for command injection detection
 DANGEROUS_PATTERNS: list[tuple[str, str]] = [
     (r"rm\s+-rf\s+/", "Dangerous: rm -rf / detected"),
     (r"dd\s+if=.*of=/dev", "Dangerous: writing to /dev"),
-    # Fork bomb: matches compact :(){:|:&};: and spaced variants
     (r":\s*\(\s*\)\s*\{.*:\s*\|.*:\s*&", "Dangerous: fork bomb detected"),
     (r"pkill\s+-9", "Dangerous: killing critical processes"),
     (r">\s*/dev/sd[a-z]", "Dangerous: writing to disk device"),
+    (r"\$\{[^}]+\}", "Dangerous: variable expansion detected"),
+    (r"<\([^)]+\)", "Dangerous: process substitution detected"),
+    (r"\$'[^']*'", "Dangerous: ANSI-C quoting detected"),
+    (r"`[^`]+`", "Dangerous: backtick command substitution detected"),
+    (r"\$\([^)]+\)", "Dangerous: $(command) substitution detected"),
 ]
 
 
@@ -446,7 +471,11 @@ class _ValidatorMixin:
         report_finding: str,
         matching_finding: bool,
     ) -> tuple[float, list[str], bool, bool]:
-        """Compute replay-verification confidence from runtime and textual evidence."""
+        """Compute replay-verification confidence from runtime and textual evidence.
+        
+        FIX #4 (High): Added WAF false positive detection to prevent 403/401 blocks
+        from being misclassified as vulnerabilities.
+        """
         gaps: list[str] = []
         runtime_chunks = self._collect_runtime_verification_texts()
         has_runtime = bool(runtime_chunks)
@@ -457,6 +486,36 @@ class _ValidatorMixin:
         report_lower = report_finding.lower()
         host_matches = re.findall(r"https?://([^\s/\"']+)", poc_code, re.IGNORECASE)
         hosts = [h.split(":")[0].lower() for h in host_matches if h]
+
+        # FIX #4: WAF False Positive Detection
+        # Check if the "vulnerability" is actually just a WAF block (403/401)
+        # WAF blocks often look like vulnerabilities but are not exploitable
+        waf_block_indicators = [
+            r"\b403\b.*\b(forbidden|blocked|waf|firewall|access denied)\b",
+            r"\b401\b.*\b(unauthorized|authentication required)\b",
+            r"\b(blocked|blocked by|mod_security|cloudflare|akamai|sucuri)\b",
+            r"\b(access denied|not allowed|forbidden|prohibited)\b",
+        ]
+        
+        has_waf_block = any(
+            re.search(pattern, runtime_text) or re.search(pattern, desc_lower)
+            for pattern in waf_block_indicators
+        )
+        
+        # Check if WAF is detected for this target in session state
+        # Defensive: self.state may not exist in unit tests
+        has_waf_detected = False
+        try:
+            if hasattr(self, 'state') and self.state and hasattr(self.state, 'active_target') and self.state.active_target:
+                # WAF detection would be in session.waf_profiles but we don't have direct access here
+                # Instead, check runtime text for WAF mentions
+                has_waf_detected = bool(re.search(r"\b(waf|web.?application.?firewall|cloudflare|mod.?security|akamai|imperva|sucuri)\b", runtime_text))
+        except (AttributeError, IndexError):
+            # In unit tests or edge cases, skip WAF detection
+            pass
+        
+        # If WAF block detected without successful bypass, flag as potential false positive
+        waf_false_positive = has_waf_block and not has_waf_detected
 
         request_logged = bool(
             re.search(r"\b(get|post|put|delete|patch|curl|request)\b", desc_lower)
@@ -571,6 +630,12 @@ class _ValidatorMixin:
                 score += _REPLAY_SCORE_WEIGHTS["runtime_host_bound"]
             if runtime_payload_bound:
                 score += _REPLAY_SCORE_WEIGHTS["runtime_payload_bound"]
+            
+            # FIX #4: WAF False Positive Penalty
+            # If WAF block detected without bypass evidence, reduce score significantly
+            if waf_false_positive:
+                score -= 0.4  # Major penalty for potential WAF false positive
+                gaps.append("WAF block detected without bypass evidence - may be false positive")
         else:
             # No runtime context available (unit tests/offline path):
             # slightly favor strong textual replay descriptions.
@@ -586,14 +651,14 @@ class _ValidatorMixin:
             and (runtime_host_bound or not hosts)
             and runtime_payload_bound
         ) if has_runtime else False
-        return min(1.0, score), gaps, has_runtime, runtime_bound
+        return min(1.0, max(0.0, score)), gaps, has_runtime, runtime_bound
 
     def _validate_tool_args(
         self, tool_name: str, arguments: dict[str, Any]
     ) -> tuple[bool, str | None]:
         if tool_name == "execute":
-            cmd = arguments.get("command", "")
-            if not isinstance(cmd, str) or not cmd.strip():
+            cmd = self._str_arg(arguments, "command")
+            if not cmd.strip():
                 return False, "'command' must be a non-empty string."
             if len(cmd) > 20_000:
                 return False, f"'command' is too long ({len(cmd)} chars). Split into smaller calls."

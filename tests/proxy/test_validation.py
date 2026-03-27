@@ -173,12 +173,7 @@ class TestCompleteValidation:
         assert is_valid is False
 
     def test_positional_traversal_not_inspected_by_design(self):
-        """Positional path args are NOT inspected — known, documented limitation.
-
-        Only flag-referenced paths (-o, >, -t, --targets) are validated.
-        Positional args are excluded by design to avoid false positives on
-        host/URL arguments (e.g. 'nmap 192.168.1.0/24' has positional IP).
-        """
+        """Positional path args are NOT inspected - only flag-referenced paths."""
         cmd = "cat /workspace/../../etc/passwd"
         is_valid, error = validate_for_execution(cmd)
         assert is_valid is True

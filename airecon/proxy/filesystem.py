@@ -40,35 +40,42 @@ def _resolve_workspace_path(path: str, workspace_root: Path) -> Path:
 
 
 def create_file(path: str, content: str) -> dict[str, Any]:
+    """Create file with path validation and atomic write."""
     try:
         if len(content.encode("utf-8")) > _MAX_CREATE_FILE_BYTES:
-            return {
-                "success": False,
-                "error": "Content too large: maximum file size is 50 MB",
-            }
+            return {"success": False, "error": "Content too large: maximum file size is 50 MB"}
+        
         workspace_root = get_workspace_root().resolve()
         file_path = _resolve_workspace_path(path, workspace_root)
 
-        # Prevent path traversal
         try:
             file_path.relative_to(workspace_root)
         except ValueError:
-            return {
-                "success": False,
-                "error": f"Access denied: Path must be inside the workspace directory. You provided: {path}"
-            }
+            return {"success": False, "error": "Access denied: Path must be inside workspace"}
+
+        if file_path.is_symlink():
+            resolved = file_path.resolve()
+            try:
+                resolved.relative_to(workspace_root)
+            except ValueError:
+                return {"success": False, "error": "Access denied: Symlink target outside workspace"}
 
         file_path.parent.mkdir(parents=True, exist_ok=True)
 
-        with open(file_path, "w", encoding="utf-8") as f:
-            f.write(content)
+        import tempfile
+        fd, temp_path = tempfile.mkstemp(dir=file_path.parent)
+        try:
+            with os.fdopen(fd, 'w', encoding='utf-8') as f:
+                f.write(content)
+            os.replace(temp_path, str(file_path))
+        except Exception:
+            try:
+                os.unlink(temp_path)
+            except Exception:
+                pass
+            raise
 
-        return {
-            "success": True,
-            "result": f"File created successfully at {file_path}",
-            "path": str(file_path)
-        }
-
+        return {"success": True, "result": f"File created at {file_path}", "path": str(file_path)}
     except Exception as e:
         return {"success": False, "error": str(e)}
 
@@ -112,8 +119,14 @@ def read_file(path: str, offset: int = 0, limit: int = 500) -> dict[str, Any]:
         try:
             file_path.relative_to(workspace_root)
         except ValueError:
-            return {"success": False,
-                    "error": "Access denied: Cannot read files outside workspace."}
+            return {"success": False, "error": "Access denied: Cannot read files outside workspace."}
+
+        if file_path.is_symlink():
+            resolved = file_path.resolve()
+            try:
+                resolved.relative_to(workspace_root)
+            except ValueError:
+                return {"success": False, "error": "Access denied: Symlink target outside workspace"}
 
         if not file_path.exists():
             return {

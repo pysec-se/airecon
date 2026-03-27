@@ -37,6 +37,7 @@ pytest-cov = "^6.0.0"
 pytest-mock = "^3.15.1"
 pytest-timeout = "^2.4.0"
 mkdocs-material = "^9.6.7"
+pyright = "^1.1.408"
 
 [tool.poetry.scripts]
 airecon = "airecon.__main__:main"
@@ -71,6 +72,21 @@ exclude_lines = [
     "if TYPE_CHECKING:",
     "raise NotImplementedError",
 ]
+
+[tool.pyright]
+include = ["airecon"]
+exclude = ["**/__pycache__", ".venv", "venv", "dist", "build"]
+pythonVersion = "3.12"
+pythonPlatform = "All"
+typeCheckingMode = "standard"
+reportMissingTypeStubs = false
+reportAttributeAccessIssue = true
+reportOptionalMemberAccess = true
+reportOptionalSubscript = true
+reportPrivateImportUsage = true
+reportUnboundVariable = true
+reportGeneralTypeIssues = true
+reportInvalidTypeForm = true
 
 [build-system]
 requires = ["poetry-core"]
