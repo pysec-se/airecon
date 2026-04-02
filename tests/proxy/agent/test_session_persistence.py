@@ -42,7 +42,11 @@ class TestSaveAndLoadSession:
     def test_roundtrip_vulnerabilities(self, tmp_sessions_dir):
         session = SessionData(target="target.com")
         session.vulnerabilities = [
-            {"finding": "SQL Injection in ?id=", "target": "target.com", "timestamp": "2026-01-01"}
+            {
+                "finding": "SQL Injection in ?id=",
+                "target": "target.com",
+                "timestamp": "2026-01-01",
+            }
         ]
         save_session(session)
 
@@ -123,7 +127,9 @@ class TestSaveAndLoadSession:
                 "prior": 0.5,
                 "posterior": 0.76,
                 "status": "supported",
-                "evidence_refs": ["endpoint_accessible:https://causal.example/admin [200]"],
+                "evidence_refs": [
+                    "endpoint_accessible:https://causal.example/admin [200]"
+                ],
             }
         )
         session.causal_state.add_intervention(
@@ -143,7 +149,9 @@ class TestSaveAndLoadSession:
         assert len(loaded.causal_state.observations) == 1
         assert len(loaded.causal_state.hypotheses) == 1
         assert len(loaded.causal_state.interventions) == 1
-        assert loaded.causal_state.hypotheses[0].posterior == pytest.approx(0.76, rel=1e-3)
+        assert loaded.causal_state.hypotheses[0].posterior == pytest.approx(
+            0.76, rel=1e-3
+        )
 
     def test_load_nonexistent_returns_none(self, tmp_sessions_dir):
         result = load_session("nonexistent_session_id_xyz")

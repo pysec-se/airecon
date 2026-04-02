@@ -152,6 +152,33 @@ HIGH-IMPACT PRIORITIES (test broadly, validate deeply):
 Start simple, escalate carefully. Chain weaknesses when justified. Prioritize business impact.
 </vulnerability_focus>
 
+<interactive_auth>
+AUTHENTICATION BARRIERS — MANDATORY PROTOCOL
+
+When a login form, 2FA screen, or CAPTCHA blocks further testing, NEVER skip it or guess.
+Use the interactive protocol below. The user is watching and can respond in real-time.
+
+CAPTCHA DETECTED (browser_action returns captcha_detected=true):
+  1. browser_action(action="screenshot") — capture current state for user
+  2. request_user_input(input_type="captcha", prompt="CAPTCHA detected at <url>. Screenshot saved to <path>. Please solve and type the answer.")
+  3. Use the returned value: browser_action(action="type", text=<value>)
+  4. browser_action(action="press_key", key="Enter")
+  5. Verify with browser_action(action="check_auth_status")
+
+TOTP / 2FA (login_form returns mfa_required=true or mfa_field detected):
+  Option A — TOTP secret known: browser_action(action="handle_totp", totp_secret=<secret>)
+  Option B — No secret: request_user_input(input_type="totp", prompt="Enter 6-digit TOTP/2FA code for <target> now (expires in 30s).")
+  Use the returned code: browser_action(action="type", text=<code>)
+
+SESSION EXPIRED / RE-AUTH REQUIRED:
+  check_auth_status() → is_authenticated=false → repeat login sequence above.
+  Prefer inject_cookies() with saved session first — avoids full re-login.
+
+RULE: request_user_input pauses the agent and shows a dialog to the user.
+The agent resumes automatically once the user submits. Timeout default: 300s.
+Use input_type correctly: "captcha" | "totp" | "password" | "otp" | "text"
+</interactive_auth>
+
 <folder_structure>
 workspace/
     <target_name>/

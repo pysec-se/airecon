@@ -1,16 +1,3 @@
-"""Validation helpers for AIRecon.
-
-Two layers of validation live here:
-
-1. **Command/path validation** (module-level functions):
-   - `validate_target_path` — prevent path traversal out of /workspace
-   - `has_dangerous_patterns` — detect rm -rf /, fork bombs, etc.
-   - `validate_for_execution` — combined pre-execution check
-
-2. **Tool-argument validation** (_ValidatorMixin):
-   - `_validate_tool_args` — validate per-tool arguments before dispatch
-"""
-
 from __future__ import annotations
 
 import ast
@@ -25,14 +12,10 @@ from .tuning import get_tuning
 
 logger = logging.getLogger("airecon.validation")
 
+# Valid input types for request_user_input tool
+VALID_USER_INPUT_TYPES = frozenset({"text", "captcha", "totp", "password", "otp"})
 
 def _load_known_tools() -> frozenset[str]:
-    """Load tool names from tools_meta.json once at module load time.
-
-    Returns a frozenset of lowercase tool names so _validate_tool_args
-    can check poc_description references without hardcoding names or
-    doing file I/O on every call.
-    """
     try:
         data_file = Path(__file__).parent.parent / "data" / "tools_meta.json"
         meta = json.loads(data_file.read_text(encoding="utf-8"))
@@ -48,7 +31,6 @@ def _load_known_tools() -> frozenset[str]:
     except Exception as exc:
         logger.debug("Could not load tools_meta.json for validator: %s", exc)
         return frozenset()
-
 
 _KNOWN_TOOLS: frozenset[str] = _load_known_tools()
 _REPLAY_GAP_MESSAGES = {
@@ -146,24 +128,9 @@ _REPLAY_SEVERITY_OFFSETS = {
     "INFO": float(get_tuning("validator.replay.thresholds.severity_offset.info", -0.04)),
 }
 
-
-# ── Path / command validation ─────────────────────────────────────────────────
-
 def validate_target_path(
     target: str, base_dir: str | Path = "/workspace"
-) -> tuple[bool, str | Path]:
-    """Validate that target path stays within base_dir.
-
-    Returns: (is_valid, resolved_path_or_error_message)
-
-    Prevents:
-    - Path traversal attacks (../../../etc/passwd)
-    - Symlink attacks (links to parent directories)
-    - Shell metacharacters in paths
-    
-    FIX #2 (Critical): Added explicit symlink validation for each path component
-    to prevent traversal via symlinks in intermediate directories.
-    """
+) -> tuple[bool, str]:
     try:
         base_path = Path(base_dir).resolve()
         target_path = (base_path / target).resolve()
@@ -173,14 +140,11 @@ def validate_target_path(
         except ValueError:
             return False, f"Path traversal detected: {target} escapes {base_dir}"
 
-        # FIX #2: Check each path component for symlinks pointing outside workspace
-        # This prevents attacks where intermediate directories are symlinks
-        # Example: /workspace/legit -> /etc (symlink to parent dir)
         current = base_path
         for part in Path(target).parts:
             next_path = current / part
             if next_path.is_symlink():
-                # Resolve just this component to see where it points
+
                 resolved_link = next_path.resolve()
                 try:
                     resolved_link.relative_to(base_path)
@@ -195,69 +159,49 @@ def validate_target_path(
         if any(char in target for char in dangerous_chars):
             return False, f"Invalid characters in path: {target}"
 
-        return True, target_path
+        return True, str(target_path)
 
     except Exception as e:
         return False, f"Path validation error: {str(e)}"
 
-
 def extract_paths_from_command(command: str) -> list[str]:
-    """Extract file paths referenced by known output flags in a bash command.
-
-    Note: only inspects known flag patterns (-o, >, -t, --targets).
-    Positional arguments are NOT inspected — this is a deliberate design
-    choice to avoid false positives on host/URL arguments.
-    """
-    # Each pattern captures: double-quoted path | single-quoted path | bare path
-    # Three capture groups per pattern — only one will be non-empty per match.
     _Q = r'(?:"([^"]+)"|\'([^\']+)\'|(\S+))'
     patterns = [
-        rf"-o\s+{_Q}",              # -o /path  or  -o "/path with spaces"
-        rf"-output\s+{_Q}",         # -output /path
-        rf">>\s*{_Q}",              # >> /path (append) — must come BEFORE single >
-        rf"(?<!>)>(?!>)\s*{_Q}",   # > /path (redirect) — excludes >>
-        rf"-t\s+{_Q}",              # -t /path/to/targets
-        rf"--targets\s+{_Q}",       # --targets /path
+        rf"-o\s+{_Q}",
+        rf"-output\s+{_Q}",
+        rf">>\s*{_Q}",
+        rf"(?<!>)>(?!>)\s*{_Q}",
+        rf"-t\s+{_Q}",
+        rf"--targets\s+{_Q}",
     ]
     paths: list[str] = []
     for pattern in patterns:
         for groups in re.findall(pattern, command):
-            # Take the first non-empty group (double-quoted, single-quoted, or bare)
+
             path = next((g for g in groups if g), None)
             if path:
                 paths.append(path)
     return paths
 
-
 def validate_command_paths(
     command: str, base_dir: str | Path = "/workspace"
 ) -> tuple[bool, str]:
-    """Validate all flag-referenced paths in a command stay within base_dir.
-
-    Returns: (is_valid, error_message or empty string)
-    """
     for path in extract_paths_from_command(command):
         is_valid, error = validate_target_path(path, base_dir)
         if not is_valid:
             return False, str(error)
     return True, ""
 
-
 def validate_paths_in_semgrep_args(
     target_path: str, base_dir: str | Path = "/workspace"
 ) -> tuple[bool, str]:
-    """Validate semgrep target path."""
-    return validate_target_path(target_path, base_dir)  # type: ignore[return-value]
-
+    return validate_target_path(target_path, base_dir)
 
 def validate_paths_in_filesystem_args(
     file_path: str, base_dir: str | Path = "/workspace"
 ) -> tuple[bool, str]:
-    """Validate filesystem operation paths (cat, grep, find, etc)."""
-    return validate_target_path(file_path, base_dir)  # type: ignore[return-value]
+    return validate_target_path(file_path, base_dir)
 
-
-# Precompiled dangerous patterns for command injection detection
 DANGEROUS_PATTERNS: list[tuple[str, str]] = [
     (r"rm\s+-rf\s+/", "Dangerous: rm -rf / detected"),
     (r"dd\s+if=.*of=/dev", "Dangerous: writing to /dev"),
@@ -266,9 +210,7 @@ DANGEROUS_PATTERNS: list[tuple[str, str]] = [
     (r">\s*/dev/sd[a-z]", "Dangerous: writing to disk device"),
 ]
 
-
 def _has_dangerous_chmod_mode(command: str) -> bool:
-    """Detect SUID/SGID chmod patterns without false positives."""
     if "chmod" not in command.lower():
         return False
 
@@ -300,12 +242,7 @@ def _has_dangerous_chmod_mode(command: str) -> bool:
 
     return False
 
-
 def has_dangerous_patterns(command: str) -> tuple[bool, str]:
-    """Check if command contains dangerous patterns.
-
-    Returns: (has_dangerous, pattern_description or empty string)
-    """
     for pattern, description in DANGEROUS_PATTERNS:
         if re.search(pattern, command, re.IGNORECASE):
             return True, description
@@ -313,22 +250,13 @@ def has_dangerous_patterns(command: str) -> tuple[bool, str]:
         return True, "Dangerous: SUID/SGID bit change detected"
     return False, ""
 
-
 def validate_for_execution(
     command: str, base_dir: str | Path = "/workspace"
 ) -> tuple[bool, str]:
-    """Complete validation before command execution.
-
-    Checks dangerous patterns first (fast), then path validity.
-    Returns: (is_valid, error_message or empty string)
-    """
     has_danger, danger_msg = has_dangerous_patterns(command)
     if has_danger:
         return False, danger_msg
-    # Detect unbalanced quotes (LLM quoting bugs cause bash EOF errors).
-    # shlex.split raises ValueError on unmatched ' or " — catch early so
-    # the agent can retry with corrected quoting instead of sending a broken
-    # command to the Docker sandbox.
+
     try:
         shlex.split(command)
     except ValueError as e:
@@ -339,10 +267,6 @@ def validate_for_execution(
         )
     return validate_command_paths(command, base_dir)
 
-
-# ── Tool-argument validation (mixin for AgentLoop) ────────────────────────────
-
-# Compiled once at import time — used in _validate_tool_args for reports
 _HTTP_EVIDENCE_RE = re.compile(
     r"(http\s+[2345]\d{2}|status[:\s]+[2345]\d{2}|code\s+[2345]\d{2}|"
     r"\b[2345]\d{2}\s+(ok|found|forbidden|redirect|not found|created|"
@@ -352,14 +276,13 @@ _HTTP_EVIDENCE_RE = re.compile(
     r"\[[2345]\d{2}\]|\([2345]\d{2}\)|\{[2345]\d{2}\}|"
     r"returned\s+[2345]\d{2}|returns\s+[2345]\d{2}|got\s+[2345]\d{2}|"
     r"observed[:\s]+[2345]\d{2}|status\s*[2345]\d{2}|"
-    # JSON API response patterns: {"status": 200}, {"code": 401}, {"statusCode": 403}
+
     r"\"status(?:Code)?\"\s*:\s*[2345]\d{2}|"
     r"\"code\"\s*:\s*[2345]\d{2}|"
     r"\"http_status\"\s*:\s*[2345]\d{2})",
     re.IGNORECASE,
 )
 
-# Gap #1: HTTP evidence patterns that check for actual impact proof
 _HTTP_EVIDENCE_PATTERNS = {
     "status_change": re.compile(
         r"(200|201|204|301|302|304|400|401|403|404|500|503)\s*→\s*(200|201|204|301|302|304|400|401|403|404|500|503)",
@@ -381,17 +304,10 @@ _HTTP_EVIDENCE_PATTERNS = {
     ),
 }
 
-
 class _ValidatorMixin:
 
     @staticmethod
     def _str_arg(arguments: dict[str, Any], key: str) -> str:
-        """Return the string value of *key* or '' if missing or not a str.
-
-        Guards against AttributeError when malformed LLM tool-call arguments
-        pass a non-string type (e.g. a dict or int) for a field that is
-        expected to be a string.
-        """
         val = arguments.get(key)
         return val if isinstance(val, str) else ""
 
@@ -464,17 +380,11 @@ class _ValidatorMixin:
         "forward", "new_tab", "switch_tab", "close_tab", "wait", "execute_js",
         "double_click", "hover", "press_key", "save_pdf", "get_console_logs",
         "get_network_logs", "view_source", "close", "list_tabs",
-        # Auth actions — implemented in browser.py, defined in tools.json
+
         "login_form", "handle_totp", "save_auth_state", "inject_cookies", "oauth_authorize",
     })
 
     def _collect_runtime_verification_texts(self, max_entries: int = 24) -> list[str]:
-        """Collect recent runtime evidence snippets for replay verification.
-
-        Sources:
-        - self.state.tool_history (tool args + result excerpts)
-        - self.state.evidence_log summaries (if available)
-        """
         chunks: list[str] = []
         state = getattr(self, "state", None)
         if state is None:
@@ -513,7 +423,6 @@ class _ValidatorMixin:
 
     @staticmethod
     def _extract_payload_markers(text: str) -> list[str]:
-        """Extract high-signal payload markers from PoC code/description."""
         markers: list[str] = []
         for m in re.findall(r"(['\"`])(.*?)\1", text):
             token = str(m[1]).strip()
@@ -525,13 +434,12 @@ class _ValidatorMixin:
             tok = str(m).strip().strip("'\"")
             if tok and len(tok) >= 3:
                 markers.append(tok.lower()[:80])
-        # Dedup while preserving order
+
         seen: set[str] = set()
         return [x for x in markers if not (x in seen or seen.add(x))]
 
     @staticmethod
     def _hosts_related(left: str, right: str) -> bool:
-        """Return True when two hosts point to the same target family."""
         left = left.strip().lower()
         right = right.strip().lower()
         if not left or not right:
@@ -543,7 +451,6 @@ class _ValidatorMixin:
         )
 
     def _has_detected_waf_profile(self, hosts: list[str]) -> bool:
-        """Return True when session has WAF profile for target host(s)."""
         session = getattr(self, "_session", None)
         waf_profiles = getattr(session, "waf_profiles", None)
         if not isinstance(waf_profiles, dict) or not waf_profiles:
@@ -610,11 +517,6 @@ class _ValidatorMixin:
         report_finding: str,
         matching_finding: bool,
     ) -> tuple[float, list[str], bool, bool]:
-        """Compute replay-verification confidence from runtime and textual evidence.
-        
-        FIX #4 (High): Added WAF false positive detection to prevent 403/401 blocks
-        from being misclassified as vulnerabilities.
-        """
         gaps: list[str] = []
         runtime_chunks = self._collect_runtime_verification_texts()
         has_runtime = bool(runtime_chunks)
@@ -626,23 +528,18 @@ class _ValidatorMixin:
         host_matches = re.findall(r"https?://([^\s/\"']+)", poc_code, re.IGNORECASE)
         hosts = [h.split(":")[0].lower() for h in host_matches if h]
 
-        # FIX #4: WAF False Positive Detection
-        # Check if the "vulnerability" is actually just a WAF block (403/401)
-        # WAF blocks often look like vulnerabilities but are not exploitable
         waf_block_indicators = [
             r"\b403\b.*\b(forbidden|blocked|waf|firewall|access denied)\b",
             r"\b401\b.*\b(unauthorized|authentication required)\b",
             r"\b(blocked|blocked by|mod_security|cloudflare|akamai|sucuri)\b",
             r"\b(access denied|not allowed|forbidden|prohibited)\b",
         ]
-        
+
         has_waf_block = any(
             re.search(pattern, runtime_text) or re.search(pattern, desc_lower)
             for pattern in waf_block_indicators
         )
-        
-        # Prefer direct session WAF profile evidence when available.
-        # Fallback to runtime text pattern matching for backward compatibility.
+
         has_waf_detected = self._has_detected_waf_profile(hosts)
         if not has_waf_detected:
             has_waf_detected = bool(
@@ -651,8 +548,7 @@ class _ValidatorMixin:
                     runtime_text,
                 )
             )
-        
-        # If WAF block detected without successful bypass, flag as potential false positive
+
         waf_false_positive = has_waf_block and not has_waf_detected
 
         request_logged = bool(
@@ -768,15 +664,12 @@ class _ValidatorMixin:
                 score += _REPLAY_SCORE_WEIGHTS["runtime_host_bound"]
             if runtime_payload_bound:
                 score += _REPLAY_SCORE_WEIGHTS["runtime_payload_bound"]
-            
-            # FIX #4: WAF False Positive Penalty
-            # If WAF block detected without bypass evidence, reduce score significantly
+
             if waf_false_positive:
-                score -= 0.4  # Major penalty for potential WAF false positive
+                score -= 0.4
                 gaps.append("WAF block detected without bypass evidence - may be false positive")
         else:
-            # No runtime context available (unit tests/offline path):
-            # slightly favor strong textual replay descriptions.
+
             if request_logged and response_logged and target_bound:
                 score += _REPLAY_SCORE_WEIGHTS["no_runtime_text_bonus"]
 
@@ -842,8 +735,7 @@ class _ValidatorMixin:
                 return False, "'path' must be a non-empty string."
             if "content" not in arguments:
                 return False, "'content' argument is required."
-            # Block writing security reports as markdown files — must use
-            # create_vulnerability_report
+
             path_lower = path_str.strip().lower()
             _REPORT_NAMES = (
                 "final_report", "report", "vuln", "vulnerability", "finding",
@@ -876,7 +768,7 @@ class _ValidatorMixin:
                     return False, "'limit' must be an integer."
 
         elif tool_name == "list_files":
-            pass  # path is optional; defaults to target root
+            pass
 
         elif tool_name in ("caido_send_request", "caido_automate"):
             host_raw = self._str_arg(arguments, "host").removeprefix("https://").removeprefix("http://").rstrip("/")
@@ -946,7 +838,6 @@ class _ValidatorMixin:
                     "Provide a real exploit: Python script, curl command, or HTTP request."
                 )
 
-            # Determine PoC type and validate structure accordingly
             poc_lower = poc_code.lower()
             _is_python = any(sig in poc_lower for sig in (
                 "import ", "def ", "#!/usr/bin/env python", "#!/usr/bin/python",
@@ -958,7 +849,7 @@ class _ValidatorMixin:
             _is_bash = "#!/bin/bash" in poc_lower or "#!/bin/sh" in poc_lower
 
             if _is_python:
-                # Validate Python syntax with ast.parse()
+
                 try:
                     ast.parse(poc_code)
                 except SyntaxError as syn_err:
@@ -968,7 +859,7 @@ class _ValidatorMixin:
                         "Fix the syntax or provide a curl command instead."
                     )
             elif not (_is_curl or _is_php or _is_js or _is_bash):
-                # Fallback: must contain at least one concrete code indicator
+
                 NON_PYTHON_INDICATORS = (
                     "curl ", "http", "payload", "exploit", "fetch(",
                     "<?php", "<script", "burp", "#!/", "request",
@@ -984,8 +875,7 @@ class _ValidatorMixin:
                     f"REPORT REJECTED: 'poc_description' is too short ({len(poc_desc)} chars). "
                     "Provide step-by-step reproduction with specific URLs, parameters, and observed behavior."
                 )
-            # technical_analysis is only mandatory for full reports, not CTF.
-            # Minimum 40 chars as hard gate; richer detail is handled by scoring.
+
             if not is_ctf and (not technical or len(technical) < 40):
                 return False, (
                     f"REPORT REJECTED: 'technical_analysis' is too short ({len(technical)} chars). "
@@ -1016,28 +906,25 @@ class _ValidatorMixin:
                     "Show the real HTTP request that demonstrates the vulnerability."
                 )
 
-            # Subdomain-friendly PoC URL validation
             scope_valid = True
             if hasattr(self, '_session') and self._session:
-                # Helper: check if string is IP address
+
                 def _is_ip_address(host: str) -> bool:
                     parts = host.split('.')
                     return len(parts) == 4 and all(p.isdigit() and 0 <= int(p) <= 255 for p in parts)
-                
-                # Helper: extract base domain for flexible subdomain matching
+
                 def _get_base_domain(host: str) -> str:
-                    host = host.lower().split(':')[0]  # Remove port
+                    host = host.lower().split(':')[0]
                     if _is_ip_address(host):
-                        return host  # IPs use exact match
+                        return host
                     parts = host.split('.')
                     return '.'.join(parts[-2:]) if len(parts) >= 2 else host
-                
+
                 poc_url_match = re.search(r"https?://([^\s/\"']+)", poc_code.lower())
                 if poc_url_match:
-                    poc_host = poc_url_match.group(1).split(':')[0]  # Remove port
+                    poc_host = poc_url_match.group(1).split(':')[0]
                     session_hosts = [self._session.target] + list(self._session.live_hosts)
 
-                    # For IP addresses: require exact match
                     if _is_ip_address(poc_host):
                         direct_match = poc_host in session_hosts
                         if not direct_match:
@@ -1048,14 +935,13 @@ class _ValidatorMixin:
                                 "PoC must target the actual session target IP."
                             )
                     else:
-                        # For domains: allow subdomain matching
+
                         poc_base = _get_base_domain(poc_host)
                         session_bases = [_get_base_domain(h) for h in session_hosts]
-                        
-                        # Also check direct substring match (for exact host matches)
+
                         direct_match = any(poc_host == h.split(':')[0] for h in session_hosts)
                         base_match = any(poc_base == s_base for s_base in session_bases)
-                        
+
                         if not (direct_match or base_match):
                             scope_valid = False
                             return False, (
@@ -1063,10 +949,9 @@ class _ValidatorMixin:
                                 f"Session target: {self._session.target}. Live hosts: {', '.join(self._session.live_hosts[:5])}. "
                                 "PoC must target the actual session target or its subdomains."
                             )
-            
+
             if not is_ctf:
-                # Flexible HTTP evidence validation: allow both tool references
-                # and descriptive observations.
+
                 if not _HTTP_EVIDENCE_RE.search(poc_desc):
                     return False, (
                         "REPORT REJECTED: 'poc_description' must include actual HTTP response evidence. "
@@ -1074,23 +959,21 @@ class _ValidatorMixin:
                         "'GET /api/data → HTTP 200, response contained {user records}'. "
                         "A 301 redirect alone, or 'endpoint exists', is not sufficient — show what data/access was obtained."
                     )
-                
-                # Flexible tool output reference (allow descriptive observations)
-                # Uses module-level _KNOWN_TOOLS (loaded once from tools_meta.json)
+
                 _desc_lower = poc_desc.lower()
                 has_tool_reference = (
-                    "output/" in _desc_lower or          # References saved file
-                    "session" in _desc_lower or           # References session data
-                    "response" in _desc_lower or          # Describes actual response
-                    "→" in poc_desc or                    # Arrow notation for request/response
-                    "http " in _desc_lower or             # HTTP protocol mention
-                    "observed" in _desc_lower or          # Descriptive observation
+                    "output/" in _desc_lower or
+                    "session" in _desc_lower or
+                    "response" in _desc_lower or
+                    "→" in poc_desc or
+                    "http " in _desc_lower or
+                    "observed" in _desc_lower or
                     "received" in _desc_lower or
                     "got" in _desc_lower or
                     "server returned" in _desc_lower or
                     "response body" in _desc_lower or
                     "response contained" in _desc_lower or
-                    any(tool in _desc_lower for tool in _KNOWN_TOOLS)  # Tool mention
+                    any(tool in _desc_lower for tool in _KNOWN_TOOLS)
                 )
                 if not has_tool_reference:
                     return False, (
@@ -1098,7 +981,6 @@ class _ValidatorMixin:
                         "Reference the tool output file (e.g., 'output/nmap_scan.txt') or describe the actual response observed."
                     )
 
-                # Gap #1: Require impact proof, not only status line.
                 has_status_change = bool(_HTTP_EVIDENCE_PATTERNS["status_change"].search(poc_desc))
                 has_content_proof = bool(_HTTP_EVIDENCE_PATTERNS["response_content"].search(poc_desc))
                 has_error_or_data = bool(
@@ -1117,7 +999,6 @@ class _ValidatorMixin:
                         "Do not submit 'HTTP 200' alone without explaining the impact."
                     )
 
-            # Replay-verification gate: prioritize end-to-end reproducibility.
             replay_score, replay_gaps, has_runtime_context, runtime_bound = self._replay_verification_score(
                 poc_code=poc_code,
                 poc_desc=poc_desc,
@@ -1156,7 +1037,6 @@ class _ValidatorMixin:
                         f"Fix: {gap_hint}."
                     )
 
-            # Quality gate: strict in EXPLOIT/REPORT, lenient in RECON/ANALYSIS.
             score = 0
             improvements: list[str] = []
 

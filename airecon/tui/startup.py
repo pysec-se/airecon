@@ -1,11 +1,10 @@
-"""Startup screen — shown while AIRecon services initialize inside the TUI."""
-
 from __future__ import annotations
 
 import asyncio
 import json
 import logging
 import threading
+import time
 import urllib.request
 from typing import Any
 
@@ -16,8 +15,102 @@ from textual.widgets import Label, Static
 
 logger = logging.getLogger("airecon.startup")
 
-_SPINNER = "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"
+_MAX_PROXY_RESTARTS: int = 3
+_MIN_STABLE_SECONDS: float = 30.0
+_PROXY_POLL_INTERVAL_SECONDS_FAST: float = 0.1
+_PROXY_POLL_INTERVAL_SECONDS_MEDIUM: float = 0.2
+_PROXY_POLL_INTERVAL_SECONDS_SLOW: float = 0.3
+_PROXY_STATUS_TIMEOUT_SECONDS: float = 1.2
+_PROXY_START_TIMEOUT_SECONDS: float = 35.0
+_PROXY_START_TIMEOUT_RESUME_SECONDS: float = 60.0
+_PROXY_START_EXTRA_GRACE_SECONDS: float = 25.0
 
+_proxy_thread: threading.Thread | None = None
+_proxy_fatal_error: list[str] = []
+
+def is_proxy_alive() -> bool:
+    return _proxy_thread is not None and _proxy_thread.is_alive()
+
+def get_proxy_fatal_error() -> str | None:
+    return _proxy_fatal_error[0] if _proxy_fatal_error else None
+
+def _proxy_thread_body() -> None:
+    import os as _os
+    import logging as _log
+    import traceback as _tb
+
+    _debug_mode = bool(_os.environ.get("AIRECON_DEBUG"))
+    if _debug_mode:
+        from airecon.logger import setup_logging as _setup_logging
+        _setup_logging(is_tui=True)
+
+    if not _debug_mode:
+        _log.getLogger("airecon").setLevel(_log.CRITICAL)
+        _log.getLogger("uvicorn.access").setLevel(_log.CRITICAL)
+    for _n in ("uvicorn", "uvicorn.error", "httpx", "httpcore"):
+        _log.getLogger(_n).setLevel(_log.CRITICAL)
+
+    from airecon.proxy.server import run_server
+
+    _restart_count = 0
+    _restart_delay = 2.0
+
+    while True:
+        _t0 = time.monotonic()
+        try:
+            run_server()
+            break
+        except KeyboardInterrupt:
+            break
+        except Exception as exc:
+            _elapsed = time.monotonic() - _t0
+            logger.error(
+                "Proxy server crashed after %.1fs (restart #%d): %s",
+                _elapsed, _restart_count, exc,
+            )
+            try:
+                with open("airecon_proxy_crash.log", "a") as _f:
+                    _f.write(
+                        f"\n=== Crash (elapsed={_elapsed:.1f}s, attempt #{_restart_count}) ===\n"
+                    )
+                    _tb.print_exc(file=_f)
+            except Exception:
+                pass
+
+            if _elapsed >= _MIN_STABLE_SECONDS:
+                _restart_count = 0
+
+            if _restart_count >= _MAX_PROXY_RESTARTS:
+                _proxy_fatal_error.append(
+                    f"Proxy crashed {_MAX_PROXY_RESTARTS + 1} times: {exc}"
+                )
+                logger.error(
+                    "Proxy exhausted %d restart attempts — giving up. "
+                    "Check airecon_proxy_crash.log for details.",
+                    _MAX_PROXY_RESTARTS,
+                )
+                break
+
+            _restart_count += 1
+            logger.warning(
+                "Restarting proxy in %.0fs (attempt %d/%d)…",
+                _restart_delay, _restart_count, _MAX_PROXY_RESTARTS,
+            )
+            time.sleep(_restart_delay)
+            _restart_delay = min(_restart_delay * 1.5, 10.0)
+
+def _start_proxy_thread() -> None:
+    global _proxy_thread, _proxy_fatal_error
+    _proxy_fatal_error.clear()
+    _proxy_thread = threading.Thread(
+        target=_proxy_thread_body,
+        daemon=True,
+        name="airecon-proxy",
+    )
+    _proxy_thread.start()
+    logger.debug("Proxy daemon thread started")
+
+_SPINNER = "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"
 _STEP_IDS = [
     "step-docker",
     "step-searxng",
@@ -34,9 +127,7 @@ _STEP_LABELS: dict[str, str] = {
     "step-engine":  "Docker Engine",
 }
 
-
 def _write_config_value(key: str, value: str) -> None:
-    """Persist a single key into ~/.airecon/config.json."""
     import json as _json
     from pathlib import Path
     config_file = Path.home() / ".airecon" / "config.json"
@@ -53,11 +144,8 @@ def _write_config_value(key: str, value: str) -> None:
     except Exception as e:
         logger.warning("Could not persist config %s: %s", key, e)
 
-
 class StartupScreen(Screen[bool]):
-    """Full-screen TUI startup with live per-service progress indicators."""
-
-    DEFAULT_CSS = ""  # Styles defined in styles.tcss
+    DEFAULT_CSS = ""
 
     def __init__(
         self,
@@ -70,7 +158,6 @@ class StartupScreen(Screen[bool]):
         self.proxy_url = proxy_url.rstrip("/")
         self.no_proxy = no_proxy
         self.session_id = session_id
-        # state per step: (state, detail)
         self._step_states: dict[str, tuple[str, str]] = {}
         self._spinner_frame: int = 0
 
@@ -108,8 +195,6 @@ class StartupScreen(Screen[bool]):
         if asyncio.iscoroutine(startup_task):
             self.run_worker(startup_task, exclusive=True)
 
-    # ── Rendering helpers ──────────────────────────────────────────
-
     def _render_step(self, step_id: str) -> None:
         state, detail = self._step_states.get(step_id, ("pending", ""))
         label = _STEP_LABELS.get(step_id, step_id)
@@ -137,7 +222,7 @@ class StartupScreen(Screen[bool]):
             self.query_one(f"#{step_id}", Label).update(
                 f"  {icon}  [bold]{label:<24}[/] [{color}]{text}[/]"
             )
-        except Exception:  # nosec B110
+        except Exception:
             pass
 
     def _set_step(self, step_id: str, state: str, detail: str = "") -> None:
@@ -155,17 +240,27 @@ class StartupScreen(Screen[bool]):
             self.query_one("#startup-status", Static).update(
                 f"\n  {markup}"
             )
-        except Exception:  # nosec B110
+        except Exception:
             pass
 
-    # ── Startup worker ─────────────────────────────────────────────
+    def _proxy_start_timeout_seconds(self) -> float:
+        return (
+            _PROXY_START_TIMEOUT_RESUME_SECONDS
+            if self.session_id
+            else _PROXY_START_TIMEOUT_SECONDS
+        )
+
+    def _proxy_poll_interval_seconds(self, elapsed_seconds: float) -> float:
+        if elapsed_seconds < 8.0:
+            return _PROXY_POLL_INTERVAL_SECONDS_FAST
+        if elapsed_seconds < 25.0:
+            return _PROXY_POLL_INTERVAL_SECONDS_MEDIUM
+        return _PROXY_POLL_INTERVAL_SECONDS_SLOW
 
     async def _run_startup(self) -> None:
-        """Run all service checks sequentially, updating the UI live."""
         from airecon.proxy.config import get_config
         cfg = get_config()
 
-        # ── 1. Docker Sandbox ──────────────────────────────────────
         self._set_step("step-docker", "running", "checking image…")
         self._set_status(
             "[#8b949e]Building Docker sandbox (first run may take a few minutes)…[/]"
@@ -182,7 +277,6 @@ class StartupScreen(Screen[bool]):
             return
         self._set_step("step-docker", "ok", "ready")
 
-        # ── 2. SearXNG ────────────────────────────────────────────
         _should_manage = (
             not cfg.searxng_url
             or "localhost" in cfg.searxng_url
@@ -191,8 +285,8 @@ class StartupScreen(Screen[bool]):
         if _should_manage:
             self._set_step("step-searxng", "running", "starting container…")
             self._set_status("[#8b949e]Starting SearXNG search engine…[/]")
-            from airecon.proxy.searxng import SearXNGManager
-            _mgr = SearXNGManager()
+            from airecon.proxy.searxng import get_shared_manager
+            _mgr = get_shared_manager()
             _url = await _mgr.ensure_running()
             if _url:
                 if not cfg.searxng_url:
@@ -203,7 +297,6 @@ class StartupScreen(Screen[bool]):
         else:
             self._set_step("step-searxng", "ok", "external")
 
-        # ── 3. Proxy Server ───────────────────────────────────────
         if self.no_proxy:
             self._set_step("step-proxy", "skip", "skipped (--no-proxy)")
             self._set_step("step-ollama", "skip", "—")
@@ -212,56 +305,83 @@ class StartupScreen(Screen[bool]):
             self._set_step("step-proxy", "running", "starting…")
             self._set_status("[#8b949e]Starting proxy server…[/]")
 
-            proxy_error: list[str] = []
-
-            def _start_proxy() -> None:
-                import logging as _log
-                for _n in (
-                    "airecon", "uvicorn", "uvicorn.access",
-                    "uvicorn.error", "httpx", "httpcore",
-                ):
-                    _log.getLogger(_n).setLevel(_log.CRITICAL)
-                try:
-                    from airecon.proxy.server import run_server
-                    run_server()
-                except Exception as e:
-                    proxy_error.append(str(e))
-                    import traceback
-                    with open("airecon_proxy_crash.log", "w") as f:
-                        traceback.print_exc(file=f)
-
-            threading.Thread(target=_start_proxy, daemon=True).start()
+            _start_proxy_thread()
 
             proxy_ok = False
             docker_ok = False
             ollama_ok = False
-            for attempt in range(60):
-                if proxy_error:
-                    self._set_step("step-proxy", "fail", proxy_error[0][:44])
+            _poll_timeout = _PROXY_STATUS_TIMEOUT_SECONDS
+            _startup_started = time.monotonic()
+            _startup_deadline = _startup_started + self._proxy_start_timeout_seconds()
+            _attempt = 0
+            while time.monotonic() < _startup_deadline:
+                _attempt += 1
+                _fatal = get_proxy_fatal_error()
+                if _fatal:
+                    self._set_step("step-proxy", "fail", _fatal[:44])
                     self._set_status(
                         "[#ef4444]✗ Proxy crashed — check airecon_proxy_crash.log[/]"
                     )
                     return
-                try:
-                    req = urllib.request.urlopen(  # nosec B310
-                        f"{self.proxy_url}/api/status", timeout=2
+
+                if not is_proxy_alive():
+                    self._set_step("step-proxy", "fail", "thread stopped")
+                    self._set_status(
+                        "[#ef4444]✗ Proxy thread stopped before responding.[/] "
+                        "[#484f58]Check airecon_proxy_crash.log.[/]"
                     )
+                    return
+
+                try:
+                    req = urllib.request.urlopen(
+                        f"{self.proxy_url}/api/status", timeout=_poll_timeout)  # nosec B310 - self.proxy_url is localhost http://127.0.0.1:8000, not user-controlled
                     data = json.loads(req.read())
                     docker_ok = data.get("docker", {}).get("connected", False)
                     ollama_ok = data.get("ollama", {}).get("connected", False)
                     proxy_ok = True
                     break
                 except Exception as e:
-                    logger.debug("Proxy poll attempt %d failed: %s", attempt, e)
-                    await asyncio.sleep(0.4)
-                    dots = "." * ((attempt % 3) + 1)
-                    self._set_step("step-proxy", "running", f"starting{dots}")
+                    logger.debug("Proxy poll attempt %d failed: %s", _attempt, e)
+                    _elapsed_f = max(0.0, time.monotonic() - _startup_started)
+                    _sleep_for = self._proxy_poll_interval_seconds(_elapsed_f)
+                    await asyncio.sleep(_sleep_for)
+                    _elapsed = int(_elapsed_f)
+                    self._set_step("step-proxy", "running", f"warming up… {_elapsed}s")
+
+            if not proxy_ok and is_proxy_alive() and not get_proxy_fatal_error():
+                logger.warning(
+                    "Proxy still warming up after %.0fs — entering extra grace window %.0fs",
+                    self._proxy_start_timeout_seconds(),
+                    _PROXY_START_EXTRA_GRACE_SECONDS,
+                )
+                self._set_status(
+                    "[#f59e0b]Proxy still warming up…[/] "
+                    "[#8b949e]Waiting extra grace window for backend readiness.[/]"
+                )
+                _grace_started = time.monotonic()
+                _grace_deadline = _grace_started + _PROXY_START_EXTRA_GRACE_SECONDS
+                while time.monotonic() < _grace_deadline:
+                    try:
+                        req = urllib.request.urlopen(
+                            f"{self.proxy_url}/api/status", timeout=_poll_timeout)  # nosec B310 - self.proxy_url is localhost http://127.0.0.1:8000, not user-controlled
+                        data = json.loads(req.read())
+                        docker_ok = data.get("docker", {}).get("connected", False)
+                        ollama_ok = data.get("ollama", {}).get("connected", False)
+                        proxy_ok = True
+                        break
+                    except Exception as e:
+                        logger.debug("Proxy grace poll failed: %s", e)
+                        _grace_elapsed_f = max(0.0, time.monotonic() - _grace_started)
+                        _sleep_for = self._proxy_poll_interval_seconds(_grace_elapsed_f)
+                        await asyncio.sleep(_sleep_for)
+                        _grace_elapsed = int(_grace_elapsed_f)
+                        self._set_step("step-proxy", "running", f"extra warm-up… {_grace_elapsed}s")
 
             if not proxy_ok:
-                self._set_step("step-proxy", "fail", "no response (port conflict?)")
+                self._set_step("step-proxy", "fail", "no response (startup timeout)")
                 self._set_status(
-                    "[#ef4444]✗ Proxy did not start.[/] "
-                    "[#484f58]Check for port conflicts.[/]"
+                    "[#ef4444]✗ Proxy did not start in time.[/] "
+                    "[#484f58]Check airecon_proxy_crash.log and port conflicts.[/]"
                 )
                 return
 
@@ -277,7 +397,6 @@ class StartupScreen(Screen[bool]):
                 "connected" if docker_ok else "initializing…",
             )
 
-        # ── Done ──────────────────────────────────────────────────
         self._set_status(
             "[bold #00d4aa]✓ All systems ready.[/]  "
             "[#484f58]Launching interface…[/]"

@@ -1,7 +1,7 @@
 import asyncio
 import pytest
 from unittest.mock import patch, MagicMock
-from airecon.tui.app import AIReconApp, QuitConfirmScreen
+from airecon.tui.app import AIReconApp, QuitConfirmScreen, UserInputModal
 from airecon.tui.startup import StartupScreen, _write_config_value
 from textual.app import App, ComposeResult
 
@@ -29,16 +29,20 @@ async def test_app_send_message_triggers_worker():
             coro.close()
         return MagicMock()
 
-    with patch.object(AIReconApp, 'run_worker', side_effect=_run_worker_side_effect) as mock_run_worker:
+    with patch.object(
+        AIReconApp, "run_worker", side_effect=_run_worker_side_effect
+    ) as mock_run_worker:
         app = AIReconApp(show_startup_screen=False, auto_poll_services=False)
         chat = MagicMock()
         slash = MagicMock()
         path = MagicMock()
-        app.query_one = MagicMock(side_effect=lambda selector, *args: {
-            "#slash-completer": slash,
-            "#path-completer": path,
-            "#chat-panel": chat,
-        }[selector])  # type: ignore[method-assign]
+        app.query_one = MagicMock(
+            side_effect=lambda selector, *args: {
+                "#slash-completer": slash,
+                "#path-completer": path,
+                "#chat-panel": chat,
+            }[selector]
+        )  # type: ignore[method-assign]
         app._show_recon_spinner = MagicMock()  # type: ignore[method-assign]
 
         class MockSubmitted:
@@ -53,23 +57,25 @@ async def test_app_send_message_triggers_worker():
 
 @pytest.mark.asyncio
 async def test_app_status_polling_connection():
-    with patch('httpx.AsyncClient.get') as mock_get:
+    with patch("httpx.AsyncClient.get") as mock_get:
         mock_response = MagicMock()
         mock_response.status_code = 200
         mock_response.json.return_value = {
             "ollama": {"connected": True, "model": "test-model"},
             "docker": {"connected": True},
-            "agent": {"tool_counts": {"exec": 5, "subagents": 1}}
+            "agent": {"tool_counts": {"exec": 5, "subagents": 1}},
         }
         mock_get.return_value = mock_response
 
         app = AIReconApp(show_startup_screen=False, auto_poll_services=False)
         status = MagicMock()
         chat = MagicMock()
-        app.query_one = MagicMock(side_effect=lambda selector, *args: {
-            "#status-bar": status,
-            "#chat-panel": chat,
-        }[selector])  # type: ignore[method-assign]
+        app.query_one = MagicMock(
+            side_effect=lambda selector, *args: {
+                "#status-bar": status,
+                "#chat-panel": chat,
+            }[selector]
+        )  # type: ignore[method-assign]
 
         # Manually trigger a single poll check rather than waiting for background tasks
         await app._check_services(verbose=False)
@@ -79,6 +85,7 @@ async def test_app_status_polling_connection():
 
 
 # ── AIReconApp new init params ────────────────────────────────────────────────
+
 
 def test_app_init_default_params():
     app = AIReconApp()
@@ -102,7 +109,73 @@ def test_app_init_proxy_url_stripped():
     assert app.proxy_url == "http://localhost:3000"
 
 
+def test_ollama_recovery_marker_detection():
+    assert AIReconApp._is_ollama_recovery_marker("[AUTO-RECOVERY #1] VRAM crash") is True
+    assert AIReconApp._is_ollama_recovery_marker("CUDA out of memory while generating") is True
+    assert AIReconApp._is_ollama_recovery_marker("normal assistant response") is False
+
+
+def test_mark_ollama_degraded_updates_status_bar():
+    app = AIReconApp(show_startup_screen=False, auto_poll_services=False)
+    status = MagicMock()
+    app.query_one = MagicMock(return_value=status)  # type: ignore[method-assign]
+    app._processing = True
+
+    app._mark_ollama_degraded("[AUTO-RECOVERY #2] VRAM crash")
+
+    assert app._is_ollama_degraded_active() is True
+    status.set_status.assert_called_with(ollama_degraded=True)
+
+
+def test_mark_ollama_degraded_ignored_when_idle():
+    app = AIReconApp(show_startup_screen=False, auto_poll_services=False)
+    status = MagicMock()
+    app.query_one = MagicMock(return_value=status)  # type: ignore[method-assign]
+    app._processing = False
+
+    app._mark_ollama_degraded("[AUTO-RECOVERY #2] VRAM crash")
+
+    assert app._is_ollama_degraded_active() is False
+    status.set_status.assert_not_called()
+
+
+def test_history_entries_to_render_supports_tool_calls_and_tool_role():
+    messages = [
+        {"role": "user", "content": "scan example.com"},
+        {
+            "role": "assistant",
+            "content": "",
+            "tool_calls": [
+                {
+                    "function": {
+                        "name": "terminal",
+                        "arguments": {"command": "nmap -sV example.com"},
+                    }
+                }
+            ],
+        },
+        {"role": "tool", "content": {"output": "open ports: 80,443"}},
+        {"role": "assistant", "content": "Recon selesai."},
+    ]
+
+    rendered = AIReconApp._history_entries_to_render(messages)
+
+    assert rendered[0] == ("user", "scan example.com")
+    assert rendered[1][0] == "tool"
+    assert "terminal" in rendered[1][1]
+    assert rendered[2][0] == "tool"
+    assert "open ports" in rendered[2][1]
+    assert rendered[3] == ("assistant", "Recon selesai.")
+
+
+def test_history_content_to_text_handles_non_string_payloads():
+    text = AIReconApp._history_content_to_text({"a": 1, "b": [2, 3]})
+    assert '"a": 1' in text
+    assert '"b": [' in text
+
+
 # ── QuitConfirmScreen ─────────────────────────────────────────────────────────
+
 
 class _QuitTestApp(App):
     def compose(self) -> ComposeResult:
@@ -184,7 +257,50 @@ async def test_quit_confirm_key_enter_defaults_no():
     assert results == [False]
 
 
+# ── UserInputModal ────────────────────────────────────────────────────────────
+
+
+class _UserInputTestApp(App):
+    def compose(self) -> ComposeResult:
+        return iter([])
+
+
+@pytest.mark.asyncio
+async def test_user_input_modal_totp_submit():
+    results = []
+    async with _UserInputTestApp().run_test() as pilot:
+        screen = UserInputModal("Enter 2FA code", input_type="totp")
+        pilot.app.push_screen(screen, lambda v: results.append(v))
+        await pilot.pause()
+        await pilot.click("#modal-input")
+        await pilot.press("1", "2", "3", "4", "5", "6")
+        await pilot.press("enter")
+        await pilot.pause()
+    assert results == ["123456"]
+
+
+@pytest.mark.asyncio
+async def test_user_input_modal_escape_cancel():
+    results = []
+    async with _UserInputTestApp().run_test() as pilot:
+        screen = UserInputModal("Solve CAPTCHA", input_type="captcha")
+        pilot.app.push_screen(screen, lambda v: results.append(v))
+        await pilot.pause()
+        await pilot.press("escape")
+        await pilot.pause()
+    assert results == [None]
+
+
+def test_user_input_modal_extracts_captcha_screenshot_path():
+    modal = UserInputModal(
+        "Please solve captcha from /tmp/airecon/captcha_abc.png",
+        input_type="captcha",
+    )
+    assert modal._extract_screenshot_path() == "/tmp/airecon/captcha_abc.png"
+
+
 # ── StartupScreen unit tests (no worker) ─────────────────────────────────────
+
 
 class _StartupTestApp(App):
     """Host a StartupScreen with the worker patched out."""
@@ -206,7 +322,13 @@ async def test_startup_screen_renders_step_labels():
         screen = pilot.app.screen
         assert isinstance(screen, StartupScreen)
         # All 5 step labels should exist
-        for sid in ("step-docker", "step-searxng", "step-proxy", "step-ollama", "step-engine"):
+        for sid in (
+            "step-docker",
+            "step-searxng",
+            "step-proxy",
+            "step-ollama",
+            "step-engine",
+        ):
             label = screen.query_one(f"#{sid}")
             assert label is not None
 
@@ -256,7 +378,13 @@ async def test_startup_screen_pending_state_on_mount():
         screen = pilot.app.screen
         assert isinstance(screen, StartupScreen)
         # All steps should start as pending
-        for sid in ("step-docker", "step-searxng", "step-proxy", "step-ollama", "step-engine"):
+        for sid in (
+            "step-docker",
+            "step-searxng",
+            "step-proxy",
+            "step-ollama",
+            "step-engine",
+        ):
             state, _ = screen._step_states[sid]
             assert state == "pending"
 
@@ -279,7 +407,22 @@ async def test_startup_screen_session_label_shown():
         assert label is not None
 
 
+def test_startup_screen_proxy_timeout_default():
+    screen = StartupScreen(proxy_url="http://127.0.0.1:3000", no_proxy=False)
+    assert screen._proxy_start_timeout_seconds() == 35.0
+
+
+def test_startup_screen_proxy_timeout_resume_mode():
+    screen = StartupScreen(
+        proxy_url="http://127.0.0.1:3000",
+        no_proxy=False,
+        session_id="1740842400_abc",
+    )
+    assert screen._proxy_start_timeout_seconds() == 60.0
+
+
 # ── _write_config_value unit test ─────────────────────────────────────────────
+
 
 def test_write_config_value_creates_file(tmp_path):
     """_write_config_value should write key into ~/.airecon/config.json."""
@@ -288,8 +431,10 @@ def test_write_config_value_creates_file(tmp_path):
     airecon_dir = tmp_path / ".airecon"
     airecon_dir.mkdir()
 
-    with patch("pathlib.Path.home", return_value=tmp_path), \
-         patch("airecon.proxy.config.reload_config"):
+    with (
+        patch("pathlib.Path.home", return_value=tmp_path),
+        patch("airecon.proxy.config.reload_config"),
+    ):
         _write_config_value("searxng_url", "http://localhost:4000")
 
     config_file = airecon_dir / "config.json"
@@ -306,8 +451,10 @@ def test_write_config_value_preserves_existing_keys(tmp_path):
     airecon_dir.mkdir()
     (airecon_dir / "config.json").write_text(_json.dumps({"ollama_model": "llama3"}))
 
-    with patch("pathlib.Path.home", return_value=tmp_path), \
-         patch("airecon.proxy.config.reload_config"):
+    with (
+        patch("pathlib.Path.home", return_value=tmp_path),
+        patch("airecon.proxy.config.reload_config"),
+    ):
         _write_config_value("searxng_url", "http://localhost:4000")
 
     result = _json.loads((airecon_dir / "config.json").read_text())

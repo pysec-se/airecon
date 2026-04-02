@@ -2,7 +2,8 @@
 
 from __future__ import annotations
 
-from unittest.mock import MagicMock
+import pytest
+from unittest.mock import AsyncMock, MagicMock
 
 from airecon.proxy.agent.loop import AgentLoop
 
@@ -10,6 +11,7 @@ from airecon.proxy.agent.loop import AgentLoop
 # ─────────────────────────────────────────────────────────────
 # Helpers
 # ─────────────────────────────────────────────────────────────
+
 
 def _make_loop() -> AgentLoop:
     ollama = MagicMock()
@@ -20,6 +22,7 @@ def _make_loop() -> AgentLoop:
 # ─────────────────────────────────────────────────────────────
 # Initial state
 # ─────────────────────────────────────────────────────────────
+
 
 class TestInitialState:
     def test_adaptive_num_ctx_starts_zero(self):
@@ -42,6 +45,7 @@ class TestInitialState:
 # ─────────────────────────────────────────────────────────────
 # _adaptive_num_ctx persistence logic
 # ─────────────────────────────────────────────────────────────
+
 
 class TestAdaptiveNumCtxPersistence:
     def test_zero_means_use_config_default(self):
@@ -71,6 +75,7 @@ class TestAdaptiveNumCtxPersistence:
 # ─────────────────────────────────────────────────────────────
 # Multi-level escalation logic (pure unit, no async)
 # ─────────────────────────────────────────────────────────────
+
 
 class TestMultiLevelEscalationLogic:
     """Test the escalation tier logic independent of the async stream loop."""
@@ -141,6 +146,7 @@ class TestMultiLevelEscalationLogic:
 # Proactive context monitoring logic
 # ─────────────────────────────────────────────────────────────
 
+
 class TestProactiveContextMonitoring:
     def test_80_percent_threshold_triggers_trim(self):
         """Usage >= 80% of context window should trigger proactive trim."""
@@ -189,7 +195,9 @@ class TestProactiveContextMonitoring:
     def test_token_usage_limit_updates_after_override(self):
         loop = _make_loop()
         loop._adaptive_num_ctx = 8192
-        adaptive_num_ctx = loop._adaptive_num_ctx if loop._adaptive_num_ctx > 0 else 131072
+        adaptive_num_ctx = (
+            loop._adaptive_num_ctx if loop._adaptive_num_ctx > 0 else 131072
+        )
         loop.state.token_usage["limit"] = adaptive_num_ctx
         assert loop.state.token_usage["limit"] == 8192
 
@@ -215,6 +223,7 @@ class TestNumKeepClamping:
 # ─────────────────────────────────────────────────────────────
 # VRAM crash error detection patterns
 # ─────────────────────────────────────────────────────────────
+
 
 class TestVramCrashDetection:
     PATTERNS = [
@@ -268,3 +277,119 @@ class TestVramCrashDetection:
 
     def test_model_not_found_not_vram(self):
         assert not self._is_vram_crash("model not found: llama3")
+
+
+class TestOllamaResetFallback:
+    @pytest.mark.asyncio
+    async def test_reset_context_retries_and_succeeds(self):
+        loop = _make_loop()
+        loop.ollama.reset_context = AsyncMock(side_effect=[False, False, True])
+
+        ok = await loop._reset_ollama_context()
+
+        assert ok is True
+        assert loop.ollama.reset_context.await_count == 3
+
+    @pytest.mark.asyncio
+    async def test_reset_context_failure_triggers_local_fallback(self):
+        loop = _make_loop()
+        loop.ollama.reset_context = AsyncMock(return_value=False)
+        loop._apply_local_context_fallback = MagicMock()
+
+        ok = await loop._reset_ollama_context()
+
+        assert ok is False
+        loop._apply_local_context_fallback.assert_called_once()
+
+
+class _FakeResp:
+    def __init__(self, payload: dict, status: int = 200):
+        self.status = status
+        self._payload = payload
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, exc_type, exc, tb):
+        return False
+
+    async def json(self):
+        return self._payload
+
+
+class _FakeSession:
+    def __init__(self, payload: dict):
+        self._payload = payload
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, exc_type, exc, tb):
+        return False
+
+    def get(self, *args, **kwargs):
+        return _FakeResp(self._payload)
+
+
+class TestPsContextResetGuard:
+    @pytest.mark.asyncio
+    async def test_high_ps_context_does_not_reset_when_local_used_is_low(self, monkeypatch):
+        loop = _make_loop()
+        loop.ollama.model = "qwen3"
+        loop.ollama._host = "http://ollama.local"
+        loop.state.token_usage["used"] = 2048
+        loop._reset_ollama_context = AsyncMock(return_value=True)
+
+        payload = {"models": [{"name": "qwen3:latest", "context_length": 131072}]}
+        monkeypatch.setattr("airecon.proxy.agent.loop.aiohttp.ClientSession", lambda *a, **k: _FakeSession(payload))
+        monkeypatch.setattr("airecon.proxy.ollama._CONTEXT_RESET_THRESHOLD", 100000, raising=False)
+
+        await loop._check_and_reset_context()
+
+        loop._reset_ollama_context.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_reset_cooldown_blocks_repeat_resets(self, monkeypatch):
+        loop = _make_loop()
+        loop.ollama.model = "qwen3"
+        loop.ollama._host = "http://ollama.local"
+        loop.state.token_usage["used"] = 131072
+        loop._reset_ollama_context = AsyncMock(return_value=True)
+
+        payload = {"models": [{"name": "qwen3:latest", "context_length": 131072}]}
+        monkeypatch.setattr("airecon.proxy.agent.loop.aiohttp.ClientSession", lambda *a, **k: _FakeSession(payload))
+        monkeypatch.setattr("airecon.proxy.ollama._CONTEXT_RESET_THRESHOLD", 100000, raising=False)
+
+        # First check should reset.
+        await loop._check_and_reset_context()
+        assert loop._reset_ollama_context.await_count == 1
+
+        # Force check window open but still inside reset cooldown.
+        loop._last_context_check = 0.0
+        await loop._check_and_reset_context()
+        assert loop._reset_ollama_context.await_count == 1
+
+    @pytest.mark.asyncio
+    async def test_reset_cooldown_honors_config_override_zero(self, monkeypatch):
+        loop = _make_loop()
+        loop.ollama.model = "qwen3"
+        loop.ollama._host = "http://ollama.local"
+        loop.state.token_usage["used"] = 131072
+        loop._reset_ollama_context = AsyncMock(return_value=True)
+
+        payload = {"models": [{"name": "qwen3:latest", "context_length": 131072}]}
+        monkeypatch.setattr("airecon.proxy.agent.loop.aiohttp.ClientSession", lambda *a, **k: _FakeSession(payload))
+        monkeypatch.setattr("airecon.proxy.ollama._CONTEXT_RESET_THRESHOLD", 100000, raising=False)
+
+        class _Cfg:
+            agent_context_reset_cooldown_seconds = 0
+
+        monkeypatch.setattr("airecon.proxy.agent.loop.get_config", lambda: _Cfg())
+
+        await loop._check_and_reset_context()
+        assert loop._reset_ollama_context.await_count == 1
+
+        # Force check window open; with cooldown=0 second reset is allowed.
+        loop._last_context_check = 0.0
+        await loop._check_and_reset_context()
+        assert loop._reset_ollama_context.await_count == 2

@@ -1,10 +1,3 @@
-"""Multi-Agent Graph representation and executor.
-
-Replaces rigid Scout+Exploit pairs with a flexible graph of specialized agents.
-Nodes represent specialized agents (Recon, Analyzer, Exploiter, Reporter),
-and edges define the data flow/dependencies.
-"""
-
 from __future__ import annotations
 
 import logging
@@ -18,36 +11,27 @@ from .session import session_to_context
 
 logger = logging.getLogger("airecon.agent.graph")
 
-
 class AgentRole(Enum):
-    """Specialized roles for nodes in the agent graph."""
     RECON = "recon"
     ANALYZER = "analyzer"
     EXPLOITER = "exploit"
     REPORTER = "reporter"
     SPECIALIST = "specialist"
 
-
 @dataclass
 class AgentNode:
-    """A single node within the Multi-Agent Graph."""
     id: str
     role: AgentRole
     prompt_template: str
     max_iterations: int = 200
     depends_on: list[str] = field(default_factory=list)
 
-
 @dataclass
 class AgentEdge:
-    """Edge connecting two nodes, specifying data transfer behavior."""
     source_id: str
     target_id: str
 
-
 class AgentGraph:
-    """Directed Acyclic Graph orchestrating specialized AIRecon agents."""
-
     def __init__(self, target: str, ollama: Any, engine: Any):
         self.target = target
         self.ollama = ollama
@@ -56,11 +40,9 @@ class AgentGraph:
         self.edges: list[AgentEdge] = []
 
     def add_node(self, node: AgentNode) -> None:
-        """Add a specialized agent node to the graph."""
         self.nodes[node.id] = node
 
     def add_edge(self, source_id: str, target_id: str) -> None:
-        """Define a dependency/data flow edge between nodes."""
         if source_id not in self.nodes or target_id not in self.nodes:
             raise ValueError("Source and target must exist in the graph")
         self.edges.append(AgentEdge(source_id, target_id))
@@ -68,12 +50,8 @@ class AgentGraph:
             self.nodes[target_id].depends_on.append(source_id)
 
     def execution_order(self) -> list[AgentNode]:
-        """Return a topological sort of nodes determining execution order.
-
-        Raises ValueError if a cycle is detected in the graph.
-        """
         visited: set[str] = set()
-        in_stack: set[str] = set()  # nodes in current DFS path (cycle detection)
+        in_stack: set[str] = set()
         order: list[AgentNode] = []
 
         def dfs(node_id: str) -> None:
@@ -100,7 +78,6 @@ class AgentGraph:
         return order
 
     async def execute(self, shared_session: Any) -> AsyncIterator[AgentEvent]:
-        """Execute the graph following topological order."""
         from .loop import AgentLoop
         order = self.execution_order()
 
@@ -110,20 +87,14 @@ class AgentGraph:
             )
             yield AgentEvent(type="agent_state", data={"status": f"Starting {node.id}..."})
 
-            # Setup specialized agent loop
             agent = AgentLoop(ollama=self.ollama, engine=self.engine)
             agent._override_max_iterations = node.max_iterations
-            # Block sub-agents from spawning infinite graphs
+
             agent._blocked_tools = {"spawn_agent", "run_parallel_agents"}
 
-            # Share session + pipeline explicitly so subagents:
-            # 1. Build on parent findings instead of re-scanning
-            # 2. Have phase enforcement and session context checkpoints active
             agent._session = shared_session
             agent.pipeline = PipelineEngine(shared_session)
 
-            # Inject parent session context into prompt so subagent knows what
-            # was done
             session_ctx = session_to_context(
                 shared_session) if shared_session else ""
             prompt = (
@@ -141,9 +112,7 @@ class AgentGraph:
                     event.data["__source_node"] = node.id
                 yield event
 
-
 def create_default_graph(target: str, prompt: str = "") -> AgentGraph:
-    """Create the standard AIRecon Phase 1-to-4 graph structure."""
     g = AgentGraph(target, ollama=None, engine=None)
 
     n_recon = AgentNode(
@@ -191,7 +160,6 @@ def create_default_graph(target: str, prompt: str = "") -> AgentGraph:
     for node in [n_recon, n_analyzer, n_exploiter, n_specialist, n_reporter]:
         g.add_node(node)
 
-    # Direct edges
     g.add_edge("recon_node", "analyzer_node")
     g.add_edge("analyzer_node", "exploiter_node")
     g.add_edge("analyzer_node", "specialist_sqli")

@@ -1,10 +1,13 @@
+"""Config tests updated for YAML format."""
+
 import json
+import yaml
 from airecon.proxy.config import Config, DEFAULT_CONFIG
 
 
 def test_config_default_initialization(tmp_path):
     # Using a fake path ensures it starts from defaults
-    cfg = Config.load(tmp_path / "missing_config.json")
+    cfg = Config.load(tmp_path / "missing_config.yaml")
     assert cfg.ollama_model == DEFAULT_CONFIG["ollama_model"]
     assert cfg.proxy_port == DEFAULT_CONFIG["proxy_port"]
     assert cfg.agent_exploration_mode is True
@@ -13,13 +16,13 @@ def test_config_default_initialization(tmp_path):
 
 
 def test_config_file_loading(tmp_path):
-    config_file = tmp_path / "config.json"
+    config_file = tmp_path / "config.yaml"
     custom_settings = {
         "ollama_model": "test-model:latest",
         "proxy_port": 8080,
     }
     with open(config_file, "w") as f:
-        json.dump(custom_settings, f)
+        yaml.dump(custom_settings, f)
 
     cfg = Config.load(config_file)
 
@@ -37,7 +40,7 @@ def test_config_env_overrides(tmp_path, monkeypatch):
     monkeypatch.setenv("AIRECON_OLLAMA_ENABLE_THINKING", "false")
     monkeypatch.setenv("AIRECON_COMMAND_TIMEOUT", "120.5")
 
-    cfg = Config.load(tmp_path / "missing_config.json")
+    cfg = Config.load(tmp_path / "missing_config.yaml")
 
     assert cfg.proxy_port == 9999
     assert cfg.ollama_enable_thinking is False
@@ -47,7 +50,7 @@ def test_config_env_overrides(tmp_path, monkeypatch):
 def test_config_invalid_env_types_ignored(tmp_path, monkeypatch):
     monkeypatch.setenv("AIRECON_PROXY_PORT", "not-a-number")
 
-    cfg = Config.load(tmp_path / "missing_config.json")
+    cfg = Config.load(tmp_path / "missing_config.yaml")
     # Should ignore the invalid int conversion and keep default
     assert cfg.proxy_port == DEFAULT_CONFIG["proxy_port"]
 
@@ -56,12 +59,12 @@ def test_config_invalid_env_types_ignored(tmp_path, monkeypatch):
 # Issue #13: Corrupt config file rewrite
 # ---------------------------------------------------------------------------
 
-class TestCorruptConfigRewrite:
 
-    def test_corrupt_json_rewritten_with_defaults(self, tmp_path):
-        """A corrupt config.json must be overwritten with DEFAULT_CONFIG."""
-        config_file = tmp_path / "config.json"
-        config_file.write_text("{invalid json!!!")
+class TestCorruptConfigRewrite:
+    def test_corrupt_yaml_rewritten_with_defaults(self, tmp_path):
+        """A corrupt config.yaml must be overwritten with DEFAULT_CONFIG."""
+        config_file = tmp_path / "config.yaml"
+        config_file.write_text("{invalid yaml!!!")
 
         cfg = Config.load(config_file)
 
@@ -69,27 +72,30 @@ class TestCorruptConfigRewrite:
         assert cfg.proxy_port == DEFAULT_CONFIG["proxy_port"]
         assert cfg.ollama_model == DEFAULT_CONFIG["ollama_model"]
 
-        # The file must have been rewritten with valid JSON defaults
+        # The file must have been rewritten with valid YAML defaults
         with open(config_file) as f:
-            rewritten = json.load(f)
+            rewritten = yaml.safe_load(f)
         assert rewritten["proxy_port"] == DEFAULT_CONFIG["proxy_port"]
 
     def test_empty_file_rewritten_with_defaults(self, tmp_path):
-        """An empty config file (not valid JSON) must be rewritten."""
-        config_file = tmp_path / "config.json"
+        """An empty config file (None from yaml.safe_load) must be rewritten."""
+        config_file = tmp_path / "config.yaml"
         config_file.write_text("")
 
         cfg = Config.load(config_file)
 
         assert cfg.proxy_port == DEFAULT_CONFIG["proxy_port"]
         with open(config_file) as f:
-            rewritten = json.load(f)
+            rewritten = yaml.safe_load(f)
+        # Empty file is rewritten with defaults, so should be a dict
+        assert rewritten is not None
+        assert isinstance(rewritten, dict)
         assert "proxy_port" in rewritten
 
-    def test_partial_corrupt_json_rewritten(self, tmp_path):
-        """Truncated JSON must trigger rewrite."""
-        config_file = tmp_path / "config.json"
-        config_file.write_text('{"proxy_port": 9000, "ollama_model":')
+    def test_partial_corrupt_yaml_rewritten(self, tmp_path):
+        """Truncated YAML must trigger rewrite."""
+        config_file = tmp_path / "config.yaml"
+        config_file.write_text("proxy_port: 9000\nollama_model: [unclosed")
 
         cfg = Config.load(config_file)
 
@@ -97,7 +103,7 @@ class TestCorruptConfigRewrite:
         assert cfg.ollama_model == DEFAULT_CONFIG["ollama_model"]
         # File is rewritten with clean defaults
         with open(config_file) as f:
-            rewritten = json.load(f)
+            rewritten = yaml.safe_load(f)
         assert rewritten["ollama_model"] == DEFAULT_CONFIG["ollama_model"]
 
 
@@ -105,8 +111,8 @@ class TestCorruptConfigRewrite:
 # Issue #13: Type coercion in load_with_defaults
 # ---------------------------------------------------------------------------
 
-class TestLoadWithDefaultsTypeCoercion:
 
+class TestLoadWithDefaultsTypeCoercion:
     def test_string_int_coerced(self):
         """proxy_port as string '3000' must be coerced to int 3000."""
         raw = {**DEFAULT_CONFIG, "proxy_port": "3000"}
@@ -177,9 +183,9 @@ class TestLoadWithDefaultsTypeCoercion:
         """End-to-end: config.json with wrong types must coerce on load."""
         config_file = tmp_path / "config.json"
         bad_typed = {
-            "proxy_port": "5000",          # string → int
-            "ollama_timeout": "300",        # string → float
-            "docker_auto_build": "false",   # string → bool
+            "proxy_port": "5000",  # string → int
+            "ollama_timeout": "300",  # string → float
+            "docker_auto_build": "false",  # string → bool
         }
         with open(config_file, "w") as f:
             json.dump(bad_typed, f)
@@ -215,3 +221,13 @@ class TestLoadWithDefaultsTypeCoercion:
         cfg = Config.load(config_file)
         assert cfg.ollama_num_ctx == 8192
         assert cfg.agent_max_conversation_messages == 333
+
+    def test_agent_recon_mode_valid_values(self):
+        cfg_standard = Config.load_with_defaults({**DEFAULT_CONFIG, "agent_recon_mode": "standard"})
+        cfg_full = Config.load_with_defaults({**DEFAULT_CONFIG, "agent_recon_mode": "FULL"})
+        assert cfg_standard.agent_recon_mode == "standard"
+        assert cfg_full.agent_recon_mode == "full"
+
+    def test_agent_recon_mode_invalid_falls_back_to_default(self):
+        cfg = Config.load_with_defaults({**DEFAULT_CONFIG, "agent_recon_mode": "aggressive"})
+        assert cfg.agent_recon_mode == DEFAULT_CONFIG["agent_recon_mode"]

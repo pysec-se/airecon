@@ -6,10 +6,7 @@ from textual.app import ComposeResult
 from textual.containers import Vertical
 from textual.widgets import DirectoryTree, Static
 
-
 class WorkspaceTree(DirectoryTree):
-    """Tree view of the workspace."""
-
     def __init__(self, *args, **kwargs) -> None:
         super().__init__(*args, **kwargs)
         self.styles.scrollbar_size_vertical = 0
@@ -19,16 +16,7 @@ class WorkspaceTree(DirectoryTree):
         filtered = [p for p in paths if not p.name.startswith(".")]
         return filtered[:500]
 
-
 class VulnTree(WorkspaceTree):
-    """Directory tree rooted at workspace, showing only targets with vuln files.
-
-    Filter logic per depth relative to workspace root:
-      depth 1 — target dir   : show only if target/vulnerabilities/ has files
-      depth 2 — subdir        : show only the 'vulnerabilities' folder
-      depth 3+ — inside vulns : show everything (non-hidden)
-    """
-
     def __init__(self, workspace_path: Path, *args, **kwargs) -> None:
         self._workspace_root = workspace_path.resolve()
         super().__init__(workspace_path, *args, **kwargs)
@@ -45,7 +33,7 @@ class VulnTree(WorkspaceTree):
                 continue
 
             if depth == 1:
-                # Target directory — include only if vulnerabilities/ has content
+
                 vuln_dir = p / "vulnerabilities"
                 try:
                     if vuln_dir.exists() and any(vuln_dir.iterdir()):
@@ -53,19 +41,16 @@ class VulnTree(WorkspaceTree):
                 except OSError:
                     pass
             elif depth == 2:
-                # Subfolder of target — include only the vulnerabilities dir
+
                 if p.name == "vulnerabilities":
                     result.append(p)
             else:
-                # Inside vulnerabilities or deeper — include all non-hidden
+
                 result.append(p)
 
         return result[:500]
 
-
 class WorkspacePanel(Vertical):
-    """Panel showing workspace tree and auto-updating vulnerability panel."""
-
     DEFAULT_CSS = ""
 
     def __init__(self, workspace_path: Path, **kwargs) -> None:
@@ -89,14 +74,9 @@ class WorkspacePanel(Vertical):
                 id="vuln-placeholder",
                 markup=False,
             )
-            # #vuln-tree is mounted dynamically when vuln files are found
 
     def on_mount(self) -> None:
         self.call_after_refresh(self._refresh_vuln_panel)
-
-    # ------------------------------------------------------------------
-    # Helper: count targets that have vulnerability files
-    # ------------------------------------------------------------------
 
     def _count_targets_with_vulns(self) -> int:
         count = 0
@@ -123,12 +103,7 @@ class WorkspacePanel(Vertical):
         except Exception:
             return False
 
-    # ------------------------------------------------------------------
-    # Core refresh logic
-    # ------------------------------------------------------------------
-
     def _refresh_vuln_panel(self) -> None:
-        """Scan all targets and update the vulnerability panel."""
         count = self._count_targets_with_vulns()
 
         if count == 0:
@@ -143,20 +118,15 @@ class WorkspacePanel(Vertical):
             self._update_header()
             return
 
-        # Ensure tree is mounted once, then reload to pick up new files
         self._ensure_vuln_tree()
         self._reload_vuln_tree()
 
         try:
             self.query_one("#vuln-placeholder", Static).display = False
-        except Exception:  # nosec B110
+        except Exception:
             pass
 
         self._update_header(count)
-
-    # ------------------------------------------------------------------
-    # Header management
-    # ------------------------------------------------------------------
 
     def _update_header(self, count: int | None = None) -> None:
         try:
@@ -168,15 +138,10 @@ class WorkspacePanel(Vertical):
                 h.update(f"🐞 VULNERABILITIES ({label})")
             else:
                 h.update("🐞 VULNERABILITIES")
-        except Exception:  # nosec B110
+        except Exception:
             pass
 
-    # ------------------------------------------------------------------
-    # Vuln tree mount / reload / remove
-    # ------------------------------------------------------------------
-
     def _ensure_vuln_tree(self) -> None:
-        """Mount VulnTree if not already mounted."""
         try:
             self.query_one("#vuln-tree", VulnTree)
         except Exception:
@@ -187,19 +152,19 @@ class WorkspacePanel(Vertical):
             section = self.query_one("#vuln-section", Vertical)
             new_tree = VulnTree(self.workspace_path, id="vuln-tree")
             section.mount(new_tree)
-        except Exception:  # nosec B110
+        except Exception:
             pass
 
     def _reload_vuln_tree(self) -> None:
         try:
             self.query_one("#vuln-tree", VulnTree).reload()
-        except Exception:  # nosec B110
+        except Exception:
             pass
 
     def _remove_vuln_tree(self) -> None:
         try:
             self.query_one("#vuln-tree").remove()
-        except Exception:  # nosec B110
+        except Exception:
             pass
 
     def _show_placeholder(self, msg: str) -> None:
@@ -207,15 +172,10 @@ class WorkspacePanel(Vertical):
             p = self.query_one("#vuln-placeholder", Static)
             p.update(msg)
             p.display = True
-        except Exception:  # nosec B110
+        except Exception:
             pass
 
-    # ------------------------------------------------------------------
-    # Public API used by app.py
-    # ------------------------------------------------------------------
-
     def update_vulnerabilities_path(self, target_path: Path) -> None:
-        """Called when user clicks a folder in the workspace tree."""
         self._current_target_path = target_path
         self._update_header()
         self._reload_vuln_tree()
@@ -225,12 +185,11 @@ class WorkspacePanel(Vertical):
         self._update_header()
 
     def reload(self) -> None:
-        """Reload workspace tree and refresh vuln panel."""
         try:
             self.query_one("#workspace-tree", WorkspaceTree).reload()
-        except Exception:  # nosec B110
+        except Exception:
             pass
         try:
             self._refresh_vuln_panel()
-        except Exception:  # nosec B110
+        except Exception:
             pass

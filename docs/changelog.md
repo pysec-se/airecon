@@ -1,5 +1,23 @@
 # Changelog
 
+## [v0.1.7-beta] - 2026-04-02
+
+### Fixed
+- fix(server): `/api/status` now reports `degraded` when Ollama health check explicitly returns false (sticky online fallback only for transient probe failures)
+- fix(tui): restored status bar visibility by keeping status bar CSS in widget-local `StatusBar.DEFAULT_CSS`
+- fix(version): align package export by re-exporting version from `airecon._version` in `airecon/__init__.py`
+- fix(quality): resolve Ruff F401 for package `__version__` re-export
+
+### Improved
+- feat(mcp): expose and display `total_tools` for MCP servers to avoid misleading truncated counts
+- feat(tui): `/mcp list <name>` now shows first 10 tools only to keep UI/context lightweight
+- feat(tui): moved ConfirmDelete modal CSS to global `styles.tcss` with scoped selectors
+
+### Validation
+- tests: full suite passing after fixes (`1608 passed`)
+
+---
+
 ## [v0.1.6-beta] - 2026-03-17
 
 ### Critical Security Fixes

@@ -5,6 +5,7 @@ Covers:
 - False positives: common security terms must NOT activate CTF mode
   (the main regression we fixed: "flag", "challenge", "benchmark" as substrings)
 """
+
 from __future__ import annotations
 
 from airecon.proxy.system import _is_bugbounty_target, _is_ctf_target
@@ -14,8 +15,8 @@ from airecon.proxy.system import _is_bugbounty_target, _is_ctf_target
 # True positives — must return True
 # ---------------------------------------------------------------------------
 
-class TestCTFTruePositives:
 
+class TestCTFTruePositives:
     # Target-based
     def test_localhost_target(self):
         assert _is_ctf_target(target="http://localhost:8080") is True
@@ -49,7 +50,10 @@ class TestCTFTruePositives:
         assert _is_ctf_target(user_message="FLAG{secret_value}") is True
 
     def test_capture_the_flag_phrase(self):
-        assert _is_ctf_target(user_message="this is a capture the flag competition") is True
+        assert (
+            _is_ctf_target(user_message="this is a capture the flag competition")
+            is True
+        )
 
     def test_xbow_keyword(self):
         assert _is_ctf_target(user_message="xbow benchmark target") is True
@@ -74,8 +78,8 @@ class TestCTFTruePositives:
 # False positives — must return False (regression tests for the bug)
 # ---------------------------------------------------------------------------
 
-class TestCTFFalsePositives:
 
+class TestCTFFalsePositives:
     # "flag" as common security/CLI term — the main bug
     def test_bare_flag_word_does_not_trigger(self):
         """'flag' alone must NOT trigger CTF mode (e.g. --flag, feature flags)."""
@@ -85,7 +89,10 @@ class TestCTFFalsePositives:
         assert _is_ctf_target(user_message="check feature flags in the app") is False
 
     def test_red_flags_does_not_trigger(self):
-        assert _is_ctf_target(user_message="there are some red flags in this code") is False
+        assert (
+            _is_ctf_target(user_message="there are some red flags in this code")
+            is False
+        )
 
     def test_flagged_does_not_trigger(self):
         assert _is_ctf_target(user_message="the request was flagged by WAF") is False
@@ -98,7 +105,10 @@ class TestCTFFalsePositives:
         assert _is_ctf_target(user_message="this is a challenging target") is False
 
     def test_challenged_does_not_trigger(self):
-        assert _is_ctf_target(user_message="the auth system challenged the request") is False
+        assert (
+            _is_ctf_target(user_message="the auth system challenged the request")
+            is False
+        )
 
     # "benchmark" — excluded from CTF indicators to prevent false positives
     def test_benchmark_does_not_trigger(self):
@@ -109,7 +119,10 @@ class TestCTFFalsePositives:
 
     # "challenge" standalone — excluded since it's too ambiguous
     def test_challenge_word_alone_does_not_trigger(self):
-        assert _is_ctf_target(user_message="the challenge here is the authentication flow") is False
+        assert (
+            _is_ctf_target(user_message="the challenge here is the authentication flow")
+            is False
+        )
 
     # Normal recon targets
     def test_public_domain_target(self):
@@ -127,52 +140,76 @@ class TestCTFFalsePositives:
         assert _is_ctf_target(target="https://example.com", user_message=None) is False
 
     def test_normal_recon_message(self):
-        assert _is_ctf_target(
-            target="https://example.com",
-            user_message="start recon on example.com and find all subdomains",
-        ) is False
+        assert (
+            _is_ctf_target(
+                target="https://example.com",
+                user_message="start recon on example.com and find all subdomains",
+            )
+            is False
+        )
 
     def test_security_terms_in_message(self):
         """Common security terms must not trigger CTF mode."""
-        assert _is_ctf_target(
-            user_message="test for SQL injection, XSS, and SSRF vulnerabilities",
-        ) is False
+        assert (
+            _is_ctf_target(
+                user_message="test for SQL injection, XSS, and SSRF vulnerabilities",
+            )
+            is False
+        )
 
     def test_pentest_message_not_ctf(self):
-        assert _is_ctf_target(
-            target="https://target.example.com",
-            user_message="perform a full penetration test and check for authentication bypass",
-        ) is False
+        assert (
+            _is_ctf_target(
+                target="https://target.example.com",
+                user_message="perform a full penetration test and check for authentication bypass",
+            )
+            is False
+        )
 
     def test_lfi_message_with_flag_path(self):
         """LFI testing that mentions /flag path must not trigger CTF mode."""
         # Note: "flag{" format would trigger, but plain path "/flag" should not
-        assert _is_ctf_target(
-            user_message="test LFI via /etc/passwd and check /flag path",
-        ) is False
+        assert (
+            _is_ctf_target(
+                user_message="test LFI via /etc/passwd and check /flag path",
+            )
+            is False
+        )
 
 
 class TestBugBountyDetection:
     def test_explicit_bugbounty_message_triggers(self):
-        assert _is_bugbounty_target(
-            target="https://example.com",
-            user_message="jalankan bug bounty assessment eksternal",
-        ) is True
+        assert (
+            _is_bugbounty_target(
+                target="https://example.com",
+                user_message="jalankan bug bounty assessment eksternal",
+            )
+            is True
+        )
 
     def test_bugbounty_platform_url_triggers(self):
-        assert _is_bugbounty_target(
-            target="https://hackerone.com/programs/example",
-            user_message="scan target ini",
-        ) is True
+        assert (
+            _is_bugbounty_target(
+                target="https://hackerone.com/programs/example",
+                user_message="scan target ini",
+            )
+            is True
+        )
 
     def test_public_domain_alone_does_not_auto_trigger(self):
-        assert _is_bugbounty_target(
-            target="https://example.com",
-            user_message="run normal recon",
-        ) is False
+        assert (
+            _is_bugbounty_target(
+                target="https://example.com",
+                user_message="run normal recon",
+            )
+            is False
+        )
 
     def test_disclosure_path_on_public_domain_triggers(self):
-        assert _is_bugbounty_target(
-            target="https://example.com/security",
-            user_message="mulai external assessment",
-        ) is True
+        assert (
+            _is_bugbounty_target(
+                target="https://example.com/security",
+                user_message="mulai external assessment",
+            )
+            is True
+        )

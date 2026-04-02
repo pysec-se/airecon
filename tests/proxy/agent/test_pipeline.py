@@ -26,7 +26,7 @@ def test_transition_recon_to_analysis(empty_pipeline):
     # MANDATORY, so we must include a live host alongside other criteria.
     # subdomains_discovered + live_hosts_validated + ports_scanned + url_discovery_met = 4/6
     empty_pipeline.session.subdomains = ["app.example.com"]
-    empty_pipeline.session.live_hosts = ["https://app.example.com"]   # MANDATORY
+    empty_pipeline.session.live_hosts = ["https://app.example.com"]  # MANDATORY
     empty_pipeline.session.open_ports = {"app.example.com": [80, 443]}
     empty_pipeline.session.urls = ["https://app.example.com/login"]
 
@@ -42,7 +42,7 @@ def test_transition_cooldown_prevent_immediate_jump():
     session = SessionData(target="example.com")
     # All criteria met including mandatory live_hosts_validated
     session.subdomains = ["app.example.com"]
-    session.live_hosts = ["https://app.example.com"]   # MANDATORY
+    session.live_hosts = ["https://app.example.com"]  # MANDATORY
     session.open_ports = {"app.example.com": [443]}
     session.urls = ["https://app.example.com"]
     session.technologies = {"nginx": "1.18"}
@@ -76,8 +76,10 @@ def test_ctf_mode_behavior(empty_pipeline):
 # Upgrade 2: Phase transition depth check + soft timeout
 # ---------------------------------------------------------------------------
 
+
 class _MockConfig:
     """Minimal config stub for PipelineEngine depth tests."""
+
     pipeline_recon_min_subdomains = 3
     pipeline_recon_min_urls = 1
     pipeline_recon_soft_timeout = 30
@@ -140,10 +142,10 @@ def test_depth_not_met_but_60pct_still_transitions():
     IS present, the 60% threshold still works for remaining criteria.
     """
     session = SessionData(target="test.com")
-    session.subdomains = ["sub.test.com"]            # subdomains_discovered ✓
-    session.live_hosts = ["https://sub.test.com"]    # live_hosts_validated ✓ (MANDATORY)
-    session.open_ports = {"test.com": [443]}         # ports_scanned ✓
-    session.urls = ["https://sub.test.com/"]         # url_discovery_met ✓
+    session.subdomains = ["sub.test.com"]  # subdomains_discovered ✓
+    session.live_hosts = ["https://sub.test.com"]  # live_hosts_validated ✓ (MANDATORY)
+    session.open_ports = {"test.com": [443]}  # ports_scanned ✓
+    session.urls = ["https://sub.test.com/"]  # url_discovery_met ✓
     # recon_artifacts_saved ✗ (no output files, scan_count fallback removed)
     # subdomain_depth_met ✗ (only 1, needs 3)
 
@@ -270,4 +272,7 @@ def test_phase_transition_confidence_penalizes_inconsistent_recon_state():
     inconsistent.urls = ["https://a.inconsistent.test/login"]
     inconsistent_engine = _make_engine(inconsistent)
 
-    assert healthy_engine.get_phase_transition_confidence() > inconsistent_engine.get_phase_transition_confidence()
+    assert (
+        healthy_engine.get_phase_transition_confidence()
+        > inconsistent_engine.get_phase_transition_confidence()
+    )

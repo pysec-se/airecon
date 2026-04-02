@@ -16,6 +16,40 @@ Screen {
     margin: 0;
 }
 
+/* ── Copy popup (top-center overlay) ── */
+#copy-toast-wrap {
+    layer: overlay;
+    dock: top;
+    width: 100%;
+    height: auto;
+    align: center top;
+    margin-top: 1;
+    display: none;
+}
+
+#copy-toast-msg {
+    background: #111827;
+    color: #e5e7eb;
+    border: round #00d4aa;
+    padding: 0 2;
+    text-style: bold;
+    width: auto;
+    max-width: 50;
+}
+
+/* ── Notifications / Toasts fallback (keep top-center) ── */
+ToastRack {
+    align: center top;
+    width: 100%;
+    height: auto;
+    margin-top: 1;
+}
+
+Toast {
+    width: auto;
+    max-width: 90;
+}
+
 /* ── Header ── */
 Header {
     background: #0d1117;
@@ -73,6 +107,15 @@ CommandInput {
     dock: bottom;
     margin: 0;
     color: #c9d1d9;
+}
+
+/* Force visible input text + placeholder inside TextArea internals */
+CommandInput > .text-area--content {
+    color: #c9d1d9;
+}
+
+CommandInput > .text-area--placeholder {
+    color: #8b949e;
 }
 
 CommandInput:focus {
@@ -864,4 +907,88 @@ QuitConfirmScreen Horizontal {
 QuitConfirmScreen Button {
     width: 14;
     margin: 0 1;
+}
+
+/* ── UserInputModal ── */
+UserInputModal {
+    align: center middle;
+}
+UserInputModal Vertical {
+    width: 72;
+    height: auto;
+    background: $surface;
+    border: thick $primary;
+    padding: 1 2;
+}
+UserInputModal #modal-title {
+    text-style: bold;
+    color: $primary;
+    margin-bottom: 1;
+}
+UserInputModal #modal-hint {
+    color: $warning;
+    text-style: italic;
+    margin-bottom: 1;
+}
+UserInputModal #modal-prompt {
+    color: $text;
+    margin-bottom: 1;
+    width: 100%;
+}
+UserInputModal #modal-screenshot {
+    color: $accent;
+    text-style: bold;
+    margin-bottom: 1;
+}
+UserInputModal #modal-input {
+    width: 100%;
+    margin-bottom: 1;
+}
+UserInputModal Horizontal {
+    align: center middle;
+    height: auto;
+    margin-top: 1;
+}
+
+/* ── Confirm delete modal (moved from widgets/file_preview.py) ── */
+ConfirmDelete {
+    align: center middle;
+}
+
+ConfirmDelete > Vertical {
+    width: 60;
+    height: auto;
+    background: $surface;
+    border: round $primary;
+    padding: 1 2;
+}
+
+ConfirmDelete #confirm-title {
+    color: $text;
+    height: auto;
+    margin-bottom: 1;
+}
+
+ConfirmDelete #confirm-path {
+    color: $text-muted;
+    background: $boost;
+    padding: 0 1;
+    margin-bottom: 2;
+    height: auto;
+    overflow: hidden;
+}
+
+ConfirmDelete #confirm-buttons {
+    height: auto;
+    margin-top: 1;
+    align: center middle;
+}
+
+ConfirmDelete #btn-yes {
+    width: 12;
+    margin-right: 1;
+}
+
+ConfirmDelete #btn-no {
+    width: 12;
 }

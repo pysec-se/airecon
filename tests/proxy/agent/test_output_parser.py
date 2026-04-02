@@ -1,4 +1,6 @@
 import json
+import logging
+
 from airecon.proxy.agent.output_parser import (
     parse_tool_output,
     detect_tool,
@@ -9,8 +11,7 @@ from airecon.proxy.agent.output_parser import (
 def test_detect_tool():
     assert detect_tool("nmap -sV -p- 10.0.0.1") == "nmap"
     assert detect_tool("sudo      nmap -v example.com") == "nmap"
-    assert detect_tool(
-        "ffuf -w wordlist.txt -u http://example.com/FUZZ") == "ffuf"
+    assert detect_tool("ffuf -w wordlist.txt -u http://example.com/FUZZ") == "ffuf"
     assert detect_tool("unknowncommand arg1 arg2") is None
 
 
@@ -43,11 +44,24 @@ PORT    STATE SERVICE  VERSION
 
 
 def test_parse_ffuf_jsonl():
-    ffuf_out = json.dumps({"results": [
-        {"url": "http://example.com/admin",
-            "status": 200, "length": 421, "words": 15},
-        {"url": "http://example.com/login", "status": 403, "length": 190, "words": 5}
-    ]})
+    ffuf_out = json.dumps(
+        {
+            "results": [
+                {
+                    "url": "http://example.com/admin",
+                    "status": 200,
+                    "length": 421,
+                    "words": 15,
+                },
+                {
+                    "url": "http://example.com/login",
+                    "status": 403,
+                    "length": 190,
+                    "words": 5,
+                },
+            ]
+        }
+    )
 
     parsed = parse_tool_output("ffuf", ffuf_out)
     assert parsed is not None
@@ -58,12 +72,17 @@ def test_parse_ffuf_jsonl():
 
 
 def test_parse_httpx_jsonl_with_tech():
-    httpx_out = json.dumps({
-        "url": "https://example.com",
-        "status_code": 200,
-        "title": "Welcome",
-        "tech": ["nginx/1.24", "PHP/8.1", "React"]
-    }) + "\n"
+    httpx_out = (
+        json.dumps(
+            {
+                "url": "https://example.com",
+                "status_code": 200,
+                "title": "Welcome",
+                "tech": ["nginx/1.24", "PHP/8.1", "React"],
+            }
+        )
+        + "\n"
+    )
 
     parsed = parse_tool_output("httpx", httpx_out)
     assert parsed is not None
@@ -107,13 +126,15 @@ def test_generic_smart_parser_fallback():
 
 def test_detect_tool_with_shell_trampoline():
     assert detect_tool("bash -lc 'nmap -sV example.com'") == "nmap"
-    assert detect_tool("sh -c \"httpx -u https://example.com\"") == "httpx"
+    assert detect_tool('sh -c "httpx -u https://example.com"') == "httpx"
 
 
 def test_detect_tool_with_timeout_env_options():
     assert detect_tool("timeout --signal=KILL 30 nmap -sV example.com") == "nmap"
     assert detect_tool("env -i FOO=1 BAR=2 httpx -u https://example.com") == "httpx"
-    assert detect_tool("/usr/bin/sudo /usr/bin/nuclei -u https://example.com") == "nuclei"
+    assert (
+        detect_tool("/usr/bin/sudo /usr/bin/nuclei -u https://example.com") == "nuclei"
+    )
 
 
 def test_parse_metasploit_ignores_negative_vulnerable_claims():
@@ -149,4 +170,17 @@ def test_parse_tool_output_fallback_has_causal_observation():
     assert parsed is not None
     assert parsed.causal_observations
     first = parsed.causal_observations[0]
-    assert first.get("observation_type") in {"tool_output_observed", "endpoint_discovered"}
+    assert first.get("observation_type") in {
+        "tool_output_observed",
+        "endpoint_discovered",
+    }
+
+
+def test_common_shell_tokens_do_not_emit_unknown_warning(caplog):
+    caplog.set_level(logging.WARNING, logger="airecon.agent.output_parser")
+
+    parse_tool_output("curl -sk https://example.com", "HTTP/1.1 200 OK")
+    parse_tool_output("for i in 1 2; do echo ok; done", "ok")
+
+    assert "Unknown tool detected: curl" not in caplog.text
+    assert "Unknown tool detected: for" not in caplog.text

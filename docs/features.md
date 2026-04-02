@@ -23,9 +23,8 @@
 - [Verified Vulnerability Reporting](#verified-vulnerability-reporting)
 - [Workspace Isolation](#workspace-isolation)
 - [URL Pattern Matching (gf)](#url-pattern-matching-gf)
-- [Out-of-Band (OOB) Interaction](#out-of-band-oob-interaction)
-- [Custom Scripting Mandate](#custom-scripting-mandate)
 - [Anti-Hallucination Controls](#anti-hallucination-controls)
+- [MCP Support](#mcp-support)
 
 ---
 
@@ -57,16 +56,16 @@ Agent Loop  →  execute tool  →  docker exec airecon-sandbox bash -c "<comman
 
 | Category | Tools |
 |----------|-------|
-| Subdomain Discovery | `subfinder`, `amass`, `assetfinder`, `dnsx`, `shuffledns`, `massdns`, `sublist3r`, `hakip2host`, `cut-cdn` |
+| Subdomain Discovery | `subfinder`, `amass`, `assetfinder`, `dnsx`, `shuffledns`, `massdns`, `sublist3r`, `hakip2host` |
 | Port Scanning | `nmap`, `naabu`, `masscan`, `netcat` |
 | Web Crawling | `katana`, `gospider`, `gau`, `waybackurls`, `httpx`, `httprobe`, `meg`, `waymore` |
 | Fingerprinting | `whatweb`, `wafw00f`, `wappalyzer`, `tlsx`, `retire`, `wpscan`, `joomscan` |
-| JS Analysis | `jsleak`, `jsluice`, `gf`, `trufflehog`, `js-beautify`, `eslint`, `LinkFinder` |
+| JS Analysis | `jsleak`, `jsluice`, `gf`, `trufflehog`, `js-beautify`, `LinkFinder` |
 | Fuzzing | `ffuf`, `feroxbuster`, `dirsearch`, `arjun`, `x8`, `headi`, `dalfox`, `wfuzz` |
 | Vuln Scanning | `nuclei`, `nikto`, `wapiti`, `sqlmap`, `ghauri`, `nosqli`, `toxicache`, `csprecon`, `semgrep`, `trivy` |
-| Exploitation | `sqlmap`, `ghauri`, `dalfox`, `interactsh-client`, `caido-cli`, `testssl.sh` |
+| Exploitation | `sqlmap`, `ghauri`, `dalfox`, `interactsh-client`, `testssl.sh` |
 | JWT & GraphQL | `jwt_tool`, `jwt-cracker`, `inql`, `GraphQLmap` |
-| Secrets | `gitleaks`, `trufflehog`, `bandit`, `git-dumper`, `git-secrets` |
+| Secrets | `gitleaks`, `trufflehog`, `bandit`, `git-dumper` |
 | Password Attacks | `hydra`, `medusa`, `hashcat`, `john` |
 | Cloud & S3 | `s3scanner`, `festin`, `shodan` |
 | Wordlists | Full SecLists at `/usr/share/seclists/`, FuzzDB at `/home/pentester/wordlists/fuzzdb/`, rockyou |
@@ -166,7 +165,7 @@ AIRecon supports full authenticated testing via the `browser_action` tool's auth
 | Method | Action | Description |
 |--------|--------|-------------|
 | Form login | `login_form` | Auto-discovers username/password selectors via heuristic scanning. Falls back to common selectors (`#username`, `input[name=email]`, etc.) |
-| TOTP / 2FA | `handle_totp` | RFC 6238 TOTP — no external dependencies required. Pass the TOTP secret directly. |
+| TOTP / 2FA | `handle_totp` | RFC 6238 TOTP — generates code from Base32 secret automatically |
 | OAuth flows | `oauth_authorize` | Handles redirect-based OAuth: navigates authorize URL, grants permissions, captures redirect |
 | Cookie injection | `inject_cookies` | Load a saved cookie dict directly into the active browser session |
 | State persistence | `save_auth_state` | Serializes cookies + localStorage + sessionStorage to disk for later re-use |
@@ -251,7 +250,7 @@ AIRecon connects natively to [Caido](https://caido.io) at `127.0.0.1:48080/graph
 | `caido_send_request` | 60s | Replay and modify HTTP requests |
 | `caido_automate` | 90s | Intruder-style fuzzing with `§FUZZ§` byte markers |
 | `caido_get_findings` | — | Retrieve annotated vulnerability findings |
-| `caido_set_scope` | — | Configure allowlist/denylist for traffic capture |
+| `caido_intercept` | — | Enable/disable intercept mode |
 
 ### HTTPQL Filter Examples
 
@@ -401,13 +400,16 @@ As soon as fingerprinting data is parsed, the correlation engine fires automatic
 
 The correlation engine automatically suggests likely vulnerabilities based on detected technologies and open ports.
 
-### Rule Types
+### Rule Sources
 
-| Type | Count | Example |
-|------|-------|---------|
-| Technology rules | 86+ | `Laravel` → check CVE-2021-3129 (RCE via deserialization), test debug mode |
-| Port rules | 40+ | Port 6379 open → Redis without auth, try `redis-cli -h <host>` |
-| CVE patterns | 20+ | `Log4j` in tech → test Log4Shell payloads immediately |
+| Source | Count | Example |
+|--------|-------|---------|
+| Port correlations (`data/port_correlations.json`) | 40+ | Port 6379 open → Redis without auth, try `redis-cli -h <host>` |
+| Technology correlations (`data/tech_correlations.json`) | 86+ | `Laravel` → check CVE-2021-3129 (RCE via deserialization) |
+| CVE correlations (`data/cve_correlations.json`) | 50+ | `Log4j` in tech → test Log4Shell payloads immediately |
+| Attack chains (`data/attack_chains.json`) | 32+ | SSRF → internal scan → pivot patterns |
+| Business logic patterns | 18+ | Race conditions, IDOR chains, auth bypass patterns |
+| Zero-day patterns | 17+ | Novel vulnerability discovery patterns |
 
 ### Output
 
@@ -631,7 +633,7 @@ Skills are Markdown files in `airecon/proxy/skills/` that give the agent deep, s
 2. When the agent detects a relevant technology or vuln class, it calls `read_file` with the skill path
 3. The skill content is loaded into context for that session
 
-**Why on-demand?** Loading all 56 skills at startup would consume 50,000+ tokens of context window — wasted on irrelevant content for most targets.
+**Why on-demand?** Loading all 56+ skills at startup would consume 50,000+ tokens of context window — wasted on irrelevant content for most targets.
 
 **Keyword mappings:** 289 keyword → skill path mappings in `system.py` trigger automatic skill suggestions. For example, detecting `GraphQL` in httpx output automatically suggests loading `protocols/graphql.md`.
 
@@ -717,90 +719,151 @@ The `gf` tool (grep with named patterns) is pre-configured with security-focused
 | `idor` | Numeric or UUID identifiers in paths (`/user/123`, `/account/uuid`) |
 | `rce` | Command-injection-prone parameters (`cmd=`, `exec=`, `shell=`) |
 | `redirect` | Open redirect candidates (`return=`, `goto=`, `callback=`) |
-| `cors` | CORS-related response headers and misconfigs |
-| `debug-pages` | Debug/admin pages (`.env`, `phpinfo`, `admin`, `swagger`) |
-| `secrets` | API keys, tokens in parameters |
-| `interestingparams` | Generally interesting parameters worth manual review |
-| `upload-fields` | File upload fields |
-
-```bash
-cat urls_all.txt | gf xss    > xss_candidates.txt
-cat urls_all.txt | gf sqli   > sqli_candidates.txt
-cat urls_all.txt | gf ssrf   > ssrf_candidates.txt
-cat urls_all.txt | gf idor   > idor_candidates.txt
-```
-
----
-
-## Out-of-Band (OOB) Interaction
-
-The `interactsh-client` tool provides a public OOB server for confirming blind vulnerabilities that don't produce visible output.
-
-**Supported vulnerability classes:** blind SSRF, blind XXE, blind RCE (command injection via DNS), blind SSTI, out-of-band SQL injection
-
-```bash
-# Start listener — generates unique callback subdomains
-interactsh-client -server oast.fun -n 5
-
-# Example outputs:
-# Unique ID: abc123.oast.fun
-# Unique ID: def456.oast.fun
-
-# Inject in a payload
-curl "https://example.com/api/fetch?url=http://abc123.oast.fun"
-
-# When the target server makes a DNS or HTTP request to abc123.oast.fun,
-# interactsh-client prints the callback with source IP, type, and timestamp.
-```
-
----
-
-## Custom Scripting Mandate
-
-AIRecon's agent is explicitly required to write custom Python scripts for complex workflows rather than relying solely on pre-built tools. Scripts are saved to `workspace/<target>/tools/` and can be re-run or modified by the user.
-
-**Examples of agent-written scripts:**
-
-| Script | Purpose |
-|--------|---------|
-| `tools/idor_bruteforce.py` | Iterate user/object IDs and compare responses for unauthorized access |
-| `tools/jwt_alg_confusion.py` | RS256→HS256 key confusion attack using a discovered public key |
-| `tools/graphql_introspect.py` | Full schema dump + automated mutation fuzzing |
-| `tools/ssrf_probe.py` | Probe each discovered parameter for SSRF using interactsh callback URLs |
-| `tools/cache_deception.py` | Append path suffixes (`.css`, `.js`, `.png`) to probe cache deception |
-| `tools/postmessage_analyze.py` | Extract and analyze all `window.postMessage` handlers from JS |
-| `tools/fuzz_login.py` | Custom login brute-force with logic-aware failure detection |
-| `tools/enumerate_js_endpoints.py` | Crawl JS files, extract API endpoints and parameter names |
-
-All scripts follow the pattern: `TARGET = sys.argv[1]`, write results to `output/`, log every request.
+| `cors` | CORS-related response headers |
 
 ---
 
 ## Anti-Hallucination Controls
 
-> **Important caveat:** These controls *reduce* hallucination risk — they do **not** eliminate it. AIRecon uses self-hosted Ollama models, which are inherently more prone to fabrication than large cloud-hosted models. Even with all controls enabled, hallucinations **will still occur**, especially with models smaller than 30B parameters. **Always verify findings manually before acting on them.**
->
-> **Minimum recommended model size:** 30B+ parameters (e.g., `qwen3:32b`). Models below 30B frequently fail to follow scope rules, invent tool output, or produce malformed tool calls.
+AIRecon includes multiple mechanisms to prevent the LLM from hallucinating tool outputs or vulnerability findings.
 
-AIRecon implements multiple layers to reduce hallucination frequency:
+### Hallucination Detection
 
-| Control | How it works | Limitation |
-|---------|-------------|-----------|
-| System prompt mandates | Explicit rules forbid inventing tool output, domains, or vulnerabilities | Smaller models may ignore rules under complex reasoning chains |
-| Argument validation | Tool arguments validated before execution; invalid calls rejected with correction | Cannot detect semantically fabricated arguments (e.g., invented domain names that pass format checks) |
-| Empty output handling | Empty command output → explicit "0 results found — do NOT invent data" message | Model may still fabricate in the next turn based on earlier context |
-| Smart error feedback | Failures include targeted tips (missing binary, permission, syntax) for self-correction | Does not prevent model from misinterpreting the error |
-| Consecutive failure tracking | After 3 consecutive failures, agent forced to switch approach | Does not prevent hallucinated *successes* — model can fabricate a passing result |
-| Per-tool self-check | After each successful tool call, model re-reads original request | Reduces scope creep but doesn't guarantee it |
-| PoC enforcement | `create_vulnerability_report` requires working PoC with evidence | PoC content is not machine-verified; model can fabricate a plausible request/response pair |
-| Deduplication | Jaccard-based report deduplication rejects duplicate findings | Deduplication logic itself subject to model errors |
+The agent loop checks for common hallucination patterns in model output:
 
-### Known Hallucination Patterns
+```python
+hallucination_signals = [
+    "i have found",           # Claims finding without tool output
+    "the scan shows",         # Claims scan result without running scan
+    "the results indicate",   # Claims results without tool evidence
+    "my analysis shows",      # Claims analysis without code_analysis tool
+    "it appears that",        # Speculative claim without evidence
+    "based on my knowledge",  # LLM knowledge, not live tool output
+    "without running",        # Explicitly admits no tool used
+]
+```
 
-| Pattern | What to check |
-|---------|--------------|
-| Invented subdomains / IPs | Cross-reference with raw tool output files in `output/` |
-| Fabricated CVE numbers | Verify CVE IDs against NVD / MITRE before reporting |
-| False-positive vulnerabilities | Manually reproduce every PoC before trusting a report |
-| Invented tool output | Check that the corresponding file exists in `output/` |
-| Skipped scope rules | Review the thinking panel — if the model reasoned around a rule, the result is unreliable |
+### Tool Call Validation
+
+Before accepting a tool call, the agent validates:
+1. Tool name exists in registered tools
+2. Required arguments are provided
+3. Argument types match schema
+
+### Evidence Requirement
+
+Vulnerability reports require concrete evidence:
+- HTTP request/response pairs
+- Screenshot or PoC script
+- CVSS vector string
+
+Reports without evidence are rejected with:
+```
+[VALIDATION ERROR] Vulnerability report rejected: missing evidence. 
+Include HTTP response, PoC script, or screenshot.
+```
+
+### Confidence Scoring
+
+All findings include a confidence score (0.0–1.0):
+- ≥0.65 = high confidence (confirmed)
+- 0.4–0.65 = medium confidence (likely)
+- <0.4 = low confidence (speculative)
+
+Low-confidence findings are flagged for manual review.
+
+---
+
+## MCP Support
+
+AIRecon supports external **Model Context Protocol (MCP) servers** for extended tool capabilities. MCP servers expose tools via HTTP (SSE) or command-line transport.
+
+### Setup
+
+Add MCP servers via TUI slash command or config:
+
+```
+/mcp add http://localhost:3001 auth:apikey:yourtoken example_name
+```
+
+Or add to `~/.airecon/mcp.json`:
+
+```json
+{
+  "mcpServers": {
+    "hexstrike": {
+      "command": "python3",
+      "args": [
+        "/path/hexstrike-ai/hexstrike_mcp.py",
+        "--server",
+        "http://127.0.0.1:8888"
+      ],
+      "env": {
+        "PYTHONUNBUFFERED": "1"
+      },
+      "enabled": true
+    },
+    "xssgen": {
+      "command": "python3",
+      "args": [
+        "/path/xssgen/xss_client.py",
+        "--server",
+        "http://127.0.0.1:8000"
+      ],
+      "env": {
+        "PYTHONUNBUFFERED": "1"
+      },
+      "enabled": true
+    },
+    "context7": {
+      "transport": "sse",
+      "url": "https://example.com/mcp",
+      "enabled": true,
+      "headers": {
+        "Authorization": "Bearer xxxxx"
+      }
+    }
+  }
+}     
+```
+
+### Available Commands
+
+| Command | Description |
+|---------|-------------|
+| `/mcp` | Show MCP command help/usage |
+| `/mcp list` | List configured MCP servers with ready status and tool totals |
+| `/mcp list <name>` | Show tools from specific server (first 10 only) |
+| `/mcp add <url> auth:user/pass|auth:apikey:<token> [name]` | Add MCP server with optional auth |
+| `/mcp enable <name>` | Enable a disabled server |
+| `/mcp disable <name>` | Disable active server |
+
+### Tool Usage
+
+MCP tools are exposed to the agent as `mcp_<server_name>`. The LLM can:
+
+- `action=list_tools`: Get all tools (truncated to 50 if >50)
+- `action=search_tools query=<keyword>`: Find tools by name/description
+- `action=call_tool tool=<name> arguments={...}`: Execute a tool
+
+### Example
+
+```
+agent → mcp_example(action=list_tools)
+→ {"tools": [{"name": "nmap_scan"}, ...], "total_tools": 150}
+
+agent → mcp_example(action=search_tools query="nmap")
+→ {"tools": [{"name": "nmap_scan"}], "count": 1}
+
+agent → mcp_example(action=call_tool tool="nmap_scan" arguments={"target": "192.168.1.1"})
+→ {"result": {"output": "PORT     STATE SERVICE", ...}}
+```
+
+### Display
+
+| TUI Command | Output |
+|-------------|--------|
+| `/mcp list` | `🟢 example - Ready (150 total tools)` |
+| `/mcp list example` | Shows first 10 tools + omitted count note |
+
+---

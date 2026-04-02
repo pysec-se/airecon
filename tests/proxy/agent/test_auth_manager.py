@@ -39,7 +39,9 @@ async def test_auto_reauth_includes_extra_fields_and_rebinds_csrf() -> None:
     manager = AuthManager()
     dummy = _DummyAuthClient()
     manager.client = dummy
-    manager.set_credentials("alice", "secret", {"tenant": "acme", "otp": "123456", "_token": "stale"})
+    manager.set_credentials(
+        "alice", "secret", {"tenant": "acme", "otp": "123456", "_token": "stale"}
+    )
 
     ok = await manager.auto_reauth("https://example.com/login")
 

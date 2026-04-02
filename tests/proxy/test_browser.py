@@ -1,6 +1,6 @@
 import pytest
 from unittest.mock import AsyncMock
-from airecon.proxy.browser import BrowserInstance, _generate_totp
+from airecon.proxy.browser import BrowserInstance, _generate_totp, browser_action
 
 
 def test_generate_totp():
@@ -20,6 +20,7 @@ def browser():
 
     async def mock_run_async(coro):
         return await coro
+
     b._run_async = mock_run_async
     return b
 
@@ -38,6 +39,7 @@ async def test_view_source_truncation(browser, mocker):
     # Mock getting the state to just return our injected components
     async def mock_state(*args):
         return {}
+
     mocker.patch.object(browser, "_get_page_state", new=mock_state)
 
     state = await browser._view_source("tab_1")
@@ -62,9 +64,9 @@ async def test_tab_management(browser, mocker):
 
     async def mock_state(tab_id):
         return {"tab_id": tab_id}
+
     mocker.patch.object(browser, "_get_page_state", new=mock_state)
-    mocker.patch.object(browser, "_setup_console_logging",
-                        new_callable=AsyncMock)
+    mocker.patch.object(browser, "_setup_console_logging", new_callable=AsyncMock)
 
     # Open tab 1
     state1 = await browser._new_tab("http://1.com")
@@ -103,6 +105,7 @@ async def test_execute_js_parallel(browser, mocker):
 
     async def mock_state(tab_id):
         return {}
+
     mocker.patch.object(browser, "_get_page_state", new=mock_state)
 
     state = await browser._execute_js("console.log()", parallel=True)
@@ -110,3 +113,47 @@ async def test_execute_js_parallel(browser, mocker):
     res = state["js_result"]
     assert "Result 1" in str(res)
     assert "'error': 'JS Error'" in str(res)
+
+
+@pytest.mark.asyncio
+async def test_execute_js_parallel_skips_closed_tab_ids_in_result_mapping(
+    browser, mocker
+):
+    mock_closed_page = AsyncMock()
+    mock_closed_page.is_closed = mocker.MagicMock(return_value=True)
+
+    mock_open_page = AsyncMock()
+    mock_open_page.evaluate = AsyncMock(return_value="Open Result")
+    mock_open_page.is_closed = mocker.MagicMock(return_value=False)
+    mock_open_page.url = "https://open.example"
+
+    browser.pages = {"tab_closed": mock_closed_page, "tab_open": mock_open_page}
+    browser.current_page_id = "tab_open"
+
+    async def mock_state(tab_id):
+        return {"tab_id": tab_id}
+
+    mocker.patch.object(browser, "_get_page_state", new=mock_state)
+
+    state = await browser._execute_js("1+1", parallel=True)
+    parallel_results = state["js_result"]["parallel_results"]
+
+    assert "tab_open" in parallel_results
+    assert parallel_results["tab_open"]["result"] == "Open Result"
+    assert "tab_closed" not in parallel_results
+
+
+def test_browser_action_execute_js_parallel_contract(mocker):
+    execute_js = mocker.patch(
+        "airecon.proxy.browser._manager.execute_js",
+        return_value={"ok": True, "message": "parallel ok"},
+    )
+
+    result = browser_action(
+        action="execute_js",
+        js_code="return document.title",
+        parallel=True,
+    )
+
+    execute_js.assert_called_once_with("return document.title", None, parallel=True)
+    assert result["ok"] is True

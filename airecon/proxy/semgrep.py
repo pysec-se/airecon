@@ -1,10 +1,3 @@
-"""Source Code Analysis via Semgrep.
-
-Runs Semgrep static analysis inside the Docker sandbox against
-cloned repositories or downloaded source code. Results are parsed
-into structured findings with severity, CWE, and file location.
-"""
-
 from __future__ import annotations
 
 import json
@@ -13,18 +6,14 @@ from typing import Any
 
 logger = logging.getLogger("airecon.semgrep")
 
-# Curated rule sets targeting security vulnerabilities
 DEFAULT_RULE_SETS: list[str] = [
     "p/security-audit",
     "p/owasp-top-ten",
     "p/cwe-top-25",
 ]
 
-
 def get_default_rules() -> list[str]:
-    """Return the default Semgrep security rule sets."""
     return list(DEFAULT_RULE_SETS)
-
 
 def build_semgrep_command(
     target_path: str,
@@ -32,17 +21,6 @@ def build_semgrep_command(
     languages: list[str] | None = None,
     max_findings: int = 100,
 ) -> str:
-    """Build a Semgrep CLI command string for Docker execution.
-
-    Args:
-        target_path: Path to scan inside the container (relative to /workspace).
-        rules: Semgrep rule set identifiers (e.g. p/security-audit).
-        languages: Filter to specific languages (e.g. python, javascript).
-        max_findings: Cap the number of findings returned.
-
-    Returns:
-        Full command string to run inside the Docker sandbox.
-    """
     max_findings = max(1, min(int(max_findings), 1000))
     rule_sets = rules or get_default_rules()
     rule_args = " ".join(f"--config {r}" for r in rule_sets)
@@ -59,16 +37,10 @@ def build_semgrep_command(
         f"{target_path} 2>/dev/null"
     )
 
-
 def parse_semgrep_results(raw_json: str) -> dict[str, Any]:
-    """Parse Semgrep JSON output into structured findings.
+#    if not raw_json.strip():
+#        return {"findings": [], "errors": [], "summary": "No results"}
 
-    Args:
-        raw_json: Raw JSON string from `semgrep --json`.
-
-    Returns:
-        Dict with 'findings' (list), 'errors' (list), and 'summary'.
-    """
     try:
         data = json.loads(raw_json)
     except json.JSONDecodeError as e:
@@ -105,7 +77,6 @@ def parse_semgrep_results(raw_json: str) -> dict[str, Any]:
         for e in data.get("errors", [])
     ]
 
-    # Build summary
     by_severity: dict[str, int] = {}
     for f in results:
         sev = f["severity"]
@@ -126,30 +97,12 @@ def parse_semgrep_results(raw_json: str) -> dict[str, Any]:
         "total": len(results),
     }
 
-
 async def run_code_analysis(
     engine: Any,
     target_path: str,
     rules: list[str] | None = None,
     languages: list[str] | None = None,
 ) -> dict[str, Any]:
-    """Run Semgrep analysis on a target path inside the Docker sandbox.
-
-    This is the main entry point called by the executor. It:
-    1. Checks if semgrep is installed (installs if needed)
-    2. Builds and runs the semgrep command
-    3. Parses and returns structured results
-
-    Args:
-        engine: DockerEngine instance for command execution.
-        target_path: Path to scan (relative to workspace root).
-        rules: Optional list of Semgrep rule sets.
-        languages: Optional list of languages to filter.
-
-    Returns:
-        Dict with parsed findings, errors, and summary.
-    """
-    # Ensure semgrep is available
     install_check = await engine.execute_tool(
         "execute",
         {"command": "which semgrep || pip install semgrep 2>&1 | tail -1"},
@@ -158,7 +111,6 @@ async def run_code_analysis(
         logger.warning(
             "Semgrep installation may have failed, attempting scan anyway")
 
-    # Build and run the scan command
     scan_cmd = build_semgrep_command(
         target_path, rules=rules, languages=languages)
     result = await engine.execute_tool("execute", {"command": scan_cmd})

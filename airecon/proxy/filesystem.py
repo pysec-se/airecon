@@ -21,30 +21,19 @@ _LINE_COUNT_EXTENSIONS = {
     ".py"}
 _MAX_DEPTH = 3
 
-
-_MAX_CREATE_FILE_BYTES = 50 * 1024 * 1024  # 50 MB
-
+_MAX_CREATE_FILE_BYTES = 50 * 1024 * 1024
 
 def _resolve_workspace_path(path: str, workspace_root: Path) -> Path:
-    """Normalize *path* relative to *workspace_root*.
-
-    Strips leading/trailing whitespace, leading slashes, and the optional
-    ``workspace/`` prefix that the LLM occasionally emits.  Returns an
-    absolute, resolved Path guaranteed to be inside *workspace_root* (caller
-    is still responsible for the containment check).
-    """
     clean = str(path).strip().lstrip("/")
     if clean.startswith("workspace/"):
         clean = clean[len("workspace/"):]
     return (workspace_root / clean).resolve() if clean else workspace_root
 
-
 def create_file(path: str, content: str) -> dict[str, Any]:
-    """Create file with path validation and atomic write."""
     try:
         if len(content.encode("utf-8")) > _MAX_CREATE_FILE_BYTES:
             return {"success": False, "error": "Content too large: maximum file size is 50 MB"}
-        
+
         workspace_root = get_workspace_root().resolve()
         file_path = _resolve_workspace_path(path, workspace_root)
 
@@ -79,26 +68,9 @@ def create_file(path: str, content: str) -> dict[str, Any]:
     except Exception as e:
         return {"success": False, "error": str(e)}
 
-
 def read_file(path: str, offset: int = 0, limit: int = 500) -> dict[str, Any]:
-    """Read file with streaming support via pagination.
-    
-    For large files (>500 lines), use offset/limit to read in chunks:
-    - First call: read_file(path="/workspace/file.txt", offset=0, limit=500)
-    - Second call: read_file(path="/workspace/file.txt", offset=500, limit=500)
-    - Continue until has_more=False
-    
-    Args:
-        path: File path (relative to workspace or absolute if in workspace/project)
-        offset: Starting line number (0-indexed, default=0)
-        limit: Max lines to read (default=500, max=5000)
-    
-    Returns:
-        Dict with success, result (file content), total_lines, and has_more flag
-    """
     try:
-        # Allow reading absolute paths ONLY if they are inside the workspace
-        # or inside the airecon project directory (e.g., for loading skills)
+
         if os.path.isabs(path) and os.path.isfile(path):
             abs_path = Path(path).resolve()
             workspace_root = get_workspace_root().resolve()
@@ -144,23 +116,19 @@ def read_file(path: str, offset: int = 0, limit: int = 500) -> dict[str, Any]:
     except Exception as e:
         return {"success": False, "error": str(e)}
 
-
 def _read_with_pagination(file_path: Path, offset: int,
                           limit: int) -> dict[str, Any]:
-    """Read file with optional line-based pagination."""
     try:
         raw = file_path.read_text(encoding="utf-8", errors="replace")
     except Exception as e:
         return {"success": False, "error": str(e)}
 
-    # Clamp to sane bounds
     offset = max(0, offset)
     limit = max(1, min(limit, 5000))
 
     lines = raw.splitlines()
     total_lines = len(lines)
 
-    # Non-paginated: small file and no offset requested
     if offset == 0 and total_lines <= limit:
         return {
             "success": True,
@@ -168,7 +136,6 @@ def _read_with_pagination(file_path: Path, offset: int,
             "total_lines": total_lines,
         }
 
-    # Paginated read
     chunk = lines[offset: offset + limit]
     has_more = (offset + limit) < total_lines
     result_text = "\n".join(chunk)
@@ -189,9 +156,7 @@ def _read_with_pagination(file_path: Path, offset: int,
         "has_more": has_more,
     }
 
-
 def list_files(path: str = "") -> dict[str, Any]:
-    """List files/dirs in the workspace with size and line count metadata."""
     try:
         workspace_root = get_workspace_root().resolve()
         base_dir = _resolve_workspace_path(path, workspace_root)
@@ -230,7 +195,6 @@ def list_files(path: str = "") -> dict[str, Any]:
     except Exception as e:
         return {"success": False, "error": str(e)}
 
-
 def _walk_dir(
     directory: Path,
     workspace_root: Path,
@@ -250,8 +214,6 @@ def _walk_dir(
     except PermissionError:
         return
 
-    # Skip symlinks that point to directories to prevent following
-    # symlink loops (e.g. output/ → .) which would recurse up to MAX_DEPTH.
     dirs = [e for e in entries if e.is_dir() and not e.is_symlink()]
     files = [e for e in entries if e.is_file()]
     all_entries = dirs + files
@@ -277,12 +239,11 @@ def _walk_dir(
                 try:
                     lc = sum(1 for _ in entry.open("r", errors="ignore"))
                     line_info = f", {lc} lines"
-                except Exception:  # nosec B110 - line count is optional
+                except Exception:
                     pass
             output.append(
                 f"{prefix}{connector}{entry.name} ({size}{line_info})"
             )
-
 
 def _fmt_size(size_bytes: int) -> str:
     if size_bytes >= 1_048_576:

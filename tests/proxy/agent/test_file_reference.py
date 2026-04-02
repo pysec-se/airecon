@@ -1,4 +1,5 @@
 """Tests for file_reference module — @/path syntax resolution."""
+
 from __future__ import annotations
 
 import shutil
@@ -21,6 +22,7 @@ from airecon.proxy.agent.file_reference import (
 # ─────────────────────────────────────────────────────────────────────────────
 # parse_refs
 # ─────────────────────────────────────────────────────────────────────────────
+
 
 class TestParseRefs:
     def test_single_file_ref(self):
@@ -83,6 +85,7 @@ class TestParseRefs:
 # strip_refs
 # ─────────────────────────────────────────────────────────────────────────────
 
+
 class TestStripRefs:
     def test_replaces_ref_with_name(self):
         refs = parse_refs("analyze @/tmp/challenge.exe")
@@ -101,7 +104,9 @@ class TestStripRefs:
         assert result == "scan target.com"
 
     def test_directory_ref_uses_dir_name(self):
-        refs = [FileRef(raw="@/home/user/myproject/", path=Path("/home/user/myproject/"))]
+        refs = [
+            FileRef(raw="@/home/user/myproject/", path=Path("/home/user/myproject/"))
+        ]
         result = strip_refs("analyze @/home/user/myproject/", refs)
         assert "[file:myproject]" in result
 
@@ -136,6 +141,7 @@ class TestStripRefs:
 # ─────────────────────────────────────────────────────────────────────────────
 # resolve_ref — text files
 # ─────────────────────────────────────────────────────────────────────────────
+
 
 class TestResolveTextFile:
     def setup_method(self):
@@ -231,6 +237,7 @@ class TestResolveTextFile:
 # resolve_ref — binary files
 # ─────────────────────────────────────────────────────────────────────────────
 
+
 class TestResolveBinaryFile:
     def setup_method(self):
         self.tmpdir = Path(tempfile.mkdtemp())
@@ -305,8 +312,9 @@ class TestResolveBinaryFile:
         # is relative_to(self.workspace) → "uploads/ctf.elf" → no ValueError.
         # Before fix: "/workspace" / Path("uploads/ctf.elf") → TypeError.
         # After fix: Path("/workspace") / Path("uploads/ctf.elf") → works.
-        with patch("airecon.proxy.config.get_workspace_root",
-                   return_value=self.workspace):
+        with patch(
+            "airecon.proxy.config.get_workspace_root", return_value=self.workspace
+        ):
             ref = FileRef(raw=f"@{src}", path=src)
             resolved = resolve_ref(ref, self.workspace)
         assert resolved.kind == "binary"
@@ -334,6 +342,7 @@ class TestResolveBinaryFile:
 # resolve_ref — directories
 # ─────────────────────────────────────────────────────────────────────────────
 
+
 class TestResolveDirectory:
     def setup_method(self):
         self.tmpdir = Path(tempfile.mkdtemp())
@@ -348,7 +357,9 @@ class TestResolveDirectory:
         proj.mkdir()
         (proj / "main.py").write_text("print('hello')\n", encoding="utf-8")
         (proj / "config.json").write_text('{"debug": true}', encoding="utf-8")
-        (proj / "README.md").write_text("# Project\nSome description.", encoding="utf-8")
+        (proj / "README.md").write_text(
+            "# Project\nSome description.", encoding="utf-8"
+        )
         sub = proj / "src"
         sub.mkdir()
         (sub / "utils.py").write_text("def helper(): pass\n", encoding="utf-8")
@@ -446,6 +457,7 @@ class TestResolveDirectory:
 # workspace_name_for_ref
 # ─────────────────────────────────────────────────────────────────────────────
 
+
 class TestWorkspaceNameForRef:
     def setup_method(self):
         self.tmpdir = Path(tempfile.mkdtemp())
@@ -519,6 +531,7 @@ class TestWorkspaceNameForRef:
 # ─────────────────────────────────────────────────────────────────────────────
 # build_injection_message
 # ─────────────────────────────────────────────────────────────────────────────
+
 
 class TestBuildInjectionMessage:
     def test_returns_none_for_empty_list(self):

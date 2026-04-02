@@ -50,7 +50,9 @@ class TestExtractTargetToken:
         assert _extract_target_token("https://example.com/path") == "example.com"
 
     def test_url_with_port(self):
-        assert _extract_target_token("https://example.com:8443/api") == "example.com:8443"
+        assert (
+            _extract_target_token("https://example.com:8443/api") == "example.com:8443"
+        )
 
     def test_url_without_scheme(self):
         assert _extract_target_token("example.com/login") == "example.com"
@@ -64,7 +66,10 @@ class TestExtractTargetToken:
         assert result == "binary"
 
     def test_workspace_path(self):
-        assert _extract_target_token("/workspace/example.com/output/scan.txt") == "example.com"
+        assert (
+            _extract_target_token("/workspace/example.com/output/scan.txt")
+            == "example.com"
+        )
 
     def test_absolute_path_file(self):
         result = _extract_target_token("/tmp/challenge.exe")

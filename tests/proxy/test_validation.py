@@ -1,7 +1,6 @@
 """Tests for input validation module."""
 
 import pytest
-from pathlib import Path
 
 from airecon.proxy.agent.validators import (
     validate_target_path,
@@ -18,13 +17,15 @@ class TestPathValidation:
         """Valid paths within /workspace should pass."""
         is_valid, result = validate_target_path("target.com", "/workspace")
         assert is_valid is True
-        assert isinstance(result, Path)
+        assert isinstance(result, str)  # Returns str path, not Path object
 
     def test_valid_nested_path(self):
         """Valid nested paths should pass."""
-        is_valid, result = validate_target_path("targets/example.com/output", "/workspace")
+        is_valid, result = validate_target_path(
+            "targets/example.com/output", "/workspace"
+        )
         assert is_valid is True
-        assert isinstance(result, Path)
+        assert isinstance(result, str)  # Returns str path, not Path object
 
     def test_path_traversal_attack(self):
         """Path traversal attempts should be blocked."""
@@ -40,7 +41,7 @@ class TestPathValidation:
             "target.com && rm -rf /",
             "target.com`whoami`",
         ]
-        
+
         for path in dangerous_paths:
             is_valid, error = validate_target_path(path, "/workspace")
             assert is_valid is False, f"Should reject: {path}"
@@ -82,7 +83,7 @@ class TestDangerousPatterns:
             "nuclei -u http://target -t cves",
             "ffuf -u http://target/FUZZ -w wordlist.txt",
         ]
-        
+
         for cmd in safe_commands:
             has_danger, desc = has_dangerous_patterns(cmd)
             assert has_danger is False, f"Incorrectly flagged: {cmd}"
@@ -94,8 +95,7 @@ class TestCommandPathValidation:
     def test_extract_output_flag_paths(self):
         """Extract paths after -o flag."""
         is_valid, error = validate_command_paths(
-            "nmap -sV example.com -o /workspace/output.txt",
-            "/workspace"
+            "nmap -sV example.com -o /workspace/output.txt", "/workspace"
         )
         assert is_valid is True
 
@@ -103,7 +103,7 @@ class TestCommandPathValidation:
         """Extract multiple paths in command."""
         is_valid, error = validate_command_paths(
             "nuclei -u http://target -t /workspace/templates -o /workspace/results.json",
-            "/workspace"
+            "/workspace",
         )
         assert is_valid is True
 
@@ -124,16 +124,14 @@ class TestCommandPathValidation:
     def test_reject_redirect_to_escaped_path(self):
         """Reject redirect targets that escape the workspace."""
         is_valid, error = validate_command_paths(
-            "cat something > ../../etc/cron.d/evil",
-            "/workspace"
+            "cat something > ../../etc/cron.d/evil", "/workspace"
         )
         assert is_valid is False
 
     def test_output_flag_traversal_is_caught(self):
         """Path traversal via -o output flag should be caught."""
         is_valid, error = validate_command_paths(
-            "nmap -sV target.com -o ../../etc/passwd",
-            "/workspace"
+            "nmap -sV target.com -o ../../etc/passwd", "/workspace"
         )
         assert is_valid is False
 
@@ -143,8 +141,7 @@ class TestCommandPathValidation:
         that protection is in _execute_filesystem_tool via validate_target_path.
         """
         is_valid, _ = validate_command_paths(
-            "cat ../../etc/passwd > /workspace/output.txt",
-            "/workspace"
+            "cat ../../etc/passwd > /workspace/output.txt", "/workspace"
         )
         # The output path /workspace/output.txt IS valid — positional arg
         # is not inspected by this function (by design).

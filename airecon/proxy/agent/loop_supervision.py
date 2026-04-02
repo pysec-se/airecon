@@ -1,19 +1,3 @@
-"""Mentor / watchdog / quality / reflector supervision helpers for AgentLoop.
-
-Extracted from loop.py to keep that file manageable. Contains:
-- _AB_SIGNALS_DATA / _WATCHDOG_COMMAND_PREFIX_RE — module-level constants
-- _extract_shell_command_candidate — safe command extraction from hallucinated text
-- _reflector_infer_tool_hint — infer tool hint from LLM text for reflector
-- _apply_objective_patch — parse <objective_patch> blocks from LLM response
-- _build_reflector_message — two-level escalation for text-only responses
-- _get_ab_signals — rule-based A→B follow-up signal lookup
-- _build_mentor_analysis — post-tool XML mentor guidance block
-- _build_watchdog_tool_call — fallback tool_call when LLM is stuck
-- _compute_quality_scores — evidence / reproducibility / impact scores
-- _build_quality_scoreboard — format quality scores as system message
-- _build_recovery_state_context — compact snapshot after VRAM crash
-- _prune_stale_skills — remove stale skill messages from conversation
-"""
 from __future__ import annotations
 
 import json
@@ -28,10 +12,6 @@ from .tuning import get_tuning
 from .validators import has_dangerous_patterns
 
 logger = logging.getLogger("airecon.agent")
-
-# ---------------------------------------------------------------------------
-# Module-level data loading
-# ---------------------------------------------------------------------------
 
 _ab_signals_path = Path(__file__).parent.parent / "data" / "ab_signals.json"
 try:
@@ -76,10 +56,7 @@ _QUALITY_TUNING = {
     "overall_impact": float(get_tuning("quality_scoring.overall.impact", 0.25)),
 }
 
-
 class _SupervisionMixin:
-    """Mixin: reflector, watchdog, mentor, quality scoreboard, skill pruning."""
-
     _OBJECTIVE_PATCH_RE = re.compile(
         r"<objective_patch[^>]*>(.*?)</objective_patch>",
         re.DOTALL | re.IGNORECASE,
@@ -90,13 +67,11 @@ class _SupervisionMixin:
         content_acc: str,
         thinking_acc: str = "",
     ) -> str | None:
-        """Extract a safe shell command from hallucinated text/code blocks."""
         def _safe(cmd: str) -> str | None:
             cleaned = cmd.strip().lstrip("$").strip()
             if not cleaned:
                 return None
-            # Multi-line scripts (from ```bash blocks) can be legitimately long.
-            # Allow up to 8000 chars; single-line commands rarely exceed 2000.
+
             if len(cleaned) > 8000:
                 return None
             has_danger, _ = has_dangerous_patterns(cleaned)
@@ -111,16 +86,6 @@ class _SupervisionMixin:
             if not lines:
                 continue
 
-            # Collect ALL lines from the block once the first valid command is
-            # found.  Earlier behaviour broke after the first non-continuation
-            # line, so a multi-line script like:
-            #   echo "Test 1"
-            #   curl -s -k "https://…/users/1"
-            #   echo "Test 2"
-            #   curl -s -k "https://…/users/2"
-            # would be truncated to only the first curl.  Now we keep every
-            # line from the first matched prefix onward, preserving the full
-            # script so the watchdog can execute it intact.
             picked: list[str] = []
             found_first = False
             for line in lines:
@@ -134,17 +99,12 @@ class _SupervisionMixin:
                 picked.append(line.rstrip("\\").strip())
 
             if picked:
-                # Join as a newline-separated script so bash executes every
-                # command in order (not space-joined into one broken line).
+
                 candidate = "\n".join(p for p in picked if p)
                 safe = _safe(candidate)
                 if safe:
                     return safe
 
-        # Scan raw text lines — content first, then thinking block.
-        # qwen3 thinking blocks often contain the intended command wrapped in
-        # backticks (e.g. `nmap -sV target`) or after a colon ("Run: nmap ...").
-        # Strip those wrappers before matching.
         _backtick_re = re.compile(r"`([^`]+)`")
         _run_prefix_re = re.compile(
             r"(?:run|execute|use|call|try|invoke)\s*:?\s*(.+)", re.IGNORECASE
@@ -154,14 +114,13 @@ class _SupervisionMixin:
             if not line:
                 continue
 
-            # Try stripping backtick wrapping first
             bt_match = _backtick_re.search(line)
             candidates = [bt_match.group(1).strip()] if bt_match else []
-            # Try stripping "Run: ..." prefix
+
             rp_match = _run_prefix_re.match(line)
             if rp_match:
                 candidates.append(rp_match.group(1).strip().lstrip("`").rstrip("`").strip())
-            # Raw line as fallback
+
             candidates.append(line.lstrip("$").strip())
 
             for candidate_line in candidates:
@@ -173,15 +132,6 @@ class _SupervisionMixin:
         return None
 
     def _reflector_infer_tool_hint(self, content_lower: str) -> str:
-        """Return a tool call hint derived from the LLM's own text and the
-        known tool registry — never hardcodes specific tool names or commands.
-
-        Strategy (in order):
-        1. Scan known tool names from _tools_ollama and return the first one
-           mentioned in the LLM's text as a generic call stub.
-        2. Fall back to a phase-agnostic generic stub so the LLM knows the
-           expected call format without being steered toward a specific tool.
-        """
         if self._tools_ollama:
             for tool_def in self._tools_ollama:
                 name = str(tool_def.get("function", {}).get("name", ""))
@@ -192,16 +142,6 @@ class _SupervisionMixin:
     def _apply_objective_patch(
         self, content: str, current_phase: PipelinePhase
     ) -> int:
-        """Parse <objective_patch>[...]</objective_patch> from LLM response text
-        and apply delta ops to objective_queue via patch_objectives().
-
-        The LLM emits this block to add, remove, modify, or reorder objectives
-        mid-session without triggering a full regeneration.  The block is parsed
-        and stripped from content *before* add_message() so conversation history
-        stays clean.
-
-        Returns the number of changes applied (0 if no valid block found).
-        """
         match = self._OBJECTIVE_PATCH_RE.search(content)
         if not match:
             return 0
@@ -213,7 +153,7 @@ class _SupervisionMixin:
             return 0
         if not isinstance(ops, list):
             ops = [ops]
-        # Default phase to current if the LLM omitted it
+
         for op in ops:
             if isinstance(op, dict) and not op.get("phase"):
                 op["phase"] = current_phase.value
@@ -232,18 +172,9 @@ class _SupervisionMixin:
         attempt: int,
         phase: PipelinePhase,
     ) -> str:
-        """Build a targeted XML-structured correction for text-only LLM responses.
-
-        Two escalation levels before watchdog takes over:
-          attempt=1 — gentle reminder with a specific tool suggestion
-          attempt=2 — firm warning, explicit format requirement
-        Inspired by PentAGI's Reflector agent pattern.
-        """
         phase_str = phase.value
         content_lower = content_acc.lower()
 
-        # Dynamically infer tool hint from LLM text + known tool registry.
-        # No hardcoded tool names — source of truth is _tools_ollama (data/tools.json).
         tool_hint = self._reflector_infer_tool_hint(content_lower)
 
         if attempt == 1:
@@ -273,20 +204,11 @@ class _SupervisionMixin:
         )
 
     def _get_ab_signals(self, evidence_summary: str) -> dict[str, Any] | None:
-        """Return the first matching A→B signal entry dict for the given finding.
-
-        Loads signal rules from data/ab_signals.json at runtime — never
-        hardcoded in Python.  Checks all keywords (any-match, case-insensitive)
-        then suppresses false positives via negative_keywords.
-        Returns the full entry dict so callers can render test_vectors,
-        chain_with, kill_conditions, and apply objective_patches.
-        Only the first match fires to avoid flooding the mentor block.
-        """
         summary_lower = evidence_summary.lower()
         for entry in _AB_SIGNALS_DATA.get("signals", []):
             if not any(kw in summary_lower for kw in entry.get("keywords", [])):
                 continue
-            # Suppress if any negative keyword is present
+
             if any(nkw in summary_lower for nkw in entry.get("negative_keywords", [])):
                 continue
             return entry
@@ -298,20 +220,11 @@ class _SupervisionMixin:
         tool_name: str,
         evidence_added: bool,
     ) -> str:
-        """Build a post-tool XML mentor analysis block.
-
-        Injected after high-value tool results to guide the LLM toward the
-        best next action. Rule-based (no extra LLM call) — derived from the
-        current evidence log and pending objectives.
-        Inspired by PentAGI's Mentor Supervision system.
-        A→B Signal Method inspired by shuvonsec/claude-bug-bounty Rule #11.
-        """
         phase_str = current_phase.value
         pending, _, recent_evidence = self.state.get_phase_context(
             phase_str, max_objectives=3, max_evidence=3
         )
 
-        # Build progress assessment
         total_ev = len(self.state.evidence_log)
         phase_ev = sum(
             1 for e in self.state.evidence_log
@@ -327,7 +240,6 @@ class _SupervisionMixin:
             progress_parts.append(f"{high_sev} HIGH/CRITICAL finding(s) confirmed")
         progress = ", ".join(progress_parts) + "."
 
-        # Latest finding summary
         latest_summary = ""
         if recent_evidence:
             ev = recent_evidence[0]
@@ -335,7 +247,6 @@ class _SupervisionMixin:
             sev_label = {5: "CRITICAL", 4: "HIGH", 3: "MEDIUM", 2: "LOW"}.get(sev, "INFO")
             latest_summary = f"Latest: [{sev_label}] {ev.get('summary', '')[:120]}"
 
-        # Identify issues and next steps from pending objectives
         if pending:
             next_obj = pending[0].get("title", "")
             next_steps = f"Next objective: {next_obj}"
@@ -345,15 +256,12 @@ class _SupervisionMixin:
                 "Consider transitioning to the next phase or deepening current findings."
             )
 
-        # Identify potential issues
         issues = ""
         if total_ev == 0:
             issues = "No evidence collected yet — surface mapping incomplete."
         elif high_sev == 0 and phase_str.upper() in ("ANALYSIS", "EXPLOIT"):
             issues = "No HIGH/CRITICAL findings yet — increase test depth or pivot attack vector."
 
-        # A→B Signal: look up follow-up tests based on the latest finding type.
-        # Only fire when severity >= min_severity to avoid noise on low-value evidence.
         ab_signal: dict[str, Any] | None = None
         if recent_evidence:
             last_ev = recent_evidence[0]
@@ -361,10 +269,9 @@ class _SupervisionMixin:
             _min_sev = int(_AB_SIGNALS_DATA.get("min_severity", 3))
             if last_sev >= _min_sev:
                 ab_signal = self._get_ab_signals(last_ev.get("summary", ""))
-                # Auto-apply objective patches immediately when signal fires
+
                 if ab_signal and ab_signal.get("objective_patches"):
-                    # Inject current phase as default for add ops that omit it;
-                    # copy each dict to avoid mutating the shared JSON-loaded object.
+
                     _patches = [
                         dict(_p, phase=phase_str)
                         if _p.get("op") == "add" and not _p.get("phase")
@@ -384,10 +291,10 @@ class _SupervisionMixin:
             signal_attr = f' signal="{signal_id}"' if signal_id else ""
             owasp_attr = f' owasp="{owasp_id}"' if owasp_id else ""
             lines.append(f"  <followup_signals{signal_attr}{owasp_attr}>")
-            # Quick-start hints (text)
+
             for hint in ab_signal.get("followup", []):
                 lines.append(f"    <hint>{hint}</hint>")
-            # Structured test vectors (label + payload)
+
             if ab_signal.get("test_vectors"):
                 lines.append("    <test_vectors>")
                 for tv in ab_signal["test_vectors"]:
@@ -395,11 +302,11 @@ class _SupervisionMixin:
                     pay = tv.get("payload", "")
                     lines.append(f'      <vector label="{lbl}">{pay}</vector>')
                 lines.append("    </test_vectors>")
-            # Chain-with: other signal IDs worth testing in parallel
+
             if ab_signal.get("chain_with"):
                 chain_str = ", ".join(ab_signal["chain_with"])
                 lines.append(f"    <chain_with>{chain_str}</chain_with>")
-            # Kill conditions: when to stop pursuing this attack class
+
             if ab_signal.get("kill_conditions"):
                 lines.append("    <kill_conditions>")
                 for kc in ab_signal["kill_conditions"]:
@@ -415,13 +322,6 @@ class _SupervisionMixin:
         thinking_acc: str,
         phase: PipelinePhase,
     ) -> dict[str, Any] | None:
-        """Build a fallback tool_call when model is stuck in text-only mode.
-
-        Priority:
-        1. Extract an actual shell command the LLM wrote in text → execute it.
-        2. No extractable command → return None so the caller injects a recovery
-           nudge and lets the model choose the next tool itself.
-        """
         candidate_cmd = self._extract_shell_command_candidate(
             content_acc=content_acc,
             thinking_acc=thinking_acc,
@@ -436,15 +336,9 @@ class _SupervisionMixin:
                 },
             }
 
-        # No extractable command — return None so the caller injects a recovery
-        # nudge and lets the model choose the next tool itself.  Hardcoding a
-        # phase-specific tool here takes decision-making away from the LLM; the
-        # nudge path (see caller) is sufficient to break text-only loops while
-        # still leaving tool selection to the model.
         return None
 
     def _compute_quality_scores(self) -> dict[str, Any]:
-        """Compute lightweight quality scores for finding confidence tracking."""
         evidence = self.state.evidence_log
         tags = [tag for ev in evidence for tag in ev.get("tags", [])]
 
@@ -582,7 +476,6 @@ class _SupervisionMixin:
         return "\n".join(lines)
 
     def _build_recovery_state_context(self) -> str:
-        """Build compact state snapshot for post-crash recovery retries."""
         phase = self._get_current_phase()
         quality = self._compute_quality_scores()
         lines = [
@@ -598,7 +491,6 @@ class _SupervisionMixin:
             ),
         ]
 
-        # Show more context to help the LLM resume correctly after a crash.
         pending, completed, evidence = self.state.get_phase_context(
             phase.value, max_objectives=5, max_evidence=6, filter_evidence_by_phase=False
         )
@@ -611,7 +503,6 @@ class _SupervisionMixin:
             for obj in completed[:3]:
                 lines.append(f"  ✓ {obj.get('title', '')}")
 
-        # Include last few tool calls WITH args so LLM knows what was being run.
         recent_tools = list(reversed(self.state.tool_history))[:5]
         if recent_tools:
             lines.append("Recent tool calls (newest first):")
@@ -620,7 +511,7 @@ class _SupervisionMixin:
                 args_hint = ""
                 args = getattr(entry, "arguments", None) or {}
                 if isinstance(args, dict):
-                    # Show the most informative arg: command > url > query > first key
+
                     for key in ("command", "url", "query", "action", "target"):
                         if key in args:
                             val = str(args[key])[:80]
@@ -645,18 +536,7 @@ class _SupervisionMixin:
         return "\n".join(lines)
 
     def _prune_stale_skills(self, max_age_iterations: int = 10) -> int:
-        """Remove stale skill messages from conversation history.
-
-        Skills injected >max_age_iterations ago that aren't relevant to current phase
-        are pruned to recover context tokens (typically 10K-30K tokens).
-
-        Args:
-            max_age_iterations: Remove skills older than this many iterations
-
-        Returns:
-            Number of skill messages pruned
-        """
-        from ..system import _PHASE_SKILL_DIRECTORIES  # local import to avoid circular
+        from ..system import _PHASE_SKILL_DIRECTORIES
 
         if not hasattr(self.state, "conversation") or len(self.state.conversation) < 10:
             return 0
@@ -665,7 +545,6 @@ class _SupervisionMixin:
         phase_dirs = _PHASE_SKILL_DIRECTORIES.get(current_phase, set())
         skills_to_remove = []
 
-        # Identify stale skill messages
         for i, msg in enumerate(self.state.conversation):
             if msg.get("role") != "system":
                 continue
@@ -673,10 +552,6 @@ class _SupervisionMixin:
             if "[AUTO-LOADED SKILL:" not in content:
                 continue
 
-            # Extract all embedded skill paths from the message.
-            # Current format wraps multiple skill blocks under:
-            #   [SYSTEM: RELEVANT SKILLS AUTO-LOADED ...]
-            #   [AUTO-LOADED SKILL: path/skill.md]
             skill_paths = [
                 p.strip()
                 for p in re.findall(r"\[AUTO-LOADED SKILL:\s*([^\]]+)\]", content)
@@ -685,15 +560,12 @@ class _SupervisionMixin:
             if not skill_paths:
                 continue
 
-            # Check if skill is stale (old iteration + not relevant to current phase)
             skill_iteration = msg.get("iteration", 0)
             age = self.state.iteration - skill_iteration
 
             if age < max_age_iterations:
-                continue  # Still fresh
+                continue
 
-            # Keep message if ANY embedded skill is phase-relevant.
-            # Remove only when all embedded skills are stale and out-of-phase.
             is_phase_relevant = any(
                 (sp.split("/", 1)[0] if "/" in sp else "") in phase_dirs
                 for sp in skill_paths
@@ -701,7 +573,6 @@ class _SupervisionMixin:
             if not is_phase_relevant:
                 skills_to_remove.append(i)
 
-        # Remove stale skills in reverse order to preserve indices
         for i in reversed(skills_to_remove):
             self.state.conversation.pop(i)
 

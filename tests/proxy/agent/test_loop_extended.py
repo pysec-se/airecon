@@ -11,6 +11,7 @@ from airecon.proxy.agent.session import SessionData
 
 # ── Fixture ───────────────────────────────────────────────────────────────────
 
+
 @pytest.fixture
 def loop(mocker):
     ollama_mock = MagicMock()
@@ -30,6 +31,7 @@ def loop(mocker):
 
 
 # ── VRAM crash detection patterns ─────────────────────────────────────────────
+
 
 class TestVRAMCrashPatterns:
     """Verify that the _is_vram_crash detection heuristics in loop.py
@@ -89,27 +91,36 @@ class TestVRAMCrashPatterns:
 
 # ── Deduplication logic ───────────────────────────────────────────────────────
 
+
 class TestDuplicateCommandDetection:
     def test_same_execute_command_is_duplicate(self, loop):
         loop._is_duplicate_command("execute", {"command": "nmap -sV 10.0.0.1"})
-        is_dup, msg = loop._is_duplicate_command("execute", {"command": "nmap -sV 10.0.0.1"})
+        is_dup, msg = loop._is_duplicate_command(
+            "execute", {"command": "nmap -sV 10.0.0.1"}
+        )
         assert is_dup
         assert "[ANTI-REPEAT]" in msg
 
     def test_different_commands_not_duplicate(self, loop):
         loop._is_duplicate_command("execute", {"command": "nmap -sV 10.0.0.1"})
-        is_dup, _ = loop._is_duplicate_command("execute", {"command": "nmap -p 443 10.0.0.1"})
+        is_dup, _ = loop._is_duplicate_command(
+            "execute", {"command": "nmap -p 443 10.0.0.1"}
+        )
         assert not is_dup
 
     def test_create_file_always_allowed(self, loop):
         """create_file is in DEDUP_EXEMPT_TOOLS and must never be blocked."""
         loop._is_duplicate_command("create_file", {"path": "test.txt", "content": "a"})
-        is_dup, _ = loop._is_duplicate_command("create_file", {"path": "test.txt", "content": "a"})
+        is_dup, _ = loop._is_duplicate_command(
+            "create_file", {"path": "test.txt", "content": "a"}
+        )
         assert not is_dup
 
     def test_create_vulnerability_report_exempt(self, loop):
         loop._is_duplicate_command("create_vulnerability_report", {"title": "SQLi"})
-        is_dup, _ = loop._is_duplicate_command("create_vulnerability_report", {"title": "SQLi"})
+        is_dup, _ = loop._is_duplicate_command(
+            "create_vulnerability_report", {"title": "SQLi"}
+        )
         assert not is_dup
 
     def test_browser_click_is_exempt(self, loop):
@@ -129,6 +140,7 @@ class TestDuplicateCommandDetection:
 
 # ── Session initialisation ────────────────────────────────────────────────────
 
+
 class TestAgentLoopInitialisation:
     @pytest.mark.asyncio
     async def test_initialize_creates_session(self, loop, mocker):
@@ -147,11 +159,15 @@ class TestAgentLoopInitialisation:
 
         assert loop.pipeline is not None
         from airecon.proxy.agent.pipeline import PipelinePhase
+
         assert loop.pipeline.get_current_phase() == PipelinePhase.RECON
 
     @pytest.mark.asyncio
     async def test_initialize_adds_system_prompt_to_conversation(self, loop, mocker):
-        mocker.patch("airecon.proxy.agent.loop.get_system_prompt", return_value="CUSTOM SYS PROMPT")
+        mocker.patch(
+            "airecon.proxy.agent.loop.get_system_prompt",
+            return_value="CUSTOM SYS PROMPT",
+        )
         await loop.initialize(target="test.com", user_message="run scan")
 
         messages = loop.state.conversation
@@ -195,6 +211,7 @@ class TestAgentLoopInitialisation:
 
 # ── Reset ─────────────────────────────────────────────────────────────────────
 
+
 class TestAgentLoopReset:
     def test_reset_clears_iteration_count(self, loop):
         loop.state.iteration = 42
@@ -212,7 +229,35 @@ class TestAgentLoopReset:
         assert loop.state.conversation == []
 
 
+class TestAgentLoopStopSubagent:
+    @pytest.mark.asyncio
+    async def test_stop_subagent_does_not_force_stop_shared_engine(self, loop):
+        loop._is_subagent = True
+        loop.engine.force_stop = AsyncMock()
+
+        await loop.stop()
+
+        loop.engine.force_stop.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_stop_main_agent_force_stops_engine(self, loop):
+        """CRITICAL FIX 2026-03-31: stop() should NOT call force_stop().
+
+        force_stop() kills all processes in container, breaking ongoing recon.
+        Container must stay alive for subsequent tool calls.
+        User must explicitly call /api/stop to kill processes.
+        """
+        loop._is_subagent = False
+        loop.engine.force_stop = AsyncMock()
+
+        await loop.stop()
+
+        # force_stop should NOT be called - container stays running
+        loop.engine.force_stop.assert_not_called()
+
+
 # ── Mocked streaming: text response ──────────────────────────────────────────
+
 
 class TestLoopStreamingWithMockedOllama:
     """Test that the loop correctly yields AgentEvents from a mocked streaming
@@ -228,8 +273,12 @@ class TestLoopStreamingWithMockedOllama:
             chunks = [
                 {"message": {"content": "Hello "}, "done": False},
                 {"message": {"content": "world!"}, "done": False},
-                {"message": {"content": ""}, "done": True,
-                 "eval_count": 5, "prompt_eval_count": 20},
+                {
+                    "message": {"content": ""},
+                    "done": True,
+                    "eval_count": 5,
+                    "prompt_eval_count": 20,
+                },
             ]
             for chunk in chunks:
                 yield chunk
@@ -250,7 +299,9 @@ class TestLoopStreamingWithMockedOllama:
     @pytest.mark.asyncio
     async def test_error_event_on_connection_refused(self, loop, mocker):
         mocker.patch("airecon.proxy.agent.loop.get_system_prompt", return_value="SYS")
-        mocker.patch("airecon.proxy.agent.loop.asyncio.sleep")  # prevent 10+30+60+120s retry waits
+        mocker.patch(
+            "airecon.proxy.agent.loop.asyncio.sleep"
+        )  # prevent 10+30+60+120s retry waits
         await loop.initialize(target="test.com", user_message="go")
 
         async def _failing_stream(*args, **kwargs):
@@ -267,8 +318,10 @@ class TestLoopStreamingWithMockedOllama:
 
         error_events = [e for e in events if e.type == "error"]
         assert len(error_events) >= 1
-        assert "Ollama" in error_events[0].data.get("message", "") or \
-               "connect" in error_events[0].data.get("message", "").lower()
+        assert (
+            "Ollama" in error_events[0].data.get("message", "")
+            or "connect" in error_events[0].data.get("message", "").lower()
+        )
 
     @pytest.mark.asyncio
     async def test_retry_partial_success_then_fail(self, loop, mocker):
@@ -298,7 +351,9 @@ class TestLoopStreamingWithMockedOllama:
 
         # Should have received content from first successful call
         text_events = [e for e in events if e.type == "text"]
-        assert len(text_events) > 0 or len(events) > 1  # Either got text or multiple attempts
+        assert (
+            len(text_events) > 0 or len(events) > 1
+        )  # Either got text or multiple attempts
 
     @pytest.mark.asyncio
     async def test_retry_all_attempts_exhausted_emits_error(self, loop, mocker):
@@ -325,7 +380,9 @@ class TestLoopStreamingWithMockedOllama:
         assert len(events) > 0
 
     @pytest.mark.asyncio
-    async def test_recovery_does_not_stop_on_text_only_hallucination(self, loop, mocker):
+    async def test_recovery_does_not_stop_on_text_only_hallucination(
+        self, loop, mocker
+    ):
         """When active recon target exists, a text-only hallucinated response
         must trigger retry, not immediate done.
         """
@@ -360,7 +417,7 @@ class TestLoopStreamingWithMockedOllama:
                                 "type": "function",
                                 "function": {
                                     "name": "execute",
-                                    "arguments": "{\"command\":\"echo recovered\"}",
+                                    "arguments": '{"command":"echo recovered"}',
                                 },
                             }
                         ]
@@ -382,7 +439,9 @@ class TestLoopStreamingWithMockedOllama:
         assert tool_start.data.get("tool") == "execute"
 
     @pytest.mark.asyncio
-    async def test_watchdog_injects_nudge_then_aborts_after_text_only_retries(self, loop, mocker):
+    async def test_watchdog_injects_nudge_then_aborts_after_text_only_retries(
+        self, loop, mocker
+    ):
         """After repeated text-only bash-block responses, watchdog injects recovery nudges
         and eventually aborts with an error event (no longer forces a specific tool call)."""
         mocker.patch("airecon.proxy.agent.loop.get_system_prompt", return_value="SYS")
@@ -418,27 +477,34 @@ class TestLoopStreamingWithMockedOllama:
         # The loop should have aborted with an error after exhausting watchdog attempts
         error_events = [e for e in events if e.type == "error"]
         assert error_events, "Expected watchdog to abort with an error event"
-        assert "stuck" in error_events[0].data.get("message", "").lower() or \
-               "text-only" in error_events[0].data.get("message", "").lower() or \
-               "watchdog" in error_events[0].data.get("message", "").lower()
+        assert (
+            "stuck" in error_events[0].data.get("message", "").lower()
+            or "text-only" in error_events[0].data.get("message", "").lower()
+            or "watchdog" in error_events[0].data.get("message", "").lower()
+        )
         # Loop emits error then done — verify error comes before final done
         event_types = [e.type for e in events]
         assert "error" in event_types, "watchdog abort must emit an error event"
         error_idx = next(i for i, e in enumerate(events) if e.type == "error")
-        remaining = [e.type for e in events[error_idx + 1:]]
-        assert remaining in ([], ["done"]), f"unexpected events after error: {remaining}"
+        remaining = [e.type for e in events[error_idx + 1 :]]
+        assert remaining in ([], ["done"]), (
+            f"unexpected events after error: {remaining}"
+        )
 
 
 class TestAdvancedStateOrchestration:
     def test_sync_phase_objectives_injects_defaults(self, loop):
         loop._sync_phase_objectives(PipelinePhase.RECON)
         recon_objs = [
-            o for o in loop.state.objective_queue
-            if o.get("phase") == "RECON"
+            o for o in loop.state.objective_queue if o.get("phase") == "RECON"
         ]
         assert len(recon_objs) >= 3
 
     def test_record_evidence_extracts_key_signals(self, loop):
+        # Set target so in-scope URL evidence is collected (scope filter requires known target).
+        from airecon.proxy.agent.session import SessionData
+
+        loop._session = SessionData(target="target.local")
         loop._record_evidence_from_result(
             phase="EXPLOIT",
             tool_name="execute",
@@ -468,15 +534,18 @@ class TestAdvancedStateOrchestration:
         assert "PHASE GATE" in note
 
     def test_exploration_directive_triggers_on_stagnation(self, loop, mocker):
-        mocker.patch("airecon.proxy.agent.loop.get_config", return_value=mocker.MagicMock(
-            agent_exploration_mode=True,
-            agent_exploration_intensity=0.9,
-            agent_stagnation_threshold=1,
-            agent_max_same_tool_streak=3,
-            agent_tool_diversity_window=8,
-            ollama_temperature=0.1,
-            agent_exploration_temperature=0.4,
-        ))
+        mocker.patch(
+            "airecon.proxy.agent.loop.get_config",
+            return_value=mocker.MagicMock(
+                agent_exploration_mode=True,
+                agent_exploration_intensity=0.9,
+                agent_stagnation_threshold=1,
+                agent_max_same_tool_streak=3,
+                agent_tool_diversity_window=8,
+                ollama_temperature=0.1,
+                agent_exploration_temperature=0.4,
+            ),
+        )
         loop._stagnation_iterations = 2
         directive = loop._build_exploration_directive(PipelinePhase.RECON)
         assert "AGGRESSIVE EXPLORATION MODE" in directive
@@ -496,11 +565,7 @@ class TestAdvancedStateOrchestration:
     def test_extract_shell_command_candidate_from_code_block(self, loop):
         candidate = loop._extract_shell_command_candidate(
             content_acc=(
-                "Let me run this.\n"
-                "```bash\n"
-                "# enumerate target\n"
-                "nmap -sV test.com\n"
-                "```"
+                "Let me run this.\n```bash\n# enumerate target\nnmap -sV test.com\n```"
             ),
             thinking_acc="",
         )
@@ -521,7 +586,11 @@ class TestAdvancedStateOrchestration:
             )
         scores = loop._compute_quality_scores()
         assert set(scores.keys()) == {
-            "evidence", "reproducibility", "impact", "overall", "counts"
+            "evidence",
+            "reproducibility",
+            "impact",
+            "overall",
+            "counts",
         }
         assert 0.0 <= scores["overall"] <= 1.0
         assert scores["counts"]["evidence"] >= 1

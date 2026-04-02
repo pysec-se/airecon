@@ -1,5 +1,258 @@
 # Changelog
 
+## [v0.1.7-beta] - 2026-04-02
+
+### Added
+
+#### A→B Signal Method — Data-Driven Vulnerability Detection
+- feat(agent): 14 signal types in `data/ab_signals.json` (SQLi, XSS, SSRF, IDOR, SSTI, cmdi,
+  open redirect, path traversal, JWT, auth bypass, deserialization, CSRF, XXE, prototype pollution)
+- feat(agent): each signal has `test_vectors`, `chain_with`, `kill_conditions`, `objective_patches`
+- feat(agent): `_get_ab_signals()` with negative keyword filtering to suppress false positives
+- feat(agent): `_build_mentor_analysis()` renders test_vectors and chain conditions as XML
+- feat(agent): `patch_objectives()` auto-applies objective patches when signals fire
+- feat(loop): `<objective_patch>` XML parsing from LLM content for dynamic objective updates
+
+#### Response Signature Diffing — Intelligent Fuzzing
+- feat(fuzzer): `response_signature(status, body)` → compact `"status:len:md5"` fingerprint
+- feat(fuzzer): fast-path skip in `_fuzz_single()` when signature matches baseline
+- feat(fuzzer): `analyze_response_differential()` gains +0.15 confidence on signature change
+- feat(fuzzer): reduces noise by filtering identical responses
+
+#### Exploit Phase Hardening
+- feat(pipeline): EXPLOIT→REPORT transition requires confirmed vuln OR [CRITICAL/HIGH/MEDIUM] severity
+- feat(data/exploit.txt): NEVER REPORT section (10 weak finding types to exclude)
+- feat(data/exploit.txt): CONDITIONALLY VALID section (findings requiring additional proof)
+
+#### Recon Diversity Engine
+- feat(pipeline): `PhaseConfig` gains `exploration_hints: list[str]` field
+- feat(data/recon.txt): 18 creative angles (favicon hash, TLS SAN, DMARC leak, Wayback CDX, cloud enum)
+- feat(data/analysis.txt): 15 hints (HTTP method override, mass assignment, cache poison, host header)
+- feat(pipeline): `get_phase_prompt()` samples 2 random hints each checkpoint — prevents monotony
+
+#### OWASP Auto-Tagging & Severity Scoring
+- feat(agent/owasp.py): `classify_owasp(summary, tags, tool)` — auto-tags evidence with OWASP Web Top 10 (2021)
+- feat(agent/owasp.py): `severity_for_evidence()` — scores 1–5 (Info/Low/Medium/High/Critical)
+- feat(agent/owasp.py): `evidence_risk_summary()` — aggregates severity distribution + top OWASP categories
+- feat(agent/owasp.py): `owasp_label()` / `severity_label()` — human-readable helpers
+- feat(models): `add_evidence()` gains `severity` field (1–5)
+- feat(models): `build_focus_context()` shows [HIGH]/[CRITICAL] + OWASP tags to LLM
+- feat(loop): `_enrich_evidence()` auto-classifies every `add_evidence()` call
+- feat(loop): `get_stats()` includes risk summary in `/api/status` response
+- feat(data): `owasp_rules.json` — data-driven rules for OWASP Web Top 10 + API Security Top 10
+- feat(owasp): 3-tier matching (high-confidence keywords → keyword match → tag match)
+- feat(owasp): confidence penalty when `confidence < 0.6`
+- test(owasp): 28 new tests in `tests/proxy/agent/test_owasp.py`
+
+#### Reflector Agent Pattern — Intelligent Error Recovery
+- feat(agent): `_build_reflector_message()` — targeted XML correction before watchdog escalation
+- feat(agent): `_reflector_infer_tool_hint()` — data-driven tool hint inference (no hardcoded names)
+- feat(agent): attempt 1 = gentle nudge, attempt 2 = firm escalation to watchdog
+- feat(agent): uses `_no_tool_iterations` directly (no separate `_reflector_count` drift)
+
+#### Mentor Supervision — Post-Tool Analysis
+- feat(agent): XML analysis injected after HIGH/CRITICAL evidence
+- feat(agent): analysis every 3 tool executions in ANALYSIS/EXPLOIT phases only
+- feat(agent): `_mentor_tool_call_count` incremented per-tool (inside loop)
+
+#### Objective Patching — Delta-Based Updates
+- feat(agent): `patch_objectives()` with delta ops (add/remove/modify/done/reorder)
+- feat(agent): replaces full objective regeneration with surgical updates
+- feat(agent): duplicate check scoped to `_effective_phase` only
+
+#### Semantic XML Prompt Structure
+- feat(agent): `build_focus_context()` emits `<objective_focus phase="...">` XML
+- feat(agent): replaces bracketed `[SYSTEM: OBJECTIVE FOCUS]` format
+
+#### Session Persistence Improvements
+- feat(agent): session auto-save guard (`_has_scan_work`) — only persist when `scan_count > 0` or evidence non-empty
+- feat(agent): fixes empty session file bug
+
+#### Token Tracking — Cumulative Session Metrics
+- feat(models): `SessionData` gains `token_total/prompt/completion/last_used` fields
+- feat(agent): `_record_token_usage()`, `_sync_token_usage_from/to_session()`, `_schedule_token_usage_snapshot_save()`
+- feat(models): `AgentState.token_usage` dict with cumulative/prompt/completion keys
+- feat(executors): subagent token usage rolled up to parent session in `spawn_agent`
+- feat(tui): displays cumulative tokens with compact k/M/B format and color scale
+
+#### BoundedList — Memory Exhaustion Prevention
+- feat(models): `BoundedList[T]` — list subclass with auto-trim oldest on overflow
+- feat(models): `_coerce_sequence_field()` for legacy deque/string backward compat
+- feat(models): all `SessionData` collection fields now bounded:
+  - `subdomains` (10k), `urls` (50k), `injection_points` (5k), `tested_endpoints` (500),
+  - `vulnerabilities` (1k), `evidence_log` (200), `objective_queue` (64)
+- feat(models): `load_session()` and `save_session()` use `_coerce_sequence_field` + list() cast
+
+#### Ollama Stability — Thinking Trace Management
+- feat(agent): `_messages_for_ollama()` strips thinking from all but last assistant message
+- feat(agent): thinking traces (~1500 tokens each) now counted in `_enforce_char_budget`
+- feat(agent): Pass 0 thinking strip before other compression passes
+- feat(agent): recovers 50-200K tokens in long sessions without information loss
+- feat(ollama): `repeat_penalty=1.05` and `num_keep=8192` added to every Ollama request
+- feat(agent): fixes mid-recon halt and hallucination at long sessions (~65 iterations)
+
+#### TUI Enhancements
+- feat(tui): colorful Rich-markup welcome screen (logo bold teal #00d4aa, commands blue #58a6ff,
+  targets amber #f59e0b, @/path refs teal, secondary text muted gray)
+- feat(tui): startup screen with status indicators
+- feat(tui): `markup=False` on dynamic strings to prevent MarkupError on XSS payloads
+- feat(tui): escape dynamic strings in status/workspace panels
+- feat(tui): vuln panel now shows all targets, not just the first one
+- feat(input): `_SLASH_COMMANDS` list → tuple (immutable module-level constant)
+
+#### MCP Client — External Tool Server Integration (Issue #45)
+- feat(mcp): MCP client via SSE transport — connect to external MCP servers
+- feat(mcp): `proxy/mcp.py` — MCP client module (SSE connection management, tools discovery)
+- feat(tui): `/mcp add <url> [auth] [name]` — add MCP server with optional auth (`auth:user/pass` or `auth:apikey:<token>`)
+- feat(tui): `/mcp list [name]` — list configured servers and their exposed tools
+- feat(tui): `/mcp list <name> --tools` — verbose tool listing for specific server
+- feat(tui): `/mcp enable/disable <name>` — toggle server without removal
+- feat(server): `/api/mcp/list` — list all MCP servers with status, tool count, initializing progress
+- feat(server): `/api/mcp/add` — add new MCP server (SSE transport)
+- feat(server): `/api/mcp/tools/{name}` — get detailed tool list for specific server
+- feat(server): `/api/mcp/enable`, `/api/mcp/disable` — enable/disable servers
+- feat(mcp): auth support — Basic auth (`user:pass`) and Bearer token (`apikey:<token>`)
+- feat(mcp): auto-discovery — tools list fetched on server add/enable via `_ensure_mcp_probe()`
+- feat(mcp): config persistence — `~/.airecon/mcp.json` stores server configs across sessions
+- feat(agent): MCP tools merged into agent tool registry — transparent dispatch alongside native tools
+- feat(mcp): `_refresh_agent_tool_registry()` — hot-reload agent tools when MCP servers change
+- feat(mcp): `_mcp_probe_cache` and `_mcp_probe_tasks` — async tool discovery with 55s timeout
+- feat(mcp): status tracking — `ready`, `initializing`, `error` with tool counts and error messages
+- test(mcp): comprehensive tests in `tests/proxy/test_server.py` for MCP API endpoints
+
+#### Interactive Authentication — CAPTCHA & TOTP Support (Issue #95)
+- feat(browser): CAPTCHA detection — reCAPTCHA, hCaptcha via DOM selectors (`browser.py:975-989`)
+- feat(browser): `_generate_totp(secret)` — RFC 6238 TOTP code generator (HMAC-SHA1, 30s period, 6 digits)
+- feat(browser): `_DEFAULT_TOTP_FIELD_SEL` — auto-detect TOTP input fields (18 selectors)
+- feat(browser): `handle_totp` browser action — auto-fill TOTP codes from secret
+- feat(browser): `save_auth_state`, `inject_cookies` — session persistence across restarts
+- feat(browser): `oauth_authorize` — OAuth 2.0 flow handling
+- feat(browser): `check_auth_status`, `wait_for_element` — auth state verification
+- feat(system): `request_user_input(input_type="captcha"|"totp"|"password"|"otp"|"text")` — interactive workflow
+- feat(system): LLM prompted to request user input when CAPTCHA/2FA detected (`system.txt:158-179`)
+- feat(system): CAPTCHA workflow — screenshot saved, user prompted to solve and enter response
+- feat(system): TOTP workflow — auto-generate from secret OR request user input if secret unknown
+- feat(validators): `USER_INPUT_TYPES` — validated input types for interactive authentication
+- test(interactive): tests in `tests/proxy/test_server.py` for user input request/response flow
+- test(interactive): `tests/proxy/test_browser.py` — TOTP generation tests
+
+#### Skills Expansion — 29 New/Upgraded Skills + 1089 Keywords
+- feat(skills/protocols/graphql.md): +path-level auth gate bypass (nginx misconfig),
+  introspection scanner, 5-step proof chain, multi-env cross-check
+- feat(skills/vulnerabilities/idor.md): +6 Python scripts (sequential enum, multi-principal matrix,
+  UUID harvest, blind differential, GraphQL alias batch, multi-tenant)
+- feat(skills/vulnerabilities/information_disclosure.md): +5 scripts (git dump, sourcemap extract,
+  JS secret scan, sensitive path scanner, Next.js extraction)
+- feat(skills/vulnerabilities/mass_assignment.md): +framework-specific exploits (Rails, Django DRF,
+  Laravel, Mongoose, Prisma, GraphQL input types)
+- feat(skills/frameworks/wordpress.md): expanded coverage
+- feat(skills/reconnaissance/subdomain_enum.md): full rewrite 106→950 lines;
+  passive (CT logs, DNS history, web archives, SPF/MX mining, JS/CSP/GitHub dork),
+  active (AXFR, wildcard brute force, permutation, VHOST fuzzing, TLS SAN probe),
+  manual (sitemap, response mining, favicon hash, ASN→rDNS)
+
+**New skills added:**
+- feat(skills/vulnerabilities/api_schema_exposure.md): OpenAPI/Swagger endpoint discovery,
+  internal hostname extraction, spec-to-attack matrix
+- feat(skills/vulnerabilities/jwt_attacks.md, oauth_misconfig.md): promoted from community
+- feat(skills/vulnerabilities/blind_xss.md, dom_based_vulnerabilities.md)
+- feat(skills/vulnerabilities/csrf_advanced_bypass.md, password_reset_poisoning.md)
+- feat(skills/vulnerabilities/spring4shell.md, unhandled_exception_differential.md)
+- feat(skills/vulnerabilities/sensitive_file_pii_exposure.md)
+- feat(skills/technologies/kubernetes_pentest.md, cicd_attacks.md, frida_hooking.md)
+- feat(skills/technologies/observability_stack_attacks.md)
+- feat(skills/postexploit/ad_credential_attacks.md, container_escape.md)
+- feat(skills/postexploit/credential_dumping.md, netexec_workflow.md)
+- feat(skills/reconnaissance/shodan_censys.md, exposed_devtools_detection.md)
+- feat(skills/reconnaissance/js_internal_hostname_intelligence.md)
+- feat(skills/reconnaissance/monitoring_secrets_exposure.md)
+- feat(skills/payloads/http_parameter_pollution.md, ldap_injection.md)
+- feat(skills/ctf/crypto/modern-ciphers.md, ctf/forensics/network.md)
+- feat(skills/ctf/heap_advanced.md, ctf/pwn/rop-and-shellcode.md)
+
+**skills.json stats:**
+- 884 → 1089 keywords (+205, +23.2%)
+- 0 broken references after conflicts resolved (jwt, oauth, kubernetes, ci/cd redirected)
+
+#### Installation Improvements
+- feat(install.sh): support curl|bash remote install via auto-clone
+- feat(install.sh): use official Poetry installer to avoid system package conflicts on Ubuntu
+- feat(install.sh): show full build and pip output for error visibility
+- feat(install.sh): keep pip stderr visible to expose real errors on all distros
+- feat(install.sh): skip poetry venv, fix PEP 440 version compare, suppress pip warnings
+- feat(install.sh): use `packaging.version` for accurate PEP 440 version comparison
+- feat(install.sh): normalize PEP 440 version comparison to avoid false mismatch
+
+#### Security Hardening
+- feat(agent): remove duplicate PINNED CONTEXT block in `process_message()`
+- feat(agent): convert 35+ f-string logger calls to % formatting (G004/G001 compliance)
+- feat(agent): logger.info(f"...") → logger.info("...", ...) — skips interpolation when suppressed
+- feat(filesystem): replace undefined `clean_path` with `base_dir.relative_to()` in `list_files()`
+- feat(loop): guard `eval_count/prompt_eval_count` against None before arithmetic
+
+### Fixed
+
+#### Core Stability
+- fix(agent): `[CONTEXT MONITOR]` messages removed from TUI output (logged to file only)
+- fix(security): block `$()` and backtick command substitution in watchdog (`has_dangerous_patterns()`)
+- fix(security): auth header propagation improvements
+- fix(agent): `_executed_cmd_hashes` pruned at >5000 entries to prevent memory leak
+- fix(agent): IDOR false positive reduction in correlation engine
+- fix(agent): phase timeout now counts iterations (not wall-clock time)
+- fix(agent): evidence truncation preserves high-confidence items
+- fix(agent): press_key dedup, DDG lock race, port-scan rerun block
+- fix(agent): harden LLM loop, subagent isolation, and command detection
+- fix(agent): subdomain workspace path, CTF false positives, LLM hallucination
+- fix(agent): watchdog extracts full multi-line bash scripts (not just first command)
+- fix(ollama): enforce thinking/native_tools invariant + guard max_retries
+- fix(ollama): improve detection-failure warning
+- fix(browser): add `--ignore-certificate-errors` for TLS cipher mismatch on pentest targets
+- fix(docker): fix 8+ binary name mismatches between tools_meta.json and installed binaries
+- fix(docker): fix race condition in docker force_stop
+- fix(patterns): fix all match-breaking issues across data pattern files
+- fix(reporting): `_resolve_report_workspace_target()` for URL/file/path resolution
+- fix(tui): `PathCompleter.hide()` bare except replaced with proper logging
+- fix(data): `spawn_agent` max iterations 200→100 in tools.json
+- fix(data): `web_search` updated to SearXNG preferred + DuckDuckGo fallback
+
+#### Type Safety & Linting
+- fix(types): resolve pyright `reportOptionalMemberAccess` errors
+- fix(types): fix push_screen callback types (accept `bool | None` per Textual requirement)
+- fix(types): exclude tests/ + benchmark/ from pyright via `pyrightconfig.json`
+- fix(lint): remove unused AsyncMock and pathlib imports in test_app.py
+- fix(lint): resolve all ruff linting errors across codebase
+- fix(lint): owasp.py — move docstring before imports (E402), remove unused variable (F841)
+- fix(lint): convert f-string logger calls to % formatting in executors.py, session.py, startup.py
+- fix(stability): clear pyright errors and unblock hanging test suites
+
+#### Test Coverage
+- test: add comprehensive unit test coverage for agent components
+- test: 879 → 1608 tests (+82.9% growth)
+- test: new test files for context recovery, tested endpoints, path completer,
+  command parse, reporting helpers, OWASP classifier
+
+#### Documentation
+- docs: align README claims with implemented behavior
+- docs: condense README from 983 → 228 lines
+- docs: add airecon-skills community library reference
+- docs: add one-line curl install as recommended method
+- docs: update README badge version formats
+
+### Changed
+- refactor(ollama): remove name-heuristic capability detection
+- refactor(agent): thinking trace stripping for long-session stability
+- chore: remove .vscode from version control tracking
+- chore: add __pycache__ and workspace/ to .gitignore
+- chore: add `coming_soon/` to .gitignore (local-only roadmap)
+- chore: add benchmark/ to ignored directories
+- chore: normalize pikpikcu/airecon history onto main
+- style: fix ruff E702 semicolons, unused imports, unused variables across codebase
+- style: normalize logger formatting across all modules
+- ci: add label-based project board routing workflow
+- ci: resolve merge conflicts with main (loop.py, owasp.py)
+
+---
+
 ## [v0.1.6-beta] - 2026-03-17
 
 ### Added

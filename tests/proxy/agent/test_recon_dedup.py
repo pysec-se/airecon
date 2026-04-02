@@ -17,6 +17,7 @@ from airecon.proxy.agent.executors import (
 # _load_recon_bins
 # ─────────────────────────────────────────────────────────────
 
+
 class TestLoadReconBins:
     def test_loads_subdomain_bins_from_real_file(self):
         """tools_meta.json must have subdomain_enum entries."""
@@ -50,10 +51,13 @@ class TestLoadReconBins:
                         read_text=MagicMock(side_effect=FileNotFoundError("no file"))
                     )
                 )
-            )
+            ),
         ):
             # Simpler: patch json.loads to raise
-            with patch("airecon.proxy.agent.executors.json.loads", side_effect=FileNotFoundError):
+            with patch(
+                "airecon.proxy.agent.executors.json.loads",
+                side_effect=FileNotFoundError,
+            ):
                 result = _load_recon_bins("port_scan", fallback)
         assert result == fallback
 
@@ -61,7 +65,10 @@ class TestLoadReconBins:
         bad_file = tmp_path / "bad.json"
         bad_file.write_text("{ not valid json }")
         fallback = frozenset({"nmap"})
-        with patch("airecon.proxy.agent.executors.json.loads", side_effect=json.JSONDecodeError("", "", 0)):
+        with patch(
+            "airecon.proxy.agent.executors.json.loads",
+            side_effect=json.JSONDecodeError("", "", 0),
+        ):
             result = _load_recon_bins("port_scan", fallback)
         assert result == fallback
 
@@ -77,6 +84,7 @@ class TestLoadReconBins:
 # ─────────────────────────────────────────────────────────────
 # _is_recon_phase_repeat_blocked
 # ─────────────────────────────────────────────────────────────
+
 
 def _make_executor(phase: str = "RECON") -> _ExecutorMixin:
     """Create a minimal _ExecutorMixin instance with mocked phase."""
@@ -142,9 +150,7 @@ class TestIsReconPhaseRepeatBlocked:
 
     def test_missing_command_key_not_blocked(self):
         mixin = _make_executor("RECON")
-        result = mixin._is_recon_phase_repeat_blocked(
-            "execute", {}, count=2
-        )
+        result = mixin._is_recon_phase_repeat_blocked("execute", {}, count=2)
         assert result is False
 
     def test_phase_exception_not_blocked(self):

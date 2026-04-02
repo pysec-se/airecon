@@ -1,7 +1,9 @@
 [tool.poetry]
 name = "airecon"
-version = "0.1.6-beta"
 description = "AI-powered security reconnaissance: Ollama + Kali Linux Docker sandbox + Textual TUI"
+version = "0.1.7-beta"
+homepage = "https://github.com/pikpikcu/airecon"
+license = "MIT"
 authors = ["pikpikcu"]
 readme = "README.md"
 packages = [{include = "airecon"}]
@@ -52,15 +54,7 @@ asyncio_default_fixture_loop_scope = "function"
 source = ["airecon"]
 # Exclude integration-heavy files that require Docker/Ollama/Playwright at runtime
 omit = [
-    "airecon/__main__.py",
-    "airecon/logger.py",
-    "airecon/proxy/server.py",
-    "airecon/proxy/searxng.py",
-    "airecon/proxy/agent/agent_graph.py",
-    "airecon/proxy/agent/subagent.py",
-    "airecon/proxy/browser.py",
-    "airecon/proxy/ollama.py",
-    "airecon/tui/*",
+    "airecon/proxy/searxng.py",  # Requires Docker container
 ]
 
 [tool.coverage.report]
@@ -87,6 +81,18 @@ reportPrivateImportUsage = true
 reportUnboundVariable = true
 reportGeneralTypeIssues = true
 reportInvalidTypeForm = true
+
+[tool.ruff]
+exclude = [
+    ".git",
+    ".venv",
+    "venv",
+    "dist",
+    "build",
+    "backup",
+    "test_remove_docstrings",
+    "**/__pycache__",
+]
 
 [build-system]
 requires = ["poetry-core"]

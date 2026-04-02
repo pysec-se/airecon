@@ -29,6 +29,7 @@ def _fast_forward(engine, iterations=15):
 
 # ── Phase: ANALYSIS ───────────────────────────────────────────────────────────
 
+
 class TestAnalysisPhaseTransitions:
     def test_recon_to_analysis_transition(self):
         # live_hosts_validated is now MANDATORY for RECON→ANALYSIS transition
@@ -84,6 +85,7 @@ class TestAnalysisPhaseTransitions:
 
 
 # ── Phase: EXPLOIT ────────────────────────────────────────────────────────────
+
 
 class TestExploitPhaseTransitions:
     def test_exploit_criteria_confirmed_vuln(self):
@@ -169,6 +171,7 @@ class TestExploitPhaseTransitions:
 
 # ── Phase: REPORT ─────────────────────────────────────────────────────────────
 
+
 class TestReportPhaseTransitions:
     def test_report_criteria_with_generated_reports(self):
         session = _make_session(
@@ -206,6 +209,7 @@ class TestReportPhaseTransitions:
 
 # ── COMPLETE phase ────────────────────────────────────────────────────────────
 
+
 class TestCompletedState:
     def test_complete_phase_no_transition(self):
         session = _make_session(current_phase="COMPLETE")
@@ -228,6 +232,7 @@ class TestCompletedState:
 
 
 # ── check_tool_phase_fit ──────────────────────────────────────────────────────
+
 
 class TestCheckToolPhaseFit:
     def test_exploit_tool_in_recon_phase_warns(self):
@@ -287,6 +292,7 @@ class TestCheckToolPhaseFit:
 
 # ── get_phase_prompt ──────────────────────────────────────────────────────────
 
+
 class TestGetPhasePrompt:
     def test_prompt_contains_phase_name(self):
         session = _make_session(current_phase="RECON")
@@ -320,6 +326,7 @@ class TestGetPhasePrompt:
 
 
 # ── Cooldown guard ────────────────────────────────────────────────────────────
+
 
 class TestCooldownGuard:
     def test_cannot_transition_before_min_iterations(self):

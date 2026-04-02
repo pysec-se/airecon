@@ -8,7 +8,7 @@
 
 **AI-Assisted Penetration Testing Agent**
 
-[![version](https://img.shields.io/badge/version-v0.1.6--beta-red.svg)](https://github.com/pikpikcu/airecon/releases)
+[![version](https://img.shields.io/badge/version-v0.1.7--beta-red.svg)](https://github.com/pikpikcu/airecon/releases)
 [![python](https://img.shields.io/badge/python-3.12%2B-blue.svg)](https://www.python.org/)
 [![llm](https://img.shields.io/badge/LLM-Ollama%20(local)-orange.svg)](https://ollama.com/)
 [![license](https://img.shields.io/badge/LICENSE-MIT-green.svg)](https://github.com/pikpikcu/airecon/blob/main/LICENSE)
@@ -23,14 +23,7 @@ AIRecon combines a self-hosted **Ollama LLM** with a **Kali Linux Docker sandbox
 
 AIRecon is designed for local-first workflows where model execution and tool orchestration run in your own environment.
 
-| Feature | AIRecon | Cloud-based agents |
-|---------|---------|-------------------|
-| API keys required | **No** | Yes |
-| Target data sent to cloud | **No** | Yes |
-| Works offline | **Yes** | No |
-| Caido integration | **Native** | None |
-| Session resume | **Yes** | Varies |
-| VRAM crash recovery | **4-tier auto** | N/A |
+| Feature | AIRecon | Cloud-based agents |\n|---------|---------|-------------------|\n| API keys required | **No** | Yes |\n| Target data sent to cloud | **No** | Yes |\n| Works offline | **Yes** | No |\n| Caido integration | **Native** | None |\n| Session resume | **Yes** | Varies |\n| VRAM crash recovery | **4-tier auto** | N/A |\n| MCP support | **Built-in** | None |
 
 ---
 
@@ -92,25 +85,22 @@ Config-based context limits, tool result truncation (50KB), incremental pruning,
 
 ---
 
-## Recent Improvements (v0.1.6-beta)
+## Recent Improvements (v0.1.7-beta)
 
-### Security and Reliability Updates
-- ✅ Session save locking (`asyncio.Lock`) to reduce concurrent write issues
-- ✅ Symlink/TOCTOU protections in file operations
-- ✅ Command validation hardening and safety checks
+### MCP Improvements
+- ✅ MCP server list now surfaces total tool counts (`total_tools`) when available
+- ✅ `/mcp list <name>` keeps output lightweight by showing only the first 10 tools
+- ✅ Better MCP display consistency for large toolsets (for example 150+ tools)
 
-### Stability Improvements
-- ✅ Session save on TUI exit paths
-- ✅ Per-request timeouts in fuzzing paths
-- ✅ Browser cleanup fallbacks for failed shutdowns
-- ✅ Config-based context management
-- ✅ Tool output truncation limits
-- ✅ Command history pruning improvements
+### TUI & UX
+- ✅ Confirm-delete modal styling centralized in `styles.tcss`
+- ✅ Status bar rendering restored using widget-local CSS to avoid global style conflicts
 
-### Code Quality
-- ✅ Removed 51 lines of verbose comments
-- ✅ Simplified docstrings
-- ⚠️ Test suite is under active stabilization. See [Stability & Quality Status](stability.md).
+### Stability & Tests
+- ✅ `/api/status` degraded-state logic fixed for explicit Ollama-down results
+- ✅ Full test suite green after fixes: `1608 passed`
+- ⚠️ Interactive CAPTCHA/TOTP verification remains user-led before production promotion.
+
 
 ---
 

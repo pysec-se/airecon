@@ -11,6 +11,7 @@ from airecon.proxy.agent.formatters import _FormatterMixin, _help_cache
 
 # ── Helpers ──────────────────────────────────────────────────────────────────
 
+
 @dataclass
 class FakeToolExecution:
     tool_name: str
@@ -35,20 +36,30 @@ class DummyFormatter(_FormatterMixin):
 
 # ── _smart_format_tool_result: failure branch ────────────────────────────────
 
+
 class TestSmartFormatFailure:
     def setup_method(self):
         self.fmt = DummyFormatter()
 
-    def _fail(self, command="nmap -sV target", error="", stderr="", stdout="", exit_code=1):
+    def _fail(
+        self, command="nmap -sV target", error="", stderr="", stdout="", exit_code=1
+    ):
         return self.fmt._smart_format_tool_result(
             "execute",
-            {"error": error, "stderr": stderr, "stdout": stdout, "exit_code": exit_code},
+            {
+                "error": error,
+                "stderr": stderr,
+                "stdout": stdout,
+                "exit_code": exit_code,
+            },
             success=False,
             command=command,
         )
 
     def test_command_not_found_shows_tip(self):
-        out = self._fail(command="gobuster dir -u http://t.com", error="gobuster: command not found")
+        out = self._fail(
+            command="gobuster dir -u http://t.com", error="gobuster: command not found"
+        )
         assert "TIP" in out
         assert "gobuster" in out
         assert "apt" in out or "pip" in out
@@ -77,9 +88,11 @@ class TestSmartFormatFailure:
         _help_cache.pop("ffuf", None)
 
         mock_engine = MagicMock()
-        mock_engine.execute_tool = AsyncMock(return_value={
-            "stdout": "Usage: ffuf [options]\n  -u URL\n  -w WORDLIST\n  -X METHOD"
-        })
+        mock_engine.execute_tool = AsyncMock(
+            return_value={
+                "stdout": "Usage: ffuf [options]\n  -u URL\n  -w WORDLIST\n  -X METHOD"
+            }
+        )
         fmt = DummyFormatter(engine=mock_engine)
         out = fmt._smart_format_tool_result(
             "execute",
@@ -99,10 +112,7 @@ class TestSmartFormatFailure:
         assert "127" in out
 
     def test_stderr_included_when_different_from_error(self):
-        out = self._fail(
-            error="Exit status 1",
-            stderr="FATAL: cannot open config file"
-        )
+        out = self._fail(error="Exit status 1", stderr="FATAL: cannot open config file")
         assert "FATAL" in out
 
     def test_sudo_command_not_suggested_again(self):
@@ -113,6 +123,7 @@ class TestSmartFormatFailure:
 
 
 # ── _smart_format_tool_result: success/execute branch ────────────────────────
+
 
 class TestSmartFormatSuccess:
     def setup_method(self):
@@ -143,9 +154,7 @@ class TestSmartFormatSuccess:
         # OR raw fallback with head/tail. Either way: truncation indicator must appear.
         assert "line-0" in out
         has_truncation = (
-            "more" in out.lower()
-            or "truncated" in out.lower()
-            or "TOTAL" in out
+            "more" in out.lower() or "truncated" in out.lower() or "TOTAL" in out
         )
         assert has_truncation
 
@@ -169,7 +178,7 @@ class TestSmartFormatSuccess:
         result = {
             "success": True,
             "url": "http://example.com",
-            "screenshot": "data:image/png;base64,AABBCC==VERY_LONG_BASE64"
+            "screenshot": "data:image/png;base64,AABBCC==VERY_LONG_BASE64",
         }
         out = self.fmt._smart_format_tool_result("browser_action", result, success=True)
         assert "VERY_LONG_BASE64" not in out
@@ -188,6 +197,7 @@ class TestSmartFormatSuccess:
 
 # ── _build_recent_history_context ────────────────────────────────────────────
 
+
 class TestBuildRecentHistoryContext:
     def test_empty_history_returns_empty(self):
         fmt = DummyFormatter(history=[])
@@ -195,7 +205,9 @@ class TestBuildRecentHistoryContext:
 
     def test_execute_entry_shows_command(self):
         entries = [
-            FakeToolExecution("execute", "success", {"command": "nmap -sV 10.0.0.1"}, 3.5),
+            FakeToolExecution(
+                "execute", "success", {"command": "nmap -sV 10.0.0.1"}, 3.5
+            ),
         ]
         fmt = DummyFormatter(history=entries)
         out = fmt._build_recent_history_context()
@@ -206,9 +218,10 @@ class TestBuildRecentHistoryContext:
     def test_execute_strips_cd_prefix(self):
         entries = [
             FakeToolExecution(
-                "execute", "success",
+                "execute",
+                "success",
                 {"command": "cd /workspace/session_abc && nmap -sV target"},
-                1.0
+                1.0,
             ),
         ]
         fmt = DummyFormatter(history=entries)
@@ -218,7 +231,9 @@ class TestBuildRecentHistoryContext:
 
     def test_failed_entry_shows_fail(self):
         entries = [
-            FakeToolExecution("execute", "error", {"command": "sqlmap -u http://test"}, 0.5),
+            FakeToolExecution(
+                "execute", "error", {"command": "sqlmap -u http://test"}, 0.5
+            ),
         ]
         fmt = DummyFormatter(history=entries)
         out = fmt._build_recent_history_context()
@@ -227,9 +242,10 @@ class TestBuildRecentHistoryContext:
     def test_browser_action_shows_action_and_url(self):
         entries = [
             FakeToolExecution(
-                "browser_action", "success",
+                "browser_action",
+                "success",
                 {"action": "goto", "url": "http://example.com"},
-                2.1
+                2.1,
             ),
         ]
         fmt = DummyFormatter(history=entries)
@@ -240,9 +256,7 @@ class TestBuildRecentHistoryContext:
     def test_web_search_shows_query(self):
         entries = [
             FakeToolExecution(
-                "web_search", "success",
-                {"query": "SQLi bypass techniques"},
-                0.8
+                "web_search", "success", {"query": "SQLi bypass techniques"}, 0.8
             ),
         ]
         fmt = DummyFormatter(history=entries)
@@ -268,24 +282,26 @@ class TestBuildRecentHistoryContext:
 
 # ── _truncate_result ──────────────────────────────────────────────────────────
 
+
 class TestTruncateResult:
     def setup_method(self):
         self.fmt = DummyFormatter()
 
     def test_failed_result_starts_with_error(self):
-        out = self.fmt._truncate_result(
-            {"success": False, "error": "Something broke"})
+        out = self.fmt._truncate_result({"success": False, "error": "Something broke"})
         assert out.startswith("ERROR:")
         assert "Something broke" in out
 
     def test_failed_result_uses_stderr_fallback(self):
         out = self.fmt._truncate_result(
-            {"success": False, "error": "", "stderr": "FATAL: panic"})
+            {"success": False, "error": "", "stderr": "FATAL: panic"}
+        )
         assert "FATAL" in out
 
     def test_failed_no_detail_shows_exit_code(self):
         out = self.fmt._truncate_result(
-            {"success": False, "error": "", "stderr": "", "exit_code": 2})
+            {"success": False, "error": "", "stderr": "", "exit_code": 2}
+        )
         assert "exit code" in out
 
     def test_success_with_stdout(self):
@@ -308,7 +324,8 @@ class TestTruncateResult:
     def test_truncation_limit_applied(self):
         long_error = "E" * 2000
         out = self.fmt._truncate_result(
-            {"success": False, "error": long_error}, max_len=100)
+            {"success": False, "error": long_error}, max_len=100
+        )
         assert "truncated" in out
         assert len(out) < 500
 

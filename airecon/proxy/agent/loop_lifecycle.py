@@ -1,0 +1,355 @@
+from __future__ import annotations
+
+import asyncio
+import logging
+import os
+
+from ..config import get_config
+from ..memory import get_memory_manager
+from ..system import _is_ctf_target
+from .models import AgentState
+from .pipeline import PipelineEngine
+from .session import SessionData
+from .tool_defs import get_tool_definitions
+
+logger = logging.getLogger("airecon.agent")
+
+
+class _LifecycleMixin:
+    async def refresh_tool_registry(self) -> None:
+        engine_tools = await self.engine.discover_tools()
+        tools_ollama = self.engine.tools_to_ollama_format(engine_tools)
+        tools_ollama.extend(get_tool_definitions())
+
+        unique: dict[str, dict] = {}
+        for t in tools_ollama:
+            fn = t.get("function", {}) if isinstance(t, dict) else {}
+            name = fn.get("name")
+            if isinstance(name, str) and name:
+                unique[name] = t
+
+        rebuilt = list(unique.values())
+        if self._blocked_tools:
+            rebuilt = [
+                t for t in rebuilt
+                if t.get("function", {}).get("name") not in self._blocked_tools
+            ]
+
+        self._tools_ollama = rebuilt
+
+    async def initialize(
+        self,
+        target: str | None = None,
+        user_message: str | None = None,
+    ) -> None:
+        from . import loop as _loop_module
+
+        self.state.conversation = [
+            {"role": "system", "content": _loop_module.get_system_prompt(
+                target=target, user_message=user_message)}
+        ]
+
+        if _is_ctf_target(target, user_message):
+            self._ctf_mode = True
+            if self._override_max_iterations is None:
+                self._override_max_iterations = self._CTF_MAX_ITERATIONS
+
+            _ctf_cfg = get_config()
+            if self._adaptive_num_ctx == 0:
+                self._adaptive_num_ctx = _ctf_cfg.ollama_num_ctx_small
+            logger.info(
+                "CTF mode activated for target=%r — ctx=%d, max_iterations=%d",
+                target, self._adaptive_num_ctx, self._CTF_MAX_ITERATIONS,
+            )
+        await self.refresh_tool_registry()
+
+        if self.engine:
+            self.state.add_message(
+                "system", "[SYSTEM: EXECUTE_COMMAND_AVAILABLE=yes]")
+
+        from ..caido_client import CaidoClient
+        _caido_token = await CaidoClient._get_token()
+        self._caido_available: bool = bool(_caido_token)
+        if _caido_token:
+            self.state.add_message(
+                "system",
+                "[SYSTEM: CAIDO_PROXY=available port=48080] "
+                "Caido web proxy is running and capturing ALL HTTP traffic automatically. "
+                "Call caido_list_requests NOW (no scope setup needed) to retrieve captured "
+                "requests — this reveals real app endpoints, auth flows, cookies, hidden "
+                "parameters, and injection points that active scanning cannot find. "
+                "After reviewing captured requests, use caido_set_scope to focus future "
+                "captures, then periodically call caido_list_requests to check for new traffic."
+            )
+        else:
+            self.state.add_message(
+                "system",
+                "[SYSTEM: CAIDO_PROXY=unavailable] "
+                "Caido is not running/authenticated on host yet — do NOT call caido_* tools now and NEVER try 'caido-setup' via execute. "
+                "Ask user to start/login Caido externally, then verify with caido_intercept(action='status')."
+            )
+
+        logger.info("Agent initialized with %d tools", len(self._tools_ollama or []))
+
+        tool_names = [t["function"]["name"] for t in self._tools_ollama]
+        self.state.add_message(
+            "system", f"[SYSTEM: REGISTERED TOOLS]\n{', '.join(tool_names)}"
+        )
+
+        self._initial_messages = list(self.state.conversation)
+
+        _target = target or self.state.active_target
+        if _target:
+            try:
+                memory = get_memory_manager()
+                _memory_context = memory.get_context_for_small_model(
+                    target=_target,
+                    current_phase=self._session.current_phase if self._session else "RECON",
+                    max_tokens=2000,
+                )
+                if _memory_context:
+                    logger.info(
+                        "Memory augmentation: loaded context for %s (%d bytes)",
+                        _target, len(_memory_context)
+                    )
+                    self.state.add_message(
+                        "system",
+                        f"## MEMORY AUGMENTATION (from past sessions)\n{_memory_context}"
+                    )
+            except Exception as _mem_err:
+                logger.debug("Memory augmentation failed: %s", _mem_err)
+
+        _session_id = os.environ.get("AIRECON_SESSION_ID") if not self._is_subagent else None
+        if _session_id:
+            # Compatibility: tests patch airecon.proxy.agent.loop.load_session
+            # and expect initialize() to use that symbol.
+            self._session = _loop_module.load_session(_session_id) or SessionData(
+                session_id=_session_id, target=""
+            )
+            logger.info("Loaded session %s (target=%s)", _session_id, self._session.target)
+        else:
+            self._session = SessionData(target="")
+            logger.info("Created new session %s", self._session.session_id)
+        self._sync_recovery_state_from_session()
+        self._sync_token_usage_from_session()
+
+        self.pipeline = PipelineEngine(self._session)
+        if self._ctf_mode and self.pipeline:
+            self.pipeline.set_ctf_mode(True)
+
+    def reset(self) -> None:
+
+        if self._token_snapshot_task and not self._token_snapshot_task.done():
+            self._token_snapshot_task.cancel()
+        self._token_snapshot_task = None
+        self._token_snapshot_resave_requested = False
+        self.state = AgentState()
+        if self._initial_messages:
+            self.state.conversation = list(self._initial_messages)
+        self._executed_tool_counts.clear()
+        self._executed_cmd_hashes.clear()
+        self._executed_cmd_order.clear()
+        self._last_output_file = None
+        self._stagnation_iterations = 0
+        self._recent_tool_names.clear()
+        self._last_evidence_count = 0
+        self._watchdog_forced_calls = 0
+        self._adaptive_num_ctx = 0
+        self._vram_crash_count = 0
+        self._adaptive_num_predict_cap = 0
+
+        self._session = SessionData(target="")
+        self.pipeline = PipelineEngine(self._session)
+        if self._ctf_mode and self.pipeline:
+            self.pipeline.set_ctf_mode(True)
+
+    async def _reset_ollama_context(self) -> bool:
+        if not hasattr(self, "ollama") or not self.ollama:
+            return False
+
+        # Build summary first, then reuse across retries.
+        summary = self._build_recon_summary()
+        system_prompt = self._build_system_prompt_for_reset()
+        full_prompt = f"{system_prompt}\n\n{summary}"
+
+        last_error: Exception | None = None
+        for attempt in range(1, 4):
+            try:
+                success = await self.ollama.reset_context(full_prompt)
+                if success:
+                    logger.info(
+                        "Ollama context reset with recon summary (tokens: ~%d, attempt=%d)",
+                        len(full_prompt) // 4,
+                        attempt,
+                    )
+                    return True
+            except Exception as e:
+                last_error = e
+
+            if attempt < 3:
+                await asyncio.sleep(0.25 * attempt)
+
+        if last_error:
+            logger.warning("Ollama context reset failed after retries: %s", last_error)
+        else:
+            logger.warning("Ollama context reset failed after retries (no exception details)")
+
+        self._apply_local_context_fallback(reason="ollama reset failed")
+        return False
+
+    def _apply_local_context_fallback(self, reason: str = "") -> None:
+        prev_messages = len(self.state.conversation)
+        if prev_messages == 0:
+            return
+
+        _critical_ctx = self._build_critical_findings_context()
+        _handoff_ctx = self._build_handoff_summary()
+
+        target_messages = 12 if self._ctf_mode else 28
+        self.state.truncate_conversation(max_messages=target_messages)
+
+        if _handoff_ctx:
+            self.state.conversation.append({"role": "system", "content": _handoff_ctx})
+        if _critical_ctx:
+            self.state.conversation.append({"role": "system", "content": _critical_ctx})
+
+        before_used = int(self.state.token_usage.get("used", 0) or 0)
+        if before_used > 0:
+            self.state.token_usage["used"] = max(0, int(before_used * 0.45))
+
+        logger.warning(
+            "Local context fallback applied (%s): %d -> %d messages, token_used %d -> %d",
+            reason or "no-reason",
+            prev_messages,
+            len(self.state.conversation),
+            before_used,
+            int(self.state.token_usage.get("used", 0) or 0),
+        )
+
+    def _build_recon_summary(self) -> str:
+        if not self._session:
+            return "[No recon progress yet]"
+        
+        lines = [
+            "=== RECON PROGRESS SUMMARY ===",
+            f"Target: {self._session.target}",
+            f"Phase: {self._get_current_phase().value if self.pipeline else 'UNKNOWN'}",
+            f"Iteration: {self.state.iteration}/{self.state.max_iterations}",
+            "",
+            "--- DISCOVERIES ---",
+            f"Subdomains: {len(self._session.subdomains)} found",
+            f"Live Hosts: {len(self._session.live_hosts)} found",
+            f"Open Ports: {sum(len(p) for p in self._session.open_ports.values())} found",
+            f"URLs: {len(self._session.urls)} discovered",
+            f"Vulnerabilities: {len(self._session.vulnerabilities)} confirmed",
+            "",
+            "--- TOOLS RUN ---",
+            f"Tools used: {', '.join(list(self._session.tools_run)[:10])}{'...' if len(self._session.tools_run) > 10 else ''}",
+            "",
+            "--- RECENT FINDINGS ---",
+        ]
+        
+        # Add last 5 evidence items
+        recent_evidence = self.state.evidence_log[-5:] if self.state.evidence_log else []
+        for ev in recent_evidence:
+            if isinstance(ev, dict):
+                lines.append(f"- {ev.get('summary', ev.get('finding', 'Unknown'))[:100]}")
+        
+        if not recent_evidence:
+            lines.append("- No recent findings yet")
+        
+        lines.append("")
+        lines.append("[END SUMMARY - Continue testing from this point]")
+        
+        return "\n".join(lines)
+
+    def _build_system_prompt_for_reset(self) -> str:
+        return """[SYSTEM: AIRecon Security Testing Agent]
+You are an expert penetration tester conducting authorized security assessments.
+Your role: Discover vulnerabilities, validate findings, and create actionable reports.
+
+Rules:
+1. Stay in character as security tester
+2. Use tools methodically - recon → analysis → exploit → report
+3. Validate all findings before reporting
+4. Never hallucinate tools or results
+5. Ask for user input when blocked (CAPTCHA, TOTP, etc.)
+
+Current workflow: Follow phase transitions (RECON→ANALYSIS→EXPLOIT→REPORT)"""
+
+    def _check_ollama_context_pressure(self):
+        if not hasattr(self, 'ollama') or not self.ollama:
+            return
+        asyncio.create_task(self._check_and_reset_context())
+
+    async def _check_and_reset_context(self):
+        from ..ollama import _CONTEXT_RESET_THRESHOLD
+
+        import time
+        now = time.time()
+        
+        # Rate limit: check max once per 60 seconds
+        if not hasattr(self, '_last_context_check'):
+            self._last_context_check = 0.0
+        
+        if now - self._last_context_check < 60:
+            return
+        
+        self._last_context_check = now
+        
+        if not self.ollama:
+            return
+        
+        from . import loop as _loop_module
+
+        try:
+            async with _loop_module.aiohttp.ClientSession() as session:
+                async with session.get(
+                    f"{self.ollama._host}/api/ps",
+                    timeout=_loop_module.aiohttp.ClientTimeout(total=2),
+                ) as resp:
+                    if resp.status != 200:
+                        return
+                    ps = await resp.json()
+        except Exception:
+            return
+        
+        for model in ps.get('models', []):
+            if model.get('name') == self.ollama.model or self.ollama.model.split(':')[0] in model.get('name', ''):
+                context_len = int(model.get('context_length', 0) or 0)
+                used_estimate = int(self.state.token_usage.get("used", 0) or 0)
+
+                # IMPORTANT: /api/ps context_length is model context capacity (often static,
+                # e.g. 131072), not guaranteed live occupancy. Guard with local usage estimate
+                # to avoid false-positive reset loops on large-context models.
+                if context_len <= _CONTEXT_RESET_THRESHOLD or used_estimate < _CONTEXT_RESET_THRESHOLD:
+                    return
+
+                now = time.time()
+                last_reset = float(getattr(self, "_last_context_reset_ts", 0.0) or 0.0)
+                cfg = _loop_module.get_config()
+                _RESET_COOLDOWN_SECONDS = float(
+                    max(0, int(getattr(cfg, "agent_context_reset_cooldown_seconds", 300) or 0))
+                )
+                if now - last_reset < _RESET_COOLDOWN_SECONDS:
+                    logger.warning(
+                        "Context reset cooldown active (used=%d, ps_ctx=%d, remaining=%.0fs)",
+                        used_estimate,
+                        context_len,
+                        max(0.0, _RESET_COOLDOWN_SECONDS - (now - last_reset)),
+                    )
+                    return
+
+                logger.error(
+                    "OLLAMA CONTEXT CRITICAL: used=%d, ps_ctx=%d threshold=%d - resetting with summary injection",
+                    used_estimate,
+                    context_len,
+                    _CONTEXT_RESET_THRESHOLD,
+                )
+                self._last_context_reset_ts = now
+                reset_ok = await self._reset_ollama_context()
+                if not reset_ok:
+                    logger.warning(
+                        "Ollama reset unavailable; continued with local fallback compaction"
+                    )
+                return

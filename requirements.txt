@@ -11,3 +11,6 @@ playwright>=1.58.0
 ollama>=0.6.1
 cvss>=3.6
 duckduckgo-search>=8.1.1
+pyyaml>=6.0
+orjson>=3.9.0
+fastapi-cache2>=0.2.0

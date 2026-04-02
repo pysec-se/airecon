@@ -32,10 +32,7 @@ def test_extract_targets(workspace):
 
 
 def test_placeholder_replacement(workspace):
-    args = {
-        "url": "http://example.com/api",
-        "nested": [{"host": "test.com"}]
-    }
+    args = {"url": "http://example.com/api", "nested": [{"host": "test.com"}]}
 
     replaced = workspace._replace_placeholder_targets(args)
 
@@ -52,8 +49,9 @@ def test_normalize_tool_args_string_json(workspace):
 
 
 def test_save_tool_output(workspace, tmp_path, mocker):
-    mocker.patch("airecon.proxy.agent.workspace.get_workspace_root",
-                 return_value=tmp_path)
+    mocker.patch(
+        "airecon.proxy.agent.workspace.get_workspace_root", return_value=tmp_path
+    )
 
     # Save standard output creates a .txt and .json
     result = {"success": True, "result": {"stdout": "Open ports: 80, 443"}}
@@ -77,8 +75,9 @@ def test_save_tool_output(workspace, tmp_path, mocker):
 
 
 def test_save_tool_output_skipped_tools(workspace, tmp_path, mocker):
-    mocker.patch("airecon.proxy.agent.workspace.get_workspace_root",
-                 return_value=tmp_path)
+    mocker.patch(
+        "airecon.proxy.agent.workspace.get_workspace_root", return_value=tmp_path
+    )
 
     # Skip creating output txt for noisy tools, just save to command history
     result = {"success": True, "result": "Done"}

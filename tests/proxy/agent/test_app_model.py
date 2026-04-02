@@ -1,4 +1,5 @@
 """Tests for ApplicationModel (Priority 3: Application Model Builder)."""
+
 from __future__ import annotations
 
 import pytest
@@ -94,7 +95,9 @@ class TestUpdateFromResponse:
     def test_multiple_methods_on_same_endpoint(self, model: ApplicationModel) -> None:
         model.update_from_response("https://example.com/api/item", "GET", 200, {}, "")
         model.update_from_response("https://example.com/api/item", "POST", 201, {}, "")
-        model.update_from_response("https://example.com/api/item", "DELETE", 204, {}, "")
+        model.update_from_response(
+            "https://example.com/api/item", "DELETE", 204, {}, ""
+        )
         entry = model.resources["/api/item"]
         assert "GET" in entry["methods"]
         assert "POST" in entry["methods"]

@@ -352,5 +352,244 @@
       "readOnly bypass: find readOnly fields in Swagger schema — send them in write requests to test if backend enforces readOnly"
     ],
     "severity": "HIGH"
+  },
+  "path_traversal_evasion": {
+    "description": "Advanced Path Traversal — obfuscated directory traversal using encoding, Unicode, and protocol tricks",
+    "indicators": [
+      "..%2f",
+      "....//",
+      "%c0%ae",
+      "%c1%9c",
+      "..\\\\",
+      "..%ff",
+      "..%252f",
+      "%2e%2e",
+      "traversal",
+      "pathwalking"
+    ],
+    "test_vectors": [
+      "Double encoding: ?file=....//....//etc/passwd or %2e%2e%2f%2e%2e%2fetc/passwd — double encoding bypasses decode checks",
+      "Overlong UTF-8: ?file=....//....//etc/passwd with %c0%ae (overlong .) — Apache mod_alias bypass",
+      "Mixed encoding: ?path=/var/www/html/..%252f..%252fetc/passwd — double URL-encoding",
+      "Protocol tricks: ?file=public/../private/file.txt or ?path=/var/log/access.log%00 — null byte in some contexts",
+      "Backslash on Windows: ?file=C:\\windows\\system32\\config\\sam — mixed with forward slashes"
+    ],
+    "severity": "CRITICAL"
+  },
+  "api_graphql_introspection_bypass": {
+    "description": "GraphQL Introspection & Enumerations — schema discovery via field suggestions, directive abuse, and introspection bypass",
+    "indicators": [
+      "__typename",
+      "__schema",
+      "__directive",
+      "introspection",
+      "playground",
+      "depthlimit",
+      "complexity"
+    ],
+    "test_vectors": [
+      "Directive enumeration: {__schema{directives{name args{name type{name kind}}}}} — find hidden validation bypasses",
+      "Type introspection: {__schema{types{name kind fields{name args{name type{name kind}}}}}} — map entire schema structure",
+      "Field suggestion abuse: query{unknownField} — error hints reveal field names, types, and relationships",
+      "Introspection disabled bypass: send X-GraphQL-Force-Introspection: true or POST with variables {\"introspection\":true} — some configs honor headers",
+      "Alias enumeration: {user1:user(id:1){email} user2:user(id:2){email}...} — enumerate sensitive data via bulk queries"
+    ],
+    "severity": "HIGH"
+  },
+  "race_condition_toctOU": {
+    "description": "Time-of-Check Time-of-Use (TOCTOU) race conditions — concurrent requests exploit window between validation and execution",
+    "indicators": [
+      "concurrent",
+      "race",
+      "double-submit",
+      "optimistic",
+      "lock",
+      "mutex",
+      "concurrency"
+    ],
+    "test_vectors": [
+      "Coupon double redemption: send 100 identical POST /redeem-coupon requests simultaneously — race to use same code",
+      "Balance manipulation: send +100 transfer + -100 debit concurrently — race to exploit balance calculation window",
+      "File upload race: upload invalid file + rapidly send valid file with same name — check phase accepts invalid, write phase overwrites",
+      "Password reset race: send 50 concurrent password reset requests — bypass rate limiting, extract tokens via timing side-channel",
+      "PoC: curl -X POST /transfer -d 'amount=1000' & curl -X POST /transfer -d 'amount=-1000' & wait — observe race condition"
+    ],
+    "severity": "HIGH"
+  },
+  "http2_exploitation": {
+    "description": "HTTP/2 Protocol Exploits — stream manipulation, header compression attacks, and protocol downgrade bypass",
+    "indicators": [
+      "h2c",
+      "h2",
+      "priority",
+      "window",
+      "frame",
+      "settings",
+      "goaway",
+      "http/2"
+    ],
+    "test_vectors": [
+      "Header compression attack: send 1000 requests with unique headers triggering HPACK dynamic table growth — exhaust server memory",
+      "Stream priority manipulation: send PRIORITY frames to starve legitimate streams — cause denial of service",
+      "GOAWAY flood: send continuous GOAWAY frames with increasing last stream ID — break connection handling",
+      "HTTP/1.1 downgrade: connect with h2cUpgrade, then send HTTP/1.1 request — some servers process incorrectly",
+      "CONNECTION header injection: send 'Connection: X-Ghost-Header: evil' with 'X-Ghost-Header' in SETTINGS — some proxies leak headers"
+    ],
+    "severity": "HIGH"
+  },
+  "business_logic_flaws": {
+    "description": "Business Logic Flaws — authentication/authorization bypass via workflow manipulation and edge cases",
+    "indicators": [
+      "workflow",
+      "checkout",
+      "upgrade",
+      "subscription",
+      "promotion",
+      "loyalty",
+      "coupon",
+      "giftcard",
+      "invite"
+    ],
+    "test_vectors": [
+      "Price manipulation: add free item to cart, apply $100 gift card, cancel item — observe if gift card balance updates incorrectly",
+      "Invite code reuse: accept invite, create account, delete account, reuse same invite link — gift to other users",
+      "Subscription downgrade abuse: upgrade to premium, request refund immediately — some systems keep premium without payment",
+      "Sequential ID enumeration: GET /api/requests/1,2,3... — find non-sequential IDs in admin panels or internal tools",
+      "Time window exploitation: initiate refund after 48 hours but before processing completes — race business logic"
+    ],
+    "severity": "MEDIUM"
+  },
+  "resource_exhaustion_ddos": {
+    "description": "Resource Exhaustion Attacks — memory/CPU/flood attacks targeting specific implementation weaknesses",
+    "indicators": [
+      "billions",
+      "quadratic",
+      "exponential",
+      "resource",
+      "denial",
+      "flood",
+      "memory",
+      "cpu"
+    ],
+    "test_vectors": [
+      "XML Bomb (Billion Laughs): <!ENTITY a \"<!ENTITY b \"&a;&a;&a;&a;&a;...\">\"> — exponential entity expansion exhausts memory",
+      "ZIP Bomb: upload compressed archive with 100GB uncompressed content — exhaust disk/Memory on extraction",
+      "Slow POST attack: send Content-Length: 1000000 but transmit 1 byte per minute — exhaust connection pool",
+      "Hash collision: send JSON with 50000 keys that all hash to same bucket — O(n²) performance degradation",
+      "Regex DoS: send input triggering catastrophic backtracking in regex validation — CPU spike, timeout"
+    ],
+    "severity": "CRITICAL"
+  },
+  "jwt_jwe_encryption_bypass": {
+    "description": "JWT JWE Encryption Bypass — encrypted token manipulation without decryption key",
+    "indicators": [
+      "jwe",
+      "encrypted",
+      "recipients",
+      "cek",
+      "alg",
+      "enc"
+    ],
+    "test_vectors": [
+      "Recipients bypass: send token with multiple recipients, include self + admin — one recipient may have admin privileges",
+      "Empty ciphertext: send valid JWE header with empty/placeholder ciphertext — some implementations cache decrypt attempts",
+      "Alg confusion: send alg:AES-GCM with key derived from public info — exploit miscalculated encryption keys",
+      "kid injection in JWE: set kid to trigger key rotation or fallback to weak key — decrypt admin token"
+    ],
+    "severity": "HIGH"
+  },
+  "jwt_token_key_leak": {
+    "description": "JWT Key Exposure — RSA private key, HS256 secret, or JWKS endpoint misconfig enables token forgery",
+    "indicators": [
+      "jwks",
+      "publickey",
+      "privatekey",
+      "rsa",
+      "secret",
+      "env",
+      "dotenv"
+    ],
+    "test_vectors": [
+      "JWKS enumeration: GET /.well-known/jwks.json, /api/jwks, /auth/jwks — extract RSA public key for RS signature forging",
+      "Private key leak: search repos for 'private.key', 'jwt_secret', 'RS256' — extract signing key from config files",
+      "Fallback to HS256: if server accepts alg:HS256, use public RSA key as HMAC secret — sign arbitrary tokens",
+      "Environment variable extraction: probe /api/config, /api/v1/env, /.env.backup — leaked secrets enable token signing"
+    ],
+    "severity": "CRITICAL"
+  },
+  "grpc_injection": {
+    "description": "gRPC Protocol Injection — protobuf deserialization, reflection API abuse, and HTTP/2 header manipulation",
+    "indicators": [
+      "grpc",
+      "protobuf",
+      "reflection",
+      "descriptor",
+      "proto",
+      "bytebuffer"
+    ],
+    "test_vectors": [
+      "Reflection API: enable gRPC reflection, call ListServices() — discover undocumented services and methods",
+      "Protobuf deserialization: craft malicious .proto message with custom extension — RCE via deserialization gadget chain",
+      "HTTP/2 header injection: send :method, :path with gRPC content-type — some proxies forward incorrectly formatted frames",
+      "Empty message injection: send empty protobuf message to endpoint expecting full data — default values may grant access"
+    ],
+    "severity": "HIGH"
+  },
+  "oauth2_deep_exploitation": {
+    "description": "OAuth2/OpenID Connect Advanced Attacks — code exchange bypass, state manipulation, and PKCE bypass",
+    "indicators": [
+      "oauth",
+      "token_endpoint",
+      "authorization_endpoint",
+      "pkce",
+      "state",
+      "nonce"
+    ],
+    "test_vectors": [
+      "Code injection: intercept authorization code, replay to token endpoint with modified redirect_uri — bypass state cross-site forgery protection",
+      "State prediction: generate predictable state values, forge authorization URLs — execute pre-authenticated account takeover",
+      "PKCE code verifier reuse: reuse valid code_verifier after code exchange — if server doesn't invalidate, replay works",
+      "Nonce replay: use same nonce across multiple ID tokens — if not validated per-request, token reuse occurs"
+    ],
+    "severity": "HIGH"
+  },
+  "api_version_skewing": {
+    "description": "API Version Skewing — exploiting deprecated/multiple API versions for security bypass",
+    "indicators": [
+      "v1",
+      "v2",
+      "api-version",
+      "X-API-Version",
+      "accept-version",
+      "deprecate"
+    ],
+    "test_vectors": [
+      "Version downgrade: send /api/v2/users + X-API-Version: 1.0 — deprecated v1 may lack auth checks",
+      "Version inconsistency: request v2 endpoint but send v1 payload structure — version detection logic conflict",
+      "Accept header versioning: Accept: application/json; version=1 — some APIs read version from Accept, not path",
+      "Unpublished version: probe /api/v99, /api/alpha, /api/beta — developer branches may have debug modes or weak auth"
+    ],
+    "severity": "MEDIUM"
+  },
+  "semantic_sqli": {
+    "description": "Semantic SQL Injection — obfuscated SQL injection using case, encoding, and whitespace manipulation to bypass WAF",
+    "indicators": [
+      "union",
+      "select",
+      "from",
+      "where",
+      "information_schema",
+      "database",
+      "table",
+      "column"
+    ],
+    "test_vectors": [
+      "Case obfuscation: UniOn SeLeCt, uNiOn, UNION— some regex-based WAFs miss mixed case",
+      "Null byte injection: SELECT%00* FROM users — null byte in identifiers bypasses some filters",
+      "Comment manipulation: SE/**/LECT, ' OR 1=1 /*comment*/ — inline comments split keywords",
+      "Encoding bypass: %55NION %53ELECT (URL-encoded UNION SELECT), CHAR(85,78,73,79,78) — string-based bypass",
+      "Whitespace variants: \\n\\r\\t\\f\\v injection in SQL queries — different parsers handle whitespace inconsistently"
+    ],
+    "severity": "HIGH"
   }
 }

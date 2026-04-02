@@ -125,7 +125,8 @@ RUN go install -v github.com/projectdiscovery/httpx/cmd/httpx@latest && \
     go install -v github.com/pwnesia/dnstake/cmd/dnstake@latest && \
     go install -v github.com/hakluke/hakoriginfinder@latest && \
     go install -v github.com/DataDog/stratus-red-team/v2/cmd/stratus@latest 2>/dev/null || true && \
-    go install -v github.com/devploit/nomore403@latest 2>/dev/null || true
+    go install -v github.com/devploit/nomore403@latest && \
+    go install -v github.com/tomnomnom/anew@latest 2>/dev/null || true
 
 # ── Copy Go binaries to /usr/local/bin so they are always in default PATH ──
 # Ollama subprocess calls (which/command -v) don't always inherit custom PATH

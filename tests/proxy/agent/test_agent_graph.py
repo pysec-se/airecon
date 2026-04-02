@@ -17,6 +17,7 @@ from airecon.proxy.agent.models import AgentEvent
 
 # ── AgentNode / AgentEdge dataclasses ────────────────────────────────────────
 
+
 class TestAgentNodeDataclass:
     def test_basic_creation(self):
         node = AgentNode(id="n1", role=AgentRole.RECON, prompt_template="do recon")
@@ -24,7 +25,7 @@ class TestAgentNodeDataclass:
         assert node.role == AgentRole.RECON
         assert node.prompt_template == "do recon"
         assert node.max_iterations == 200  # default
-        assert node.depends_on == []       # default
+        assert node.depends_on == []  # default
 
     def test_custom_iterations_and_deps(self):
         node = AgentNode(
@@ -51,6 +52,7 @@ class TestAgentEdgeDataclass:
 
 
 # ── AgentGraph: add_node / add_edge ──────────────────────────────────────────
+
 
 class TestAgentGraphConstruction:
     def _make_graph(self):
@@ -99,11 +101,16 @@ class TestAgentGraphConstruction:
 
 # ── execution_order: topological sort ────────────────────────────────────────
 
+
 class TestExecutionOrder:
     def _linear_graph(self) -> AgentGraph:
         """a → b → c"""
         g = AgentGraph(target="t", ollama=None, engine=None)
-        for nid, role in [("a", AgentRole.RECON), ("b", AgentRole.ANALYZER), ("c", AgentRole.REPORTER)]:
+        for nid, role in [
+            ("a", AgentRole.RECON),
+            ("b", AgentRole.ANALYZER),
+            ("c", AgentRole.REPORTER),
+        ]:
             g.add_node(AgentNode(id=nid, role=role, prompt_template=""))
         g.add_edge("a", "b")
         g.add_edge("b", "c")
@@ -162,14 +169,16 @@ class TestExecutionOrder:
     def test_unknown_dependency_raises(self):
         """Node depends on a node not in the graph."""
         g = AgentGraph(target="t", ollama=None, engine=None)
-        node = AgentNode(id="x", role=AgentRole.RECON, prompt_template="",
-                         depends_on=["ghost"])
+        node = AgentNode(
+            id="x", role=AgentRole.RECON, prompt_template="", depends_on=["ghost"]
+        )
         g.add_node(node)
         with pytest.raises(ValueError, match="unknown node"):
             g.execution_order()
 
 
 # ── create_default_graph ──────────────────────────────────────────────────────
+
 
 class TestCreateDefaultGraph:
     def test_returns_agent_graph(self):
@@ -178,8 +187,13 @@ class TestCreateDefaultGraph:
 
     def test_has_expected_nodes(self):
         g = create_default_graph("example.com")
-        expected = {"recon_node", "analyzer_node", "exploiter_node",
-                    "specialist_sqli", "reporter_node"}
+        expected = {
+            "recon_node",
+            "analyzer_node",
+            "exploiter_node",
+            "specialist_sqli",
+            "reporter_node",
+        }
         assert set(g.nodes.keys()) == expected
 
     def test_execution_order_valid(self):
@@ -207,6 +221,7 @@ class TestCreateDefaultGraph:
 
 # ── AgentGraph.execute ────────────────────────────────────────────────────────
 
+
 class TestAgentGraphExecute:
     def _make_mock_loop(self, events: list[AgentEvent]) -> MagicMock:
         """Return a mock AgentLoop whose process_message is an async generator."""
@@ -229,10 +244,12 @@ class TestAgentGraphExecute:
         node = AgentNode(id="solo", role=AgentRole.RECON, prompt_template="run recon")
         g.add_node(node)
 
-        mock_loop = self._make_mock_loop([
-            AgentEvent(type="text", data={"content": "found stuff"}),
-            AgentEvent(type="done", data={}),
-        ])
+        mock_loop = self._make_mock_loop(
+            [
+                AgentEvent(type="text", data={"content": "found stuff"}),
+                AgentEvent(type="done", data={}),
+            ]
+        )
         shared_session = SessionData(target="test.com")
 
         with patch("airecon.proxy.agent.loop.AgentLoop", return_value=mock_loop):
@@ -252,9 +269,11 @@ class TestAgentGraphExecute:
         node = AgentNode(id="recon", role=AgentRole.RECON, prompt_template="")
         g.add_node(node)
 
-        mock_loop = self._make_mock_loop([
-            AgentEvent(type="text", data={"content": "hi"}),
-        ])
+        mock_loop = self._make_mock_loop(
+            [
+                AgentEvent(type="text", data={"content": "hi"}),
+            ]
+        )
 
         with patch("airecon.proxy.agent.loop.AgentLoop", return_value=mock_loop):
             events = []
@@ -267,6 +286,7 @@ class TestAgentGraphExecute:
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
+
 
 async def aiter(items):
     """Helper: convert a list to an async iterator."""

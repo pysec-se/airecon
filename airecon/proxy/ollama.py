@@ -1,11 +1,8 @@
-"""Async client for Ollama using the official Python SDK."""
-
 from __future__ import annotations
 
 import asyncio
 import logging
-import threading
-from typing import Any, AsyncIterator
+from typing import Any, AsyncIterator, Callable
 
 import ollama
 
@@ -13,8 +10,8 @@ from .config import get_config
 
 logger = logging.getLogger("airecon.ollama")
 
-# Ollama errors that must NOT be retried — retrying wastes 14s and the
-# model/context state won't change between attempts.
+_CONTEXT_RESET_THRESHOLD = 100000
+
 _PERMANENT_OLLAMA_ERRORS: frozenset[str] = frozenset([
     "model not found",
     "model is not loaded",
@@ -24,17 +21,10 @@ _PERMANENT_OLLAMA_ERRORS: frozenset[str] = frozenset([
     "no gpu",
 ])
 
-
 def _detect_model_capabilities_from_show(
     model_name: str,
     show_response: dict[str, Any] | Any,
 ) -> tuple[bool, bool]:
-    """Detect capabilities from Ollama `show` metadata.
-
-    We intentionally trust model metadata over name heuristics. This keeps
-    capability detection aligned with Ollama model definitions instead of
-    broad assumptions from tag names.
-    """
     data = show_response if isinstance(show_response, dict) else dict(show_response)
 
     capabilities = {
@@ -58,10 +48,6 @@ def _detect_model_capabilities_from_show(
         for cap in ("tools", "tool-calling", "function-calling")
     )
 
-    # AIRecon's tool loop relies on reasoning traces to validate tool calls.
-    # A model that supports tool-calling but produces no thinking output is
-    # disabled for safety — without reasoning traces the agent cannot verify
-    # whether a tool invocation is well-grounded.
     supports_native_tools = has_native_tools and supports_thinking
 
     logger.info(
@@ -73,12 +59,8 @@ def _detect_model_capabilities_from_show(
     )
     return supports_thinking, supports_native_tools
 
-
 class OllamaClient:
-    """Wrapper around the official ollama.AsyncClient."""
-    # Shared per-loop request gates keyed by (loop_id, host, model):
-    # prevents concurrent large-model inference spikes from parallel subagents.
-    _request_gate_lock = threading.Lock()
+
     _request_gates: dict[tuple[int, str, str], tuple[int, asyncio.Semaphore]] = {}
 
     def __init__(self, base_url: str | None = None,
@@ -88,15 +70,9 @@ class OllamaClient:
         self._host = host
         self.model = model or cfg.ollama_model
 
-        # Auto-detect model capabilities
         self._supports_thinking = cfg.ollama_supports_thinking
         self._supports_native_tools = cfg.ollama_supports_native_tools
 
-        # If config has auto-detect (True by default), run ONE metadata call.
-        # Only override capabilities when detection succeeds — on transient
-        # failure we keep the config default (True = optimistic/force-on) so
-        # a brief Ollama hiccup at startup does not silently disable thinking
-        # for the whole session.
         if cfg.ollama_supports_thinking is True or cfg.ollama_supports_native_tools is True:
             detected = self._detect_capabilities()
             if detected is not None:
@@ -106,8 +82,6 @@ class OllamaClient:
                 if cfg.ollama_supports_native_tools is True:
                     self._supports_native_tools = detected_tools
 
-        # Invariant: native tool-calling requires thinking traces for validation.
-        # Enforce regardless of how capabilities were set (config or detection).
         if not self._supports_thinking and self._supports_native_tools:
             logger.warning(
                 "native_tools=True requires thinking=True (AIRecon uses reasoning "
@@ -126,8 +100,140 @@ class OllamaClient:
         self._client = ollama.AsyncClient(
             host=host, timeout=cfg.ollama_timeout)
 
+        self._response_times_storage: list[float] = []
+        self._max_response_times = 20
+        self._slow_response_threshold = 30.0
+        self._critical_response_threshold = 60.0
+
+    async def reset_context(self, system_prompt: str | None = None) -> bool:
+        try:
+            if system_prompt:
+                # Re-inject system prompt to maintain context continuity
+                await self._client.chat(
+                    model=self.model,
+                    messages=[{"role": "system", "content": system_prompt}],
+                    keep_alive="10m",  # Keep model loaded for 10 minutes
+                )
+                logger.info("✓ Ollama context reset with system prompt re-injection")
+            else:
+                # Pure reset - empty messages
+                await self._client.chat(
+                    model=self.model,
+                    messages=[],
+                    keep_alive="10m",  # Keep model loaded for 10 minutes
+                )
+                logger.info("✓ Ollama context reset (empty)")
+            return True
+        except Exception as e:
+            logger.warning("Ollama context reset failed: %s", e)
+            return False
+
+    @property
+    def _response_times(self) -> list[float]:
+        if not hasattr(self, "_response_times_storage"):
+            self._response_times_storage = []
+        return self._response_times_storage
+
+    @_response_times.setter
+    def _response_times(self, value: list[float]) -> None:
+        self._response_times_storage = value
+
+    @property
+    def _max_response_times(self) -> int:
+        if not hasattr(self, "_max_response_times_value"):
+            self._max_response_times_value = 20
+        return self._max_response_times_value
+
+    @_max_response_times.setter
+    def _max_response_times(self, value: int) -> None:
+        self._max_response_times_value = value
+
+    @property
+    def _slow_response_threshold(self) -> float:
+        if not hasattr(self, "_slow_response_threshold_value"):
+            self._slow_response_threshold_value = 30.0
+        return self._slow_response_threshold_value
+
+    @_slow_response_threshold.setter
+    def _slow_response_threshold(self, value: float) -> None:
+        self._slow_response_threshold_value = value
+
+    @property
+    def _critical_response_threshold(self) -> float:
+        if not hasattr(self, "_critical_response_threshold_value"):
+            self._critical_response_threshold_value = 60.0
+        return self._critical_response_threshold_value
+
+    @_critical_response_threshold.setter
+    def _critical_response_threshold(self, value: float) -> None:
+        self._critical_response_threshold_value = value
+
+    def _get_adaptive_timeout(self) -> float:
+        model_lower = self.model.lower()
+
+        if any(x in model_lower for x in ["122b", "100b", "150b", "200b"]):
+            return 300.0
+
+        elif any(x in model_lower for x in ["70b", "80b", "90b"]):
+            return 180.0
+
+        elif any(x in model_lower for x in ["30b", "32b", "35b", "40b", "50b"]):
+            return 120.0
+
+        elif any(x in model_lower for x in ["7b", "8b", "9b", "10b", "11b", "12b", "13b", "14b"]):
+            return 180.0
+
+        elif any(x in model_lower for x in ["1b", "2b", "3b", "4b", "5b", "6b"]):
+            return 120.0
+
+        else:
+            return 90.0
+
+    def _record_response_time(self, response_time: float) -> None:
+        self._response_times.append(response_time)
+        if len(self._response_times) > self._max_response_times:
+            self._response_times.pop(0)
+
+    def _get_dynamic_timeout(self, operation: str = "inference") -> float:
+        base_timeout = self._get_adaptive_timeout()
+
+        if operation == "compression":
+            base_timeout = max(base_timeout, 120.0)
+
+        response_times = self._response_times
+        if len(response_times) >= 3:
+            avg_time = sum(response_times[-10:]) / min(len(response_times), 10)
+            max_time = max(response_times[-10:])
+
+            dynamic_timeout = max(avg_time * 3.0, max_time, base_timeout)
+
+            dynamic_timeout = min(dynamic_timeout, 600.0)
+
+            if dynamic_timeout > base_timeout * 1.5:
+                logger.warning(
+                    "Ollama response degradation detected: avg=%.1fs, max=%.1fs, "
+                    "base_timeout=%.0fs → dynamic_timeout=%.0fs",
+                    avg_time, max_time, base_timeout, dynamic_timeout
+                )
+
+            return dynamic_timeout
+
+        return base_timeout
+
+    def get_response_time_stats(self) -> dict[str, float]:
+        response_times = self._response_times
+        if not response_times:
+            return {"avg": 0.0, "min": 0.0, "max": 0.0, "count": 0}
+
+        recent = response_times[-10:]
+        return {
+            "avg": sum(recent) / len(recent),
+            "min": min(recent),
+            "max": max(recent),
+            "count": len(response_times),
+        }
+
     async def _get_request_gate(self) -> asyncio.Semaphore:
-        """Return a shared semaphore that bounds concurrent Ollama requests."""
         cfg = get_config()
         limit = max(
             1,
@@ -136,27 +242,21 @@ class OllamaClient:
         loop_id = id(asyncio.get_running_loop())
         key = (loop_id, self._host, self.model)
 
-        with self._request_gate_lock:
-            cached = self._request_gates.get(key)
-            if cached is None or cached[0] != limit:
-                gate = asyncio.Semaphore(limit)
-                self._request_gates[key] = (limit, gate)
-                logger.info(
-                    "Ollama concurrency gate initialized for %s (%s): %d",
-                    self.model,
-                    self._host,
-                    limit,
-                )
-            else:
-                gate = cached[1]
+        cached = self._request_gates.get(key)
+        if cached is None or cached[0] != limit:
+            gate = asyncio.Semaphore(limit)
+            self._request_gates[key] = (limit, gate)
+            logger.info(
+                "Ollama concurrency gate initialized for %s (%s): %d",
+                self.model,
+                self._host,
+                limit,
+            )
+        else:
+            gate = cached[1]
         return gate
 
     def _detect_capabilities(self) -> tuple[bool, bool] | None:
-        """Detect model capabilities via Ollama `show` metadata.
-
-        Returns (thinking, native_tools) on success, or None on any error.
-        Callers that receive None should keep their existing config defaults.
-        """
         try:
             sync_client = ollama.Client(host=self._host)
             show_response = sync_client.show(model=self.model)
@@ -182,11 +282,9 @@ class OllamaClient:
         return self._supports_native_tools
 
     async def close(self) -> None:
-        """Close client and unload model."""
         await self.unload_model()
 
     async def unload_model(self) -> None:
-        """Unload model from memory by setting keep_alive to 0."""
         try:
             logger.info("Unloading model %s...", self.model)
             await self._client.generate(model=self.model, prompt="", keep_alive=0)
@@ -195,7 +293,6 @@ class OllamaClient:
             logger.error("Failed to unload model: %s", e)
 
     async def health_check(self) -> bool:
-        """Check if Ollama is reachable."""
         try:
             await self._client.list()
             return True
@@ -207,13 +304,8 @@ class OllamaClient:
         messages: list[dict[str, Any]],
         max_retries: int = 3,
         options: dict[str, Any] | None = None,
+        operation: str = "compression",
     ) -> str:
-        """Non-streaming single completion for internal use (e.g. memory compression).
-
-        Returns the assistant message content as a plain string.
-        Retries up to max_retries times with exponential backoff on transient errors.
-        Raises RuntimeError if Ollama returns an unexpected response format after all retries.
-        """
         max_retries = max(0, max_retries)
         gate = await self._get_request_gate()
         async with gate:
@@ -227,9 +319,30 @@ class OllamaClient:
                     }
                     if options:
                         kwargs["options"] = options
-                    response = await self._client.chat(**kwargs)
 
-                    # Extract content with explicit validation
+                    timeout = self._get_dynamic_timeout(operation)
+                    start_time = asyncio.get_running_loop().time()
+
+                    response = await asyncio.wait_for(
+                        self._client.chat(**kwargs),
+                        timeout=timeout
+                    )
+
+                    response_time = asyncio.get_running_loop().time() - start_time
+                    self._record_response_time(response_time)
+
+                    if response_time > self._critical_response_threshold:
+                        logger.critical(
+                            "Ollama CRITICAL slow response: %.1fs (threshold: %.0fs) — "
+                            "Consider reducing load or switching to smaller model",
+                            response_time, self._critical_response_threshold
+                        )
+                    elif response_time > self._slow_response_threshold:
+                        logger.warning(
+                            "Ollama slow response: %.1fs (threshold: %.0fs)",
+                            response_time, self._slow_response_threshold
+                        )
+
                     content = None
                     if hasattr(response, "message") and response.message is not None:
                         content = response.message.content
@@ -253,6 +366,19 @@ class OllamaClient:
 
                     return content or ""
 
+                except asyncio.TimeoutError:
+
+                    logger.warning(
+                        "Ollama complete() timeout (%.0fs) for model %s (attempt %d/%d)",
+                        timeout, self.model, attempt + 1, max_retries + 1
+                    )
+                    if attempt < max_retries:
+                        wait = 2 ** (attempt + 1)
+                        await asyncio.sleep(wait)
+                        continue
+                    raise RuntimeError(
+                        f"Ollama timeout after {timeout:.0f}s for model {self.model}"
+                    )
                 except RuntimeError:
                     raise
                 except Exception as e:
@@ -266,7 +392,7 @@ class OllamaClient:
                         )
                     )
                     if is_transient and attempt < max_retries:
-                        wait = 2 ** (attempt + 1)  # 2s, 4s, 8s
+                        wait = 2 ** (attempt + 1)
                         logger.warning(
                             "Transient Ollama error in complete() (attempt %d/%d), retrying in %ss: %s",
                             attempt + 1, max_retries + 1, wait, e,
@@ -283,12 +409,8 @@ class OllamaClient:
         options: dict[str, Any] | None = None,
         think: bool = False,
         max_retries: int = 3,
+        stop_requested_fn: Callable[[], bool] | None = None,
     ) -> AsyncIterator[Any]:
-        """
-        Streaming chat completion using SDK.
-        Returns the raw chunk object from Ollama SDK.
-        Retries up to max_retries times on transient connection errors.
-        """
         kwargs: dict[str, Any] = {
             "model": self.model,
             "messages": messages,
@@ -302,13 +424,92 @@ class OllamaClient:
         if options:
             kwargs["options"] = options
 
+        _STOP_POLL = 2.0
+
         gate = await self._get_request_gate()
         async with gate:
             for attempt in range(max_retries + 1):
                 try:
-                    async for chunk in await self._client.chat(**kwargs):
+                    _chunk_timeout = get_config().ollama_chunk_timeout
+
+                    _overall_timeout = get_config().ollama_timeout
+                    _loop = asyncio.get_running_loop()
+                    _start_time = _loop.time()
+
+                    _stream = await self._client.chat(**kwargs)
+                    _aiter = _stream.__aiter__()
+                    _chunk_count = 0
+                    _elapsed = 0.0
+
+                    _next_fut: asyncio.Future | None = None
+                    _last_activity_time = _start_time
+
+                    while True:
+
+                        _current_time = _loop.time()
+                        if (_current_time - _start_time) > _overall_timeout:
+                            raise TimeoutError(
+                                f"Ollama overall timeout: request took longer than "
+                                f"{_overall_timeout:.0f}s"
+                            )
+
+                        if (_current_time - _last_activity_time) > 300:
+                            _inactive = _current_time - _last_activity_time
+                            logger.warning(
+                                "Ollama watchdog: No activity for %.0fs, cancelling request",
+                                _inactive,
+                            )
+                            if _next_fut is not None and not _next_fut.done():
+                                _next_fut.cancel()
+                            raise TimeoutError(
+                                "Ollama watchdog: No activity for 300s, request cancelled"
+                            )
+
+                        if stop_requested_fn and stop_requested_fn():
+                            if _next_fut is not None and not _next_fut.done():
+                                _next_fut.cancel()
+                            return
+
+                        if _next_fut is None:
+                            _next_fut = asyncio.ensure_future(_aiter.__anext__())
+
+                        _remaining = _chunk_timeout - _elapsed
+                        _wait = min(_STOP_POLL, _remaining) if _remaining > 0 else _STOP_POLL
+                        try:
+                            assert _next_fut is not None
+                            chunk = await asyncio.wait_for(
+                                asyncio.shield(_next_fut),
+                                timeout=_wait,
+                            )
+                        except StopAsyncIteration:
+                            _next_fut = None
+                            _last_activity_time = _loop.time()
+                            break
+                        except asyncio.TimeoutError:
+                            _elapsed += _wait
+                            if _elapsed >= _chunk_timeout:
+                                if _next_fut is not None and not _next_fut.done():
+                                    _next_fut.cancel()
+                                _next_fut = None
+                                raise TimeoutError(
+                                    f"Ollama stream timeout: no chunk received for "
+                                    f"{_chunk_timeout:.0f}s after {_chunk_count} chunks. "
+                                    "The model may be frozen or overloaded."
+                                ) from None
+
+                            continue
+                        _elapsed = 0.0
+                        _chunk_count += 1
+                        _last_activity_time = _loop.time()
+                        _next_fut = None
                         yield chunk
                     return
+
+                except TimeoutError:
+
+                    if _next_fut is not None and not _next_fut.done():
+                        _next_fut.cancel()
+                    raise
 
                 except ollama.ResponseError as e:
                     err_str = str(e.error)
@@ -316,21 +517,21 @@ class OllamaClient:
                         "invalid character '<'" in err_str
                         or "failed to parse JSON" in err_str
                     ):
-                        # HTML response = Ollama crashed or OOM — not retryable
+
                         raise ollama.ResponseError(
                             "Ollama returned an HTML error page instead of JSON. "
                             "This usually means Ollama crashed or ran out of memory. "
                             "Try: `systemctl restart ollama` or reduce `ollama_num_ctx` in config.",
                             status_code=e.status_code,
                         )
-                    # Permanent errors must not be retried
+
                     err_lower = err_str.lower()
                     if any(p in err_lower for p in _PERMANENT_OLLAMA_ERRORS):
                         logger.error("Permanent Ollama error (not retrying): %s", err_str)
                         raise
-                    # Other ResponseErrors (model loading, transient) → retry
+
                     if attempt < max_retries:
-                        wait = 2 ** (attempt + 1)  # 2s, 4s, 8s
+                        wait = 2 ** (attempt + 1)
                         logger.warning(
                             "Ollama ResponseError (attempt %d/%d), retrying in %ss: %s",
                             attempt + 1, max_retries + 1, wait, e.error,
@@ -344,6 +545,10 @@ class OllamaClient:
                     raise
 
                 except Exception as e:
+
+                    if _next_fut is not None and not _next_fut.done():
+                        _next_fut.cancel()
+                    _next_fut = None
                     err_str = str(e).lower()
                     is_transient = any(
                         k in err_str
@@ -359,7 +564,7 @@ class OllamaClient:
                         )
                     )
                     if is_transient and attempt < max_retries:
-                        wait = 2 ** (attempt + 1)  # 2s, 4s, 8s
+                        wait = 2 ** (attempt + 1)
                         logger.warning(
                             "Transient Ollama error (attempt %d/%d), retrying in %ss: %s",
                             attempt + 1, max_retries + 1, wait, e,

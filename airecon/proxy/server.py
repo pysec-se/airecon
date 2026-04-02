@@ -1,47 +1,266 @@
-"""FastAPI proxy server: bridges TUI client ↔ Ollama ↔ Docker Sandbox."""
-
 from __future__ import annotations
 
 import asyncio
+import contextlib
+import functools
+import ipaddress
 import json
 import logging
 import os
+import time
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any, AsyncIterator
+from urllib.parse import urlparse
 
-from fastapi import FastAPI
+import aiohttp
+
+from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 from sse_starlette.sse import EventSourceResponse
 
 from airecon._version import __version__ as _version
-
 from .agent import AgentLoop
 from .config import get_config
 from .docker import DockerEngine
+from .mcp import add_mcp_sse_server, list_mcp_servers, mcp_list_tools, set_mcp_enabled
 from .ollama import OllamaClient
+
+try:
+    import orjson
+    _USE_ORJSON = True
+except ImportError:
+    _USE_ORJSON = False
+
+class ORJSONResponse(JSONResponse):
+    def render(self, content: Any) -> bytes:
+        if _USE_ORJSON:
+            return orjson.dumps(content)
+        return json.dumps(content).encode("utf-8")
+
+try:
+    from fastapi_cache import FastAPICache
+    from fastapi_cache.decorator import cache
+    from fastapi_cache.backends.inmemory import InMemoryBackend
+    _USE_CACHE = True
+except ImportError:
+    _USE_CACHE = False
+    cache = None
+    FastAPICache = None
+    InMemoryBackend = None
+
+def _cache_or_noop(expire: int = 5):
+    def no_op_decorator(func):
+        return func
+
+    if not (_USE_CACHE and cache is not None and FastAPICache is not None):
+        return no_op_decorator
+
+    def conditional_cache_decorator(func):
+        @functools.wraps(func)
+        async def wrapper(*args, **kwargs):
+            try:
+                _ = FastAPICache._prefix  # type: ignore[union-attr]
+
+                cached_func = cache(expire=expire)(func)  # type: ignore[union-attr]
+                return await cached_func(*args, **kwargs)
+            except (AssertionError, AttributeError):
+
+                return await func(*args, **kwargs)
+        return wrapper
+
+    return conditional_cache_decorator
 
 logger = logging.getLogger("airecon.server")
 
-# Global instances
+
+def _is_local_or_unspecified_host(hostname: str) -> bool:
+    host = (hostname or "").strip().lower()
+    if host in {"", "localhost"}:
+        return True
+    try:
+        addr = ipaddress.ip_address(host)
+    except ValueError:
+        return False
+    return bool(addr.is_loopback or addr.is_unspecified)
+
 ollama_client: OllamaClient | None = None
 engine: DockerEngine | None = None
 agent: AgentLoop | None = None
-_chat_lock: asyncio.Lock | None = None
 
-# Skills cache — built once at startup, served on every /api/skills request.
-# Skills files don't change at runtime so there is no need to re-scan the
-# filesystem on each call (109 files × read_text = noticeable event-loop block).
+_agent_busy: bool = False
+_agent_busy_lock: asyncio.Lock | None = None
+_agent_done_event: asyncio.Event | None = None
+_agent_task: asyncio.Task | None = None
+
+_agent_failure_count: int = 0
+_agent_failure_cooldown_until: float = 0.0
+
+_HIGH_PRIORITY_PATHS = {"/api/status", "/api/progress"}
+_request_start_time: dict[str, float] = {}
+
+_ollama_health_failures: list[bool] = []
+_ollama_health_cooldown_until: float = 0.0
+_ollama_last_ok_at: float = 0.0
+_ollama_last_known_ok: bool = False
+
+_OLLAMA_STATUS_TIMEOUT_SECONDS: float = 3.5
+_OLLAMA_STICKY_OK_SECONDS: float = 120.0
+
 _skills_cache: list[dict] | None = None
+_skills_cache_lock: asyncio.Lock | None = None
 
+_mcp_probe_cache: dict[str, dict[str, Any]] = {}
+_mcp_probe_tasks: dict[str, asyncio.Task] = {}
+_mcp_probe_lock: asyncio.Lock | None = None
+_mcp_prewarm_task: asyncio.Task | None = None
+
+
+async def _refresh_agent_tool_registry() -> None:
+    if not agent:
+        return
+    refresh_fn = getattr(agent, "refresh_tool_registry", None)
+    if not callable(refresh_fn):
+        return
+    try:
+        result = refresh_fn()
+        if asyncio.iscoroutine(result):
+            await result
+    except Exception as e:
+        logger.debug("Agent tool registry refresh skipped: %s", e)
+
+def _get_agent_busy_lock() -> asyncio.Lock:
+    global _agent_busy_lock
+    if _agent_busy_lock is None:
+        _agent_busy_lock = asyncio.Lock()
+    return _agent_busy_lock
+
+def _get_skills_cache_lock() -> asyncio.Lock:
+    global _skills_cache_lock
+    if _skills_cache_lock is None:
+        _skills_cache_lock = asyncio.Lock()
+    return _skills_cache_lock
+
+
+def _get_mcp_probe_lock() -> asyncio.Lock:
+    global _mcp_probe_lock
+    if _mcp_probe_lock is None:
+        _mcp_probe_lock = asyncio.Lock()
+    return _mcp_probe_lock
+
+
+def _mcp_cfg_fingerprint(cfg: dict[str, Any]) -> str:
+    try:
+        return json.dumps(cfg, sort_keys=True, default=str)
+    except Exception:
+        return str(cfg)
+
+
+async def _run_mcp_probe(server_name: str, cfg: dict[str, Any], fingerprint: str) -> None:
+    status = "error"
+    tools: list[str] = []
+    tool_count = 0
+    total_tools = 0
+    error: str | None = "MCP probe did not complete"
+
+    try:
+        ok, info = await asyncio.wait_for(mcp_list_tools(server_name), timeout=45.0)
+        if ok:
+            raw_tools = info.get("tools", []) if isinstance(info, dict) else []
+            tool_names: list[str] = []
+            for t in raw_tools:
+                if isinstance(t, dict):
+                    n = t.get("name")
+                    if isinstance(n, str) and n.strip():
+                        tool_names.append(n.strip())
+            tools = tool_names
+            tool_count = len(tool_names)
+            # Use total_tools if available (from truncated response), otherwise fallback to tool_count
+            total_tools = info.get("total_tools") if isinstance(info, dict) and isinstance(info.get("total_tools"), int) else tool_count
+            status = "ready"
+            error = None
+        else:
+            status = "error"
+            error = str(info.get("error", "unknown error")) if isinstance(info, dict) else "unknown error"
+    except asyncio.TimeoutError:
+        status = "error"
+        error = "MCP startup timed out (>45s)"
+    except BaseException as e:
+        status = "error"
+        error = f"MCP probe crashed: {e}"
+    finally:
+        async with _get_mcp_probe_lock():
+            _mcp_probe_cache[server_name] = {
+                "fingerprint": fingerprint,
+                "status": status,
+                "tool_count": tool_count,
+                "total_tools": total_tools,
+                "tools": tools,
+                "tool_error": error,
+                "updated_at": time.time(),
+            }
+            _mcp_probe_tasks.pop(server_name, None)
+
+
+async def _ensure_mcp_probe(server_name: str, cfg: dict[str, Any]) -> None:
+    fingerprint = _mcp_cfg_fingerprint(cfg)
+    async with _get_mcp_probe_lock():
+        cached = _mcp_probe_cache.get(server_name)
+        if cached and cached.get("fingerprint") != fingerprint:
+            _mcp_probe_cache.pop(server_name, None)
+            cached = None
+
+        task = _mcp_probe_tasks.get(server_name)
+        if task and task.done():
+            _mcp_probe_tasks.pop(server_name, None)
+            task = None
+
+        if cached and cached.get("status") == "ready":
+            return
+
+        if task is None:
+            _mcp_probe_cache[server_name] = {
+                "fingerprint": fingerprint,
+                "status": "initializing",
+                "tool_count": None,
+                "tools": [],
+                "tool_error": None,
+                "updated_at": time.time(),
+            }
+            _mcp_probe_tasks[server_name] = asyncio.create_task(
+                _run_mcp_probe(server_name, cfg, fingerprint),
+                name=f"mcp-probe:{server_name}",
+            )
+
+
+async def _prewarm_mcp_servers(wait_timeout: float = 15.0) -> None:
+    servers = list_mcp_servers()
+    if not servers:
+        return
+
+    for name, cfg in sorted(servers.items()):
+        if not bool(cfg.get("enabled", True)):
+            continue
+        if cfg.get("url") or cfg.get("command"):
+            await _ensure_mcp_probe(name, cfg)
+
+    deadline = time.time() + wait_timeout
+    while time.time() < deadline:
+        async with _get_mcp_probe_lock():
+            pending = [t for t in _mcp_probe_tasks.values() if not t.done()]
+        if not pending:
+            break
+        await asyncio.sleep(0.2)
+
+    async with _get_mcp_probe_lock():
+        ready = sum(1 for v in _mcp_probe_cache.values() if str(v.get("status")) == "ready")
+        failed = sum(1 for v in _mcp_probe_cache.values() if str(v.get("status")) == "error")
+        init_left = sum(1 for v in _mcp_probe_cache.values() if str(v.get("status")) == "initializing")
+    logger.info("MCP prewarm: ready=%d error=%d initializing=%d", ready, failed, init_left)
 
 def _build_skills_cache_sync() -> list[dict]:
-    """Synchronous helper: scan skills dir and extract name/description/category.
-
-    Designed to run in a thread executor so it never blocks the event loop.
-    """
     skills_dir = Path(__file__).resolve().parent / "skills"
     if not skills_dir.exists():
         return []
@@ -60,77 +279,112 @@ def _build_skills_cache_sync() -> list[dict]:
                 if line and not line.startswith("<!--"):
                     description = line[:120]
                     break
-        except Exception:  # nosec B110
+        except Exception:
             pass
         result.append({"name": name, "description": description, "category": category})
     return result
 
+async def _get_skills_cache() -> list[dict]:
+    global _skills_cache
+
+    if _skills_cache is not None:
+        return _skills_cache
+
+    async with _get_skills_cache_lock():
+
+        if _skills_cache is not None:
+            return _skills_cache
+
+        _skills_cache = await asyncio.to_thread(_build_skills_cache_sync)
+        logger.info("Skills cache: %d skills loaded", len(_skills_cache))
+        return _skills_cache
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    """Startup/shutdown lifecycle."""
-    global ollama_client, engine, agent, _chat_lock, _skills_cache
+    global ollama_client, engine, agent, _mcp_prewarm_task
 
     if os.getenv("AIRECON_TEST_MODE") == "1":
-        if _chat_lock is None:
-            _chat_lock = asyncio.Lock()
         yield
         return
+
+    try:
+        from .memory import get_memory_manager
+        get_memory_manager()
+        logger.info("Memory database ready at ~/.airecon/memory/airecon.db")
+    except Exception as _mem_err:
+        logger.debug("Memory initialization skipped: %s", _mem_err)
+
+    if _USE_CACHE:
+        try:
+            FastAPICache.init(InMemoryBackend(), prefix="airecon-cache")  # type: ignore[union-attr]
+            logger.info("Response caching enabled (InMemoryBackend)")
+        except Exception as _cache_err:
+            logger.warning("Failed to initialize fastapi-cache2: %s", _cache_err)
 
     cfg = get_config()
     logger.info(f"Starting AIRecon Proxy on {cfg.proxy_host}:{cfg.proxy_port}")
     logger.info(f"  Ollama: {cfg.ollama_url} (model: {cfg.ollama_model})")
     logger.info(f"  Docker image: {cfg.docker_image}")
 
-    # Pre-build skills cache in thread executor so /api/skills is instant
-    # (109 × read_text on main event loop caused visible TUI lag).
-    _skills_cache = await asyncio.to_thread(_build_skills_cache_sync)
-    logger.info("  Skills cache: %d skills loaded", len(_skills_cache))
+    startup_failed = False
 
-    # Initialize clients
-    ollama_client = OllamaClient()
-    engine = DockerEngine()
-    agent = AgentLoop(ollama=ollama_client, engine=engine)
-
-    # Check Ollama connectivity
-    ollama_ok = await ollama_client.health_check()
-    logger.info(f"  Ollama status: {'✓ connected' if ollama_ok else '✗ unavailable'}")
-
-    # Ensure Docker image exists (auto-build if needed)
-    if cfg.docker_auto_build:
-        image_ok = await engine.ensure_image()
-        logger.info(f"  Docker image: {'✓ ready' if image_ok else '✗ failed'}")
-
-    # Start sandbox container
-    container_ok = await engine.start_container()
-    logger.info(f"  Container: {'✓ running' if container_ok else '✗ failed'}")
-
-    # Initialize agent (discover tools)
     try:
-        await agent.initialize()
-    except Exception as e:
-        logger.error(
-            f"Agent initialization failed: {e}. Marking agent unavailable.")
-        agent = None  # force 503 on /api/chat rather than silent broken state
 
-    _chat_lock = asyncio.Lock()
+        ollama_client = await asyncio.to_thread(OllamaClient)
+        engine = DockerEngine()
+        agent = AgentLoop(ollama=ollama_client, engine=engine)
+
+        ollama_ok = await ollama_client.health_check()
+        logger.info(f"  Ollama status: {'✓ connected' if ollama_ok else '✗ unavailable'}")
+
+        if cfg.docker_auto_build:
+            image_ok = await engine.ensure_image()
+            logger.info(f"  Docker image: {'✓ ready' if image_ok else '✗ failed'}")
+
+        container_ok = await engine.start_container()
+        logger.info(f"  Container: {'✓ running' if container_ok else '✗ failed'}")
+
+        try:
+            await agent.initialize()
+            try:
+                _mcp_prewarm_task = asyncio.create_task(
+                    _prewarm_mcp_servers(wait_timeout=20.0),
+                    name="mcp-prewarm",
+                )
+            except Exception as _mcp_err:
+                logger.warning("MCP prewarm scheduling failed: %s", _mcp_err)
+        except Exception as e:
+            logger.error(
+                f"Agent initialization failed: {e}. Marking agent unavailable.")
+            agent = None
+
+    except Exception as e:
+        logger.exception("Startup failed: %s", e)
+        startup_failed = True
 
     yield
 
-    if agent:
-        try:
-            logger.info("Saving session before shutdown...")
-            await agent.stop()
-            logger.info("Session saved successfully")
-        except Exception as e:
-            logger.error(f"Failed to save session during shutdown: {e}")
-    
-    if ollama_client:
-        await ollama_client.close()
-    if engine:
-        await engine.close()
-    logger.info("AIRecon Proxy shutdown complete")
+    if startup_failed:
+        logger.info("Skipping shutdown cleanup (startup failed)")
+    else:
+        if agent:
+            try:
+                logger.info("Saving session before shutdown...")
+                await agent.stop()
+                logger.info("Session saved successfully")
+            except Exception as e:
+                logger.error(f"Failed to save session during shutdown: {e}")
 
+        if _mcp_prewarm_task and not _mcp_prewarm_task.done():
+            _mcp_prewarm_task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await _mcp_prewarm_task
+
+        if ollama_client:
+            await ollama_client.close()
+        if engine:
+            await engine.close()
+        logger.info("AIRecon Proxy shutdown complete")
 
 app = FastAPI(
     title="AIRecon Proxy",
@@ -141,25 +395,64 @@ app = FastAPI(
 
 app.add_middleware(
     CORSMiddleware,
-    # Restrict to localhost only — this proxy is not meant to be internet-facing
+
     allow_origin_regex=r"https?://(localhost|127\.0\.0\.1)(:\d+)?",
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
+if os.environ.get("AIRECON_DEBUG"):
+    @app.middleware("http")
+    async def _log_requests(request: Request, call_next):
+        _t0 = time.monotonic()
+        _path = request.url.path
 
-# ─── Request/Response Models ─────────────────────────────────────────
+        _request_id = f"{_path}:{_t0}"
+        _request_start_time[_request_id] = _t0
+
+        try:
+            response = await call_next(request)
+            _ms = (time.monotonic() - _t0) * 1000
+
+            if _ms > 5000:
+                logger.warning(
+                    "SLOW REQUEST: %s %s → %d (%.0fms) — event loop may be saturated",
+                    request.method, _path, response.status_code, _ms,
+                )
+            else:
+                logger.info(
+                    "%s %s → %d  (%.0fms)",
+                    request.method, _path, response.status_code, _ms,
+                )
+
+            return response
+        finally:
+
+            _request_start_time.pop(_request_id, None)
 
 class ChatRequest(BaseModel):
     message: str = Field(..., max_length=100_000)
     stream: bool = True
 
-
 class FileAnalyzeRequest(BaseModel):
     file_path: str = Field(..., max_length=500)
-    file_content: str = Field(..., max_length=10_000_000)  # 10 MB
+    file_content: str = Field(..., max_length=10_000_000)
     task: str = Field(..., max_length=10_000)
     max_iterations: int = Field(30, ge=1, le=50)
+
+class UserInputResponse(BaseModel):
+    request_id: str
+    value: str = Field("", max_length=10_000)
+    cancelled: bool = False
+
+class MCPAddRequest(BaseModel):
+    url: str = Field(..., max_length=2000)
+    auth: str | None = Field(default=None, max_length=1000)
+    name: str | None = Field(default=None, max_length=100)
+
+
+class MCPToggleRequest(BaseModel):
+    name: str = Field(..., max_length=100)
 
 
 class StatusResponse(BaseModel):
@@ -168,18 +461,153 @@ class StatusResponse(BaseModel):
     docker: dict[str, Any]
     agent: dict[str, Any]
 
-
-# ─── Routes ──────────────────────────────────────────────────────────
-
 @app.get("/api/status")
-async def get_status() -> JSONResponse:
-    """Health check and connection status."""
-    ollama_ok = await ollama_client.health_check() if ollama_client else False
-    docker_ok = engine.is_connected if engine else False
+@_cache_or_noop(expire=5)
+async def get_status() -> ORJSONResponse:
+    global _ollama_health_failures, _ollama_health_cooldown_until
+    global _ollama_last_ok_at, _ollama_last_known_ok
+
+    ollama_ok = False
+    docker_ok = False
+    searxng_ok = False
+    import time
+
+    current_time = time.time()
+    in_cooldown = current_time < _ollama_health_cooldown_until
+    # Sticky status should only apply for transient probe issues (timeout/exception/cooldown),
+    # not for explicit "health_check returned False".
+    ollama_probe_soft_fail = False
+
+    if not in_cooldown and ollama_client:
+        try:
+            ollama_ok = bool(await asyncio.wait_for(
+                ollama_client.health_check(),
+                timeout=_OLLAMA_STATUS_TIMEOUT_SECONDS,
+            ))
+
+            _ollama_health_failures.append(not ollama_ok)
+            if len(_ollama_health_failures) > 10:
+                _ollama_health_failures.pop(0)
+
+            if ollama_ok:
+                _ollama_last_ok_at = current_time
+                _ollama_last_known_ok = True
+        except asyncio.TimeoutError:
+            ollama_probe_soft_fail = True
+            logger.debug(
+                "Ollama health check timed out (%.1fs) — using sticky status fallback when available",
+                _OLLAMA_STATUS_TIMEOUT_SECONDS,
+            )
+            _ollama_health_failures.append(True)
+            if len(_ollama_health_failures) > 10:
+                _ollama_health_failures.pop(0)
+
+            if sum(_ollama_health_failures[-10:]) >= 3:
+                _ollama_health_cooldown_until = current_time + 30.0
+                logger.warning(
+                    "Ollama health check circuit breaker tripped (%d/10 failures) — skipping for 30s",
+                    sum(_ollama_health_failures[-10:]),
+                )
+        except Exception as e:
+            ollama_probe_soft_fail = True
+            logger.debug("Ollama health check failed: %s", e)
+            _ollama_health_failures.append(True)
+            if len(_ollama_health_failures) > 10:
+                _ollama_health_failures.pop(0)
+
+            if sum(_ollama_health_failures[-10:]) >= 3:
+                _ollama_health_cooldown_until = current_time + 30.0
+                logger.warning(
+                    "Ollama health check circuit breaker tripped (%d/10 failures) — skipping for 30s",
+                    sum(_ollama_health_failures[-10:]),
+                )
+    elif in_cooldown:
+        ollama_probe_soft_fail = True
+        logger.debug("Ollama health check skipped (circuit breaker cooldown)")
+
+    if (
+        not ollama_ok
+        and ollama_probe_soft_fail
+        and _ollama_last_known_ok
+        and (current_time - _ollama_last_ok_at) <= _OLLAMA_STICKY_OK_SECONDS
+    ):
+        ollama_ok = True
+        logger.debug(
+            "Using sticky Ollama online status (last_success=%.1fs ago)",
+            current_time - _ollama_last_ok_at,
+        )
+
+    try:
+
+        if engine:
+            docker_ok = engine.is_connected
+    except Exception as e:
+        logger.debug("Docker status check failed: %s", e)
 
     cfg = get_config()
 
-    return JSONResponse({
+    searx_url = (cfg.searxng_url or "http://localhost:8080").rstrip("/")
+    searx_host = (urlparse(searx_url).hostname or "").lower()
+    searx_is_local = _is_local_or_unspecified_host(searx_host)
+
+    probe_responded = False
+    probe_unavailable = False
+    try:
+        async with aiohttp.ClientSession() as session:
+            async with session.get(
+                f"{searx_url}/healthz",
+                timeout=aiohttp.ClientTimeout(total=2),
+            ) as resp:
+                probe_responded = True
+                if resp.status == 200:
+                    body = (await resp.text()).strip().upper()
+                    searxng_ok = body == "OK"
+                elif resp.status in (404, 405):
+                    probe_unavailable = True
+                    searxng_ok = False
+                else:
+                    searxng_ok = False
+    except Exception as e:
+        logger.debug(
+            "SearXNG status check failed (%s): %r",
+            type(e).__name__,
+            e,
+        )
+        searxng_ok = False
+
+    if (
+        not searxng_ok
+        and searx_is_local
+        and (probe_unavailable or not probe_responded)
+    ):
+        try:
+            from .searxng import get_shared_manager
+
+            searxng_mgr = get_shared_manager()
+            searxng_ok = await searxng_mgr.is_running()
+        except Exception as e:
+            logger.debug("SearXNG manager fallback failed (%s): %r", type(e).__name__, e)
+
+    agent_stats = agent.get_stats() if agent else {}
+
+    caido_connected = False
+    try:
+        from .caido_client import CaidoClient
+
+        _token = await asyncio.wait_for(CaidoClient._get_token(), timeout=1.5)
+        caido_connected = bool(_token)
+    except Exception:
+        caido_connected = False
+
+    if agent and isinstance(agent_stats, dict):
+        caido_stats = agent_stats.get("caido")
+        if not isinstance(caido_stats, dict):
+            caido_stats = {"active": False, "findings_count": 0}
+            agent_stats["caido"] = caido_stats
+        caido_stats["active"] = bool(caido_stats.get("active", False) or caido_connected)
+        caido_stats["findings_count"] = int(caido_stats.get("findings_count", 0) or 0)
+
+    return ORJSONResponse({
         "status": "ok" if (ollama_ok and docker_ok) else "degraded",
         "ollama": {
             "connected": ollama_ok,
@@ -190,151 +618,543 @@ async def get_status() -> JSONResponse:
             "connected": docker_ok,
             "image": cfg.docker_image,
         },
-        "agent": agent.get_stats() if agent else {},
+        "searxng": {
+            "connected": searxng_ok,
+            "container": "airecon-searxng",
+            "url": cfg.searxng_url if cfg.searxng_url else "http://localhost:8080",
+        },
+        "agent": agent_stats,
     })
 
-
 @app.get("/api/progress")
-async def get_progress() -> JSONResponse:
-    """Real-time progress data: target, findings, tool counts, phase status."""
+async def get_progress():
     if not agent:
         return JSONResponse(
             {"error": "Agent not initialized"}, status_code=503)
     return JSONResponse(agent.get_progress())
 
+@app.get("/api/health")
+async def get_health() -> JSONResponse:
+    cfg = get_config()
+    health_status: dict[str, Any] = {
+        "status": "ok",
+        "timestamp": time.time(),
+        "components": {
+            "ollama": {"status": "disconnected", "details": {}},
+            "docker": {"status": "disconnected", "details": {}},
+            "agent": {"status": "inactive", "details": {}},
+        },
+    }
+
+    if ollama_client:
+        try:
+            ok = await asyncio.wait_for(ollama_client.health_check(), timeout=10.0)
+            health_status["components"]["ollama"]["status"] = "connected" if ok else "error"
+            health_status["components"]["ollama"]["details"] = {"model": cfg.ollama_model}
+        except asyncio.TimeoutError:
+            health_status["components"]["ollama"]["status"] = "timeout"
+            health_status["components"]["ollama"]["details"] = {"model": cfg.ollama_model}
+        except Exception as e:
+            health_status["components"]["ollama"]["status"] = "error"
+            health_status["components"]["ollama"]["details"] = {"error": str(e)}
+
+    if engine:
+        try:
+            connected = engine.is_connected
+            health_status["components"]["docker"]["status"] = "connected" if connected else "disconnected"
+            health_status["components"]["docker"]["details"] = {"image": cfg.docker_image}
+        except Exception as e:
+            health_status["components"]["docker"]["status"] = "error"
+            health_status["components"]["docker"]["details"] = {"error": str(e)}
+
+    if agent:
+        try:
+            stats = agent.get_stats()
+            health_status["components"]["agent"]["status"] = "active"
+            health_status["components"]["agent"]["details"] = {
+                "tool_executions": stats.get("tool_counts", {}).get("exec", 0),
+                "tokens_used": stats.get("token_usage", {}).get("used", 0),
+            }
+        except Exception as e:
+            health_status["components"]["agent"]["status"] = "error"
+            health_status["components"]["agent"]["details"] = {"error": str(e)}
+
+    return JSONResponse(health_status)
 
 @app.get("/api/tools")
-async def list_tools() -> JSONResponse:
-    """List available tools."""
+@_cache_or_noop(expire=30)
+async def list_tools() -> ORJSONResponse:
     if not agent or not agent._tools_ollama:
         if not engine:
-            return JSONResponse(
+            return ORJSONResponse(
                 {"tools": [], "error": "Agent not initialized"}, status_code=503)
         tools = await engine.discover_tools()
-        return JSONResponse({"count": len(tools), "tools": tools})
+        return ORJSONResponse({"count": len(tools), "tools": tools})
 
-    # Return the full list prepared for Ollama
-    # Convert manually to JSON-friendly format if needed
-    tools = agent._tools_ollama
-    return JSONResponse({
+    await _refresh_agent_tool_registry()
+    tools = agent._tools_ollama or []
+    return ORJSONResponse({
         "count": len(tools),
         "tools": tools,
     })
 
+@app.get("/api/mcp/list")
+async def mcp_list() -> ORJSONResponse:
+    servers = list_mcp_servers()
+
+    for name, cfg in sorted(servers.items()):
+        if not bool(cfg.get("enabled", True)):
+            continue
+        if cfg.get("url") or cfg.get("command"):
+            await _ensure_mcp_probe(name, cfg)
+
+    async with _get_mcp_probe_lock():
+        cache_snapshot = dict(_mcp_probe_cache)
+
+    now_ts = time.time()
+
+    items: list[dict[str, Any]] = []
+    initializing = 0
+    for name, cfg in sorted(servers.items()):
+        enabled = bool(cfg.get("enabled", True))
+        cached = cache_snapshot.get(name, {})
+
+        if not enabled:
+            status = "disabled"
+            init_age = 0.0
+        else:
+            status = str(cached.get("status") or "initializing")
+            updated_at = float(cached.get("updated_at") or now_ts)
+            init_age = max(0.0, now_ts - updated_at)
+
+            if status == "initializing" and init_age > 55.0:
+                status = "error"
+                cached = {
+                    **cached,
+                    "tool_error": "MCP startup is taking too long (>55s). Check command path and runtime dependencies.",
+                    "tool_count": 0,
+                    "tools": [],
+                    "total_tools": 0,
+                }
+
+            if status == "initializing":
+                initializing += 1
+
+        row: dict[str, Any] = {
+            "name": name,
+            "transport": "command" if cfg.get("command") else str(cfg.get("transport") or "http"),
+            "url": cfg.get("url"),
+            "command": cfg.get("command"),
+            "args": cfg.get("args", []),
+            "enabled": enabled,
+            "status": status,
+            "tool_count": cached.get("tool_count") if enabled else 0,
+            "total_tools": cached.get("total_tools") if enabled else 0,
+            "tools": cached.get("tools", []) if enabled else [],
+            "tool_error": cached.get("tool_error") if enabled else None,
+            "initializing_for": int(init_age) if status == "initializing" else 0,
+        }
+        items.append(row)
+
+    return ORJSONResponse({
+        "count": len(items),
+        "initializing": initializing,
+        "servers": items,
+    })
+
+
+@app.post("/api/mcp/add")
+async def mcp_add(request: MCPAddRequest) -> ORJSONResponse:
+    try:
+        added = add_mcp_sse_server(request.url.strip(), request.name, request.auth)
+        cfg_added = dict(added.get("config", {}))
+        if bool(cfg_added.get("enabled", True)):
+            await _ensure_mcp_probe(str(added.get("name", "")), cfg_added)
+    except ValueError as e:
+        return ORJSONResponse({"error": str(e)}, status_code=400)
+    except Exception as e:
+        return ORJSONResponse({"error": f"Failed to add MCP server: {e}"}, status_code=500)
+
+    await _refresh_agent_tool_registry()
+
+    return ORJSONResponse({"status": "ok", **added})
+
+
+@app.get("/api/mcp/tools/{name}")
+async def mcp_tools(name: str) -> ORJSONResponse:
+    servers = list_mcp_servers()
+    cfg = servers.get(name)
+    if not cfg:
+        return ORJSONResponse({"error": f"MCP server '{name}' not found"}, status_code=404)
+    if not bool(cfg.get("enabled", True)):
+        return ORJSONResponse({"error": f"MCP server '{name}' is disabled"}, status_code=400)
+
+    try:
+        ok, info = await asyncio.wait_for(mcp_list_tools(name), timeout=30.0)
+    except asyncio.TimeoutError:
+        return ORJSONResponse({"error": "MCP tools list timed out (>30s)"}, status_code=504)
+
+    if not ok:
+        return ORJSONResponse({"error": info.get("error", "unknown error") if isinstance(info, dict) else str(info)}, status_code=502)
+
+    tools = info.get("tools", []) if isinstance(info, dict) else []
+    total_tools = info.get("total_tools") if isinstance(info, dict) and isinstance(info.get("total_tools"), int) else len(tools)
+    truncated = bool(info.get("truncated")) if isinstance(info, dict) else False
+
+    return ORJSONResponse({
+        "name": name,
+        "count": len(tools),
+        "total_tools": total_tools,
+        "truncated": truncated,
+        "tools": tools
+    })
+
+
+@app.post("/api/mcp/enable")
+async def mcp_enable(request: MCPToggleRequest) -> ORJSONResponse:
+    if not set_mcp_enabled(request.name, True):
+        return ORJSONResponse({"error": f"MCP server '{request.name}' not found"}, status_code=404)
+
+    servers = list_mcp_servers()
+    cfg = servers.get(request.name) or {}
+    if cfg.get("url") or cfg.get("command"):
+        await _ensure_mcp_probe(request.name, cfg)
+    await _refresh_agent_tool_registry()
+    return ORJSONResponse({"status": "ok", "name": request.name, "enabled": True})
+
+
+@app.post("/api/mcp/disable")
+async def mcp_disable(request: MCPToggleRequest) -> ORJSONResponse:
+    if not set_mcp_enabled(request.name, False):
+        return ORJSONResponse({"error": f"MCP server '{request.name}' not found"}, status_code=404)
+
+    async with _get_mcp_probe_lock():
+        task = _mcp_probe_tasks.pop(request.name, None)
+        _mcp_probe_cache.pop(request.name, None)
+    if task and not task.done():
+        task.cancel()
+
+    await _refresh_agent_tool_registry()
+
+    return ORJSONResponse({"status": "ok", "name": request.name, "enabled": False})
+
 
 @app.get("/api/skills")
-async def list_skills() -> JSONResponse:
-    """List available skill .md files grouped by category.
-
-    Returns the pre-built cache (populated at startup).  If the cache is
-    missing for any reason (e.g. test environment without lifespan), fall back
-    to building it in a thread executor so the event loop is never blocked.
-    """
-    global _skills_cache
-    if _skills_cache is None:
-        # Restricted environments may not allow worker-thread execution.
-        if os.getenv("AIRECON_TEST_MODE") == "1":
-            _skills_cache = _build_skills_cache_sync()
-        else:
-            _skills_cache = await asyncio.to_thread(_build_skills_cache_sync)
-    return JSONResponse({"count": len(_skills_cache), "skills": _skills_cache})
-
+@_cache_or_noop(expire=60)
+async def list_skills() -> ORJSONResponse:
+    skills = await _get_skills_cache()
+    return ORJSONResponse({"count": len(skills), "skills": skills})
 
 @app.post("/api/chat", response_model=None)
 async def chat(request: ChatRequest) -> EventSourceResponse | JSONResponse:
-    """Send a message and get streaming response."""
+    global _agent_busy
+
     if not agent:
         return JSONResponse(
             {"error": "Agent not initialized"}, status_code=503)
+
+    async with _get_agent_busy_lock():
+        if _agent_busy:
+            return JSONResponse(
+                {
+                    "error": "Agent is currently busy with another session. "
+                             "Use /api/stop to interrupt it, then retry.",
+                    "busy": True,
+                },
+                status_code=409,
+            )
+        _agent_busy = True
 
     if request.stream:
         return EventSourceResponse(
             _stream_agent_events(request.message),
             media_type="text/event-stream",
         )
-    else:
-        # Non-streaming: collect all events
-        events = []
-        if _chat_lock:
-            async with _chat_lock:
-                async for event in agent.process_message(request.message):
-                    event_data = event.data if isinstance(
-                        event.data, dict) else {}
-                    events.append({"type": event.type, **event_data})
-        else:
-            async for event in agent.process_message(request.message):
-                event_data = event.data if isinstance(event.data, dict) else {}
-                events.append({"type": event.type, **event_data})
-        return JSONResponse({"events": events})
 
+    events: list[dict[str, Any]] = []
+    try:
+        async for event in agent.process_message(request.message):
+            event_data = event.data if isinstance(event.data, dict) else {}
+            events.append({"type": event.type, **event_data})
+    finally:
+        _agent_busy = False
+    return ORJSONResponse({"events": events})
 
 async def _stream_agent_events(message: str) -> AsyncIterator[dict]:
-    """Stream agent events as SSE."""
+    global _agent_busy, _agent_done_event, _agent_task, _agent_failure_count
+
     if not agent:
+        _agent_failure_count += 1
         yield {
             "event": "error",
             "data": json.dumps({
                 "type": "error",
-                "message": "Agent not initialized"
-            })
+                "message": "Agent not initialized",
+            }),
         }
         return
 
-    _agent = agent  # capture non-None reference for nested function
-    async def _process():
-        async for event in _agent.process_message(message):
-            event_data = event.data if isinstance(event.data, dict) else {}
-            yield {
-                "event": event.type,
-                "data": json.dumps({"type": event.type, **event_data}, default=str),
-            }
+    _agent_busy = True
+    _agent_done_event = asyncio.Event()
 
-    if _chat_lock:
-        async with _chat_lock:
-            async for item in _process():
+    _agent = agent
+    queue: asyncio.Queue[dict] = asyncio.Queue(maxsize=512)
+    done_event = _agent_done_event
+    _overflow_count = 0
+    _last_event_time = time.time()
+
+    async def _run() -> None:
+        nonlocal _overflow_count, _last_event_time
+        global _agent_busy, _agent_failure_count
+
+        try:
+            _IDLE_SOFT_SECONDS = float(os.environ.get("AIRECON_AGENT_IDLE_SOFT_TIMEOUT", "600"))
+            _IDLE_HARD_SECONDS = float(os.environ.get("AIRECON_AGENT_IDLE_HARD_TIMEOUT", "1800"))
+            _IDLE_POLL_SECONDS = float(os.environ.get("AIRECON_AGENT_IDLE_POLL", "30"))
+            _IDLE_WARN_INTERVAL_SECONDS = float(os.environ.get("AIRECON_AGENT_IDLE_WARN_INTERVAL", "120"))
+
+            if _IDLE_HARD_SECONDS < _IDLE_SOFT_SECONDS:
+                _IDLE_HARD_SECONDS = _IDLE_SOFT_SECONDS
+            _IDLE_POLL_SECONDS = max(0.5, _IDLE_POLL_SECONDS)
+
+            agen = _agent.process_message(message)
+            _last_agent_event_time = time.time()
+            _last_idle_warn = 0.0
+            _next_event_task: asyncio.Task | None = None
+
+            try:
+                while True:
+                    if _next_event_task is None:
+                        _next_event_task = asyncio.ensure_future(agen.__anext__())
+
+                    try:
+                        event = await asyncio.wait_for(
+                            asyncio.shield(_next_event_task),
+                            timeout=_IDLE_POLL_SECONDS,
+                        )
+                        _next_event_task = None
+                    except asyncio.TimeoutError:
+                        now = time.time()
+                        idle_for = now - _last_agent_event_time
+
+                        if idle_for >= _IDLE_HARD_SECONDS:
+                            raise asyncio.TimeoutError(
+                                f"agent idle {idle_for:.1f}s exceeded hard timeout {_IDLE_HARD_SECONDS:.1f}s"
+                            )
+
+                        if (
+                            idle_for >= _IDLE_SOFT_SECONDS
+                            and (now - _last_idle_warn) >= _IDLE_WARN_INTERVAL_SECONDS
+                        ):
+                            _last_idle_warn = now
+                            warn_msg = (
+                                f"Agent idle {idle_for:.1f}s (soft timeout {_IDLE_SOFT_SECONDS:.1f}s). "
+                                "Still waiting for tool/LLM output..."
+                            )
+                            logger.warning(warn_msg)
+                            try:
+                                queue.put_nowait({
+                                    "event": "progress",
+                                    "data": json.dumps({
+                                        "type": "progress",
+                                        "message": warn_msg,
+                                    }),
+                                })
+                            except asyncio.QueueFull:
+                                pass
+                        continue
+                    except StopAsyncIteration:
+                        break
+
+                    event_data = event.data if isinstance(event.data, dict) else {}
+                
+                    item = {
+                        "event": event.type,
+                        "data": json.dumps(
+                            {"type": event.type, **event_data}, default=str
+                        ),
+                    }
+                    _last_event_time = time.time()
+                    _last_agent_event_time = _last_event_time
+                    try:
+                        queue.put_nowait(item)
+                    except asyncio.QueueFull:
+                        _overflow_count += 1
+
+                        if _overflow_count <= 3:
+                            logger.warning(
+                                f"SSE queue full (overflow #{_overflow_count}) — "
+                                "dropping event. Client may be disconnected or slow."
+                            )
+
+                        if _overflow_count == 10:
+                            # Ensure terminal overflow error can be enqueued.
+                            # If queue is full, drop one oldest buffered item first.
+                            try:
+                                _ = queue.get_nowait()
+                            except asyncio.QueueEmpty:
+                                pass
+
+                            try:
+                                queue.put_nowait({
+                                    "event": "error",
+                                    "data": json.dumps({
+                                        "type": "error",
+                                        "message": "SSE queue overflow — client too slow or disconnected"
+                                    }),
+                                })
+                            except asyncio.QueueFull:
+                                pass
+            finally:
+                if _next_event_task and not _next_event_task.done():
+                    _next_event_task.cancel()
+                    with contextlib.suppress(asyncio.CancelledError, Exception):
+                        await _next_event_task
+        except asyncio.TimeoutError as _timeout_err:
+
+            logger.error(
+                "Agent idle hard-timeout triggered: %s. "
+                "This usually means Ollama/tool execution is hung with no new events.",
+                _timeout_err,
+            )
+            _agent_failure_count += 1
+            try:
+                queue.put_nowait({
+                    "event": "error",
+                    "data": json.dumps({
+                        "type": "error",
+                        "message": "Agent idle hard-timeout — check Ollama connectivity and long-running tool execution"
+                    }),
+                })
+            except asyncio.QueueFull:
+
+                pass
+        except asyncio.CancelledError:
+            logger.warning("Agent task was cancelled")
+            try:
+                queue.put_nowait({
+                    "event": "error",
+                    "data": json.dumps(
+                        {"type": "error", "message": "Agent task was cancelled"}
+                    ),
+                })
+            except asyncio.QueueFull:
+
+                pass
+        except Exception as _exc:
+            logger.error(
+                "process_message raised uncaught exception: %s", _exc, exc_info=True
+            )
+            _agent_failure_count += 1
+            try:
+                queue.put_nowait({
+                    "event": "error",
+                    "data": json.dumps(
+                        {"type": "error", "message": f"Agent error: {_exc}"}
+                    ),
+                })
+            except asyncio.QueueFull:
+
+                pass
+        finally:
+            _agent_busy = False
+            done_event.set()
+
+    _agent_task = asyncio.create_task(_run(), name="airecon-agent")
+
+    _SSE_HEARTBEAT_INTERVAL = 15.0
+    _SSE_POLL_INTERVAL = 0.5
+    _MAX_STREAM_TIME = int(os.environ.get("AIRECON_SSE_MAX_STREAM_TIME", "7200"))
+
+    try:
+        start_time = time.time()
+        _last_heartbeat = start_time
+        _last_event_time = start_time
+
+        while True:
+            now = time.time()
+
+            if now - start_time > _MAX_STREAM_TIME:
+                logger.warning("SSE stream timed out after 30 minutes")
+                _agent_failure_count += 1
+                break
+
+            if _agent_task.done() and not _agent_task.cancelled():
+                try:
+                    _agent_task.result()
+                except Exception as _task_err:
+                    logger.error(f"Agent background task failed: {_task_err}")
+                    _agent_failure_count += 1
+                if queue.empty():
+                    break
+
+            try:
+                item = await asyncio.wait_for(
+                    queue.get(), timeout=_SSE_POLL_INTERVAL
+                )
                 yield item
-    else:
-        async for item in _process():
-            yield item
+                _last_event_time = now
+                _last_heartbeat = now
+            except asyncio.TimeoutError:
 
+                if now - _last_event_time > 300:
+                    logger.warning(
+                        f"SSE stream stuck — no events for 5 minutes. "
+                        f"Agent task done={_agent_task.done() if _agent_task else 'N/A'}"
+                    )
+
+                if now - _last_heartbeat >= _SSE_HEARTBEAT_INTERVAL:
+                    yield {"event": "ping", "data": "{}"}
+                    _last_heartbeat = now
+            except StopAsyncIteration:
+
+                logger.debug("SSE client disconnected — stopping generator (agent task continues)")
+                break
+            except asyncio.CancelledError:
+
+                logger.info(
+                    "SSE stream cancelled by client (normal disconnect). "
+                    "Agent task continues running in background."
+                )
+                raise
+    except asyncio.CancelledError:
+
+        logger.info(
+            "SSE generator cancelled (client disconnected). "
+            "Agent background task continues autonomously."
+        )
+        raise
+    finally:
+
+        logger.debug(
+            f"SSE generator ended — agent task continues autonomously "
+            f"(overflows={_overflow_count})"
+        )
 
 @app.post("/api/file-analyze", response_model=None)
 async def file_analyze(request: FileAnalyzeRequest) -> EventSourceResponse | JSONResponse:
-    """Run a fresh mini-agent to analyze a file without interrupting the main recon agent.
-
-    Creates an independent AgentLoop (not the global one) so both can run
-    concurrently.  The mini-agent is limited to read/analysis tools and capped
-    at max_iterations to prevent runaway usage.
-    """
     if not ollama_client or not engine:
-        return JSONResponse({"error": "Services not ready"}, status_code=503)
+        return ORJSONResponse({"error": "Services not ready"}, status_code=503)
 
     return EventSourceResponse(
         _stream_file_agent_events(request),
         media_type="text/event-stream",
     )
 
-
 async def _stream_file_agent_events(
     request: FileAnalyzeRequest,
 ) -> AsyncIterator[dict]:
-    """Stream events from a mini file-analysis AgentLoop."""
+    #global _agent_failure_count
     mini_agent = AgentLoop(ollama_client, engine)  # type: ignore[arg-type]
-    mini_agent._is_subagent = True  # prevent loading/overwriting parent session via AIRECON_SESSION_ID
+    mini_agent._is_subagent = True
     mini_agent._override_max_iterations = request.max_iterations
-    # Block destructive/recon-heavy tools — file analysis only needs read/exec
+
     mini_agent._blocked_tools = {
         "spawn_agent",
         "quick_fuzz", "advanced_fuzz", "deep_fuzz", "schemathesis_fuzz",
         "caido_automate", "caido_send_request",
     }
 
-    # Extract target from file_path so tool outputs land in the correct
-    # workspace folder instead of the fallback "unknown/" directory.
-    # Handles paths like:
-    #   workspace/example.com/output/file.txt  → "example.com"
-    #   /workspace/example.com/output/file.txt → "example.com"
-    #   example.com/output/file.txt            → "example.com"
     _fp_parts = Path(request.file_path.lstrip("/")).parts
     _target: str | None = None
     for _i, _part in enumerate(_fp_parts):
@@ -347,8 +1167,6 @@ async def _stream_file_agent_events(
     if _target:
         mini_agent.state.active_target = _target
 
-    # Embed a snippet of file content in the system prompt so the model has
-    # immediate context.  If the file is large, the agent can use read_file.
     _MAX_EMBED = 8_000
     file_snippet = request.file_content[:_MAX_EMBED]
     truncation_note = (
@@ -357,7 +1175,6 @@ async def _stream_file_agent_events(
         if len(request.file_content) > _MAX_EMBED else ""
     )
 
-    # Sanitize file_path before embedding in prompt (strip newlines, limit length)
     safe_file_path = request.file_path.replace("\n", " ").replace("\r", " ")[:500]
     file_context_message = (
         "You are a security file analyzer. Your sole task is to analyze "
@@ -398,53 +1215,56 @@ async def _stream_file_agent_events(
         except Exception as stop_err:
             logger.debug("Mini-agent cleanup failed: %s", stop_err)
 
-
 @app.post("/api/reset")
 async def reset_conversation() -> JSONResponse:
-    """Reset conversation history."""
     if agent:
         agent.reset()
-    return JSONResponse({"status": "ok", "message": "Conversation reset"})
-
+    return ORJSONResponse({"status": "ok", "message": "Conversation reset"})
 
 @app.get("/api/history")
 async def get_history() -> JSONResponse:
-    """Get conversation history (without system prompt)."""
     if not agent:
-        return JSONResponse({"messages": []})
+        return ORJSONResponse({"messages": []})
 
-    # Skip system message
+    if agent._session:
+        session_id = agent._session.session_id
+        from .agent.session import load_session
+        saved_session = load_session(session_id)
+
+        if saved_session and hasattr(saved_session, 'conversation') and saved_session.conversation:
+
+            messages = [
+                msg for msg in saved_session.conversation
+                if msg.get("role") != "system"
+            ]
+            logger.debug(f"Loaded {len(messages)} history messages from session {session_id}")
+            return ORJSONResponse({"messages": messages, "source": "session_file"})
+
     messages = [
         msg for msg in (agent.state.conversation if hasattr(agent, "state") else [])
         if msg.get("role") != "system"
     ]
-    return JSONResponse({"messages": messages})
-
+    return ORJSONResponse({"messages": messages, "source": "agent_memory"})
 
 @app.post("/api/unload")
 async def unload_model_endpoint() -> JSONResponse:
-    """Unload the Ollama model (release VRAM)."""
     if ollama_client:
         await ollama_client.unload_model()
-        return JSONResponse({"status": "ok", "message": "Model unloaded"})
+        return ORJSONResponse({"status": "ok", "message": "Model unloaded"})
     return JSONResponse(
         {"status": "error", "message": "Ollama client not initialized"}, status_code=503)
 
-
 @app.get("/api/sessions")
 async def list_sessions_endpoint() -> JSONResponse:
-    """List all saved sessions, sorted by most recently updated."""
     from .agent.session import list_sessions
-    return JSONResponse({"sessions": list_sessions()})
-
+    return ORJSONResponse({"sessions": list_sessions()})
 
 @app.get("/api/session/current")
-async def current_session() -> JSONResponse:
-    """Return the currently active session info."""
+async def current_session():
     if not agent or not agent._session:
-        return JSONResponse({"session": None})
+        return ORJSONResponse({"session": None})
     s = agent._session
-    return JSONResponse({
+    return ORJSONResponse({
         "session": {
             "session_id": s.session_id,
             "target": s.target,
@@ -453,40 +1273,73 @@ async def current_session() -> JSONResponse:
             "subdomains": len(s.subdomains),
             "live_hosts": len(s.live_hosts),
             "vulnerabilities": len(s.vulnerabilities),
+
         }
     })
 
-
 @app.post("/api/stop")
 async def stop_agent() -> JSONResponse:
-    """Force stop the agent and all running tools."""
+    global _agent_busy
     if agent:
         await agent.stop()
+
+        _agent_busy = False
+        if _agent_done_event:
+            _agent_done_event.set()
         return JSONResponse(
             {"status": "ok", "message": "Agent and tools stopped"})
     return JSONResponse(
         {"status": "error", "message": "Agent not initialized"}, status_code=503)
 
+@app.get("/api/user-input/pending")
+async def get_pending_user_input() -> JSONResponse:
+    if not agent or not getattr(agent, "_user_input_event", None):
+        return ORJSONResponse({"pending": False})
+    return ORJSONResponse({
+        "pending": True,
+        "request_id": getattr(agent, "_user_input_request_id", ""),
+        "prompt": getattr(agent, "_user_input_prompt", ""),
+        "input_type": getattr(agent, "_user_input_type", "text"),
+    })
+
+@app.post("/api/user-input")
+async def submit_user_input(request: UserInputResponse) -> JSONResponse:
+    if not agent:
+        return JSONResponse(
+            {"error": "Agent not initialized"}, status_code=503)
+    evt = getattr(agent, "_user_input_event", None)
+    if evt is None:
+        return JSONResponse(
+            {"error": "No pending input request"}, status_code=400)
+    if getattr(agent, "_user_input_request_id", None) != request.request_id:
+        return JSONResponse(
+            {"error": "request_id mismatch"}, status_code=400)
+
+    agent._user_input_value = request.value
+    agent._user_input_cancelled = request.cancelled
+    evt.set()
+    return ORJSONResponse({"status": "ok"})
 
 def create_app() -> FastAPI:
-    """Factory function for creating the app."""
     return app
 
-
 def run_server() -> None:
-    """Run the proxy server."""
     import uvicorn
 
     cfg = get_config()
 
-    # Logging is already configured in __main__.py or logger.py
-    # We just run uvicorn
+    try:
+        uvicorn.run(
+            "airecon.proxy.server:app",
+            host=cfg.proxy_host,
+            port=cfg.proxy_port,
+            log_level="critical",
+            log_config=None,
+            reload=False,
+        )
+    except KeyboardInterrupt:
+        logger.info("Proxy server interrupted by user")
+    except Exception as e:
+        logger.exception("Proxy server crashed: %s", e)
 
-    uvicorn.run(
-        "airecon.proxy.server:app",
-        host=cfg.proxy_host,
-        port=cfg.proxy_port,
-        log_level="critical",
-        log_config=None,
-        reload=False,
-    )
+        raise
