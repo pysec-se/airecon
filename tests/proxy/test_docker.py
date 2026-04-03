@@ -24,9 +24,12 @@ async def test_ensure_image_skip_if_exists(docker_engine, mocker):
     assert result is True
     # create_subprocess_exec should be called with "docker image inspect"
     asyncio.create_subprocess_exec.assert_called_with(
-        "docker", "image", "inspect", docker_engine.IMAGE_NAME,
+        "docker",
+        "image",
+        "inspect",
+        docker_engine.IMAGE_NAME,
         stdout=asyncio.subprocess.DEVNULL,
-        stderr=asyncio.subprocess.DEVNULL
+        stderr=asyncio.subprocess.DEVNULL,
     )
 
 
@@ -34,14 +37,14 @@ async def test_ensure_image_skip_if_exists(docker_engine, mocker):
 async def test_start_container_success(docker_engine, mocker):
     mock_proc = AsyncMock()
     mock_proc.returncode = 0
-    mock_proc.communicate = AsyncMock(
-        return_value=(b"abcdef1234567890\n", b""))
+    mock_proc.communicate = AsyncMock(return_value=(b"abcdef1234567890\n", b""))
 
     mocker.patch("asyncio.create_subprocess_exec", return_value=mock_proc)
 
     # Mocking get_workspace_root to prevent folder creation during test
-    mocker.patch("airecon.proxy.docker.get_workspace_root",
-                 return_value="/tmp/test_workspace")
+    mocker.patch(
+        "airecon.proxy.docker.get_workspace_root", return_value="/tmp/test_workspace"
+    )
 
     # Needs to bypass the `apt update` background task waiting around
     mocker.patch.object(docker_engine, "execute", new_callable=AsyncMock)
@@ -86,6 +89,9 @@ async def test_execute_timeout(docker_engine, mocker):
     docker_engine._container_name = "test-container"
 
     mock_proc = AsyncMock()
+    # returncode=None means the process is still running — required so the
+    # TimeoutError handler's `if proc.returncode is None: proc.kill()` branch fires.
+    mock_proc.returncode = None
     # Making the process block forever until timeout
     mock_proc.wait = AsyncMock(side_effect=asyncio.TimeoutError())
 
@@ -112,7 +118,10 @@ async def test_execute_timeout(docker_engine, mocker):
 # exit_code=1 partial-success tests (grep/find pipeline false-negative fix)
 # ---------------------------------------------------------------------------
 
-def _make_exec_mock(mocker, docker_engine, returncode: int, stdout: bytes, stderr: bytes = b""):
+
+def _make_exec_mock(
+    mocker, docker_engine, returncode: int, stdout: bytes, stderr: bytes = b""
+):
     """Helper: set up docker_engine.execute() with given returncode + output."""
     docker_engine._connected = True
     docker_engine._container_name = "test-container"
@@ -137,11 +146,14 @@ def _make_exec_mock(mocker, docker_engine, returncode: int, stdout: bytes, stder
 async def test_execute_exit1_with_stdout_is_partial_success(docker_engine, mocker):
     """exit_code=1 + non-empty stdout → success=True (bash pipeline grep case)."""
     _make_exec_mock(
-        mocker, docker_engine,
+        mocker,
+        docker_engine,
         returncode=1,
         stdout=b"Location: https://example.com/author/foo/\r\n",
     )
-    result = await docker_engine.execute("for i in 1 2 3; do curl -sk -I https://example.com/?p=$i | grep -i location; done")
+    result = await docker_engine.execute(
+        "for i in 1 2 3; do curl -sk -I https://example.com/?p=$i | grep -i location; done"
+    )
 
     assert result["success"] is True
     assert result["exit_code"] == 1
@@ -152,7 +164,8 @@ async def test_execute_exit1_with_stdout_is_partial_success(docker_engine, mocke
 async def test_execute_exit1_empty_stdout_is_failure(docker_engine, mocker):
     """exit_code=1 + empty stdout → success=False (real error)."""
     _make_exec_mock(
-        mocker, docker_engine,
+        mocker,
+        docker_engine,
         returncode=1,
         stdout=b"",
         stderr=b"grep: invalid option",
@@ -167,7 +180,8 @@ async def test_execute_exit1_empty_stdout_is_failure(docker_engine, mocker):
 async def test_execute_exit2_with_stdout_is_failure(docker_engine, mocker):
     """exit_code=2 (real error) → success=False even if stdout has content."""
     _make_exec_mock(
-        mocker, docker_engine,
+        mocker,
+        docker_engine,
         returncode=2,
         stdout=b"some partial output",
         stderr=b"command error",
@@ -182,7 +196,8 @@ async def test_execute_exit2_with_stdout_is_failure(docker_engine, mocker):
 async def test_execute_exit0_no_stdout_is_success(docker_engine, mocker):
     """exit_code=0 + empty stdout → success=True (normal zero-exit)."""
     _make_exec_mock(
-        mocker, docker_engine,
+        mocker,
+        docker_engine,
         returncode=0,
         stdout=b"",
     )
@@ -257,13 +272,14 @@ async def test_force_stop_with_straggler_processes(docker_engine, mocker):
     # Mock docker exec command for pkill
     mock_pkill_proc = AsyncMock()
     mock_pkill_proc.wait = AsyncMock()
-    
+
     call_count = [0]
+
     def create_proc(*args, **kwargs):
         call_count[0] += 1
         # First call is pkill, second is docker rm (not used here)
         return mock_pkill_proc
-    
+
     mocker.patch("asyncio.create_subprocess_exec", side_effect=create_proc)
 
     # force_stop should not raise even with straggler processes

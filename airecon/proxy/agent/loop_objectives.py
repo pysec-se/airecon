@@ -1,15 +1,3 @@
-"""Phase objectives, evidence recording, and tool budget helpers for AgentLoop.
-
-Extracted from loop.py to keep that file manageable. Contains:
-- _PHASE_OBJECTIVES / _EXPLOIT_HEAVY_TOOLS — class-level constants
-- _get_current_phase / _sync_phase_objectives / _update_objectives_from_session
-- _update_objectives_from_tool — mark objectives done after tool execution
-- _extract_result_text — flatten result dict to plain text
-- _enrich_evidence — OWASP classification + severity for evidence entries
-- _record_evidence_from_result — extract flags/CVEs/URLs from tool output
-- _build_phase_gate_note — warn when exploit tools run too early
-- _check_tool_budget — soft budget warning from _PHASE_TOOL_BUDGETS
-"""
 from __future__ import annotations
 
 import json
@@ -28,8 +16,6 @@ from .executors import (
 from .owasp import classify_owasp, severity_for_evidence
 from .pipeline import _PHASE_TOOL_BUDGETS, PipelinePhase
 
-# Load analysis-phase vuln tool hints from tools_meta.json at import time.
-# Separate load from loop.py's _TOOLS_META so this module has no circular deps.
 _tools_meta_path = Path(__file__).parent.parent / "data" / "tools_meta.json"
 try:
     with open(_tools_meta_path) as _f:
@@ -42,13 +28,7 @@ _ANALYSIS_VULN_TOOLS: frozenset[str] = frozenset(
     _TOOLS_META_OBJ.get("analysis_phase_vuln_tools", [])
 )
 
-# _RECON_LIVE_HOST_BINS and _RECON_CONTENT_DISCOVERY_BINS are loaded from
-# tools_meta.json via executors.py — see imports above.
-
-
 class _ObjectivesMixin:
-    """Mixin: phase objectives lifecycle, evidence log, and tool budget enforcement."""
-
     _PHASE_OBJECTIVES: dict[str, list[str]] = {
         "RECON": [
             "Enumerate subdomains/hosts (passive sources first, then active validation)",
@@ -86,7 +66,6 @@ class _ObjectivesMixin:
         return PipelinePhase.RECON
 
     def _dynamic_phase_objectives(self, phase: PipelinePhase) -> list[str]:
-        """Generate lightweight adaptive objectives from current session state."""
         s = self._session
         if not s:
             return []
@@ -163,19 +142,19 @@ class _ObjectivesMixin:
 
         s = self._session
         if phase == PipelinePhase.RECON:
-            # defaults[0] = enumerate subdomains/hosts
+
             if s.subdomains or s.live_hosts:
                 self.state.mark_objective(phase.value, defaults[0], "done")
-            # defaults[1] = filter to LIVE hosts (httpx/dnsx ran and populated live_hosts)
+
             if s.live_hosts and len(defaults) > 1:
                 self.state.mark_objective(phase.value, defaults[1], "done")
-            # defaults[2] = port scan live hosts
+
             if s.open_ports and len(defaults) > 2:
                 self.state.mark_objective(phase.value, defaults[2], "done")
-            # defaults[3] = discover directories/URLs on live hosts
+
             if s.urls and len(defaults) > 3:
                 self.state.mark_objective(phase.value, defaults[3], "done")
-            # defaults[4] = persist recon artifacts
+
             if s.scan_count >= 3 and len(defaults) > 4:
                 self.state.mark_objective(phase.value, defaults[4], "done")
         elif phase == PipelinePhase.ANALYSIS:
@@ -205,23 +184,18 @@ class _ObjectivesMixin:
             def _has(pat: str) -> bool:
                 return bool(re.search(pat, _combined, re.IGNORECASE))
 
-            # defaults[0]: enumerate application routes.
             if (s.urls or s.tested_endpoints or _has(r"https?://|/(api|admin|login|dashboard|register)\b")) and len(defaults) > 0:
                 self.state.mark_objective(phase.value, defaults[0], "done")
 
-            # defaults[1]: authentication testing.
             if _has(r"\b(login\s+success|authenticated|401|403|token|session|cookie|default\s+cred|weak\s+pass|brute)\b") and len(defaults) > 1:
                 self.state.mark_objective(phase.value, defaults[1], "done")
 
-            # defaults[2]: authorization testing (IDOR / broken access).
             if _has(r"\b(idor|bola|broken\s+access|access\s+control|forbidden|unauthorized|privilege\s+escalation|horizontal|vertical)\b") and len(defaults) > 2:
                 self.state.mark_objective(phase.value, defaults[2], "done")
 
-            # defaults[3]: injection vector testing.
             if _has(r"\b(sqli|sql\s+injection|xss|ssti|ssrf|xxe|rce|command\s+injection|lfi|rfi|union\s+select|sleep\s*\(|<script|onerror=)\b") and len(defaults) > 3:
                 self.state.mark_objective(phase.value, defaults[3], "done")
 
-            # defaults[4]: impact extraction (flags/data/capability proof).
             if (
                 any(v.get("flag") or v.get("proof") or v.get("evidence") or v.get("poc_script_code") for v in s.vulnerabilities)
                 or _has(r"\b(flag\{[^}\n]+\}|credential|secret|token|api[_-]?key|database\s+dump|exfiltrat|unauthorized\s+data|admin\s+access|read\s+/etc/passwd)\b")
@@ -255,25 +229,19 @@ class _ObjectivesMixin:
             cmd = str(arguments.get("command", "")).lower()
 
         if phase == PipelinePhase.RECON:
-            # defaults[0]: enumerate subdomains/hosts
-            # Require: command uses a known subdomain enum tool, or passive
-            # OSINT via web_search/browser_action — not just any execute call.
+
             _subdomain_hit = (
                 cmd and any(b in cmd for b in _RECON_SUBDOMAIN_BINS)
             ) or tool_name in ("web_search", "browser_action")
             if _subdomain_hit:
                 self.state.mark_objective(phase.value, defaults[0], "done")
 
-            # defaults[1]: filter to LIVE hosts (httpx/dnsx probe)
-            # Distinct from port scanning — requires an aliveness check tool.
             if cmd and any(b in cmd for b in _RECON_LIVE_HOST_BINS) and len(defaults) > 1:
                 self.state.mark_objective(phase.value, defaults[1], "done")
 
-            # defaults[2]: port scan and fingerprint live hosts
             if cmd and any(b in cmd for b in _RECON_PORT_SCAN_BINS) and len(defaults) > 2:
                 self.state.mark_objective(phase.value, defaults[2], "done")
 
-            # defaults[3]: crawl and map endpoints/routes
             _crawl_hit = (
                 cmd and any(b in cmd for b in _RECON_CONTENT_DISCOVERY_BINS)
             ) or (
@@ -284,13 +252,11 @@ class _ObjectivesMixin:
             if _crawl_hit and len(defaults) > 3:
                 self.state.mark_objective(phase.value, defaults[3], "done")
 
-            # defaults[4]: persist recon artifacts to output/
             if output_file and output_file.startswith("output/") and len(defaults) > 4:
                 self.state.mark_objective(phase.value, defaults[4], "done")
 
         elif phase == PipelinePhase.ANALYSIS:
-            # defaults[0]: map technologies, endpoints, parameters
-            # Require actual tech/endpoint evidence in result — not just "execute ran".
+
             _result_text = self._extract_result_text(result)
             _has_tech_evidence = bool(re.search(
                 r"\b(apache|nginx|iis|php|python|django|flask|express|rails|laravel|"
@@ -307,12 +273,9 @@ class _ObjectivesMixin:
             ):
                 self.state.mark_objective(phase.value, defaults[0], "done")
 
-            # defaults[1]: identify injection points / misconfigurations
             if cmd and any(hint in cmd for hint in _ANALYSIS_VULN_TOOLS):
                 self.state.mark_objective(phase.value, defaults[1], "done")
 
-            # defaults[2]: correlate findings into exploit candidates
-            # Require at least 2 meaningful evidence entries (confidence >= 0.65).
             meaningful_ev = [
                 e for e in self.state.evidence_log
                 if float(e.get("confidence", 0)) >= 0.65
@@ -323,8 +286,6 @@ class _ObjectivesMixin:
         elif phase == PipelinePhase.EXPLOIT:
             result_text = self._extract_result_text(result)
 
-            # defaults[0]: enumerate all application routes
-            # Require: exploit tool ran OR result shows HTTP responses (route exploration)
             _enum_hit = tool_name in self._EXPLOIT_HEAVY_TOOLS or (
                 tool_name == "execute"
                 and bool(re.search(
@@ -336,8 +297,6 @@ class _ObjectivesMixin:
             if _enum_hit:
                 self.state.mark_objective(phase.value, defaults[0], "done")
 
-            # defaults[1]: test authentication
-            # Require: auth-related response evidence (not mere artifact creation).
             _auth_hit = bool(re.search(
                 r"(FLAG\{[^}\n]+\}|CVE-\d{4}-\d+|"
                 r"login\s+success|authenticated|access\s+denied|"
@@ -348,7 +307,6 @@ class _ObjectivesMixin:
             if _auth_hit and len(defaults) > 1:
                 self.state.mark_objective(phase.value, defaults[1], "done")
 
-            # defaults[2]: test authorization vectors
             _authz_hit = bool(re.search(
                 r"(idor|bola|broken\s+access|access\s+control|forbidden|unauthorized|"
                 r"privilege\s+escalation|horizontal|vertical)",
@@ -358,7 +316,6 @@ class _ObjectivesMixin:
             if _authz_hit and len(defaults) > 2:
                 self.state.mark_objective(phase.value, defaults[2], "done")
 
-            # defaults[3]: test injection vectors
             _inject_hit = bool(re.search(
                 r"(sqli|sql\s+injection|xss|ssti|command\s+injection|"
                 r"ssrf|xxe|lfi|rfi|union\s+select|sleep\s*\(|"
@@ -369,7 +326,6 @@ class _ObjectivesMixin:
             if _inject_hit and len(defaults) > 3:
                 self.state.mark_objective(phase.value, defaults[3], "done")
 
-            # defaults[4]: extract impact artifacts (flag/data/capability proof)
             _impact_hit = bool(re.search(
                 r"(FLAG\{[^}\n]+\}|credential|secret|api[_-]?key|database\s+dump|"
                 r"exfiltrat|unauthorized\s+data|admin\s+access|read\s+/etc/passwd)",
@@ -436,7 +392,6 @@ class _ObjectivesMixin:
         confidence: float,
         tool_name: str,
     ) -> tuple[list[str], int]:
-        """Auto-classify OWASP categories and compute severity for an evidence entry."""
         owasp_tags = classify_owasp(summary, base_tags, tool_name)
         enriched_tags = list(dict.fromkeys(base_tags + owasp_tags))
         sev = severity_for_evidence(summary, enriched_tags, confidence, tool_name)
@@ -511,7 +466,32 @@ class _ObjectivesMixin:
                 re.findall(r"https?://[^\s\"'<>]+", blob, re.IGNORECASE)
             )
         )
-        for url in url_matches[:4]:
+
+        _target_domain: str = ""
+        if self._session and self._session.target:
+            import urllib.parse as _up
+            _parsed = _up.urlparse(
+                self._session.target
+                if "://" in self._session.target
+                else f"http://{self._session.target}"
+            )
+            _host = _parsed.hostname or ""
+
+            _parts = _host.split(".")
+            _target_domain = ".".join(_parts[-2:]) if len(_parts) >= 2 else _host
+
+        in_scope_urls: list[str] = []
+        if _target_domain:
+            import urllib.parse as _up2
+            for _u in url_matches:
+                try:
+                    _h = _up2.urlparse(_u).hostname or ""
+                except Exception:
+                    continue
+                if _h.endswith(_target_domain):
+                    in_scope_urls.append(_u)
+
+        for url in in_scope_urls[:4]:
             _summary = f"Interesting URL collected: {url}"
             _t, _s = self._enrich_evidence(_summary, ["url", "endpoint"], 0.65, tool_name)
             self.state.add_evidence(
@@ -548,8 +528,7 @@ class _ObjectivesMixin:
         signal_re = re.compile(
             r"(?i)(vulnerab|injection|xss|sqli|idor|ssrf|rce|auth bypass|token|secret|credential)"
         )
-        # Negative-context patterns: lines that MENTION a vuln class but indicate
-        # absence, test setup, or tool preamble — not actual findings.
+
         _FALSE_SIGNAL_RE = re.compile(
             r"(?i)\b("
             r"0\s+vuln|no\s+vuln|not\s+vuln|no\s+injection|not\s+found|not\s+detected|"
@@ -570,9 +549,7 @@ class _ObjectivesMixin:
                 break
         for line in high_signal_lines:
             _summary = f"Security signal: {line}"
-            # Confidence 0.6: below _MEANINGFUL_EVIDENCE_THRESHOLD (0.65) so
-            # ambiguous keyword matches do NOT reset the stagnation counter.
-            # Only confirmed findings (CVE, flag, artifact) cross the threshold.
+
             _t, _s = self._enrich_evidence(_summary, ["signal"], 0.6, tool_name)
             self.state.add_evidence(
                 phase=phase,
@@ -597,15 +574,9 @@ class _ObjectivesMixin:
                     severity=_s,
                 )
 
-        # Auto-generate hypotheses from high-signal evidence.
-        # This populates hypothesis_queue from tool results, enabling the
-        # hypothesis engine to track and test security findings across iterations.
         if success:
             self._auto_form_hypotheses(phase, tool_name, arguments, blob)
 
-    # ── Hypothesis auto-formation ─────────────────────────────────────────────
-
-    # Typed vulnerability patterns: (regex, vuln_type_slug, confirmation_tool)
     _VULN_HYPO_PATTERNS: list[tuple[re.Pattern, str, str]] = [
         (re.compile(
             r"\b(sql\s*i(?:njection)?|sqli|union\s+select|error.based\s+sql|"
@@ -648,7 +619,6 @@ class _ObjectivesMixin:
          "open_redirect", "curl"),
     ]
 
-    # Negative-context patterns: mentions a vuln class but indicates absence or test setup.
     _HYPO_FALSE_SIGNAL_RE = re.compile(
         r"(?i)\b("
         r"testing\s+for|checking\s+for|scanning\s+for|looking\s+for|"
@@ -666,26 +636,13 @@ class _ObjectivesMixin:
         arguments: dict[str, Any],
         result_text: str,
     ) -> None:
-        """Auto-populate hypothesis_queue from high-signal tool output.
-
-        This method bridges the gap between evidence collection and hypothesis
-        tracking: it is called at the end of every successful
-        _record_evidence_from_result and converts CVE findings, vulnerability
-        keyword signals, and open port discoveries into testable hypotheses.
-
-        At most _MAX_HYPO_PER_CALL hypotheses are formed per call to keep the
-        queue focused; the AgentState.add_hypothesis() dedup (Jaccard >= 0.80)
-        prevents redundant entries across iterations.
-        """
         _MAX_HYPO_PER_CALL = 2
         formed = 0
 
-        # Extract endpoint context from the command for richer claim text.
         _cmd = str(arguments.get("command", "")) if tool_name == "execute" else ""
         _url_m = re.search(r"https?://[^\s\"'<>{}\[\]]+", _cmd or result_text)
         _endpoint = _url_m.group(0)[:80] if _url_m else "the target"
 
-        # ── 1. CVE references → exploitability hypothesis ─────────────────
         for cve in re.findall(r"CVE-\d{4}-\d{4,7}", result_text, re.IGNORECASE):
             if formed >= _MAX_HYPO_PER_CALL:
                 break
@@ -703,7 +660,6 @@ class _ObjectivesMixin:
             )
             formed += 1
 
-        # ── 2. Typed vulnerability signals → targeted hypotheses ──────────
         for _pat, _vuln_type, _confirm_tool in self._VULN_HYPO_PATTERNS:
             if formed >= _MAX_HYPO_PER_CALL:
                 break
@@ -727,7 +683,6 @@ class _ObjectivesMixin:
             )
             formed += 1
 
-        # ── 3. Open ports → service-level hypothesis (RECON only) ─────────
         if phase == "RECON" and formed < _MAX_HYPO_PER_CALL:
             _port_hits = list(dict.fromkeys(
                 re.findall(r"\b(\d{1,5})/open\b", result_text, re.IGNORECASE)
@@ -787,15 +742,9 @@ class _ObjectivesMixin:
         return ""
 
     def _check_tool_budget(self, tool_name: str, phase: str) -> str:
-        """Return a soft budget warning if this tool is over/near its phase limit.
-
-        Uses _PHASE_TOOL_BUDGETS from pipeline.py. Returns empty string when no
-        constraint exists or budget is not yet reached. Never blocks execution.
-        """
         budget = _PHASE_TOOL_BUDGETS.get(phase, {}).get(tool_name)
         if budget is None:
-            # Unconstrained tools can still be soft-throttled when they repeatedly
-            # produce no meaningful evidence.
+
             eff = self.state.get_tool_effectiveness(phase, tool_name)
             calls = int(eff.get("calls", 0.0))
             hit_rate = float(eff.get("hit_rate", 0.0))
@@ -809,9 +758,7 @@ class _ObjectivesMixin:
         eff = self.state.get_tool_effectiveness(phase, tool_name)
         calls = int(eff.get("calls", 0.0))
         hit_rate = float(eff.get("hit_rate", 0.0))
-        # Adaptive effective budget:
-        # - low-yield tools get a tighter warning threshold
-        # - high-yield tools get slight flexibility before warning
+
         effective_budget = budget
         if calls >= 3:
             if hit_rate < 0.20:

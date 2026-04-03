@@ -16,6 +16,7 @@ from airecon.proxy.agent.formatters import _load_port_hints, _load_tech_hints
 # _guess_injection_type
 # ---------------------------------------------------------------------------
 
+
 class TestGuessInjectionType:
     def test_canonical_map_id(self):
         # "id" is a canonical IDOR param in fuzzer_data.json PARAM_TYPE_MAP
@@ -55,6 +56,7 @@ class TestGuessInjectionType:
 # _extract_injection_points
 # ---------------------------------------------------------------------------
 
+
 class TestExtractInjectionPoints:
     def test_query_params_extracted(self):
         url = "https://example.com/search?q=hello&page=2"
@@ -77,7 +79,9 @@ class TestExtractInjectionPoints:
     def test_numeric_path_segment_detected(self):
         url = "https://example.com/api/users/123"
         points = _extract_injection_points(url)
-        assert any("123" in p["parameter"] or "123" == p["value_sample"] for p in points)
+        assert any(
+            "123" in p["parameter"] or "123" == p["value_sample"] for p in points
+        )
 
     def test_uuid_path_segment_detected(self):
         uid = "550e8400-e29b-41d4-a716-446655440000"
@@ -143,10 +147,16 @@ class TestExtractInjectionPoints:
 # _merge_injection_points
 # ---------------------------------------------------------------------------
 
+
 class TestMergeInjectionPoints:
     def _make_point(self, url: str, param: str, method: str = "GET") -> dict:
-        return {"url": url, "parameter": param, "method": method,
-                "value_sample": "", "type_hint": "INJECT"}
+        return {
+            "url": url,
+            "parameter": param,
+            "method": method,
+            "value_sample": "",
+            "type_hint": "INJECT",
+        }
 
     def test_adds_new_points(self):
         session = []
@@ -203,6 +213,7 @@ class TestMergeInjectionPoints:
 # _load_port_hints / _load_tech_hints (structure validation)
 # ---------------------------------------------------------------------------
 
+
 class TestLoadHints:
     def test_port_hints_returns_dict_of_int(self):
         hints = _load_port_hints()
@@ -234,15 +245,17 @@ class TestLoadHints:
     def test_common_ports_present(self):
         hints = _load_port_hints()
         # port_correlations.json covers infra ports; SSH (22) and FTP (21) are always present
-        assert 22 in hints or 21 in hints, "Expected at least port 21 or 22 in port hints"
+        assert 22 in hints or 21 in hints, (
+            "Expected at least port 21 or 22 in port hints"
+        )
 
 
 # ---------------------------------------------------------------------------
 # Issue #16: URL normalization
 # ---------------------------------------------------------------------------
 
-class TestNormalizeUrl:
 
+class TestNormalizeUrl:
     def test_scheme_lowercased(self):
         assert _normalize_url("HTTPS://example.com/path").startswith("https://")
 
@@ -303,6 +316,7 @@ class TestExtractInjectionPointUrlNormalization:
         for pt in points:
             # path in url should not end with slash (unless root)
             from urllib.parse import urlparse
+
             path = urlparse(pt["url"]).path
             if path != "/":
                 assert not path.endswith("/"), (
@@ -311,8 +325,12 @@ class TestExtractInjectionPointUrlNormalization:
 
     def test_trailing_slash_and_no_trailing_slash_dedup_correctly(self):
         """URLs differing only by trailing slash must produce the same dedup key."""
-        pts_with_slash = _extract_injection_points("https://example.com/api/users/?id=5")
-        pts_without_slash = _extract_injection_points("https://example.com/api/users?id=5")
+        pts_with_slash = _extract_injection_points(
+            "https://example.com/api/users/?id=5"
+        )
+        pts_without_slash = _extract_injection_points(
+            "https://example.com/api/users?id=5"
+        )
 
         if pts_with_slash and pts_without_slash:
             url_with = pts_with_slash[0]["url"]

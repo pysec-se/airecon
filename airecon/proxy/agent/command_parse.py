@@ -9,18 +9,10 @@ _WRAPPER_TOKENS = {
 
 _SHELL_WRAPPERS = {"bash", "sh", "zsh"}
 
-
 def _basename(token: str) -> str:
     return token.rsplit("/", 1)[-1].lower()
 
-
 def extract_primary_binary(command: str) -> str:
-    """Extract the effective executable from a shell command string.
-
-    Handles wrappers (`sudo`, `timeout`, `stdbuf`, `env`, etc.) and shell
-    trampoline patterns (`bash -lc 'nmap ...'`). Returns lowercase basename or
-    empty string when no executable can be resolved.
-    """
     cmd = str(command or "").strip()
     if not cmd:
         return ""
@@ -40,7 +32,6 @@ def extract_primary_binary(command: str) -> str:
         token = tokens[i]
         token_base = _basename(token)
 
-        # Shell trampoline e.g. /bin/bash -lc "nmap ..."
         if token_base in _SHELL_WRAPPERS:
             i += 1
             while i < len(tokens) and tokens[i].startswith("-"):
@@ -51,12 +42,11 @@ def extract_primary_binary(command: str) -> str:
                     return nested
             return token_base
 
-        # Support wrapped binaries by basename (e.g. /usr/bin/sudo)
         if token_base in _WRAPPER_TOKENS:
             i += 1
 
             if token_base == "timeout":
-                # timeout supports options before duration and optional '--'
+
                 while i < len(tokens) and tokens[i].startswith("-"):
                     i += 1
                 if i < len(tokens) and re.match(r"^\d+[smhd]?$", tokens[i]):
@@ -69,7 +59,7 @@ def extract_primary_binary(command: str) -> str:
                     i += 1
 
             elif token_base == "env":
-                # env supports flags (-i, -u KEY) and KEY=VALUE assignments
+
                 while i < len(tokens):
                     t = tokens[i]
                     if t == "--":

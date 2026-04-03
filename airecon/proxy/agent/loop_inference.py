@@ -1,28 +1,18 @@
-"""Adaptive inference parameter helpers for AgentLoop.
-
-Extracted from loop.py to keep that file manageable. Contains:
-- _cfg_bool / _cfg_int / _cfg_float — typed config accessors
-- _fit_num_predict_to_ctx — clamp output reservation to context window
-- _get_iteration_num_predict / _get_adaptive_num_predict — per-iteration token budget
-- _should_use_thinking — decide whether extended thinking is worth the VRAM
-- _get_iteration_temperature — base temp or exploration temp based on state
-"""
 from __future__ import annotations
 
+import logging
 from typing import Any
 
 from .pipeline import PipelinePhase
 
+logger = logging.getLogger("airecon.agent.inference")
 
 class _InferenceMixin:
-    """Mixin: adaptive temperature, num_predict, and thinking-mode helpers."""
-
-    # Tools that need minimal reasoning — reduce token budget to speed up iteration.
     _SHALLOW_TOOLS: frozenset[str] = frozenset({
         "list_files", "read_file", "create_file", "get_console_logs",
         "get_network_logs", "view_source", "caido_list_requests",
     })
-    # Tools / phases that need maximum reasoning depth.
+
     _DEEP_TOOLS: frozenset[str] = frozenset({
         "advanced_fuzz", "deep_fuzz", "schemathesis_fuzz",
         "spawn_agent", "create_vulnerability_report", "code_analysis",
@@ -55,13 +45,25 @@ class _InferenceMixin:
             return default
 
     @staticmethod
-    def _fit_num_predict_to_ctx(num_predict: int, num_ctx: int) -> int:
-        """Clamp output reservation to fit inside the active context window.
+    def _get_thinking_mode(cfg: Any) -> str:
+        raw_mode = getattr(cfg, "ollama_thinking_mode", "adaptive")
+        if not isinstance(raw_mode, str):
+            logger.warning(f"Invalid thinking mode type ({type(raw_mode)}), using 'adaptive'")
+            return "adaptive"
 
-        Ensures we always keep meaningful prompt/input space and avoids
-        pathological settings (e.g. num_predict ~= num_ctx) that trigger
-        aggressive truncation and unstable model behavior.
-        """
+        thinking_mode = raw_mode.lower().strip()
+        valid_modes = ("low", "medium", "high", "adaptive")
+
+        if thinking_mode not in valid_modes:
+            logger.warning(
+                f"Invalid thinking_mode '{thinking_mode}' — must be one of {valid_modes}. Using 'adaptive'."
+            )
+            return "adaptive"
+
+        return thinking_mode
+
+    @staticmethod
+    def _fit_num_predict_to_ctx(num_predict: int, num_ctx: int) -> int:
         _ctx = max(1024, int(num_ctx))
         _requested = max(256, int(num_predict))
         _prompt_reserve = 1024 if _ctx >= 4096 else max(256, _ctx // 4)
@@ -71,12 +73,6 @@ class _InferenceMixin:
 
     @staticmethod
     def _fit_num_keep_to_ctx(num_keep: int, num_ctx: int, num_predict: int) -> int:
-        """Clamp num_keep so it never exceeds the active context envelope.
-
-        After VRAM recovery, num_ctx may shrink aggressively (e.g. 4096). If
-        num_keep remains high (e.g. 8192), Ollama can reject/struggle with the
-        request and recovery loops fail repeatedly.
-        """
         _ctx = max(1024, int(num_ctx))
         _predict = max(0, int(num_predict))
         _requested = max(0, int(num_keep))
@@ -87,37 +83,38 @@ class _InferenceMixin:
     def _get_iteration_num_predict(
         self, cfg: Any, current_phase: Any, num_ctx: int
     ) -> int:
-        """Compute the real num_predict used this iteration.
-
-        Combines phase/tool adaptivity, crash-time cap, and context-fit guardrails.
-        """
         _phase_name = current_phase.value if current_phase else "RECON"
         _requested = self._get_adaptive_num_predict(cfg, _phase_name)
         if self._adaptive_num_predict_cap > 0:
             _requested = min(_requested, self._adaptive_num_predict_cap)
+
+        _used = self.state.token_usage.get("used", 0)
+        _pressure = _used / max(num_ctx, 1)
+        if _pressure >= 0.75:
+            _requested = min(_requested, 2048)
+        elif _pressure >= 0.65:
+            _requested = min(_requested, 4096)
+        elif _pressure >= 0.50:
+            _requested = min(_requested, 8192)
+
         return self._fit_num_predict_to_ctx(_requested, num_ctx)
 
     def _should_use_thinking(
         self, cfg: Any, current_phase: Any
     ) -> bool:
-        """Decide whether to enable thinking for this iteration.
+        thinking_enabled = self._cfg_bool(cfg, "ollama_enable_thinking", True)
+        model_supports_thinking = self.ollama.supports_thinking
 
-        Thinking is expensive: ~1500 tokens and 1-3s overhead per iteration.
-        It's only needed when the model must reason deeply — not for routine
-        RECON tool calls like 'run subfinder'.
-
-        Rules:
-        - Always OFF if model/config disables it globally.
-        - Always ON in ANALYSIS and EXPLOIT (complex reasoning required).
-        - Always ON during stagnation, recovery, or repeated failures.
-        - Always ON for deep tools (advanced_fuzz, spawn_agent, etc.).
-        - RECON / REPORT routine iterations: OFF after iter 8 to save tokens.
-        """
-        if not (
-            self._cfg_bool(cfg, "ollama_enable_thinking", True)
-            and self.ollama.supports_thinking
-        ):
+        if not (thinking_enabled and model_supports_thinking):
+            logger.debug(
+                f"Thinking disabled: enabled={thinking_enabled}, model_supports={model_supports_thinking}"
+            )
             return False
+
+        thinking_mode = self._get_thinking_mode(cfg)
+
+        phase_name = current_phase.value if current_phase else "UNKNOWN"
+        last_tool = self._recent_tool_names[-1] if self._recent_tool_names else "none"
 
         stagnation_threshold = self._cfg_int(cfg, "agent_stagnation_threshold", 2)
         _is_struggling = (
@@ -128,77 +125,105 @@ class _InferenceMixin:
             or self._watchdog_forced_calls > 0
         )
 
-        # CTF mode: thinking is expensive VRAM-wise on 122B models.
-        # Only think when genuinely stuck or at periodic checkpoints (every 5 iter).
-        # Routine CTF iterations (curl, read, enumerate) do not need deep reasoning.
-        if self._ctf_mode:
-            if _is_struggling:
-                return True
-            last_tool = self._recent_tool_names[-1] if self._recent_tool_names else ""
-            if last_tool in self._DEEP_TOOLS:
-                return True
-            # Periodic thinking every 5 iterations to reassess strategy
-            return self.state.iteration % 5 == 0
-
-        # Normal mode: always think for ANALYSIS and EXPLOIT
-        if current_phase and current_phase in (
-            PipelinePhase.ANALYSIS, PipelinePhase.EXPLOIT
-        ):
-            return True
-
-        # Always think when struggling or in recovery
         if _is_struggling:
+            logger.debug(
+                f"Thinking ENABLED (mode={thinking_mode}, phase={phase_name}, tool={last_tool}): struggling=True"
+            )
             return True
 
-        # Always think for deep tools
-        last_tool = self._recent_tool_names[-1] if self._recent_tool_names else ""
-        if last_tool in self._DEEP_TOOLS:
-            return True
+        is_deep_tool = last_tool in self._DEEP_TOOLS
+        is_shallow_tool = last_tool in self._SHALLOW_TOOLS
 
-        # RECON / REPORT: disable thinking after warm-up (iter > 8)
-        # to save tokens per iteration on routine tool calls.
-        if self.state.iteration > 8:
+        if self._ctf_mode:
+            if is_deep_tool:
+                logger.debug(
+                    f"Thinking ENABLED (mode={thinking_mode}, CTF): deep_tool={last_tool}"
+                )
+                return True
+            if thinking_mode in ("high", "adaptive"):
+                should_think = self.state.iteration % 5 == 0
+                logger.debug(
+                    f"Thinking {'ENABLED' if should_think else 'DISABLED'} (mode={thinking_mode}, CTF): iteration={self.state.iteration}, periodic={should_think}"
+                )
+                return should_think
+            logger.debug(f"Thinking DISABLED (mode={thinking_mode}, CTF): low/medium mode")
             return False
 
-        return True
+        if thinking_mode == "low":
+            should_think = is_deep_tool
+            logger.debug(
+                f"Thinking {'ENABLED' if should_think else 'DISABLED'} (mode=low): deep_tool={is_deep_tool}, tool={last_tool}"
+            )
+            return should_think
+
+        if thinking_mode == "medium":
+            should_think = (
+                current_phase and current_phase in (PipelinePhase.ANALYSIS, PipelinePhase.EXPLOIT)
+            ) or is_deep_tool
+            logger.debug(
+                f"Thinking {'ENABLED' if should_think else 'DISABLED'} (mode=medium): phase={phase_name}, deep_tool={is_deep_tool}"
+            )
+            return should_think
+
+        if thinking_mode == "high":
+            if is_shallow_tool and self.state.iteration > 15:
+                logger.debug(
+                    f"Thinking DISABLED (mode=high): shallow_tool={last_tool}, iteration={self.state.iteration}>15"
+                )
+                return False
+            if current_phase and current_phase == PipelinePhase.RECON:
+                should_think = self.state.iteration <= 15
+                logger.debug(
+                    f"Thinking {'ENABLED' if should_think else 'DISABLED'} (mode=high, RECON): iteration={self.state.iteration}<=15={should_think}"
+                )
+                return should_think
+            logger.debug(f"Thinking ENABLED (mode=high): default for {phase_name}")
+            return True
+
+        if current_phase and current_phase in (PipelinePhase.ANALYSIS, PipelinePhase.EXPLOIT):
+            logger.debug(
+                f"Thinking ENABLED (mode=adaptive): phase={phase_name}"
+            )
+            return True
+
+        if is_deep_tool:
+            logger.debug(
+                f"Thinking ENABLED (mode=adaptive): deep_tool={last_tool}"
+            )
+            return True
+
+        should_think = self.state.iteration <= 8
+        logger.debug(
+            f"Thinking {'ENABLED' if should_think else 'DISABLED'} (mode=adaptive, RECON/REPORT): iteration={self.state.iteration}<=8={should_think}, tool={last_tool}"
+        )
+        return should_think
 
     def _get_adaptive_num_predict(self, cfg: Any, phase: str) -> int:
-        """Return an adaptive num_predict based on phase complexity and last tool.
-
-        SHALLOW (fast iteration):  4 096 tokens   — file ops, listing, log reads
-        MEDIUM  (default):         8 192 tokens   — recon, analysis tasks
-        DEEP    (max reasoning):  16 384 tokens   — exploit dev, reporting, stagnation
-        CTF mode caps at 8 192 to prevent thinking-block VRAM explosion.
-        """
         base = self._cfg_int(cfg, "ollama_num_predict", 32768)
         last_tool = self._recent_tool_names[-1] if self._recent_tool_names else ""
         stagnation_threshold = self._cfg_int(cfg, "agent_stagnation_threshold", 2)
 
-        # CTF mode: cap tightly — each iteration must be fast and lean.
-        # Large thinking blocks in EXPLOIT phase are the primary VRAM killer.
         if self._ctf_mode:
             if (
                 self._stagnation_iterations >= stagnation_threshold
                 or self._consecutive_failures >= 2
             ):
-                return min(base, 8192)   # deep think only when truly stuck
-            return min(base, 4096)       # routine CTF iteration: minimal budget
+                return min(base, 8192)
+            return min(base, 4096)
 
-        # Normal mode: tiered budget
         if (
             self._stagnation_iterations >= stagnation_threshold
-            or phase in ("EXPLOIT", "REPORT")
+            or phase in ("ANALYSIS", "EXPLOIT", "REPORT")
             or last_tool in self._DEEP_TOOLS
         ):
-            return min(base, 16384)   # deep — capped to prevent VRAM OOM
+            return min(base, 16384)
 
         if last_tool in self._SHALLOW_TOOLS:
-            return min(base, 4096)    # shallow: fast
+            return min(base, 4096)
 
-        # ANALYSIS or RECON with non-trivial tools — medium budget
         return min(base, 8192)
 
-    def _get_iteration_temperature(self, cfg: Any) -> float:
+    def _get_iteration_temperature(self, cfg: Any, phase: str = "") -> float:
         base_temp = self._cfg_float(cfg, "ollama_temperature", 0.15)
         if not self._cfg_bool(cfg, "agent_exploration_mode", True):
             return base_temp
@@ -206,6 +231,11 @@ class _InferenceMixin:
             cfg, "agent_exploration_temperature", 0.35
         )
         stagnation_threshold = self._cfg_int(cfg, "agent_stagnation_threshold", 2)
+
+        if phase in ("ANALYSIS", "EXPLOIT"):
+            phase_temp = self._cfg_float(cfg, "agent_phase_creative_temperature", 0.20)
+            base_temp = max(base_temp, phase_temp)
+
         if (
             self._stagnation_iterations >= stagnation_threshold
             or self._consecutive_failures >= 2

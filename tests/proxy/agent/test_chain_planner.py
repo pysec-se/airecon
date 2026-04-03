@@ -1,4 +1,5 @@
 """Tests for Exploit Chain Planner (chain_planner.py)."""
+
 from __future__ import annotations
 
 from airecon.proxy.agent.chain_planner import (
@@ -97,7 +98,7 @@ class TestPlanChains:
 
     def test_matches_xss_vuln_to_chain(self) -> None:
         vulns = [
-            {"finding": "XSS reflected in search parameter"},
+            {"finding": "XSS reflected in search parameter", "url": "http://target.com/search", "evidence": "<script> alert(1)</script>"},
         ]
         chains = plan_chains(vulns, existing_chain_ids=set(), iteration=5)
         assert len(chains) > 0
@@ -105,10 +106,14 @@ class TestPlanChains:
     def test_skips_existing_chain_ids(self) -> None:
         vulns = [{"finding": "SQL injection in login"}]
         existing: set[str] = set()
-        chains1 = plan_chains(vulns, existing_chain_ids=existing, iteration=5, max_chains=3)
+        chains1 = plan_chains(
+            vulns, existing_chain_ids=existing, iteration=5, max_chains=3
+        )
         # A second call may still return chains (different templates), but
         # must not repeat any previously returned chain_id.
-        chains2 = plan_chains(vulns, existing_chain_ids=existing, iteration=6, max_chains=3)
+        chains2 = plan_chains(
+            vulns, existing_chain_ids=existing, iteration=6, max_chains=3
+        )
         ids_after_first = {c.chain_id for c in chains1}
         ids_after_second = {c.chain_id for c in chains2}
         assert ids_after_first.isdisjoint(ids_after_second)
@@ -116,13 +121,17 @@ class TestPlanChains:
     def test_chain_id_is_stable_across_iterations(self) -> None:
         """Same template+finding should produce the same ID regardless of iteration."""
         vulns = [{"finding": "SQL injection in login"}]
-        chains_i5 = plan_chains(vulns, existing_chain_ids=set(), iteration=5, max_chains=1)
-        chains_i999 = plan_chains(vulns, existing_chain_ids=set(), iteration=999, max_chains=1)
+        chains_i5 = plan_chains(
+            vulns, existing_chain_ids=set(), iteration=5, max_chains=1
+        )
+        chains_i999 = plan_chains(
+            vulns, existing_chain_ids=set(), iteration=999, max_chains=1
+        )
         assert chains_i5 and chains_i999
         assert chains_i5[0].chain_id == chains_i999[0].chain_id
 
     def test_uses_title_when_finding_missing(self) -> None:
-        vulns = [{"title": "SSRF detected in metadata fetch endpoint"}]
+        vulns = [{"title": "SSRF detected in metadata fetch endpoint", "url": "http://internal/api/fetch", "evidence": "169.254.169.254"}]
         chains = plan_chains(vulns, existing_chain_ids=set(), iteration=9)
         assert len(chains) > 0
 
@@ -153,7 +162,9 @@ class TestPlanChains:
                     "statement": "SQL injection is likely in login parameter id",
                     "posterior": 0.87,
                     "status": "supported",
-                    "evidence_refs": ["vulnerability_signal:[HIGH] SQLi candidate in /login"],
+                    "evidence_refs": [
+                        "vulnerability_signal:[HIGH] SQLi candidate in /login"
+                    ],
                 }
             ],
         )
@@ -213,18 +224,29 @@ class TestPlanChains:
         vulns = [{"finding": "XSS reflected in search parameter via <script>"}]
         chains = plan_chains(vulns, existing_chain_ids=set(), iteration=10)
         if chains:
-            assert "xss" in chains[0].vuln_basis.lower() or "search" in chains[0].vuln_basis.lower()
+            assert (
+                "xss" in chains[0].vuln_basis.lower()
+                or "search" in chains[0].vuln_basis.lower()
+            )
 
-    def test_word_boundary_trigger_avoids_substring_false_positive(self, monkeypatch) -> None:
+    def test_word_boundary_trigger_avoids_substring_false_positive(
+        self, monkeypatch
+    ) -> None:
         import airecon.proxy.agent.chain_planner as cp
 
-        monkeypatch.setattr(cp, "_ATTACK_CHAIN_TEMPLATES", [{
-            "id": "word_boundary_test",
-            "name": "SQL Word Trigger Chain",
-            "description": "",
-            "triggers": ["sql"],
-            "steps": [{"description": "step1", "tool_hint": "execute"}],
-        }])
+        monkeypatch.setattr(
+            cp,
+            "_ATTACK_CHAIN_TEMPLATES",
+            [
+                {
+                    "id": "word_boundary_test",
+                    "name": "SQL Word Trigger Chain",
+                    "description": "",
+                    "triggers": ["sql"],
+                    "steps": [{"description": "step1", "tool_hint": "execute"}],
+                }
+            ],
+        )
 
         # "nosql" should not satisfy single-word trigger "sql" with boundary matching.
         chains = cp.plan_chains(
@@ -237,32 +259,50 @@ class TestPlanChains:
     def test_prioritizes_high_severity_finding_first(self, monkeypatch) -> None:
         import airecon.proxy.agent.chain_planner as cp
 
-        monkeypatch.setattr(cp, "_ATTACK_CHAIN_TEMPLATES", [{
-            "id": "severity_priority_test",
-            "name": "SQL Severity Chain",
-            "description": "",
-            "triggers": ["sql injection"],
-            "steps": [{"description": "step1", "tool_hint": "execute"}],
-        }])
+        monkeypatch.setattr(
+            cp,
+            "_ATTACK_CHAIN_TEMPLATES",
+            [
+                {
+                    "id": "severity_priority_test",
+                    "name": "SQL Severity Chain",
+                    "description": "",
+                    "triggers": ["sql injection"],
+                    "steps": [{"description": "step1", "tool_hint": "execute"}],
+                }
+            ],
+        )
 
         vulns = [
             {"finding": "[LOW] SQL injection in search", "severity": "LOW"},
-            {"finding": "[CRITICAL] SQL injection in admin login", "severity": "CRITICAL", "proof": "admin dump"},
+            {
+                "finding": "[CRITICAL] SQL injection in admin login",
+                "severity": "CRITICAL",
+                "proof": "admin dump",
+            },
         ]
-        chains = cp.plan_chains(vulns, existing_chain_ids=set(), iteration=1, max_chains=1)
+        chains = cp.plan_chains(
+            vulns, existing_chain_ids=set(), iteration=1, max_chains=1
+        )
         assert chains
         assert "CRITICAL" in chains[0].vuln_basis.upper()
 
     def test_semantic_trigger_matches_synonym(self, monkeypatch) -> None:
         import airecon.proxy.agent.chain_planner as cp
 
-        monkeypatch.setattr(cp, "_ATTACK_CHAIN_TEMPLATES", [{
-            "id": "semantic_synonym",
-            "name": "SQLi Semantic Chain",
-            "description": "",
-            "triggers": ["sql injection"],
-            "steps": [{"description": "step1", "tool_hint": "execute"}],
-        }])
+        monkeypatch.setattr(
+            cp,
+            "_ATTACK_CHAIN_TEMPLATES",
+            [
+                {
+                    "id": "semantic_synonym",
+                    "name": "SQLi Semantic Chain",
+                    "description": "",
+                    "triggers": ["sql injection"],
+                    "steps": [{"description": "step1", "tool_hint": "execute"}],
+                }
+            ],
+        )
 
         chains = cp.plan_chains(
             [{"finding": "Boolean-based SQLi confirmed in login flow"}],
@@ -274,13 +314,19 @@ class TestPlanChains:
     def test_semantic_trigger_rejects_unverified_vuln(self, monkeypatch) -> None:
         import airecon.proxy.agent.chain_planner as cp
 
-        monkeypatch.setattr(cp, "_ATTACK_CHAIN_TEMPLATES", [{
-            "id": "semantic_negative",
-            "name": "Unverified SQL Chain",
-            "description": "",
-            "triggers": ["sql injection"],
-            "steps": [{"description": "step1", "tool_hint": "execute"}],
-        }])
+        monkeypatch.setattr(
+            cp,
+            "_ATTACK_CHAIN_TEMPLATES",
+            [
+                {
+                    "id": "semantic_negative",
+                    "name": "Unverified SQL Chain",
+                    "description": "",
+                    "triggers": ["sql injection"],
+                    "steps": [{"description": "step1", "tool_hint": "execute"}],
+                }
+            ],
+        )
 
         chains = cp.plan_chains(
             [{"finding": "Potential SQL injection, needs verification"}],

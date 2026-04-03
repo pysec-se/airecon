@@ -150,7 +150,15 @@ If a tool is NOT installed, install it immediately. Do NOT skip the task.
 
 ## Vulnerability Scanning
 
-    nikto, wapiti, dalfox, csprecon, nosqli, toxicache, semgrep, trivy, crlfuzz, misconfig-mapper
+    dalfox, csprecon, nosqli, toxicache, semgrep, trivy, crlfuzz, misconfig-mapper
+
+    wapiti / nikto — REQUIRES reading wapiti skill first.
+                     wapiti: crawl-based scanner, 30+ modules, JSON output.
+                             Best for: XSS, SQLi, LFI, SSRF, RCE, backup files, misconfigs.
+                             JSON output: wapiti -u <target> -f json -o output/wapiti.json
+                     nikto: fast misconfig fingerprinting, no crawling, 60-second baseline.
+                             Best for: server headers, dangerous files, outdated software.
+                     Load with: read_file on the wapiti skill before any wapiti/nikto usage.
 
     nuclei  — REQUIRES reading nuclei skill first. Has mandatory pre-conditions.
               Load with: read_file on the nuclei skill before any nuclei usage.

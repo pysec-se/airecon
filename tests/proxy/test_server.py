@@ -3,6 +3,9 @@
 from __future__ import annotations
 
 import asyncio
+import ipaddress
+import json
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -11,24 +14,32 @@ import httpx
 import airecon.proxy.server as srv
 
 
+def test_is_local_or_unspecified_host():
+    assert srv._is_local_or_unspecified_host("localhost") is True
+    assert srv._is_local_or_unspecified_host("127.0.0.1") is True
+    assert srv._is_local_or_unspecified_host("::1") is True
+    assert srv._is_local_or_unspecified_host(ipaddress.IPv4Address(0).compressed) is True
+    assert srv._is_local_or_unspecified_host("::") is True
+    assert srv._is_local_or_unspecified_host("example.com") is False
+
+
 # ── Fixture: inject mocked globals before each test ──────────────────────────
+
 
 @pytest.fixture(autouse=True)
 def _patch_server_globals(tmp_path):
     """Replace module-level globals so routes work without real services."""
-    import asyncio
-
     mock_agent = _make_mock_agent()
     mock_ollama = _make_mock_ollama()
     mock_engine = _make_mock_engine()
-    lock = asyncio.Lock()
 
     with (
         patch.dict("os.environ", {"AIRECON_TEST_MODE": "1"}, clear=False),
         patch.object(srv, "agent", mock_agent),
         patch.object(srv, "ollama_client", mock_ollama),
         patch.object(srv, "engine", mock_engine),
-        patch.object(srv, "_chat_lock", lock),
+        # Reset busy flag before each test so tests don't interfere
+        patch.object(srv, "_agent_busy", False),
     ):
         yield {
             "agent": mock_agent,
@@ -41,7 +52,10 @@ def _make_mock_agent() -> MagicMock:
     m = MagicMock()
     m.get_stats.return_value = {"iterations": 5, "phase": "RECON"}
     m.get_progress.return_value = {
-        "target": "example.com", "phase": "RECON", "iteration": 5}
+        "target": "example.com",
+        "phase": "RECON",
+        "iteration": 5,
+    }
     m._tools_ollama = [{"type": "function", "function": {"name": "execute"}}]
     m.state = MagicMock()
     m.state.conversation = [
@@ -60,6 +74,7 @@ def _make_mock_agent() -> MagicMock:
 
     async def _process(msg):
         from airecon.proxy.agent.models import AgentEvent
+
         yield AgentEvent(type="text", data={"content": "scanning..."})
         yield AgentEvent(type="done", data={})
 
@@ -112,6 +127,7 @@ def _client() -> _OneShotClient:
 
 # ── GET /api/status ───────────────────────────────────────────────────────────
 
+
 class TestGetStatus:
     def test_returns_200(self):
         r = _client().get("/api/status")
@@ -138,6 +154,18 @@ class TestGetStatus:
         r = _client().get("/api/status")
         assert "agent" in r.json()
 
+    def test_status_sets_caido_active_when_live_probe_succeeds(self, _patch_server_globals):
+        _patch_server_globals["agent"].get_stats.return_value = {
+            "message_count": 1,
+            "tool_counts": {},
+            "caido": {"active": False, "findings_count": 0},
+        }
+        with patch("airecon.proxy.caido_client.CaidoClient._get_token", new=AsyncMock(return_value="tok")):
+            r = _client().get("/api/status")
+        data = r.json()
+        assert data["agent"]["caido"]["active"] is True
+        assert data["agent"]["caido"]["findings_count"] == 0
+
     def test_no_agent_returns_empty_stats(self):
         with patch.object(srv, "agent", None):
             r = _client().get("/api/status")
@@ -145,6 +173,7 @@ class TestGetStatus:
 
 
 # ── GET /api/progress ─────────────────────────────────────────────────────────
+
 
 class TestGetProgress:
     def test_returns_200_with_agent(self):
@@ -159,6 +188,7 @@ class TestGetProgress:
 
 
 # ── GET /api/tools ────────────────────────────────────────────────────────────
+
 
 class TestListTools:
     def test_returns_tools_from_agent(self):
@@ -180,6 +210,94 @@ class TestListTools:
 
 
 # ── GET /api/skills ───────────────────────────────────────────────────────────
+
+
+class TestMCP:
+    def test_mcp_list_returns_empty_when_no_servers(self):
+        with patch("airecon.proxy.server.list_mcp_servers", return_value={}):
+            r = _client().get("/api/mcp/list")
+        assert r.status_code == 200
+        body = r.json()
+        assert body["count"] == 0
+        assert body["servers"] == []
+
+    def test_mcp_list_includes_command_server_tool_count(self):
+        server_cfg = {
+            "command": "python3",
+            "args": ["/usr/share/hexstrike-ai/hexstrike_mcp.py"],
+            "env": {"PYTHONUNBUFFERED": "1"},
+        }
+        fp = srv._mcp_cfg_fingerprint(server_cfg)
+
+        with (
+            patch("airecon.proxy.server.list_mcp_servers", return_value={"hexstrike": server_cfg}),
+            patch("airecon.proxy.server._ensure_mcp_probe", new=AsyncMock()),
+            patch.dict(
+                srv.__dict__,
+                {
+                    "_mcp_probe_cache": {
+                        "hexstrike": {
+                            "fingerprint": fp,
+                            "status": "ready",
+                            "tool_count": 2,
+                            "tools": ["mcp_hexstrike_ping", "mcp_hexstrike_scan"],
+                            "tool_error": None,
+                            "updated_at": 0,
+                        }
+                    }
+                },
+                clear=False,
+            ),
+        ):
+            r = _client().get("/api/mcp/list")
+
+        assert r.status_code == 200
+        body = r.json()
+        assert body["count"] == 1
+        assert body["servers"][0]["name"] == "hexstrike"
+        assert body["servers"][0]["transport"] == "command"
+        assert body["servers"][0]["status"] == "ready"
+        assert body["servers"][0]["tool_count"] == 2
+
+    def test_mcp_add_rejects_invalid_url(self):
+        r = _client().post("/api/mcp/add", json={"url": "not-a-url"})
+        assert r.status_code == 400
+
+    def test_mcp_disable_and_enable_by_name(self):
+        with (
+            patch("airecon.proxy.server.set_mcp_enabled", side_effect=[True, True]),
+            patch("airecon.proxy.server.list_mcp_servers", return_value={
+                "hexstrike": {
+                    "command": "python3",
+                    "args": ["x.py"],
+                    "enabled": True,
+                }
+            }),
+            patch("airecon.proxy.server._ensure_mcp_probe", new=AsyncMock()),
+        ):
+            r1 = _client().post("/api/mcp/disable", json={"name": "hexstrike"})
+            r2 = _client().post("/api/mcp/enable", json={"name": "hexstrike"})
+
+        assert r1.status_code == 200
+        assert r2.status_code == 200
+        assert r2.json().get("enabled") is True
+
+    def test_mcp_list_name_tools(self):
+        with (
+            patch("airecon.proxy.server.list_mcp_servers", return_value={
+                "hexstrike": {
+                    "command": "python3",
+                    "args": ["x.py"],
+                    "enabled": True,
+                }
+            }),
+            patch("airecon.proxy.server.mcp_list_tools", new=AsyncMock(return_value=(True, {"tools": [{"name": "scan"}]}))),
+        ):
+            r = _client().get("/api/mcp/tools/hexstrike")
+
+        assert r.status_code == 200
+        assert r.json().get("count") == 1
+
 
 class TestListSkills:
     def test_empty_skills_dir(self):
@@ -203,9 +321,12 @@ class TestListSkills:
 
 # ── POST /api/chat ────────────────────────────────────────────────────────────
 
+
 class TestChat:
     def test_non_streaming_returns_events(self):
-        r = _client().post("/api/chat", json={"message": "scan example.com", "stream": False})
+        r = _client().post(
+            "/api/chat", json={"message": "scan example.com", "stream": False}
+        )
         assert r.status_code == 200
         data = r.json()
         assert "events" in data
@@ -222,11 +343,172 @@ class TestChat:
         assert r.status_code in (200, 422)
 
     def test_message_too_long_rejected(self):
-        r = _client().post("/api/chat", json={"message": "x" * 100_001, "stream": False})
+        r = _client().post(
+            "/api/chat", json={"message": "x" * 100_001, "stream": False}
+        )
         assert r.status_code == 422
+
+    @pytest.mark.asyncio
+    async def test_chat_stream_sets_busy_before_response_returns(self, _patch_server_globals):
+        with patch.object(srv, "_agent_busy", False):
+            response = await srv.chat(srv.ChatRequest(message="example.com", stream=True))
+            assert isinstance(response, srv.EventSourceResponse)
+            assert srv._agent_busy is True
+            srv._agent_busy = False
+
+    @pytest.mark.asyncio
+    async def test_chat_stream_rejects_second_request_when_first_reserved_busy(self, _patch_server_globals):
+        with patch.object(srv, "_agent_busy", False):
+            first = await srv.chat(srv.ChatRequest(message="first", stream=True))
+            assert isinstance(first, srv.EventSourceResponse)
+
+            second = await srv.chat(srv.ChatRequest(message="second", stream=True))
+            assert isinstance(second, srv.JSONResponse)
+            assert second.status_code == 409
+            payload = json.loads(second.body.decode())
+            assert payload.get("busy") is True
+            srv._agent_busy = False
+
+    @pytest.mark.asyncio
+    async def test_stream_soft_idle_timeout_emits_progress_not_error(self, _patch_server_globals):
+        async def _slow_then_done(_msg: str):
+            from airecon.proxy.agent.models import AgentEvent
+
+            await asyncio.sleep(0.6)
+            yield AgentEvent(type="done", data={})
+
+        agent = _patch_server_globals["agent"]
+        agent.process_message = _slow_then_done
+
+        env = {
+            "AIRECON_AGENT_IDLE_SOFT_TIMEOUT": "0.5",
+            "AIRECON_AGENT_IDLE_HARD_TIMEOUT": "2.0",
+            "AIRECON_AGENT_IDLE_POLL": "0.5",
+            "AIRECON_AGENT_IDLE_WARN_INTERVAL": "0.5",
+            "AIRECON_SSE_MAX_STREAM_TIME": "10",
+        }
+
+        events: list[dict] = []
+        with patch.dict("os.environ", env, clear=False):
+            async for item in srv._stream_agent_events("scan target"):
+                events.append(item)
+                if item.get("event") == "done":
+                    break
+
+        event_types = [e.get("event") for e in events]
+        assert "progress" in event_types
+        assert "error" not in event_types
+
+    @pytest.mark.asyncio
+    async def test_stream_hard_idle_timeout_emits_error(self, _patch_server_globals):
+        async def _very_slow(_msg: str):
+            from airecon.proxy.agent.models import AgentEvent
+
+            await asyncio.sleep(2.2)
+            yield AgentEvent(type="done", data={})
+
+        agent = _patch_server_globals["agent"]
+        agent.process_message = _very_slow
+
+        env = {
+            "AIRECON_AGENT_IDLE_SOFT_TIMEOUT": "0.5",
+            "AIRECON_AGENT_IDLE_HARD_TIMEOUT": "1.0",
+            "AIRECON_AGENT_IDLE_POLL": "0.5",
+            "AIRECON_AGENT_IDLE_WARN_INTERVAL": "0.5",
+            "AIRECON_SSE_MAX_STREAM_TIME": "10",
+        }
+
+        error_data = ""
+        with patch.dict("os.environ", env, clear=False):
+            async for item in srv._stream_agent_events("scan target"):
+                if item.get("event") == "error":
+                    error_data = item.get("data", "")
+                    break
+
+        assert "hard-timeout" in error_data
+
+    @pytest.mark.asyncio
+    async def test_stream_resets_busy_flag_after_completion(self, _patch_server_globals):
+        async def _done(_msg: str):
+            from airecon.proxy.agent.models import AgentEvent
+
+            yield AgentEvent(type="done", data={})
+
+        agent = _patch_server_globals["agent"]
+        agent.process_message = _done
+
+        with patch.object(srv, "_agent_busy", False):
+            events = [item async for item in srv._stream_agent_events("scan target")]
+
+        assert any(e.get("event") == "done" for e in events)
+        assert srv._agent_busy is False
+
+    @pytest.mark.asyncio
+    async def test_stream_user_input_end_to_end_realtime_submit(self, _patch_server_globals):
+        """Live smoke: SSE emits user_input_required, then /api/user-input resumes stream."""
+        from airecon.proxy.agent.models import AgentEvent
+
+        agent = _patch_server_globals["agent"]
+
+        async def _interactive_process(_msg: str):
+            agent._user_input_event = asyncio.Event()
+            agent._user_input_request_id = "req-live-001"
+            agent._user_input_prompt = "Enter TOTP code"
+            agent._user_input_type = "totp"
+            agent._user_input_value = ""
+            agent._user_input_cancelled = False
+
+            yield AgentEvent(
+                type="user_input_required",
+                data={
+                    "request_id": "req-live-001",
+                    "prompt": "Enter TOTP code",
+                    "input_type": "totp",
+                },
+            )
+
+            await asyncio.wait_for(agent._user_input_event.wait(), timeout=5.0)
+            yield AgentEvent(type="text", data={"content": f"received:{agent._user_input_value}"})
+            yield AgentEvent(type="done", data={})
+
+        agent.process_message = _interactive_process
+
+        seen_types: list[str] = []
+        text_chunks: list[str] = []
+
+        async def _consume_stream() -> None:
+            with patch.object(srv, "_agent_busy", False):
+                async for item in srv._stream_agent_events("start"):
+                    payload = item.get("data", "")
+                    if not payload:
+                        continue
+                    data = json.loads(payload)
+                    ev_type = data.get("type", "")
+                    seen_types.append(ev_type)
+
+                    if ev_type == "user_input_required":
+                        submit_resp = await srv.submit_user_input(
+                            srv.UserInputResponse(
+                                request_id=data["request_id"],
+                                value="123456",
+                                cancelled=False,
+                            )
+                        )
+                        assert submit_resp.status_code == 200
+                    elif ev_type == "text":
+                        text_chunks.append(data.get("content", ""))
+                    elif ev_type == "done":
+                        break
+
+        await asyncio.wait_for(_consume_stream(), timeout=10.0)
+
+        assert "user_input_required" in seen_types
+        assert "done" in seen_types
+        assert any("received:123456" in c for c in text_chunks)
 
 
 # ── POST /api/reset ───────────────────────────────────────────────────────────
+
 
 class TestResetConversation:
     def test_reset_returns_ok(self):
@@ -245,6 +527,7 @@ class TestResetConversation:
 
 
 # ── GET /api/history ─────────────────────────────────────────────────────────
+
 
 class TestGetHistory:
     def test_returns_non_system_messages(self):
@@ -266,11 +549,15 @@ class TestGetHistory:
 
 # ── GET /api/sessions ─────────────────────────────────────────────────────────
 
+
 class TestListSessions:
     def test_returns_sessions_list(self):
-        with patch("airecon.proxy.agent.session.list_sessions", return_value=[
-            {"session_id": "s1", "target": "a.com", "created_at": "2026-01-01"}
-        ]):
+        with patch(
+            "airecon.proxy.agent.session.list_sessions",
+            return_value=[
+                {"session_id": "s1", "target": "a.com", "created_at": "2026-01-01"}
+            ],
+        ):
             r = _client().get("/api/sessions")
         assert r.status_code == 200
         assert len(r.json()["sessions"]) == 1
@@ -283,6 +570,7 @@ class TestListSessions:
 
 
 # ── GET /api/session/current ─────────────────────────────────────────────────
+
 
 class TestCurrentSession:
     def test_returns_session_info_with_agent(self):
@@ -306,6 +594,7 @@ class TestCurrentSession:
 
 # ── POST /api/stop ────────────────────────────────────────────────────────────
 
+
 class TestStopAgent:
     def test_stop_returns_ok(self):
         r = _client().post("/api/stop")
@@ -324,6 +613,7 @@ class TestStopAgent:
 
 # ── POST /api/unload ─────────────────────────────────────────────────────────
 
+
 class TestUnloadModel:
     def test_unload_returns_ok(self):
         r = _client().post("/api/unload")
@@ -338,3 +628,233 @@ class TestUnloadModel:
     def test_unload_calls_unload_model(self, _patch_server_globals):
         _client().post("/api/unload")
         _patch_server_globals["ollama"].unload_model.assert_called_once()
+
+
+# ── _stream_file_agent_events cleanup ────────────────────────────────────────
+
+
+class TestFileAnalyzeStreamCleanup:
+    @pytest.mark.asyncio
+    async def test_mini_agent_is_stopped_after_stream_completes(self):
+        stop_mock = AsyncMock()
+
+        class _MiniAgent:
+            def __init__(self, *args, **kwargs):
+                self._is_subagent = False
+                self._override_max_iterations = None
+                self._blocked_tools = set()
+                self.state = SimpleNamespace(active_target=None, conversation=[])
+                self.stop = stop_mock
+
+            async def initialize(self, *args, **kwargs):
+                return None
+
+            async def process_message(self, _msg: str):
+                from airecon.proxy.agent.models import AgentEvent
+
+                yield AgentEvent(type="done", data={})
+
+        req = srv.FileAnalyzeRequest(
+            file_path="workspace/example.com/output/file.txt",
+            file_content="hello",
+            task="analyze",
+            max_iterations=2,
+        )
+
+        with (
+            patch.object(srv, "AgentLoop", _MiniAgent),
+            patch.object(srv, "ollama_client", object()),
+            patch.object(srv, "engine", object()),
+        ):
+            events = [event async for event in srv._stream_file_agent_events(req)]
+
+        assert len(events) == 1
+        stop_mock.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_mini_agent_is_stopped_when_initialize_fails(self):
+        stop_mock = AsyncMock()
+
+        class _MiniAgent:
+            def __init__(self, *args, **kwargs):
+                self._is_subagent = False
+                self._override_max_iterations = None
+                self._blocked_tools = set()
+                self.state = SimpleNamespace(active_target=None, conversation=[])
+                self.stop = stop_mock
+
+            async def initialize(self, *args, **kwargs):
+                raise RuntimeError("init failed")
+
+            async def process_message(self, _msg: str):
+                if False:
+                    yield None
+
+        req = srv.FileAnalyzeRequest(
+            file_path="workspace/example.com/output/file.txt",
+            file_content="hello",
+            task="analyze",
+            max_iterations=2,
+        )
+
+        with (
+            patch.object(srv, "AgentLoop", _MiniAgent),
+            patch.object(srv, "ollama_client", object()),
+            patch.object(srv, "engine", object()),
+        ):
+            events = [event async for event in srv._stream_file_agent_events(req)]
+
+        assert len(events) == 1
+        assert events[0]["event"] == "error"
+        stop_mock.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_mini_agent_is_stopped_when_stream_is_cancelled(self):
+        stop_mock = AsyncMock()
+        started = asyncio.Event()
+        wait_forever = asyncio.Event()
+
+        class _MiniAgent:
+            def __init__(self, *args, **kwargs):
+                self._is_subagent = False
+                self._override_max_iterations = None
+                self._blocked_tools = set()
+                self.state = SimpleNamespace(active_target=None, conversation=[])
+                self.stop = stop_mock
+
+            async def initialize(self, *args, **kwargs):
+                return None
+
+            async def process_message(self, _msg: str):
+                from airecon.proxy.agent.models import AgentEvent
+
+                started.set()
+                yield AgentEvent(type="thinking", data={"content": "working"})
+                await wait_forever.wait()
+
+        req = srv.FileAnalyzeRequest(
+            file_path="workspace/example.com/output/file.txt",
+            file_content="hello",
+            task="analyze",
+            max_iterations=2,
+        )
+
+        with (
+            patch.object(srv, "AgentLoop", _MiniAgent),
+            patch.object(srv, "ollama_client", object()),
+            patch.object(srv, "engine", object()),
+        ):
+            gen = srv._stream_file_agent_events(req)
+            first_event = await gen.__anext__()
+            assert first_event["event"] == "thinking"
+            await started.wait()
+            await gen.aclose()
+
+        stop_mock.assert_awaited_once()
+
+
+# ── GET /api/user-input/pending ───────────────────────────────────────────────
+
+
+class TestGetPendingUserInput:
+    def test_no_pending_when_agent_has_no_event(self, _patch_server_globals):
+        agent = _patch_server_globals["agent"]
+        agent._user_input_event = None
+        r = _client().get("/api/user-input/pending")
+        assert r.status_code == 200
+        assert r.json()["pending"] is False
+
+    def test_pending_when_event_set(self, _patch_server_globals):
+        import asyncio
+
+        agent = _patch_server_globals["agent"]
+        agent._user_input_event = asyncio.Event()
+        agent._user_input_request_id = "req-abc"
+        agent._user_input_prompt = "Enter TOTP code"
+        agent._user_input_type = "totp"
+        r = _client().get("/api/user-input/pending")
+        assert r.status_code == 200
+        data = r.json()
+        assert data["pending"] is True
+        assert data["request_id"] == "req-abc"
+        assert data["prompt"] == "Enter TOTP code"
+        assert data["input_type"] == "totp"
+
+    def test_no_pending_when_no_agent(self):
+        with patch.object(srv, "agent", None):
+            r = _client().get("/api/user-input/pending")
+        assert r.status_code == 200
+        assert r.json()["pending"] is False
+
+
+# ── POST /api/user-input ──────────────────────────────────────────────────────
+
+
+class TestSubmitUserInput:
+    def _make_agent_with_event(self):
+        import asyncio
+
+        agent = _make_mock_agent()
+        evt = asyncio.Event()
+        agent._user_input_event = evt
+        agent._user_input_request_id = "req-xyz"
+        agent._user_input_value = ""
+        agent._user_input_cancelled = False
+        return agent, evt
+
+    def test_submit_sets_value_and_fires_event(self):
+        agent, evt = self._make_agent_with_event()
+        with patch.object(srv, "agent", agent):
+            r = _client().post(
+                "/api/user-input",
+                json={"request_id": "req-xyz", "value": "123456", "cancelled": False},
+            )
+        assert r.status_code == 200
+        assert r.json()["status"] == "ok"
+        assert agent._user_input_value == "123456"
+        assert evt.is_set()
+
+    def test_submit_cancel_sets_cancelled_flag(self):
+        agent, evt = self._make_agent_with_event()
+        with patch.object(srv, "agent", agent):
+            r = _client().post(
+                "/api/user-input",
+                json={"request_id": "req-xyz", "value": "", "cancelled": True},
+            )
+        assert r.status_code == 200
+        assert agent._user_input_cancelled is True
+        assert evt.is_set()
+
+    def test_submit_wrong_request_id_returns_400(self):
+        agent, _ = self._make_agent_with_event()
+        with patch.object(srv, "agent", agent):
+            r = _client().post(
+                "/api/user-input",
+                json={"request_id": "wrong-id", "value": "abc"},
+            )
+        assert r.status_code == 400
+
+    def test_submit_no_pending_event_returns_400(self):
+        agent = _make_mock_agent()
+        agent._user_input_event = None
+        with patch.object(srv, "agent", agent):
+            r = _client().post(
+                "/api/user-input",
+                json={"request_id": "any", "value": "abc"},
+            )
+        assert r.status_code == 400
+
+    def test_submit_no_agent_returns_503(self):
+        with patch.object(srv, "agent", None):
+            r = _client().post(
+                "/api/user-input",
+                json={"request_id": "any", "value": "abc"},
+            )
+        assert r.status_code == 503
+
+    def test_submit_value_too_long_returns_422(self):
+        r = _client().post(
+            "/api/user-input",
+            json={"request_id": "req-xyz", "value": "x" * 10_001},
+        )
+        assert r.status_code == 422

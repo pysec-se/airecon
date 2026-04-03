@@ -1,4 +1,5 @@
 """Tests for WAF detection and bypass strategy module (waf_detector.py)."""
+
 from __future__ import annotations
 
 from airecon.proxy.agent.waf_detector import (
@@ -111,8 +112,8 @@ class TestDetectWafFromResponse:
             host="example.com",
             status_code=200,
             headers={
-                "server": "cloudflare",          # Cloudflare (0.80)
-                "x-amzn-waf-action": "BLOCK",    # AWS WAF (0.95) -> should win
+                "server": "cloudflare",  # Cloudflare (0.80)
+                "x-amzn-waf-action": "BLOCK",  # AWS WAF (0.95) -> should win
             },
             body_excerpt="",
         )
@@ -163,6 +164,7 @@ class TestBuildWafBypassContext:
     def test_loads_patterns_from_json(self) -> None:
         """Verify that patterns.json waf_bypass_strategies is loaded correctly."""
         from airecon.proxy.agent.waf_detector import _load_bypass_strategies
+
         strategies = _load_bypass_strategies("generic")
         assert isinstance(strategies, list)
         assert len(strategies) > 0
@@ -170,6 +172,7 @@ class TestBuildWafBypassContext:
     def test_fallback_strategies_when_waf_unknown(self) -> None:
         """Unknown WAF name falls back to generic strategies."""
         from airecon.proxy.agent.waf_detector import _load_bypass_strategies
+
         strategies = _load_bypass_strategies("totally_unknown_waf_xyz")
         # Should return generic strategies (from patterns.json) or fallback
         assert isinstance(strategies, list)
@@ -177,7 +180,9 @@ class TestBuildWafBypassContext:
 
 
 class TestWafProfileMergingAndRanking:
-    def test_merge_preserves_history_and_increases_confidence_on_repeat_blocks(self) -> None:
+    def test_merge_preserves_history_and_increases_confidence_on_repeat_blocks(
+        self,
+    ) -> None:
         existing = {
             "host": "example.com",
             "waf_name": "Cloudflare",
@@ -249,7 +254,7 @@ class TestWafProfileMergingAndRanking:
             evidence=["Header cf-ray: Cloudflare"],
             detected_at_iteration=5,
         )
-        
+
         # Second detection: AWS WAF (could be behind Cloudflare)
         aws_profile = WAFProfile(
             host="example.com",
@@ -258,7 +263,7 @@ class TestWafProfileMergingAndRanking:
             evidence=["Header x-amzn-waf: AWS WAF"],
             detected_at_iteration=8,
         )
-        
+
         # Merge should handle multiple WAFs
         merged = merge_waf_profiles(
             existing=cloudflare_profile,  # Pass WAFProfile directly
@@ -267,7 +272,7 @@ class TestWafProfileMergingAndRanking:
             status_code=403,
             iteration=10,
         )
-        
+
         # Should not crash and should preserve evidence from both
         assert merged is not None
         # Should keep the higher confidence or fresher one

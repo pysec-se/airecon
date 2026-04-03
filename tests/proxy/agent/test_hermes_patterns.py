@@ -7,6 +7,7 @@ Covers:
 - isinstance(dict) args validation (executors.py)
 - _THINK_BLOCK_RE / _THINK_OPEN_RE edge cases
 """
+
 from __future__ import annotations
 
 import pytest
@@ -23,13 +24,18 @@ from airecon.proxy.agent.executors import _AIRECON_TOOL_NAMES
 # _repair_tool_pairs — ID-based orphan detection
 # ---------------------------------------------------------------------------
 
+
 class TestRepairToolPairs:
     def test_valid_pair_untouched(self):
         msgs = [
             {"role": "user", "content": "go"},
-            {"role": "assistant", "content": "", "tool_calls": [
-                {"id": "call_1", "function": {"name": "execute", "arguments": "{}"}}
-            ]},
+            {
+                "role": "assistant",
+                "content": "",
+                "tool_calls": [
+                    {"id": "call_1", "function": {"name": "execute", "arguments": "{}"}}
+                ],
+            },
             {"role": "tool", "tool_call_id": "call_1", "content": "ok"},
         ]
         result = AgentState._repair_tool_pairs(msgs)
@@ -50,9 +56,16 @@ class TestRepairToolPairs:
         """assistant tool_call with no matching tool result gets a stub."""
         msgs = [
             {"role": "user", "content": "go"},
-            {"role": "assistant", "content": "", "tool_calls": [
-                {"id": "call_x", "function": {"name": "web_search", "arguments": "{}"}}
-            ]},
+            {
+                "role": "assistant",
+                "content": "",
+                "tool_calls": [
+                    {
+                        "id": "call_x",
+                        "function": {"name": "web_search", "arguments": "{}"},
+                    }
+                ],
+            },
         ]
         result = AgentState._repair_tool_pairs(msgs)
         assert result[-1]["role"] == "tool"
@@ -63,10 +76,20 @@ class TestRepairToolPairs:
         """Two tool_calls: first has result, second is missing → stub for second only."""
         msgs = [
             {"role": "user", "content": "go"},
-            {"role": "assistant", "content": "", "tool_calls": [
-                {"id": "call_1", "function": {"name": "execute", "arguments": "{}"}},
-                {"id": "call_2", "function": {"name": "web_search", "arguments": "{}"}},
-            ]},
+            {
+                "role": "assistant",
+                "content": "",
+                "tool_calls": [
+                    {
+                        "id": "call_1",
+                        "function": {"name": "execute", "arguments": "{}"},
+                    },
+                    {
+                        "id": "call_2",
+                        "function": {"name": "web_search", "arguments": "{}"},
+                    },
+                ],
+            },
             {"role": "tool", "tool_call_id": "call_1", "content": "result1"},
         ]
         result = AgentState._repair_tool_pairs(msgs)
@@ -92,9 +115,13 @@ class TestRepairToolPairs:
         msgs = [
             {"role": "system", "content": "[SYSTEM: PINNED CONTEXT]"},
             {"role": "user", "content": "scan"},
-            {"role": "assistant", "content": "", "tool_calls": [
-                {"id": "c1", "function": {"name": "execute", "arguments": "{}"}}
-            ]},
+            {
+                "role": "assistant",
+                "content": "",
+                "tool_calls": [
+                    {"id": "c1", "function": {"name": "execute", "arguments": "{}"}}
+                ],
+            },
             {"role": "tool", "tool_call_id": "c1", "content": "done"},
         ]
         result = AgentState._repair_tool_pairs(msgs)
@@ -103,6 +130,7 @@ class TestRepairToolPairs:
 
     def test_non_standard_tool_call_object(self):
         """tool_calls entry as object with .id attribute (Ollama sometimes returns these)."""
+
         class FakeTc:
             id = "call_obj"
             function = None
@@ -121,6 +149,7 @@ class TestRepairToolPairs:
 # ---------------------------------------------------------------------------
 # add_message() — <think> block stripping
 # ---------------------------------------------------------------------------
+
 
 class TestAddMessageThinkStrip:
     def setup_method(self):
@@ -178,6 +207,7 @@ class TestAddMessageThinkStrip:
 # _THINK_BLOCK_RE / _THINK_OPEN_RE regex correctness
 # ---------------------------------------------------------------------------
 
+
 class TestThinkRegex:
     def test_block_re_case_insensitive(self):
         result = _THINK_BLOCK_RE.sub("", "<THINK>hidden</THINK>visible")
@@ -210,6 +240,7 @@ class TestThinkRegex:
 # _AIRECON_TOOL_NAMES hallucination guard
 # ---------------------------------------------------------------------------
 
+
 class TestAIReconToolNames:
     def test_web_search_in_set(self):
         assert "web_search" in _AIRECON_TOOL_NAMES
@@ -236,6 +267,7 @@ class TestAIReconToolNames:
 # isinstance(dict) args validation guard (via _execute_tool_and_record)
 # ---------------------------------------------------------------------------
 
+
 class TestArgsValidation:
     """Verify non-dict args are rejected before dispatch."""
 
@@ -255,7 +287,8 @@ class TestArgsValidation:
         executor = FakeExecutor()
         # Provide list instead of dict
         ok, duration, result, _ = await executor._execute_tool_and_record(
-            "execute", ["this", "is", "wrong"]  # type: ignore[arg-type]
+            "execute",
+            ["this", "is", "wrong"],  # type: ignore[arg-type]
         )
         assert ok is False
         assert "dict" in result["error"].lower()
@@ -274,7 +307,8 @@ class TestArgsValidation:
 
         executor = FakeExecutor()
         ok, _, result, _ = await executor._execute_tool_and_record(
-            "web_search", "just a string"  # type: ignore[arg-type]
+            "web_search",
+            "just a string",  # type: ignore[arg-type]
         )
         assert ok is False
         assert "dict" in result["error"].lower()

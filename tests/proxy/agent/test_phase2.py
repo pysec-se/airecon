@@ -1,4 +1,5 @@
 """Tests for Phase 2: Skill Orchestration Policy + Tool Budget."""
+
 from __future__ import annotations
 
 import pytest
@@ -69,7 +70,9 @@ def test_skill_phase_no_boost_zero_hits(mocker):
     # Message has NO keywords — skill_scores is empty, so "xss" keyword never fires.
     # EXPLOIT phase has one guaranteed skill: tools/advanced_fuzzing.md
     # That skill loads via the guarantee path regardless of keyword hits.
-    ctx, loaded = auto_load_skills_for_message("totally unrelated message", phase="EXPLOIT")
+    ctx, loaded = auto_load_skills_for_message(
+        "totally unrelated message", phase="EXPLOIT"
+    )
 
     # The keyword-only skill (xss.md) must NOT be loaded (zero hits, no keyword match).
     assert "payloads/xss.md" not in loaded
@@ -86,6 +89,7 @@ def test_skill_phase_report_no_boost(mocker):
     mocker.patch("airecon.proxy.system._SKILL_KEYWORDS", fake_keywords)
 
     import airecon.proxy.system as sys_module
+
     original_dirs = sys_module._PHASE_SKILL_DIRECTORIES
 
     # Verify REPORT has empty preferred set
@@ -166,9 +170,15 @@ def test_phase_tool_usage_isolated_per_phase():
 
 def test_tool_effectiveness_tracks_meaningful_hits():
     state = AgentState()
-    state.record_tool_outcome("ANALYSIS", "quick_fuzz", success=True, meaningful_evidence_delta=1)
-    state.record_tool_outcome("ANALYSIS", "quick_fuzz", success=True, meaningful_evidence_delta=0)
-    state.record_tool_outcome("ANALYSIS", "quick_fuzz", success=False, meaningful_evidence_delta=0)
+    state.record_tool_outcome(
+        "ANALYSIS", "quick_fuzz", success=True, meaningful_evidence_delta=1
+    )
+    state.record_tool_outcome(
+        "ANALYSIS", "quick_fuzz", success=True, meaningful_evidence_delta=0
+    )
+    state.record_tool_outcome(
+        "ANALYSIS", "quick_fuzz", success=False, meaningful_evidence_delta=0
+    )
 
     eff = state.get_tool_effectiveness("ANALYSIS", "quick_fuzz")
     assert eff["calls"] == 3.0

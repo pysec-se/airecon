@@ -32,16 +32,17 @@ def test_calculate_similarity():
 
 
 def test_is_duplicate_vulnerability():
-    existing = [
-        {"finding": "Reflected XSS in parameter 'q'", "target": "example.com"}
-    ]
+    existing = [{"finding": "Reflected XSS in parameter 'q'", "target": "example.com"}]
 
-    new_dup = {"finding": "Reflected XSS in parameter 'q'",
-               "target": "example.com"}
+    new_dup = {"finding": "Reflected XSS in parameter 'q'", "target": "example.com"}
     new_diff_param = {
-        "finding": "Reflected XSS in parameter 'search'", "target": "example.com"}
+        "finding": "Reflected XSS in parameter 'search'",
+        "target": "example.com",
+    }
     new_diff_target = {
-        "finding": "Reflected XSS in parameter 'q'", "target": "api.example.com"}
+        "finding": "Reflected XSS in parameter 'q'",
+        "target": "api.example.com",
+    }
 
     assert _is_duplicate_vulnerability(new_dup, existing) is True
     assert _is_duplicate_vulnerability(new_diff_param, existing) is False
@@ -55,7 +56,7 @@ def test_update_from_parsed_output_adds_technologies(mock_session):
         tool="httpx",
         summary="Found tech",
         items=[],
-        technologies={"nginx": "1.24", "PHP": ""}
+        technologies={"nginx": "1.24", "PHP": ""},
     )
     update_from_parsed_output(mock_session, parsed)
 
@@ -64,10 +65,7 @@ def test_update_from_parsed_output_adds_technologies(mock_session):
 
     # Test upgrading an empty version
     parsed2 = ParsedOutput(
-        tool="whatweb",
-        summary="Found PHP ver",
-        items=[],
-        technologies={"PHP": "8.1"}
+        tool="whatweb", summary="Found PHP ver", items=[], technologies={"PHP": "8.1"}
     )
     update_from_parsed_output(mock_session, parsed2)
     assert mock_session.technologies["PHP"] == "8.1"
@@ -85,8 +83,8 @@ def test_update_from_parsed_output_classifies_items(mock_session):
             "443/tcp open https",
             "internal-subdomain.example.com",
             # This shouldn't be matched by anything special
-            "Unrelated garbage data"
-        ]
+            "Unrelated garbage data",
+        ],
     )
 
     update_from_parsed_output(mock_session, parsed)
@@ -170,7 +168,9 @@ def test_update_from_parsed_output_vuln_pattern_ignores_cve_not_affected(mock_se
     assert len(mock_session.vulnerabilities) == 0
 
 
-def test_update_from_parsed_output_vuln_pattern_keeps_not_authenticated_signal(mock_session):
+def test_update_from_parsed_output_vuln_pattern_keeps_not_authenticated_signal(
+    mock_session,
+):
     parsed = ParsedOutput(
         tool="metasploit",
         summary="Metasploit output",
@@ -210,7 +210,9 @@ def test_update_from_parsed_output_updates_causal_state(mock_session):
             }
         ],
     )
-    update_from_parsed_output(mock_session, parsed, command="httpx -u https://example.com/admin")
+    update_from_parsed_output(
+        mock_session, parsed, command="httpx -u https://example.com/admin"
+    )
 
     assert len(mock_session.causal_state.observations) == 1
     assert len(mock_session.causal_state.hypotheses) >= 1
@@ -249,11 +251,11 @@ class TestBoundedListDeserialization:
     def test_coerce_sequence_valid_json_list(self) -> None:
         """Test _coerce_sequence_field with valid JSON list format."""
         from airecon.proxy.agent.session import _coerce_sequence_field
-        
+
         # Valid JSON list
         data = ["item1", "item2", "item3"]
         result = _coerce_sequence_field(data, field_name="test", maxlen=100)
-        
+
         assert result is not None
         assert len(result) == 3
         assert "item1" in result
@@ -262,21 +264,21 @@ class TestBoundedListDeserialization:
     def test_coerce_sequence_empty_list(self) -> None:
         """Test _coerce_sequence_field with empty list."""
         from airecon.proxy.agent.session import _coerce_sequence_field
-        
+
         data = []
         result = _coerce_sequence_field(data, field_name="test", maxlen=100)
-        
+
         assert result is not None
         assert len(result) == 0
 
     def test_coerce_sequence_legacy_deque_string_format(self) -> None:
         """Test _coerce_sequence_field with legacy deque string format."""
         from airecon.proxy.agent.session import _coerce_sequence_field
-        
+
         # Legacy format: deque(['item1', 'item2'])
         data = "deque(['item1', 'item2'])"
         result = _coerce_sequence_field(data, field_name="test", maxlen=100)
-        
+
         # Should handle legacy format gracefully
         assert result is not None
         assert len(result) >= 0
@@ -284,39 +286,39 @@ class TestBoundedListDeserialization:
     def test_coerce_sequence_corrupted_legacy_format(self) -> None:
         """CRITICAL: Corrupted legacy deque format should not crash."""
         from airecon.proxy.agent.session import _coerce_sequence_field
-        
+
         # Corrupted legacy format (truncated)
         data = "deque(['item1', 'item"  # Missing closing
         result = _coerce_sequence_field(data, field_name="test", maxlen=100)
-        
+
         # Should not crash
         assert result is not None
 
     def test_coerce_sequence_none_input(self) -> None:
         """Test _coerce_sequence_field with None input."""
         from airecon.proxy.agent.session import _coerce_sequence_field
-        
+
         result = _coerce_sequence_field(None, field_name="test", maxlen=100)
-        
+
         # Should handle None gracefully
         assert result is not None
 
     def test_coerce_sequence_empty_string(self) -> None:
         """Test _coerce_sequence_field with empty string."""
         from airecon.proxy.agent.session import _coerce_sequence_field
-        
+
         result = _coerce_sequence_field("", field_name="test", maxlen=100)
-        
+
         # Should handle empty string gracefully
         assert result is not None
 
     def test_coerce_sequence_truncates_to_maxlen(self) -> None:
         """Test that _coerce_sequence_field truncates to maxlen."""
         from airecon.proxy.agent.session import _coerce_sequence_field
-        
+
         data = ["item" + str(i) for i in range(50)]
         result = _coerce_sequence_field(data, field_name="test", maxlen=10)
-        
+
         assert len(result) == 10
         # Should keep the newest items (last ones)
         assert "item49" in result

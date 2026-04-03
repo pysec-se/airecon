@@ -29,10 +29,10 @@ class TestSearXngSearch:
         # This test validates the function signature and behavior through other means
         # rather than full async mocking which is complex with aiohttp
         from airecon.proxy.web_search import _searxng_search
-        
+
         # Verify the function exists and is callable
         assert callable(_searxng_search)
-        
+
         # The function should handle max_results parameter correctly
         # (verified through integration and manual testing)
 
@@ -44,6 +44,7 @@ class TestDdgSearch:
     async def test_ddg_search_function_exists(self):
         """Should have _ddg_search function."""
         from airecon.proxy.web_search import _ddg_search
+
         assert callable(_ddg_search)
 
 
@@ -55,7 +56,7 @@ class TestWebSearch:
         """web_search function should accept expected parameters."""
         import inspect
         from airecon.proxy.web_search import web_search as ws_func
-        
+
         sig = inspect.signature(ws_func)
         assert "query" in sig.parameters
         assert "max_results" in sig.parameters
@@ -68,10 +69,12 @@ class TestWebSearch:
             "success": True,
             "result": "Cached result",
         }
-        
-        with patch("airecon.proxy.web_search._get_cached_results", return_value=cached_result):
+
+        with patch(
+            "airecon.proxy.web_search._get_cached_results", return_value=cached_result
+        ):
             result = await web_search.web_search("test", use_cache=True)
-        
+
         assert result["success"] is True
         assert result["from_cache"] is True
         assert "Cached result" in result["result"]
@@ -84,7 +87,7 @@ class TestCacheFunctions:
         """Cache key should be consistent for same inputs."""
         key1 = web_search._get_cache_key("test query", 10)
         key2 = web_search._get_cache_key("test query", 10)
-        
+
         assert key1 == key2
         assert len(key1) == 32  # MD5 hex length
 
@@ -92,21 +95,21 @@ class TestCacheFunctions:
         """Cache key should differ for different queries."""
         key1 = web_search._get_cache_key("query1", 10)
         key2 = web_search._get_cache_key("query2", 10)
-        
+
         assert key1 != key2
 
     def test_cache_key_differs_for_different_max_results(self):
         """Cache key should differ for different max_results."""
         key1 = web_search._get_cache_key("test", 10)
         key2 = web_search._get_cache_key("test", 20)
-        
+
         assert key1 != key2
 
     def test_get_cached_results_file_not_exists(self):
         """Should return None when cache file doesn't exist."""
         with patch("pathlib.Path.exists", return_value=False):
             result = web_search._get_cached_results("test", 10)
-        
+
         assert result is None
 
     def test_get_cached_results_expired(self):
@@ -115,10 +118,10 @@ class TestCacheFunctions:
             mock_stat = MagicMock()
             # Set mtime to 2 hours ago (cache TTL is 1 hour)
             mock_stat.st_mtime = time.time() - 7200
-            
+
             with patch("pathlib.Path.stat", return_value=mock_stat):
                 result = web_search._get_cached_results("test", 10)
-        
+
         assert result is None
 
     def test_get_cached_results_fresh(self):
@@ -127,16 +130,16 @@ class TestCacheFunctions:
             "success": True,
             "result": "Cached search results",
         }
-        
+
         with patch("pathlib.Path.exists", return_value=True):
             mock_stat = MagicMock()
             # Set mtime to 30 minutes ago (within TTL)
             mock_stat.st_mtime = time.time() - 1800
-            
+
             with patch("pathlib.Path.stat", return_value=mock_stat):
                 with patch("gzip.open", mock_open(read_data=json.dumps(cached_data))):
                     result = web_search._get_cached_results("test", 10)
-        
+
         assert result is not None
         assert result["success"] is True
         assert "Cached" in result["result"]
@@ -146,7 +149,7 @@ class TestCacheFunctions:
         with patch("pathlib.Path.mkdir") as mock_mkdir:
             with patch("gzip.open", mock_open()):
                 web_search._cache_results("test", 10, {"success": True})
-        
+
         mock_mkdir.assert_called_once_with(parents=True, exist_ok=True)
 
     def test_cache_results_handles_errors(self):
@@ -164,13 +167,13 @@ class TestIntegrationScenarios:
         key1 = web_search._get_cache_key("query1", 10)
         key2 = web_search._get_cache_key("query2", 10)
         key3 = web_search._get_cache_key("query1", 20)
-        
+
         # Same query and max_results should produce same key
         key1_repeat = web_search._get_cache_key("query1", 10)
         assert key1 == key1_repeat
-        
+
         # Different query should produce different key
         assert key1 != key2
-        
+
         # Different max_results should produce different key
         assert key1 != key3

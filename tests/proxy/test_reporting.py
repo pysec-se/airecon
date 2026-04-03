@@ -1,5 +1,8 @@
 import os
-from airecon.proxy.reporting import create_vulnerability_report, calculate_cvss_and_severity
+from airecon.proxy.reporting import (
+    create_vulnerability_report,
+    calculate_cvss_and_severity,
+)
 
 
 def test_calculate_cvss():
@@ -18,7 +21,7 @@ def test_reporting_validation_fails_missing_required():
         description="description",
         target="target.com",
         poc_description="poc",
-        poc_script_code="code"
+        poc_script_code="code",
     )
 
     assert result["success"] is False
@@ -32,7 +35,7 @@ def test_reporting_validation_fails_invalid_cve():
         target="target.com",
         poc_description="poc",
         poc_script_code="code",
-        cve="INVALID-CVE-FORMAT"
+        cve="INVALID-CVE-FORMAT",
     )
 
     assert result["success"] is False
@@ -57,7 +60,7 @@ def test_reporting_success_and_file_creation(tmp_path):
         confidentiality="H",
         integrity="H",
         availability="H",
-        _workspace_root=workspace
+        _workspace_root=workspace,
     )
 
     assert result["success"] is True
@@ -84,7 +87,7 @@ def test_reporting_duplicate_collision(tmp_path):
         target="example.com",
         poc_description="poc",
         poc_script_code="code",
-        _workspace_root=workspace
+        _workspace_root=workspace,
     )
 
     # Try again
@@ -94,7 +97,7 @@ def test_reporting_duplicate_collision(tmp_path):
         target="example.com",
         poc_description="poc",
         poc_script_code="code",
-        _workspace_root=workspace
+        _workspace_root=workspace,
     )
 
     assert result2["success"] is False
@@ -197,18 +200,18 @@ def test_reporting_full_cvss_integration(tmp_path):
         poc_script_code=(
             "curl -X POST https://example.com/api/v1/login \\\n"
             "  -H 'Content-Type: application/json' \\\n"
-            "  -d '{\"username\": \"admin\\'--\", \"password\": \"x\"}' \\\n"
+            '  -d \'{"username": "admin\\\'--", "password": "x"}\' \\\n'
             "  | grep -i 'welcome'"
         ),
         # Full CVSS 3.1 metrics - Critical severity
-        attack_vector="N",        # Network
-        attack_complexity="L",    # Low
+        attack_vector="N",  # Network
+        attack_complexity="L",  # Low
         privileges_required="N",  # None
-        user_interaction="N",     # None
-        scope="U",                # Unchanged
-        confidentiality="H",      # High
-        integrity="H",            # High
-        availability="H",         # High
+        user_interaction="N",  # None
+        scope="U",  # Unchanged
+        confidentiality="H",  # High
+        integrity="H",  # High
+        availability="H",  # High
         # Optional metadata
         cve="CVE-2024-12345",
         impact="Complete system compromise possible. Attackers can bypass authentication and access all user accounts.",
@@ -241,3 +244,62 @@ def test_reporting_full_cvss_integration(tmp_path):
     assert "CVE-2024-12345" in content
     assert "parameterized" in content.lower() or "Parameterized" in content
     assert "curl -X POST" in content
+
+
+def test_reporting_partial_cvss_fields_rejected(tmp_path):
+    workspace = str(tmp_path)
+
+    result = create_vulnerability_report(
+        title="Partial CVSS Input",
+        description="desc",
+        target="example.com",
+        poc_description="poc",
+        poc_script_code="code",
+        attack_vector="N",
+        # Missing remaining CVSS fields
+        _workspace_root=workspace,
+    )
+
+    assert result["success"] is False
+    assert "cvss" in result["message"].lower() or "cvss" in " ".join(result.get("errors", [])).lower()
+
+
+def test_reporting_accepts_lowercase_cvss_values(tmp_path):
+    workspace = str(tmp_path)
+
+    result = create_vulnerability_report(
+        title="Lowercase CVSS Accepted",
+        description="desc",
+        target="example.com",
+        poc_description="poc",
+        poc_script_code="code",
+        attack_vector="n",
+        attack_complexity="l",
+        privileges_required="n",
+        user_interaction="n",
+        scope="u",
+        confidentiality="h",
+        integrity="h",
+        availability="h",
+        _workspace_root=workspace,
+    )
+
+    assert result["success"] is True
+    assert result["severity"] == "critical"
+
+
+def test_reporting_symbol_only_title_gets_stable_fallback_slug(tmp_path):
+    workspace = str(tmp_path)
+
+    result = create_vulnerability_report(
+        title="!!!",
+        description="desc",
+        target="example.com",
+        poc_description="poc",
+        poc_script_code="code",
+        _workspace_root=workspace,
+    )
+
+    assert result["success"] is True
+    assert result["report_id"] == "report"
+    assert result["report_path"].endswith("/report.md") or result["report_path"].endswith("\\report.md")

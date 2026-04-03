@@ -8,7 +8,8 @@
                 "findomain",
                 "shuffledns",
                 "massdns",
-                "dnsx"
+                "dnsx",
+                "sublist3r"
             ],
             "port_scan": [
                 "nmap",
@@ -63,7 +64,8 @@
                 "nuclei",
                 "nikto",
                 "zaproxy",
-                "vulnx"
+                "vulnx",
+                "wapiti3"
             ],
             "cms_scanners": [
                 "wpscan",
@@ -152,7 +154,8 @@
                 "jsleak",
                 "js_snooper",
                 "jsniper",
-                "csprecon"
+                "csprecon",
+                "semgrep"
             ]
         },
         "cloud_secrets": {

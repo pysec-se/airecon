@@ -1,7 +1,6 @@
-"""Chat widget: displays conversation with clean CLI-style rendering."""
-
 from __future__ import annotations
 
+import asyncio
 import re
 
 from rich.text import Text
@@ -11,94 +10,108 @@ from textual.message import Message
 from textual.reactive import reactive
 from textual.widgets import LoadingIndicator, RichLog, Static
 
-# ── ANSI Stripper ──
 _ANSI_RE = re.compile(r'\x1B(?:[@-Z\\-_]|\[[0-?]*[ -/]*[@-~])')
 
-# ── Port/service pattern (e.g. 80/tcp, 443/udp) ──
 _PORT_RE = re.compile(r'\b\d{1,5}/(tcp|udp)\b', re.IGNORECASE)
 
-# ── CVE pattern ──
 _CVE_RE = re.compile(r'\bCVE-\d{4}-\d{4,}\b', re.IGNORECASE)
-
 
 def _strip_ansi(text: str) -> str:
     return _ANSI_RE.sub('', text)
 
-
 def _colorize_line(line: str) -> Text:
-    """Colorize a single plain-text tool output line using Rich Text.
-
-    Applies color based on content patterns without enabling markup parsing,
-    so tool output containing [ ] characters is safe.
-    """
     stripped = line.strip()
     t = Text(no_wrap=False, overflow="fold")
 
-    # ── Positive / success ──
     if re.match(r'^(\[?\+\]?|\[OK\]|\[SUCCESS\]|✓|✔)\s', stripped, re.IGNORECASE) or \
        stripped.lower().startswith(("found:", "discovered:", "resolved:")):
         t.append(line, style="#00d4aa")
 
-    # ── Findings / vulnerabilities ──
     elif any(kw in stripped.lower() for kw in (
         "[vuln]", "[critical]", "[high]", "critical:", "vulnerability", "injection found",
         "xss found", "sqli", "bypass", "exposed", "disclosure", "[crit",
     )):
         t.append(line, style="bold #f97316")
 
-    # ── Medium severity ──
     elif any(kw in stripped.lower() for kw in ("[medium]", "medium:", "potential")):
         t.append(line, style="#f59e0b")
 
-    # ── Errors / failures ──
     elif re.match(r'^(\[?\-\]?|\[ERR\]|\[ERROR\]|✗|✘|ERROR|FAILED|FATAL)\s', stripped, re.IGNORECASE) or \
             stripped.lower().startswith(("error:", "failed:", "exception:", "fatal:")):
         t.append(line, style="#ef4444")
 
-    # ── Warnings ──
     elif re.match(r'^(\[!?\]|\[WARN\]|\[WARNING\]|WARNING|WARN)\s', stripped, re.IGNORECASE):
         t.append(line, style="#f59e0b")
 
-    # ── Port/service lines (e.g. "80/tcp  open  http  nginx") ──
     elif _PORT_RE.search(stripped):
-        # Highlight open/filtered differently
+
         if "open" in stripped.lower():
             t.append(line, style="#58a6ff")
         else:
             t.append(line, style="#484f58")
 
-    # ── CVE references ──
     elif _CVE_RE.search(stripped):
         t.append(line, style="bold #f97316")
 
-    # ── Info / status ──
     elif re.match(r'^(\[?\*\]?|\[INFO\]|INFO|>|→)\s', stripped, re.IGNORECASE):
         t.append(line, style="#8b949e")
 
-    # ── Subdomains / hostnames / URLs ──
     elif re.match(r'^[a-zA-Z0-9\-]+\.[a-zA-Z]{2,}(/|$)', stripped) or \
             stripped.startswith(("http://", "https://")):
         t.append(line, style="#58a6ff")
 
-    # ── Blank lines — minimal style ──
     elif not stripped:
         t.append(line, style="#21262d")
 
-    # ── Default ──
     else:
         t.append(line, style="#c9d1d9")
 
     return t
 
 
-# ═══════════════════════════════════════════════════════════════
-#  ChatMessage — A single chat message (user, assistant, error…)
-# ═══════════════════════════════════════════════════════════════
+class AutoCopyStatic(Static):
+    def __init__(self, *args, **kwargs) -> None:
+        super().__init__(*args, **kwargs)
+        self._copy_debounce_task: asyncio.Task | None = None
+
+    async def _debounced_copy(self, selected_text: str) -> None:
+        await asyncio.sleep(0.35)
+        if not self.screen:
+            return
+        current = (self.screen.get_selected_text() or "").strip()
+        if not current or current != selected_text:
+            return
+        if getattr(self.app, "_last_autocopied_chat_selection", None) == selected_text:
+            return
+        self.app.copy_to_clipboard(selected_text)
+        setattr(self.app, "_last_autocopied_chat_selection", selected_text)
+
+    def selection_updated(self, selection) -> None:
+        super().selection_updated(selection)
+        if self._copy_debounce_task and not self._copy_debounce_task.done():
+            self._copy_debounce_task.cancel()
+
+        if not selection:
+            return
+
+        try:
+            selected_text = self.screen.get_selected_text() if self.screen else None
+            if not selected_text:
+                return
+            selected_text = selected_text.strip()
+            if not selected_text:
+                return
+            self._copy_debounce_task = asyncio.create_task(self._debounced_copy(selected_text))
+        except Exception:
+            return
+
+    def on_unmount(self) -> None:
+        if self._copy_debounce_task and not self._copy_debounce_task.done():
+            self._copy_debounce_task.cancel()
+
 
 class ChatMessage(Static):
-    """A single chat message rendered as clean text (no Markdown widget)."""
-
-    DEFAULT_CSS = ""  # Defer to styles.tcss
+    DEFAULT_CSS = ""
 
     BINDINGS = [("c", "copy", "Copy Message")]
     can_focus = True
@@ -117,7 +130,7 @@ class ChatMessage(Static):
         self.add_class(f"{role}-message")
 
     def compose(self) -> ComposeResult:
-        # Role label with icon
+
         role_config = {
             "user": ("❯", "role-label-user"),
             "assistant": ("◆", "role-label-assistant"),
@@ -139,33 +152,19 @@ class ChatMessage(Static):
         name = role_names.get(self.role, self.role.title())
         yield Static(f"{icon} {name}", classes=f"role-label {css_class}")
 
-        # markup=False by default to prevent MarkupError on user-controlled/LLM content.
-        # Pass markup=True only for internally-generated messages that use Rich markup tags.
-        yield Static(self.message_content, classes="msg-body", markup=self._markup)
+        yield AutoCopyStatic(self.message_content, classes="msg-body", markup=self._markup)
 
     def action_copy(self) -> None:
-        """Copy message content to clipboard."""
         self.app.copy_to_clipboard(self.message_content)
-        self.notify("Copied!", severity="information")
-
-
-# ═══════════════════════════════════════════════════════════════
-#  ToolMessage — Tool execution card with status
-# ═══════════════════════════════════════════════════════════════
 
 class ToolMessageSelected(Message):
-    """Message sent when the tool message is clicked."""
-
     def __init__(self, output_file: str, tool_name: str) -> None:
         self.output_file = output_file
         self.tool_name = tool_name
         super().__init__()
 
-
 class ToolMessage(Vertical):
-    """A compact tool execution card."""
-
-    DEFAULT_CSS = ""  # Defer to styles.tcss
+    DEFAULT_CSS = ""
 
     BINDINGS = [("c", "copy", "Copy Output")]
 
@@ -187,19 +186,17 @@ class ToolMessage(Vertical):
         self.add_class("running")
 
     def compose(self) -> ComposeResult:
-        # Header line: ⚙ TOOL_NAME  {args_preview}
+
         header = Text()
         header.append("⚙ ", style="bold #58a6ff")
         header.append(self.tool_name, style="bold #c9d1d9")
         header.append("  ", style="")
 
-        # Sanitize args for display
         try:
             if isinstance(self.args, str):
                 args_str = self.args
             elif isinstance(self.args, dict):
-                # Show command if it's an execute tool, otherwise key=value
-                # pairs
+
                 if "command" in self.args:
                     args_str = self.args["command"]
                 else:
@@ -215,7 +212,6 @@ class ToolMessage(Vertical):
         header.append(args_str, style="#484f58")
         yield Static(header, classes="tool-header")
 
-        # Spinner while running
         if self.status == "running":
             yield LoadingIndicator()
             live_output = RichLog(
@@ -223,8 +219,7 @@ class ToolMessage(Vertical):
                 highlight=False,
                 auto_scroll=True,
                 classes="tool-live-output")
-            # Force hide native scrollbar for this widget since CSS might not
-            # apply deeply to RichLog contents
+
             live_output.styles.scrollbar_size_vertical = 0
             live_output.styles.scrollbar_size_horizontal = 0
             self._live_output = live_output
@@ -234,7 +229,7 @@ class ToolMessage(Vertical):
         self._live_output_buffer += text
 
         if self._live_output:
-            # Split by either \n or \r to flush progress bars instantly
+
             while True:
                 match = re.search(r'[\n\r]', self._live_output_buffer)
                 if not match:
@@ -260,7 +255,7 @@ class ToolMessage(Vertical):
         self.add_class(self.status)
 
         if self.status == "done":
-            # ── SUCCESS: Collapse to a clean one-liner ──
+
             summary = Text()
             summary.append("✓ ", style="bold #00d4aa")
             summary.append(self.tool_name, style="bold #8b949e")
@@ -275,29 +270,25 @@ class ToolMessage(Vertical):
             self._summary_text = summary
             self.call_after_refresh(self._collapse_to_summary)
         else:
-            # ── ERROR: Keep expanded so user can see the error ──
+
             self.call_after_refresh(self._show_error_details)
 
     def _collapse_to_summary(self) -> None:
-        """Success: remove all children and show one-liner."""
         try:
             for child in list(self.children):
                 child.remove()
-        except Exception:  # nosec B110 - widget cleanup is best-effort
+        except Exception:
             pass
         self.mount(Static(self._summary_text, classes="tool-summary"))
 
     def _show_error_details(self) -> None:
-        """Error: remove spinner but keep header, add error output."""
-        # Remove only the spinner, keep the header
         try:
             for child in list(self.children):
                 if isinstance(child, LoadingIndicator):
                     child.remove()
-        except Exception:  # nosec B110 - widget cleanup is best-effort
+        except Exception:
             pass
 
-        # Show error output
         if self.output:
             clean = _strip_ansi(self.output)
             lines = clean.strip().splitlines()
@@ -308,7 +299,6 @@ class ToolMessage(Vertical):
                 preview = "\n".join(lines)
             self.mount(Static(preview, classes="tool-output", markup=False))
 
-        # Error footer
         footer = Text()
         footer.append("✗ ", style="bold #ef4444")
         footer.append(f"{self.duration:.1f}s", style="#ef4444")
@@ -324,7 +314,6 @@ class ToolMessage(Vertical):
     def action_copy(self) -> None:
         content = self.output if self.output else str(self.args)
         self.app.copy_to_clipboard(content)
-        self.notify("Copied!", severity="information")
 
     def on_click(self) -> None:
         if self.output_file:
@@ -335,15 +324,8 @@ class ToolMessage(Vertical):
         else:
             self.app.notify("No output file.", severity="warning")
 
-
-# ═══════════════════════════════════════════════════════════════
-#  StreamingMessage — Live streaming text (assistant only)
-# ═══════════════════════════════════════════════════════════════
-
 class StreamingMessage(Static):
-    """Message that updates incrementally during streaming."""
-
-    DEFAULT_CSS = ""  # Defer to styles.tcss
+    DEFAULT_CSS = ""
 
     content_text = reactive("", layout=True)
 
@@ -358,69 +340,42 @@ class StreamingMessage(Static):
         if not self._initial_label_yielded:
             yield Static("◆ AIRecon", classes="role-label role-label-assistant")
             self._initial_label_yielded = True
-        # Disable markup to prevent parsing errors on special characters (e.g., =alert(1)>)
+
         self._text_widget = Static(
             "", classes="streaming-content", markup=False)
         yield self._text_widget
         yield Static("●", classes="streaming-indicator")
 
     def append_text(self, text: str) -> None:
-        """Append text (batched: flush every 50 chars for performance)."""
         self.content_text += text
         if self._text_widget and (
                 len(self.content_text) - self._last_flush_len >= 50):
             try:
                 self._text_widget.update(self.content_text)
                 self._last_flush_len = len(self.content_text)
-            except Exception:  # nosec B110 - fallback: drop update on markup error
+            except Exception:
                 pass
 
     def finalize(self) -> None:
-        """Remove streaming indicator and flush remaining text."""
         if self._text_widget and len(self.content_text) > self._last_flush_len:
             try:
                 self._text_widget.update(self.content_text)
-            except Exception:  # nosec B110 - silently handle markup errors
+            except Exception:
                 pass
         try:
             self.query_one(".streaming-indicator", Static).remove()
-        except Exception:  # nosec B110 - indicator may already be gone
+        except Exception:
             pass
 
-
-# ═══════════════════════════════════════════════════════════════
-#  ThinkingSpinner — Animated spinner (hides thinking content)
-# ═══════════════════════════════════════════════════════════════
-
-
 class ThinkingSpinner(Horizontal):
-    """Compact spinner shown while the model is thinking.
-    Replaces itself with nothing when thinking ends."""
-
-    DEFAULT_CSS = ""  # Defer to styles.tcss
+    DEFAULT_CSS = ""
 
     def compose(self) -> ComposeResult:
         yield LoadingIndicator(id="thinking-spinner")
         yield Static("  Thinking…", classes="thinking-label")
 
-
-# ═══════════════════════════════════════════════════════════════
-#  SubAgentBlock — Collapsible block for a running sub-agent
-# ═══════════════════════════════════════════════════════════════
-
 class SubAgentBlock(Vertical):
-    """Collapsible block that streams a sub-agent's LLM output and tool calls.
-
-    While running: header + spinner + Static (accumulated text) + ToolMessages.
-    When done: collapses to a one-liner summary (click to re-expand).
-
-    Text tokens are accumulated into a single string and the Static widget is
-    refreshed in batches (every 50 chars or on newline) — same pattern as
-    StreamingMessage — so word-by-word LLM tokens render as flowing prose, not
-    one word per line.
-    """
-
-    DEFAULT_CSS = ""  # Defer to styles.tcss
+    DEFAULT_CSS = ""
     can_focus = True
 
     def __init__(self, task_label: str, **kwargs) -> None:
@@ -431,8 +386,8 @@ class SubAgentBlock(Vertical):
         self._success = True
         self._total_duration = 0.0
         self._tool_count = 0
-        self._text_str: str = ""          # full accumulated text for replay
-        self._last_flush_len: int = 0     # chars already rendered to _text_static
+        self._text_str: str = ""
+        self._last_flush_len: int = 0
         self._active_tools: dict[str, ToolMessage] = {}
         self._body: Vertical | None = None
         self._text_static: Static | None = None
@@ -449,8 +404,6 @@ class SubAgentBlock(Vertical):
             self._text_static = Static("", markup=False, classes="subagent-text")
             self._body.mount(self._text_static)
 
-    # ── Text streaming ──────────────────────────────────────────
-
     def _header_text(self, note: str = "") -> Text:
         t = Text()
         t.append("◈ ", style="bold #a78bfa")
@@ -463,7 +416,6 @@ class SubAgentBlock(Vertical):
         return t
 
     def append_text(self, text: str) -> None:
-        """Accumulate LLM text tokens and flush to Static in batches."""
         self._text_str += _strip_ansi(text)
         if self._text_static is None or not self._expanded:
             return
@@ -472,10 +424,8 @@ class SubAgentBlock(Vertical):
             try:
                 self._text_static.update(self._text_str)
                 self._last_flush_len = len(self._text_str)
-            except Exception:  # nosec B110 - markup-safe Static, shouldn't fail
+            except Exception:
                 pass
-
-    # ── Nested tool calls ────────────────────────────────────────
 
     def add_tool_start(self, tool_id: str, tool_name: str,
                        args: dict | str) -> None:
@@ -497,10 +447,7 @@ class SubAgentBlock(Vertical):
         if msg:
             msg.update_result(success, duration, output, output_file)
 
-    # ── Completion ────────────────────────────────────────────────
-
     def finish(self, success: bool = True) -> None:
-        """Mark the sub-agent as done and collapse to a summary."""
         self._done = True
         self._success = success
         self.remove_class("running")
@@ -511,7 +458,7 @@ class SubAgentBlock(Vertical):
         for child in list(self.children):
             try:
                 child.remove()
-            except Exception:  # nosec B110 - best-effort cleanup
+            except Exception:
                 pass
 
         icon = "✓" if self._success else "✗"
@@ -536,7 +483,7 @@ class SubAgentBlock(Vertical):
     def _expand_full(self) -> None:
         try:
             self.query_one(".subagent-summary", Static).remove()
-        except Exception:  # nosec B110 - may already be gone
+        except Exception:
             pass
 
         self.mount(Static(self._header_text("  [↕]"), classes="subagent-header"))
@@ -544,14 +491,11 @@ class SubAgentBlock(Vertical):
         self._body = body
         self.mount(body)
 
-        # Replay saved text as a read-only Static
         if self._text_str:
             replay = Static(self._text_str, markup=False, classes="subagent-text")
             body.mount(replay)
-        self._text_static = None   # read-only replay; no new writes
+        self._text_static = None
         self._expanded = True
-
-    # ── Interaction ───────────────────────────────────────────────
 
     def on_click(self) -> None:
         if not self._done:
@@ -561,15 +505,8 @@ class SubAgentBlock(Vertical):
         else:
             self._expand_full()
 
-
-# ═══════════════════════════════════════════════════════════════
-#  ChatPanel — Scrollable container for all messages
-# ═══════════════════════════════════════════════════════════════
-
 class ChatPanel(VerticalScroll):
-    """Scrollable chat panel containing messages."""
-
-    DEFAULT_CSS = ""  # Defer to styles.tcss
+    DEFAULT_CSS = ""
 
     can_focus = True
 
@@ -579,13 +516,12 @@ class ChatPanel(VerticalScroll):
         self.styles.scrollbar_size_horizontal = 0
         self._streaming_msg: StreamingMessage | None = None
         self._thinking_msg: ThinkingSpinner | None = None
-        # initialized here, not lazily
+
         self._active_tools: dict[str, ToolMessage] = {}
         self._active_subagents: dict[str, SubAgentBlock] = {}
-        self._pending: list = []  # widgets buffered before on_mount
+        self._pending: list = []
 
     def on_mount(self) -> None:
-        """Flush any widgets that were queued before the panel was attached."""
         if self._pending:
             for widget in self._pending:
                 self.mount(widget)
@@ -593,7 +529,6 @@ class ChatPanel(VerticalScroll):
             self.scroll_end(animate=False)
 
     def _safe_mount(self, widget) -> None:
-        """Mount a widget, or queue it if the panel is not yet attached."""
         if self.is_attached:
             self.mount(widget)
         else:
@@ -609,6 +544,12 @@ class ChatPanel(VerticalScroll):
         self.end_streaming()
         self.end_thinking()
         self._safe_mount(ChatMessage(content, role="assistant", markup=markup))
+        self.scroll_end(animate=False)
+
+    def add_tool_message(self, content: str) -> None:
+        self.end_streaming()
+        self.end_thinking()
+        self._safe_mount(ChatMessage(content, role="tool"))
         self.scroll_end(animate=False)
 
     def add_tool_start(self, tool_id: str, tool_name: str,
@@ -672,7 +613,6 @@ class ChatPanel(VerticalScroll):
             self._streaming_msg = None
 
     def start_thinking(self) -> None:
-        """Show a spinner while the model thinks."""
         self.end_streaming()
         if not self._thinking_msg:
             self._thinking_msg = ThinkingSpinner()
@@ -680,13 +620,10 @@ class ChatPanel(VerticalScroll):
             self.scroll_end(animate=False)
 
     def append_to_thinking(self, text: str) -> None:
-        """Silently absorb thinking text (hidden from user)."""
-        # Just keep the spinner alive, don't display text
         if not self._thinking_msg:
             self.start_thinking()
 
     def end_thinking(self) -> None:
-        """Remove the thinking spinner entirely."""
         if self._thinking_msg:
             self._thinking_msg.remove()
             self._thinking_msg = None
@@ -700,10 +637,7 @@ class ChatPanel(VerticalScroll):
         self._active_tools.clear()
         self._active_subagents.clear()
 
-    # ── Sub-agent block API ──────────────────────────────────────
-
     def add_subagent_block(self, agent_id: str, task_label: str) -> None:
-        """Mount a new collapsible sub-agent block."""
         self.end_streaming()
         self.end_thinking()
         block = SubAgentBlock(task_label)

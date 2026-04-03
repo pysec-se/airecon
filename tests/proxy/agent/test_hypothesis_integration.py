@@ -5,12 +5,14 @@ Covers:
 2. Chain advancement → hypothesis status update (pending/testing → confirmed)
 3. Confirmed hypotheses → included in plan_chains() as synthetic vulns
 """
+
 from __future__ import annotations
 
 from unittest.mock import MagicMock, patch
 
 
 # ── helpers ───────────────────────────────────────────────────────────────────
+
 
 def _make_loop():
     from airecon.proxy.agent.loop import AgentLoop
@@ -47,8 +49,8 @@ def _make_mixin():
 
 # ── 1. _auto_form_hypotheses: CVE → hypothesis ────────────────────────────────
 
-class TestAutoFormHypotheses:
 
+class TestAutoFormHypotheses:
     def test_cve_in_output_creates_hypothesis(self):
         m = _make_mixin()
         m._auto_form_hypotheses(
@@ -94,7 +96,9 @@ class TestAutoFormHypotheses:
             result_text="Testing for SQL injection on endpoint /api/users",
         )
         # "testing for" is a false-signal — must not create hypothesis
-        sqli_hyps = [h for h in m.state.hypothesis_queue if "SQL_INJECTION" in h["claim"]]
+        sqli_hyps = [
+            h for h in m.state.hypothesis_queue if "SQL_INJECTION" in h["claim"]
+        ]
         assert sqli_hyps == []
 
     def test_open_port_in_recon_creates_hypothesis(self):
@@ -105,7 +109,9 @@ class TestAutoFormHypotheses:
             arguments={"command": "nmap -sV target.com"},
             result_text="80/open tcp http\n443/open tcp https\n22/open tcp ssh",
         )
-        port_hyps = [h for h in m.state.hypothesis_queue if "port" in h["claim"].lower()]
+        port_hyps = [
+            h for h in m.state.hypothesis_queue if "port" in h["claim"].lower()
+        ]
         assert port_hyps, "No port hypothesis formed"
         assert "80" in port_hyps[0]["claim"]
 
@@ -118,7 +124,9 @@ class TestAutoFormHypotheses:
             arguments={},
             result_text="80/open tcp http",
         )
-        port_hyps = [h for h in m.state.hypothesis_queue if "port" in h["claim"].lower()]
+        port_hyps = [
+            h for h in m.state.hypothesis_queue if "port" in h["claim"].lower()
+        ]
         assert port_hyps == []
 
     def test_max_two_hypotheses_per_call(self):
@@ -140,7 +148,9 @@ class TestAutoFormHypotheses:
         blob = "CVE-2021-41773 path traversal"
         m._auto_form_hypotheses("ANALYSIS", "execute", {}, blob)
         m._auto_form_hypotheses("ANALYSIS", "execute", {}, blob)
-        cve_hyps = [h for h in m.state.hypothesis_queue if "CVE-2021-41773" in h["claim"]]
+        cve_hyps = [
+            h for h in m.state.hypothesis_queue if "CVE-2021-41773" in h["claim"]
+        ]
         assert len(cve_hyps) == 1
 
     def test_no_hypotheses_on_empty_result(self):
@@ -157,15 +167,17 @@ class TestAutoFormHypotheses:
             arguments={"command": "sqlmap -u http://victim.com/api/users?id=1"},
             result_text="boolean-based SQL injection detected",
         )
-        sqli_hyps = [h for h in m.state.hypothesis_queue if "SQL INJECTION" in h["claim"]]
+        sqli_hyps = [
+            h for h in m.state.hypothesis_queue if "SQL INJECTION" in h["claim"]
+        ]
         assert sqli_hyps
         assert "victim.com" in sqli_hyps[0]["claim"]
 
 
 # ── 2. record_evidence_from_result calls _auto_form_hypotheses ────────────────
 
-class TestRecordEvidenceCallsAutoForm:
 
+class TestRecordEvidenceCallsAutoForm:
     def test_successful_execution_populates_hypothesis_queue(self):
         """CVE in tool output → hypothesis via _record_evidence_from_result."""
         m = _make_mixin()
@@ -191,14 +203,16 @@ class TestRecordEvidenceCallsAutoForm:
             output_file=None,
         )
         # Failed execution should not trigger hypothesis formation
-        sqli_hyps = [h for h in m.state.hypothesis_queue if "SQL_INJECTION" in h["claim"]]
+        sqli_hyps = [
+            h for h in m.state.hypothesis_queue if "SQL_INJECTION" in h["claim"]
+        ]
         assert sqli_hyps == []
 
 
 # ── 3. Chain advancement → hypothesis status update ───────────────────────────
 
-class TestChainAdvancementUpdatesHypothesis:
 
+class TestChainAdvancementUpdatesHypothesis:
     def _make_chain_dict(self, name: str, vuln_basis: str, n_steps: int = 2):
         return {
             "chain_id": f"chain_{name}",
@@ -210,7 +224,13 @@ class TestChainAdvancementUpdatesHypothesis:
             "phase_formed": "EXPLOIT",
             "iteration_formed": 1,
             "steps": [
-                {"step_id": f"s{i}", "description": f"Step {i}", "tool_hint": "sqlmap", "status": "pending", "evidence": ""}
+                {
+                    "step_id": f"s{i}",
+                    "description": f"Step {i}",
+                    "tool_hint": "sqlmap",
+                    "status": "pending",
+                    "evidence": "",
+                }
                 for i in range(n_steps)
             ],
         }
@@ -307,8 +327,8 @@ class TestChainAdvancementUpdatesHypothesis:
 
 # ── 4. Confirmed hypotheses feed plan_chains() ───────────────────────────────
 
-class TestConfirmedHypothesesFeedChainPlanner:
 
+class TestConfirmedHypothesesFeedChainPlanner:
     def test_confirmed_hypothesis_becomes_synthetic_vuln(self):
         """Confirmed hypothesis → synthetic vuln entry for chain planner."""
         from airecon.proxy.agent.models import AgentState

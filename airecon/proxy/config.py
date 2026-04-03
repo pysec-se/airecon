@@ -1,169 +1,209 @@
-"""Configuration management for AIRecon proxy."""
-
 from __future__ import annotations
 
+import asyncio
 import dataclasses
-import json
 import logging
 import os
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+import yaml
+
 logger = logging.getLogger("airecon.proxy.config")
 
 APP_DIR_NAME = ".airecon"
-CONFIG_FILENAME = "config.json"
+CONFIG_FILENAME = "config.yaml"
 
+_CONFIG_SCHEMA: dict[str, tuple[Any, str]] = {
+
+    "ollama_url": ("http://127.0.0.1:11434", "Ollama API endpoint. For remote servers use http://IP:11434"),
+    "ollama_model": ("qwen3.5:122b", "Model to use. Recommended: qwen3.5:122b for best reasoning"),
+    "ollama_timeout": (300.0, "Total request timeout (seconds). 300s = 5 min. Increase for slow remote servers."),
+    "ollama_chunk_timeout": (180.0, "Per-chunk stream timeout (seconds). 180s for 122B model prefill over network."),
+
+    "ollama_num_ctx": (131072, "Context window size. 131072 = 128K, 1000000 = 1M tokens. Set -1 for unlimited (use server default). VRAM: 128K≈31GB, 1M≈248GB for 122B model."),
+    "ollama_num_ctx_small": (65536, "Context for CTF/summary mode. 65536 = 64K (half VRAM usage)."),
+    "ollama_temperature": (0.15, "LLM output randomness. 0.0=deterministic, 0.15=recommended (strict), 0.3=creative. Does NOT affect thinking mode — controls output diversity only."),
+    "ollama_num_predict": (32768, "Max tokens to generate. 32768 for detailed tool responses."),
+    "ollama_enable_thinking": (True, "Enable extended thinking mode (for Qwen3.5+). When enabled, model generates <think> reasoning blocks before answering."),
+    "ollama_thinking_mode": ("adaptive", "Thinking intensity: low|medium|high|adaptive. Controls WHEN model uses <think> reasoning blocks. Low=only deep tools, Medium=ANALYSIS/EXPLOIT+deep tools, High=most iterations, Adaptive=smart balance. DIFFERENT from temperature — thinking_mode affects reasoning depth, temperature affects output randomness."),
+    "ollama_supports_thinking": (True, "Auto-detected: model supports <think> blocks."),
+    "ollama_supports_native_tools": (True, "Auto-detected: model supports native tool calling."),
+    "ollama_max_concurrent_requests": (1, "Max concurrent Ollama requests. Keep 1 for 122B models."),
+    "ollama_num_keep": (8192, "Protect first N tokens from KV eviction. 8192 = protect system prompt (~8K tokens)."),
+    "ollama_repeat_penalty": (1.05, "Prevent repetition loops. 1.05 = mild. Range: 1.0–1.2."),
+
+    "proxy_host": ("127.0.0.1", "Host to bind proxy server. 127.0.0.1 = localhost only."),
+    "proxy_port": (3000, "Port for proxy server. Default 3000."),
+
+    "command_timeout": (900.0, "Docker command timeout (seconds). 900s = 15 min for long scans (nmap, nuclei)."),
+
+    "docker_image": ("airecon-sandbox", "Docker image name for sandbox container."),
+    "docker_auto_build": (True, "Auto-build Docker image on startup if not exists."),
+    "docker_memory_limit": ("12g", "Container memory limit. '12g' = 12GB (increased from 8g for heavy recon). Prevents OOM kills. Set to '16g' for 32GB+ RAM systems, '8g' for 16GB systems."),
+
+    "tool_response_role": ("tool", "Role for tool responses in conversation. Keep 'tool'."),
+
+    "deep_recon_autostart": (True, "Auto-start deep recon on session start."),
+    "agent_recon_mode": ("standard", "Recon execution mode: standard|full. standard=respect user scope, full=auto-expand simple target prompts into comprehensive recon."),
+
+    "agent_max_tool_iterations": (1200, "Max tool calls per session. 1200 for comprehensive recon."),
+    "agent_repeat_tool_call_limit": (2, "Max times to repeat same tool call. 2 = retry once."),
+    "agent_missing_tool_retry_limit": (2, "Max retries for missing tool. 2 = retry once."),
+    "agent_plan_revision_interval": (30, "Revise attack plan every N iterations. 30 = every 30 iterations."),
+    "agent_exploration_mode": (True, "Enable exploration mode (broader scanning)."),
+    "agent_exploration_intensity": (0.9, "Exploration aggressiveness. 0.9 = high. Range: 0.5–1.0."),
+    "agent_exploration_temperature": (0.5, "Temperature for exploration. 0.5 = balanced creativity."),
+    "agent_stagnation_threshold": (2, "Iterations without progress before forcing new approach. 2 = after 2 stagnant iterations."),
+    "agent_tool_diversity_window": (8, "Window for tool diversity check. 8 = last 8 tool calls."),
+    "agent_max_same_tool_streak": (3, "Max consecutive same tool calls. 3 = force switch after 3 identical calls."),
+    "agent_phase_creative_temperature": (0.20, "Temperature for ANALYSIS/EXPLOIT phases. 0.20 = slightly creative."),
+
+    "allow_destructive_testing": (False, "Allow destructive tests (e.g., DELETE requests). Default: False for safety."),
+
+    "browser_page_load_delay": (1.0, "Delay after page load (seconds). 1.0s for JS-heavy sites."),
+    "browser_action_timeout": (120, "Browser action timeout (seconds). 120s for complex interactions."),
+
+    "ollama_keep_alive": (-1, "How long to keep model in VRAM. -1 = forever, '60m' = 60 min, 0 = unload immediately."),
+
+    "searxng_url": ("http://localhost:8080", "SearXNG instance URL. Leave default for local auto-managed instance."),
+    "searxng_engines": ("google,bing,duckduckgo,brave,google_news,github,stackoverflow", "Comma-separated search engines."),
+
+    "vuln_similarity_threshold": (0.7, "Vulnerability dedup threshold. 0.7 = 70% similarity = duplicate. Range: 0.5–0.9."),
+    "evidence_similarity_threshold": (0.70, "Evidence dedup threshold. 0.70 = 70% similarity = duplicate. Range: 0.5–0.9."),
+
+    "pipeline_recon_min_subdomains": (3, "Min subdomains before RECON→ANALYSIS. 3 = at least 3 subdomains."),
+    "pipeline_recon_min_urls": (1, "Min URLs before RECON→ANALYSIS. 1 = at least 1 URL."),
+    "pipeline_recon_soft_timeout": (30, "Force RECON→ANALYSIS after N iterations. 30 = force after 30 iterations."),
+
+    "agent_max_conversation_messages": (None, "Max messages in conversation. Auto-calculated from ollama_num_ctx // 128."),
+    "agent_compression_trigger_ratio": (0.8, "Compress at X% of max messages. 0.8 = compress at 80% full."),
+    "agent_uncompressed_keep_count": (20, "Keep last N messages uncompressed. 20 = preserve recent context."),
+    "agent_llm_compression_num_ctx": (8192, "Context window for LLM compression. 8192 = 8K (saves VRAM)."),
+    "agent_llm_compression_num_predict": (1024, "Output tokens for compression. 1024 = concise summaries."),
+    "agent_context_reset_cooldown_seconds": (300, "Minimum seconds between forced Ollama context resets. Prevents reset loops when /api/ps reports static large context length."),
+}
+
+DEFAULT_CONFIG = {key: value for key, (value, _) in _CONFIG_SCHEMA.items()}
+
+_CONFIG_CATEGORIES = [
+    ("Ollama Connection", ["ollama_url", "ollama_model", "ollama_timeout", "ollama_chunk_timeout"]),
+    ("Ollama Model Settings", ["ollama_num_ctx", "ollama_num_ctx_small", "ollama_temperature", "ollama_num_predict", "ollama_enable_thinking", "ollama_thinking_mode", "ollama_supports_thinking", "ollama_supports_native_tools", "ollama_max_concurrent_requests", "ollama_num_keep", "ollama_repeat_penalty"]),
+    ("Proxy Server", ["proxy_host", "proxy_port"]),
+    ("Timeouts", ["command_timeout"]),
+    ("Docker Sandbox", ["docker_image", "docker_auto_build", "docker_memory_limit"]),
+    ("Tool Behavior", ["tool_response_role"]),
+    ("Deep Recon", ["deep_recon_autostart", "agent_recon_mode"]),
+    ("Agent Loop Controls", ["agent_max_tool_iterations", "agent_repeat_tool_call_limit", "agent_missing_tool_retry_limit", "agent_plan_revision_interval", "agent_exploration_mode", "agent_exploration_intensity", "agent_exploration_temperature", "agent_stagnation_threshold", "agent_tool_diversity_window", "agent_max_same_tool_streak", "agent_phase_creative_temperature"]),
+    ("Safety", ["allow_destructive_testing"]),
+    ("Browser", ["browser_page_load_delay", "browser_action_timeout"]),
+    ("Ollama Keep-Alive", ["ollama_keep_alive"]),
+    ("SearXNG", ["searxng_url", "searxng_engines"]),
+    ("Deduplication", ["vuln_similarity_threshold", "evidence_similarity_threshold"]),
+    ("Phase Transitions", ["pipeline_recon_min_subdomains", "pipeline_recon_min_urls", "pipeline_recon_soft_timeout"]),
+    ("Context Management", ["agent_max_conversation_messages", "agent_compression_trigger_ratio", "agent_uncompressed_keep_count", "agent_llm_compression_num_ctx", "agent_llm_compression_num_predict", "agent_context_reset_cooldown_seconds"]),
+]
 
 _workspace_root_cache: Path | None = None
 
+_config_reload_lock: asyncio.Lock | None = None
 
 def get_workspace_root() -> Path:
-    """Return workspace root = <CWD>/workspace/ captured at first call (startup).
-
-    Using CWD lets users place workspaces wherever they run `airecon start`,
-    making monitoring easy: the workspace folder appears right beside where
-    the command was launched.  The path is cached after the first call so
-    it stays consistent even if os.getcwd() ever changes later in the process.
-    """
     global _workspace_root_cache
     if _workspace_root_cache is None:
         _workspace_root_cache = Path.cwd() / "workspace"
         _workspace_root_cache.mkdir(parents=True, exist_ok=True)
     return _workspace_root_cache
 
+def _write_yaml_with_comments(config: dict, filepath: Path) -> None:
+    from airecon._version import __version__
 
-DEFAULT_CONFIG = {
-    "ollama_url": "http://127.0.0.1:11434",
-    # Qwen3.5:122b — 122B parameter model with 128K context and extended thinking.
-    # Tuned for maximum reasoning depth and autonomous pentesting coverage.
-    "ollama_model": "qwen3.5:122b",
-    # 2400s — 122B parameter inference takes longer than smaller models.
-    "ollama_timeout": 2400.0,
-    # 131072 = full 128K context window supported by Qwen3.5:122b.
-    # WARNING: KV cache at 131K ctx ≈ 31 GB extra VRAM for 122B model.
-    # Lower to 32768 if VRAM crashes occur frequently.
-    "ollama_num_ctx": 131072,
-    # 32768 = 32K — used for CTF mode and summary calls to cap KV cache VRAM.
-    # KV cache at 32K ctx ≈ 8 GB (vs 31 GB at 131K) — 4x reduction.
-    "ollama_num_ctx_small": 32768,
-    # Low temperature keeps reasoning deterministic and reduces hallucination.
-    "ollama_temperature": 0.15,
-    # 32768 tokens for deep thinking + detailed tool-call responses.
-    "ollama_num_predict": 32768,
-    "ollama_enable_thinking": True,
-    "ollama_supports_thinking": True,
-    "ollama_supports_native_tools": True,
-    # Maximum concurrent Ollama requests from this AIRecon process.
-    # Keep 1 for stability on large models; increase only if server has headroom.
-    "ollama_max_concurrent_requests": 1,
-    # Protect the first N tokens (system prompt) from Ollama's KV-cache eviction.
-    # Set to >= system prompt token count (~8K for AIRecon) so the model never
-    # loses scope/rules due to Ollama-level truncation in long sessions.
-    "ollama_num_keep": 8192,
-    # Repeat penalty — prevents model from getting stuck in repetition loops
-    # during long recon sessions when KV cache pressure causes flat probability.
-    # 1.05 is conservative; range 1.0 (off) – 1.2 (aggressive).
-    "ollama_repeat_penalty": 1.05,
-    "proxy_host": "127.0.0.1",
-    "proxy_port": 3000,
-    "command_timeout": 900.0,
-    "docker_image": "airecon-sandbox",
-    "docker_auto_build": True,
-    "tool_response_role": "tool",
-    "deep_recon_autostart": True,
-    # 800 iterations — 122B model can sustain long chains without degrading.
-    "agent_max_tool_iterations": 800,
-    "agent_repeat_tool_call_limit": 2,
-    "agent_missing_tool_retry_limit": 2,
-    "agent_plan_revision_interval": 30,
-    "agent_exploration_mode": True,
-    # 0.9 — push exploration hard; 122B model handles branching paths well.
-    "agent_exploration_intensity": 0.9,
-    "agent_exploration_temperature": 0.5,
-    "agent_stagnation_threshold": 2,
-    "agent_tool_diversity_window": 8,
-    "agent_max_same_tool_streak": 3,
-    "allow_destructive_testing": False,
-    "browser_page_load_delay": 1.0,
-    # Browser action timeout in seconds (applies to each browser coroutine).
-    "browser_action_timeout": 120,
-    # -1 = keep model loaded in VRAM indefinitely (dedicated server).
-    # Use "60m" if sharing a machine with other workloads.
-    # Must be int (-1, 0) or a duration string with unit ("60m", "1h").
-    # The bare string "-1" is invalid — Ollama rejects it with HTTP 400.
-    "ollama_keep_alive": -1,
-    "searxng_url": "http://localhost:8080",
-    "searxng_engines": "google,bing,duckduckgo,brave,google_news,github,stackoverflow",
-    "vuln_similarity_threshold": 0.7,
-    # Phase transition depth requirements for RECON phase.
-    # Agent must discover >= N subdomains before RECON→ANALYSIS transition.
-    "pipeline_recon_min_subdomains": 3,
-    # Agent must collect >= N URLs before RECON→ANALYSIS transition.
-    "pipeline_recon_min_urls": 1,
-    # Soft timeout (iterations) — force RECON→ANALYSIS after this many iterations
-    # regardless of depth criteria, to prevent infinite RECON loops.
-    "pipeline_recon_soft_timeout": 30,
-    # Context management - dynamic thresholds based on ollama_num_ctx.
-    # Default: ollama_num_ctx // 128 (1024 for 131K context, 256 for 32K).
-    "agent_max_conversation_messages": None,  # Calculated below
-    # Trigger LLM compression at 80% of max conversation messages.
-    "agent_compression_trigger_ratio": 0.8,
-    # Keep last N messages uncompressed during tool result compression.
-    "agent_uncompressed_keep_count": 20,
-    # LLM compression context window (small to save VRAM during compression).
-    "agent_llm_compression_num_ctx": 8192,
-    # LLM compression output length.
-    "agent_llm_compression_num_predict": 1024,
-}
+    lines = []
 
-# Calculate dynamic context thresholds based on ollama_num_ctx
-if DEFAULT_CONFIG["agent_max_conversation_messages"] is None:
-    DEFAULT_CONFIG["agent_max_conversation_messages"] = (
-        DEFAULT_CONFIG["ollama_num_ctx"] // 128
-    )
+    lines.append("#╔══════════════════════════════════════════════════════════╗")
+    lines.append("#║              AIRecon Configuration File                  ║")
+    lines.append("#║                                                          ║")
+    lines.append(f"#║  Version: {__version__:<46} ║")
+    lines.append("#║  Format: YAML (supports comments)                        ║")
+    lines.append("#║  Edit this file to customize AIRecon behavior            ║")
+    lines.append("#║                                                          ║")
+    lines.append("#║  Docs: https://github.com/pikpikcu/airecon               ║")
+    lines.append("#╚══════════════════════════════════════════════════════════╝")
+    lines.append("")
+    lines.append("# Quick Start:")
+    lines.append("#   1. Edit ollama_model to change AI model")
+    lines.append("#   2. Adjust ollama_num_ctx based on your VRAM (131072 = 31GB)")
+    lines.append("#   3. Set ollama_url for remote Ollama servers")
+    lines.append("#   4. Run: airecon start")
+    lines.append("")
 
+    for category, keys in _CONFIG_CATEGORIES:
+        lines.append("")
+        lines.append(f"# {'=' * 38}")
+        lines.append(f"# {category}")
+        lines.append(f"# {'=' * 38}")
+
+        for key in keys:
+            if key in config:
+                value = config[key]
+                comment = _CONFIG_SCHEMA.get(key, ("", ""))[1]
+
+                if isinstance(value, str):
+
+                    if value.startswith("http") or ":" in value or value == "":
+                        value_str = f'"{value}"'
+                    else:
+                        value_str = value
+                elif isinstance(value, bool):
+                    value_str = "true" if value else "false"
+                elif value is None:
+                    value_str = "null"
+                elif isinstance(value, float):
+                    value_str = str(value)
+                else:
+                    value_str = str(value)
+
+                if comment:
+                    lines.append(f"# {comment}")
+                lines.append(f"{key}: {value_str}")
+
+    with open(filepath, "w") as f:
+        f.write("\n".join(lines) + "\n")
 
 @dataclass(frozen=True)
 class Config:
-    """Application configuration loaded from ~/.airecon/config.json."""
-
-    # Ollama
     ollama_url: str
     ollama_model: str
 
-    # Proxy server
     proxy_host: str
     proxy_port: int
 
-    # Timeouts (seconds)
     ollama_timeout: float
+    ollama_chunk_timeout: float
     command_timeout: float
 
-    # Ollama Model Options
     ollama_num_ctx: int
     ollama_num_ctx_small: int
     ollama_temperature: float
     ollama_num_predict: int
     ollama_enable_thinking: bool
+    ollama_thinking_mode: str
     ollama_supports_thinking: bool
     ollama_supports_native_tools: bool
     ollama_max_concurrent_requests: int
     ollama_num_keep: int
     ollama_repeat_penalty: float
 
-    # Docker sandbox
     docker_image: str
     docker_auto_build: bool
+    docker_memory_limit: str
 
-    # Tooling behavior
     tool_response_role: str
 
-    # Deep recon behavior
     deep_recon_autostart: bool
+    agent_recon_mode: str
 
-    # Agent loop controls
     agent_max_tool_iterations: int
     agent_repeat_tool_call_limit: int
     agent_missing_tool_retry_limit: int
@@ -174,71 +214,72 @@ class Config:
     agent_stagnation_threshold: int
     agent_tool_diversity_window: int
     agent_max_same_tool_streak: int
+    agent_phase_creative_temperature: float
 
-    # Safety
     allow_destructive_testing: bool
 
-    # Browser
     browser_page_load_delay: float
-    # Timeout (seconds) for each browser coroutine dispatched via run_coroutine_threadsafe.
+
     browser_action_timeout: int
 
-    # Ollama model keep_alive (how long to keep model in VRAM)
-    # int: -1 = infinite, 0 = unload immediately; str must include unit ("60m")
     ollama_keep_alive: int | str
 
-    # SearXNG self-hosted search (leave empty to use DuckDuckGo fallback)
     searxng_url: str
     searxng_engines: str
 
-    # Vulnerability deduplication threshold (0.0-1.0, default 0.7)
     vuln_similarity_threshold: float
 
-    # Phase transition depth requirements
+    evidence_similarity_threshold: float
+
     pipeline_recon_min_subdomains: int
     pipeline_recon_min_urls: int
     pipeline_recon_soft_timeout: int
 
-    # Context management - dynamic thresholds based on ollama_num_ctx
-    # These are calculated as ratios of ollama_num_ctx for adaptive behavior
-    agent_max_conversation_messages: int  # Default: ollama_num_ctx // 128
-    agent_compression_trigger_ratio: float  # Default: 0.8 (trigger at 80% of max)
-    agent_uncompressed_keep_count: int  # Default: 20 messages
-    agent_llm_compression_num_ctx: int  # Default: 8192
-    agent_llm_compression_num_predict: int  # Default: 1024
+    agent_max_conversation_messages: int
+    agent_compression_trigger_ratio: float
+    agent_uncompressed_keep_count: int
+    agent_llm_compression_num_ctx: int
+    agent_llm_compression_num_predict: int
+    agent_context_reset_cooldown_seconds: int
 
     @classmethod
     def load(cls, config_path: str | Path | None = None) -> Config:
-        """Load config from specified path or default ~/.airecon/config.json."""
         if config_path:
             config_file = Path(config_path)
-            # If explicit path given, it MUST exist (or we let it error/warn?)
-            # Valid decision: If user provides path, we try to load it. If
-            # missing, we error.
         else:
             home_dir = Path.home()
             config_dir = home_dir / APP_DIR_NAME
             config_file = config_dir / CONFIG_FILENAME
 
-            # Ensure directory exists only for default path
             if not config_dir.exists():
                 config_dir.mkdir(parents=True, exist_ok=True)
 
         current_config: dict[str, Any] = {}
         user_config: dict[str, Any] = {}
 
-        # Load or Create
         if config_file.exists():
             try:
                 with open(config_file, "r") as f:
-                    loaded = json.load(f)
-                    if isinstance(loaded, dict):
-                        user_config = loaded
-                    else:
+                    loaded = yaml.safe_load(f)
+                    if loaded is None:
+
                         logger.warning(
-                            "Config file %s is not a JSON object. Using defaults.",
+                            "Config file %s is empty (got None). Rewriting with defaults.",
                             config_file,
                         )
+                        _write_yaml_with_comments(DEFAULT_CONFIG, config_file)
+                        logger.info("Config file reset to defaults at %s", config_file)
+                    elif isinstance(loaded, dict):
+                        user_config = loaded
+                    else:
+
+                        logger.error(
+                            "Config file %s is corrupt (expected YAML mapping, got %s). "
+                            "Rewriting with defaults.",
+                            config_file, type(loaded).__name__,
+                        )
+                        _write_yaml_with_comments(DEFAULT_CONFIG, config_file)
+                        logger.info("Config file reset to defaults at %s", config_file)
                     current_config.update(user_config)
             except Exception as e:
                 logger.error(
@@ -246,29 +287,29 @@ class Config:
                     "Resetting to defaults and rewriting config file.",
                     config_file, e,
                 )
-                # Rewrite corrupt config with defaults so next startup is clean
+
                 try:
-                    with open(config_file, "w") as f:
-                        json.dump(DEFAULT_CONFIG, f, indent=4)
+                    _write_yaml_with_comments(DEFAULT_CONFIG, config_file)
                     logger.info("Config file reset to defaults at %s", config_file)
                 except Exception as write_err:
                     logger.error("Could not rewrite config file: %s", write_err)
         else:
-            # Only generate default if using the default path
+
             if config_path is None:
                 logger.info(
                     f"No config found. Generating default config at {config_file}")
                 try:
-                    with open(config_file, "w") as f:
-                        json.dump(DEFAULT_CONFIG, f, indent=4)
+                    _write_yaml_with_comments(DEFAULT_CONFIG, config_file)
+                    logger.info(
+                        f"Generated config file: {config_file}\n"
+                        f"Edit this file to customize AIRecon. Comments included!"
+                    )
                 except Exception as e:
                     logger.error(f"Failed to write default config: {e}")
             else:
                 logger.warning(
                     f"Configuration file not found at {config_file}. Using default configuration settings.")
 
-        # Override with Environment Variables (Optional, for temporary
-        # overrides)
         for key in DEFAULT_CONFIG:
             env_key = f"AIRECON_{key.upper()}"
             if env_key in os.environ:
@@ -289,9 +330,6 @@ class Config:
                 else:
                     current_config[key] = val
 
-        # Dynamic context limit behavior:
-        # - If user did NOT explicitly set agent_max_conversation_messages,
-        #   auto-derive from ollama_num_ctx in load_with_defaults.
         explicit_cap = "AIRECON_AGENT_MAX_CONVERSATION_MESSAGES" in os.environ
         if not explicit_cap and "agent_max_conversation_messages" in current_config:
             configured_cap = current_config.get("agent_max_conversation_messages")
@@ -303,16 +341,6 @@ class Config:
 
     @classmethod
     def load_with_defaults(cls, raw: dict) -> Config:
-        """Construct Config from a raw dict safely.
-
-        - Unknown keys (old/removed fields) are silently ignored.
-        - Missing keys fall back to DEFAULT_CONFIG values.
-        - Wrong-typed values are coerced to the expected type (e.g. "3000" → 3000).
-
-        This prevents cryptic dataclass errors when users have outdated
-        config files that contain fields no longer in the dataclass, or
-        when new fields are added without a migration step.
-        """
         known_fields = {f.name for f in dataclasses.fields(cls)}
         merged = {k: DEFAULT_CONFIG[k] for k in known_fields if k in DEFAULT_CONFIG}
         merged.update({k: v for k, v in raw.items() if k in known_fields})
@@ -323,7 +351,6 @@ class Config:
                 ", ".join(sorted(unknown)),
             )
 
-        # Type coercion: ensure each value matches the type of its default.
         for key in list(merged):
             default_val = DEFAULT_CONFIG.get(key)
             if default_val is None:
@@ -331,7 +358,7 @@ class Config:
             expected_type = type(default_val)
             val = merged[key]
             if key == "agent_max_conversation_messages" and val is None:
-                # Explicit sentinel: auto-derive from ollama_num_ctx later.
+
                 continue
             if not isinstance(val, expected_type):
                 try:
@@ -353,64 +380,65 @@ class Config:
                     )
                     merged[key] = default_val
 
-        # Bounds validation: reset out-of-range values to defaults.
-        # FIX #3 (Critical): Added comprehensive bounds validation for all
-        # numeric config fields to prevent crashes from invalid manual edits.
-        _BOUNDS: dict[str, tuple[float | None, float | None]] = {
-            # Vulnerability/reporting
+        _BOUNDS_RULES: dict[str, tuple[float | None, float | None]] = {
+
             "vuln_similarity_threshold": (0.0, 1.0),
-            
-            # Timeouts (must be positive)
-            "ollama_timeout": (1.0, None),
-            "command_timeout": (1.0, None),
-            "browser_action_timeout": (5, None),
-            
-            # Agent loop controls (must be positive integers)
-            "agent_max_tool_iterations": (100, None),  # Min 100 to be useful
-            "agent_repeat_tool_call_limit": (1, None),
-            "agent_missing_tool_retry_limit": (0, None),
-            "agent_plan_revision_interval": (1, None),
-            "agent_stagnation_threshold": (1, None),
-            "agent_tool_diversity_window": (3, None),
-            "agent_max_same_tool_streak": (1, None),
-            
-            # Exploration (0.0-1.0 ratio or 0.0-2.0 temperature)
+            "evidence_similarity_threshold": (0.0, 1.0),
+
+            "ollama_timeout": (10.0, 86400.0),
+            "ollama_chunk_timeout": (10.0, 3600.0),
+            "command_timeout": (10.0, 86400.0),
+            "browser_action_timeout": (10, 600),
+
+            "agent_max_tool_iterations": (50, 5000),
+            "agent_repeat_tool_call_limit": (1, 10),
+            "agent_missing_tool_retry_limit": (0, 10),
+            "agent_plan_revision_interval": (5, 300),
+            "agent_stagnation_threshold": (1, 20),
+            "agent_tool_diversity_window": (3, 50),
+            "agent_max_same_tool_streak": (1, 20),
+
+            "agent_phase_creative_temperature": (0.0, 1.0),
             "agent_exploration_intensity": (0.0, 1.0),
             "agent_exploration_temperature": (0.0, 2.0),
-            
-            # Context management (FIX #3: Added new fields)
-            "ollama_num_ctx": (4096, 262144),  # 4K-256K (reasonable LLM context range)
-            "ollama_num_ctx_small": (1024, 65536),  # 1K-64K
-            "ollama_num_predict": (1, 65536),  # Must be positive, max 64K
+
+            "ollama_num_ctx": (-1, 10000000),
+            "ollama_num_ctx_small": (512, 5000000),
+            "ollama_num_predict": (1, 262144),
             "ollama_max_concurrent_requests": (1, 10),
-            "ollama_num_keep": (0, 32768),
+            "ollama_num_keep": (0, 5000000),
             "ollama_repeat_penalty": (1.0, 2.0),
-            
-            # New context management fields (FIX #3: Added bounds)
-            "agent_max_conversation_messages": (100, 10000),  # 100-10K messages
-            "agent_compression_trigger_ratio": (0.5, 0.95),  # 50%-95%
-            "agent_uncompressed_keep_count": (5, 100),  # 5-100 messages
-            "agent_llm_compression_num_ctx": (1024, 32768),  # 1K-32K
-            "agent_llm_compression_num_predict": (256, 8192),  # 256-8K
-            
-            # Browser
-            "browser_page_load_delay": (0.0, 10.0),  # 0-10 seconds
-            
-            # Pipeline phase requirements
-            "pipeline_recon_min_subdomains": (0, None),
-            "pipeline_recon_min_urls": (0, None),
-            "pipeline_recon_soft_timeout": (5, None),
+
+            "agent_max_conversation_messages": (50, 20000),
+            "agent_compression_trigger_ratio": (0.5, 0.95),
+            "agent_uncompressed_keep_count": (5, 200),
+            "agent_llm_compression_num_ctx": (1024, 32768),
+            "agent_llm_compression_num_predict": (256, 8192),
+            "agent_context_reset_cooldown_seconds": (0, 86400),
+
+            "browser_page_load_delay": (0.0, 30.0),
+
+            "pipeline_recon_min_subdomains": (0, 1000),
+            "pipeline_recon_min_urls": (0, 10000),
+            "pipeline_recon_soft_timeout": (5, 1000),
         }
-        for bkey, (lo, hi) in _BOUNDS.items():
+
+        for bkey, (lo, hi) in _BOUNDS_RULES.items():
             bval = merged.get(bkey)
             if bval is None:
                 continue
+
+            if bkey == "ollama_num_ctx" and bval == -1:
+                logger.info("Config: ollama_num_ctx=-1 (unlimited) — using Ollama server default")
+                continue
+
             out_of_range = (lo is not None and bval < lo) or (hi is not None and bval > hi)
+
             if out_of_range:
                 default_bval = DEFAULT_CONFIG.get(bkey)
                 if default_bval is None:
-                    # If no default, use lower bound as fallback
                     default_bval = lo
+
                 logger.warning(
                     "Config: '%s' value %r is out of allowed range [%s, %s] — using default %r",
                     bkey, bval, lo, hi, default_bval,
@@ -424,44 +452,55 @@ class Config:
                 ctx_val = int(DEFAULT_CONFIG["ollama_num_ctx"])
             merged["agent_max_conversation_messages"] = max(100, min(10000, ctx_val // 128))
 
+        recon_mode = str(merged.get("agent_recon_mode", "standard")).strip().lower()
+        if recon_mode not in {"standard", "full"}:
+            logger.warning(
+                "Config: 'agent_recon_mode' value %r is invalid — using default %r",
+                merged.get("agent_recon_mode"),
+                DEFAULT_CONFIG["agent_recon_mode"],
+            )
+            recon_mode = str(DEFAULT_CONFIG["agent_recon_mode"])
+        merged["agent_recon_mode"] = recon_mode
+
         return cls(**merged)
 
-
-# Singleton
 _config: Config | None = None
 _config_mtime: float = 0.0
 _config_path: Path | None = None
 
-
 def _get_config_path(config_path: str | Path | None = None) -> Path:
-    """Resolve the config file path."""
     if config_path:
         return Path(config_path)
     return Path.home() / APP_DIR_NAME / CONFIG_FILENAME
 
-
 def get_config(config_path: str | None = None) -> Config:
-    """Get or create the global config instance.
-
-    Auto-reloads if the config file has been modified since last load.
-    """
     global _config, _config_mtime, _config_path
 
     if _config_path is None:
         _config_path = _get_config_path(config_path)
 
-    # Check if config file was modified (hot-reload)
     if _config is not None:
         try:
             current_mtime = (
                 _config_path.stat().st_mtime if _config_path.exists() else 0.0
             )
             if current_mtime > _config_mtime:
+
+                try:
+                    asyncio.get_running_loop()
+
+                    global _config_reload_lock
+                    if _config_reload_lock is None:
+                        _config_reload_lock = asyncio.Lock()
+
+                except RuntimeError:
+                    pass
+
                 logger.info(
                     f"Config file changed — reloading from {_config_path}")
                 _config = Config.load(_config_path)
                 _config_mtime = current_mtime
-        except Exception:  # nosec B110 - keep existing config if stat fails
+        except Exception:
             pass
 
     if _config is None:
@@ -475,9 +514,42 @@ def get_config(config_path: str | None = None) -> Config:
 
     return _config
 
+async def get_config_async(config_path: str | None = None) -> Config:
+    global _config, _config_mtime, _config_path, _config_reload_lock
+
+    if _config_path is None:
+        _config_path = _get_config_path(config_path)
+
+    if _config_reload_lock is None:
+        _config_reload_lock = asyncio.Lock()
+
+    async with _config_reload_lock:
+
+        if _config is not None:
+            try:
+                current_mtime = (
+                    _config_path.stat().st_mtime if _config_path.exists() else 0.0
+                )
+                if current_mtime > _config_mtime:
+                    logger.info(
+                        f"Config file changed — reloading from {_config_path}")
+                    _config = Config.load(_config_path)
+                    _config_mtime = current_mtime
+            except Exception:
+                pass
+
+        if _config is None:
+            _config = Config.load(config_path)
+            try:
+                _config_mtime = (
+                    _config_path.stat().st_mtime if _config_path.exists() else 0.0
+                )
+            except Exception:
+                _config_mtime = 0.0
+
+    return _config
 
 def reload_config() -> Config:
-    """Force reload config from disk. Returns the new config."""
     global _config, _config_mtime
     _config = None
     _config_mtime = 0.0

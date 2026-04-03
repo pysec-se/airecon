@@ -16,7 +16,7 @@ def test_correlation_by_port(mock_session):
     # Setup session with specific port formats
     mock_session.open_ports = {
         "example.com": [80, 443, 3306],  # The format output parser yields
-        "8080": "http-proxy"  # The older format edge case handled by the engine
+        "8080": "http-proxy",  # The older format edge case handled by the engine
     }
 
     results = run_correlation(mock_session)
@@ -46,8 +46,15 @@ def test_correlation_by_technology_and_cve(mock_session):
     results = run_correlation(mock_session)
 
     # Verify standard tech correlation
-    wp_finding = next((r for r in results if r.get(
-        "type") == "technology" and "wordpress" in r.get("technology", "").lower()), None)
+    wp_finding = next(
+        (
+            r
+            for r in results
+            if r.get("type") == "technology"
+            and "wordpress" in r.get("technology", "").lower()
+        ),
+        None,
+    )
     assert wp_finding is not None
     assert "wpscan" in str(wp_finding.get("tools", [])).lower()
 
@@ -62,15 +69,14 @@ def test_correlation_attack_chains(mock_session):
     mock_session.technologies = {"Session Cookies": ""}
     # Simulate an established finding
     mock_session.vulnerabilities = [
-        {"finding": "XSS vulnerability found in search parameter"}]
+        {"finding": "XSS vulnerability found in search parameter"}
+    ]
 
     results = run_correlation(mock_session)
 
-    chain_finding = next(
-        (r for r in results if r.get("type") == "attack_chain"), None)
+    chain_finding = next((r for r in results if r.get("type") == "attack_chain"), None)
     assert chain_finding is not None
-    assert "Cookie" in str(chain_finding).title(
-    ) or "XSS" in str(chain_finding).upper()
+    assert "Cookie" in str(chain_finding).title() or "XSS" in str(chain_finding).upper()
 
 
 # ---------------------------------------------------------------------------
@@ -86,8 +92,9 @@ def test_synthesize_attack_chains_happy_path(mock_session):
 
     results = synthesize_attack_chains(mock_session)
     chain_ids = [r.get("chain_id") or "" for r in results]
-    assert any("SSRF" in cid for cid in chain_ids), \
+    assert any("SSRF" in cid for cid in chain_ids), (
         f"Expected SSRF chain, got: {chain_ids}"
+    )
 
 
 def test_synthesize_attack_chains_below_threshold(mock_session):
@@ -117,17 +124,23 @@ def test_synthesize_attack_chains_severity_ordering(mock_session):
     if len(results) >= 2:
         severity_rank = {"CRITICAL": 4, "HIGH": 3, "MEDIUM": 2, "LOW": 1}
         ranks = [severity_rank.get(r["severity"].upper(), 0) for r in results]
-        assert ranks == sorted(ranks, reverse=True), \
+        assert ranks == sorted(ranks, reverse=True), (
             "Results not sorted by severity descending"
+        )
 
 
 def test_synthesize_attack_chains_max_cap(mock_session):
     """Never returns more than 10 synthesized chains."""
     # Flood with generic signals to match many chains
     mock_session.technologies = {
-        "cloud": "AWS", "mysql": "5.7", "wordpress": "6.0",
-        "nginx": "1.18", "php": "8.0", "redis": "7.0",
-        "elasticsearch": "8.0", "mongodb": "6.0",
+        "cloud": "AWS",
+        "mysql": "5.7",
+        "wordpress": "6.0",
+        "nginx": "1.18",
+        "php": "8.0",
+        "redis": "7.0",
+        "elasticsearch": "8.0",
+        "mongodb": "6.0",
     }
     mock_session.vulnerabilities = [
         {"title": "SQL injection"},
@@ -177,16 +190,24 @@ def test_synthesize_attack_chains_handles_string_port_formats(mock_session):
     assert isinstance(results, list)
 
 
-def test_synthesize_attack_chains_word_boundary_avoids_substring_false_positive(mock_session, monkeypatch):
+def test_synthesize_attack_chains_word_boundary_avoids_substring_false_positive(
+    mock_session, monkeypatch
+):
     """Single-word required findings should not match partial tokens like nosql->sql."""
     import airecon.proxy.correlation as corr
 
-    monkeypatch.setattr(corr, "ATTACK_CHAINS", [{
-        "name": "SQL Boundary Chain",
-        "required_findings": ["sql"],
-        "steps": ["step1"],
-        "severity": "MEDIUM",
-    }])
+    monkeypatch.setattr(
+        corr,
+        "ATTACK_CHAINS",
+        [
+            {
+                "name": "SQL Boundary Chain",
+                "required_findings": ["sql"],
+                "steps": ["step1"],
+                "severity": "MEDIUM",
+            }
+        ],
+    )
 
     mock_session.vulnerabilities = [{"title": "NoSQL injection in profile endpoint"}]
     results = corr.synthesize_attack_chains(mock_session)
@@ -197,7 +218,11 @@ def test_build_attack_graph_from_session_signals(mock_session):
     mock_session.technologies = {"WordPress": "6.0", "PHP": "8.1"}
     mock_session.open_ports = {"example.com": [80, 443]}
     mock_session.injection_points = [
-        {"parameter": "id", "type_hint": "IDOR", "url": "https://example.com/api/user?id=1"}
+        {
+            "parameter": "id",
+            "type_hint": "IDOR",
+            "url": "https://example.com/api/user?id=1",
+        }
     ]
     mock_session.vulnerabilities = [
         {"finding": "[HIGH] IDOR in /api/user endpoint exposes other user records"}

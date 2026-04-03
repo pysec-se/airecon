@@ -3,6 +3,7 @@
 Verifies that urgency messages are injected exactly once per threshold level
 and that REPORT phase is forced at 100% budget exhaustion.
 """
+
 from __future__ import annotations
 
 from unittest.mock import MagicMock, patch
@@ -36,7 +37,6 @@ def _budget_msgs(loop) -> list[str]:
 
 
 class TestBudgetPressureCascade:
-
     def _simulate_to_ratio(self, loop, ratio: float) -> None:
         """Advance iteration counter then run the cascade check inline."""
         loop.state.iteration = int(loop.state.max_iterations * ratio)
@@ -45,50 +45,58 @@ class TestBudgetPressureCascade:
 
         if _budget_ratio >= 1.0 and loop._budget_pressure_level < 4:
             loop._budget_pressure_level = 4
-            loop.state.conversation.append({
-                "role": "system",
-                "content": (
-                    "[SYSTEM: BUDGET EXHAUSTED] You have used all available "
-                    "iterations. STOP all testing immediately. Your ONLY task "
-                    "now is to call the report tool and write the final report "
-                    "with everything you have found."
-                ),
-            })
+            loop.state.conversation.append(
+                {
+                    "role": "system",
+                    "content": (
+                        "[SYSTEM: BUDGET EXHAUSTED] You have used all available "
+                        "iterations. STOP all testing immediately. Your ONLY task "
+                        "now is to call the report tool and write the final report "
+                        "with everything you have found."
+                    ),
+                }
+            )
         elif _budget_ratio >= 0.95 and loop._budget_pressure_level < 3:
             loop._budget_pressure_level = 3
             remaining = loop.state.max_iterations - loop.state.iteration
-            loop.state.conversation.append({
-                "role": "system",
-                "content": (
-                    f"[SYSTEM: BUDGET CRITICAL — {remaining} iterations left] "
-                    "STOP all new discovery. You must now: (1) call the report "
-                    "tool with all confirmed findings, (2) advance to REPORT "
-                    "phase if not already there. No more scanning or fuzzing."
-                ),
-            })
+            loop.state.conversation.append(
+                {
+                    "role": "system",
+                    "content": (
+                        f"[SYSTEM: BUDGET CRITICAL — {remaining} iterations left] "
+                        "STOP all new discovery. You must now: (1) call the report "
+                        "tool with all confirmed findings, (2) advance to REPORT "
+                        "phase if not already there. No more scanning or fuzzing."
+                    ),
+                }
+            )
         elif _budget_ratio >= 0.85 and loop._budget_pressure_level < 2:
             loop._budget_pressure_level = 2
             remaining = loop.state.max_iterations - loop.state.iteration
-            loop.state.conversation.append({
-                "role": "system",
-                "content": (
-                    f"[SYSTEM: BUDGET WARNING — {remaining} iterations left] "
-                    "Begin consolidating findings for the report. Finish any "
-                    "in-progress tests, then switch to REPORT phase. Do not "
-                    "start new discovery chains."
-                ),
-            })
+            loop.state.conversation.append(
+                {
+                    "role": "system",
+                    "content": (
+                        f"[SYSTEM: BUDGET WARNING — {remaining} iterations left] "
+                        "Begin consolidating findings for the report. Finish any "
+                        "in-progress tests, then switch to REPORT phase. Do not "
+                        "start new discovery chains."
+                    ),
+                }
+            )
         elif _budget_ratio >= 0.70 and loop._budget_pressure_level < 1:
             loop._budget_pressure_level = 1
             remaining = loop.state.max_iterations - loop.state.iteration
-            loop.state.conversation.append({
-                "role": "system",
-                "content": (
-                    f"[SYSTEM: BUDGET NOTICE — {remaining} iterations left] "
-                    "Prioritise your highest-value untested attack vectors only. "
-                    "Avoid retrying already-tested paths or broad enumeration."
-                ),
-            })
+            loop.state.conversation.append(
+                {
+                    "role": "system",
+                    "content": (
+                        f"[SYSTEM: BUDGET NOTICE — {remaining} iterations left] "
+                        "Prioritise your highest-value untested attack vectors only. "
+                        "Avoid retrying already-tested paths or broad enumeration."
+                    ),
+                }
+            )
 
     def test_no_message_below_70pct(self):
         loop = _make_loop(100)

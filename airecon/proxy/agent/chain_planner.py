@@ -1,16 +1,3 @@
-"""Exploit Chain Planner — multi-step attack chain orchestration.
-
-Provides a structured way to plan and track multi-step exploit chains.
-Chains are built from confirmed vulnerabilities and session findings,
-guided by attack chain templates.
-
-Design:
-- ExploitChain dataclass: steps, current_step, status
-- plan_chains(): generate candidate chains from session.vulnerabilities
-- advance_chain(): mark current step done, move to next
-- build_chain_context(): XML context block for LLM injection
-- attack_chains.json: chain templates (loaded at module level)
-"""
 from __future__ import annotations
 
 import hashlib
@@ -89,27 +76,15 @@ _CAUSAL_CHAIN_HIGH_POSTERIOR = float(
     get_tuning("causal_reasoning.chain_high_posterior", 0.82)
 )
 
-# ---------------------------------------------------------------------------
-# Attack chain templates — loaded from data/attack_chains.json at import time
-# ---------------------------------------------------------------------------
-
 def _load_attack_chains() -> list[dict[str, Any]]:
-    """Load attack chain templates from attack_chains.json.
-
-    Supports two formats:
-    - New format: {"chains": [{id, name, triggers, steps: [{description, tool_hint}]}]}
-    - Legacy format: [{name, steps: ["str"], required_findings}]
-    Both are normalised to the new format for the planner.
-    """
     try:
         path = Path(__file__).parent.parent / "data" / "attack_chains.json"
         raw = json.loads(path.read_text(encoding="utf-8"))
 
-        # New format: top-level dict with "chains" key
         if isinstance(raw, dict) and "chains" in raw:
             chains = raw["chains"]
         elif isinstance(raw, list):
-            chains = raw  # Legacy: flat list
+            chains = raw
         else:
             return []
 
@@ -118,10 +93,8 @@ def _load_attack_chains() -> list[dict[str, Any]]:
             if not isinstance(entry, dict):
                 continue
 
-            # Normalise triggers: use "triggers" if present, else derive from "required_findings"
             triggers = entry.get("triggers") or entry.get("required_findings") or []
 
-            # Normalise steps: new format is list of dicts, legacy is list of strings
             raw_steps = entry.get("steps", [])
             steps: list[dict[str, Any]] = []
             for step in raw_steps:
@@ -143,50 +116,34 @@ def _load_attack_chains() -> list[dict[str, Any]]:
         logger.debug("Could not load attack_chains.json: %s", exc)
         return []
 
-
 _ATTACK_CHAIN_TEMPLATES: list[dict[str, Any]] = _load_attack_chains()
-
 
 @dataclass
 class ChainStep:
-    """One step in an exploit chain."""
-
     step_id: int
     description: str
-    tool_hint: str = ""      # Suggested tool to use (e.g. "execute, http_observe")
-    status: str = "pending"  # "pending" | "done" | "skipped"
-    evidence: str = ""       # Evidence collected when this step completed
-
+    tool_hint: str = ""
+    status: str = "pending"
+    evidence: str = ""
 
 @dataclass
 class ExploitChain:
-    """A multi-step attack chain targeting a specific vulnerability path.
-
-    Lifecycle:
-      planning → active (first step done) → completed (all steps done) / abandoned
-    """
-
     chain_id: str
     name: str
     description: str = ""
     steps: list[ChainStep] = field(default_factory=list)
     current_step_index: int = 0
-    status: str = "planning"   # "planning" | "active" | "completed" | "abandoned"
+    status: str = "planning"
     phase_formed: str = "EXPLOIT"
-    vuln_basis: str = ""       # The confirmed vulnerability that triggered this chain
+    vuln_basis: str = ""
     iteration_formed: int = 0
 
     def current_step(self) -> ChainStep | None:
-        """Return the current pending step, or None if chain is complete."""
         if self.current_step_index >= len(self.steps):
             return None
         return self.steps[self.current_step_index]
 
     def advance(self, evidence: str = "") -> ChainStep | None:
-        """Mark current step done and advance to next step.
-
-        Returns the new current step, or None if chain is complete.
-        """
         if self.current_step_index < len(self.steps):
             current = self.steps[self.current_step_index]
             current.status = "done"
@@ -205,12 +162,10 @@ class ExploitChain:
     def pending_steps(self) -> list[ChainStep]:
         return [s for s in self.steps if s.status == "pending"]
 
-
 def _match_template_to_vuln(
     template: dict[str, Any],
     vuln: dict[str, Any],
 ) -> tuple[float, list[str]]:
-    """Return (match_score, matched_triggers) for template ↔ vulnerability mapping."""
     triggers = template.get("triggers", [])
     if not triggers:
         return 0.0, []
@@ -300,7 +255,6 @@ def _match_template_to_vuln(
         evidence_support += _CHAIN_EVIDENCE_SUPPORT["confirmation_language"]
     evidence_support = min(1.0, evidence_support)
 
-    # Weak findings with no target/evidence context need a strong lexical match.
     if (
         not has_direct_evidence
         and not has_target_context
@@ -316,9 +270,7 @@ def _match_template_to_vuln(
     )
     return round(score, 3), matched
 
-
 def _vuln_priority_score(vuln: dict[str, Any]) -> int:
-    """Return priority score used to order vulnerabilities for chain planning."""
     sev_rank = {"CRITICAL": 5, "HIGH": 4, "MEDIUM": 3, "LOW": 2, "INFO": 1}
 
     sev_raw = str(vuln.get("severity", "")).strip().upper()
@@ -352,9 +304,7 @@ def _vuln_priority_score(vuln: dict[str, Any]) -> int:
     causal_bonus = max(0, min(10, int(causal_posterior * 10)))
     return base + evidence_bonus + causal_bonus
 
-
 def _vuln_chain_evidence_score(vuln: dict[str, Any]) -> float:
-    """Estimate evidence strength for chain ranking (0.0-1.0)."""
     score = 0.0
     if vuln.get("report_generated") or vuln.get("replay_verified") or vuln.get("verified"):
         score += 0.45
@@ -373,11 +323,9 @@ def _vuln_chain_evidence_score(vuln: dict[str, Any]) -> float:
         pass
     return min(1.0, score)
 
-
 def _causal_hypotheses_to_vulns(
     causal_hypotheses: list[dict[str, Any]] | None,
 ) -> list[dict[str, Any]]:
-    """Convert high-posterior causal hypotheses into chain-planning candidates."""
     if not causal_hypotheses:
         return []
 
@@ -419,7 +367,6 @@ def _causal_hypotheses_to_vulns(
         )
     return converted
 
-
 def plan_chains(
     vulnerabilities: list[dict[str, Any]],
     existing_chain_ids: set[str],
@@ -427,13 +374,6 @@ def plan_chains(
     max_chains: int = 5,
     causal_hypotheses: list[dict[str, Any]] | None = None,
 ) -> list[ExploitChain]:
-    """Generate candidate exploit chains from confirmed vulnerabilities.
-
-    Matches each vulnerability against attack chain templates. Skips
-    chains already in existing_chain_ids to avoid re-planning.
-
-    Returns new chains (not yet in existing_chain_ids).
-    """
     new_chains: list[ExploitChain] = []
 
     if not _ATTACK_CHAIN_TEMPLATES:
@@ -443,8 +383,6 @@ def plan_chains(
     candidate_vulnerabilities = list(vulnerabilities or [])
     candidate_vulnerabilities.extend(_causal_hypotheses_to_vulns(causal_hypotheses))
 
-    # Prioritize high-severity, evidence-backed findings first so chain planning
-    # focuses on high-impact paths before low-signal findings.
     ranked_vulns = sorted(
         list(enumerate(candidate_vulnerabilities[:30])),
         key=lambda item: (-_vuln_priority_score(item[1]), item[0]),
@@ -469,12 +407,9 @@ def plan_chains(
             if match_score < _CHAIN_MATCH_THRESHOLD:
                 continue
 
-            # Deterministic chain ID so existing_chain_ids can dedup across
-            # iterations. Previously the ID included iteration/offset, which
-            # made the same template+finding pair reappear as "new" every cycle.
             template_id = str(template.get("id", "x"))
             _seed = f"{template_id}:{finding.lower()[:220]}"
-            _fp = hashlib.md5(  # nosec B324 - non-security dedup hash
+            _fp = hashlib.md5(
                 _seed.encode("utf-8", errors="replace"),
                 usedforsecurity=False,
             ).hexdigest()[:12]
@@ -482,7 +417,6 @@ def plan_chains(
             if chain_id in existing_chain_ids:
                 continue
 
-            # Build steps from template
             steps = []
             for i, step_def in enumerate(template.get("steps", [])):
                 steps.append(ChainStep(
@@ -539,24 +473,13 @@ def plan_chains(
 
     return new_chains
 
-
 def advance_chain(
     chain: ExploitChain,
     evidence: str = "",
 ) -> ChainStep | None:
-    """Advance a chain to its next step.
-
-    Returns the new current step, or None if the chain is complete.
-    """
     return chain.advance(evidence=evidence)
 
-
 def build_chain_context(chains: list[ExploitChain], max_chains: int = 3) -> str:
-    """Build an XML context block for active exploit chains.
-
-    Only includes active/planning chains. Completed and abandoned chains
-    are excluded to keep context lean.
-    """
     active = [
         c for c in chains
         if c.status in ("planning", "active")
@@ -588,7 +511,7 @@ def build_chain_context(chains: list[ExploitChain], max_chains: int = 3) -> str:
         done = chain.completed_steps()
         if done:
             lines.append(f"    <completed_steps count=\"{len(done)}\">")
-            for s in done[-3:]:  # Show last 3 completed
+            for s in done[-3:]:
                 lines.append(f"      ✓ Step {s.step_id}: {s.description[:80]}")
             lines.append("    </completed_steps>")
 

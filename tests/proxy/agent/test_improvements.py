@@ -5,6 +5,7 @@
 - auto_load_skills_for_technologies
 - correlation dedup
 """
+
 from __future__ import annotations
 
 from airecon.proxy.agent.output_parser import parse_tool_output
@@ -42,12 +43,16 @@ SQLMAP_OUTPUT_CLEAN = """\
 
 
 def test_sqlmap_vuln_detected():
-    result = parse_tool_output("sqlmap -u 'http://example.com/search?q=test'", SQLMAP_OUTPUT_VULN)
+    result = parse_tool_output(
+        "sqlmap -u 'http://example.com/search?q=test'", SQLMAP_OUTPUT_VULN
+    )
     assert result is not None
     assert result.tool == "sqlmap"
     assert result.total_count > 0
-    assert any("vuln" in item.lower() or "sqli" in item.lower() or "q" in item.lower()
-               for item in result.items)
+    assert any(
+        "vuln" in item.lower() or "sqli" in item.lower() or "q" in item.lower()
+        for item in result.items
+    )
     assert "mysql" in result.summary.lower() or result.total_count > 0
 
 
@@ -87,7 +92,9 @@ def test_nikto_findings_parsed():
 
 
 def test_nikto_no_findings_returns_zero():
-    result = parse_tool_output("nikto -h http://example.com", "- Nikto v2.1.6\n- 0 items found.\n")
+    result = parse_tool_output(
+        "nikto -h http://example.com", "- Nikto v2.1.6\n- 0 items found.\n"
+    )
     assert result is not None
     assert result.total_count == 0
 
@@ -104,7 +111,9 @@ DALFOX_OUTPUT = """\
 
 
 def test_dalfox_xss_parsed():
-    result = parse_tool_output("dalfox url http://example.com/search?q=test", DALFOX_OUTPUT)
+    result = parse_tool_output(
+        "dalfox url http://example.com/search?q=test", DALFOX_OUTPUT
+    )
     assert result is not None
     assert result.tool == "dalfox"
     assert result.total_count >= 2
@@ -113,7 +122,9 @@ def test_dalfox_xss_parsed():
 
 
 def test_dalfox_no_xss():
-    result = parse_tool_output("dalfox url http://clean.com/", "[*] Dalfox\n[*] Scan complete. No XSS.\n")
+    result = parse_tool_output(
+        "dalfox url http://clean.com/", "[*] Dalfox\n[*] Scan complete. No XSS.\n"
+    )
     assert result is not None
     assert result.total_count == 0
 
@@ -141,12 +152,28 @@ def test_wpscan_vulns_parsed():
 
 # ── tested_injection_points ───────────────────────────────────────────────────
 
+
 def test_mark_and_get_untested():
     session = SessionData(target="example.com", session_id="test_123")
     session.injection_points = [
-        {"url": "http://example.com/", "parameter": "id", "method": "GET", "type_hint": "IDOR"},
-        {"url": "http://example.com/", "parameter": "q", "method": "GET", "type_hint": "INJECT"},
-        {"url": "http://example.com/api", "parameter": "token", "method": "POST", "type_hint": "AUTH"},
+        {
+            "url": "http://example.com/",
+            "parameter": "id",
+            "method": "GET",
+            "type_hint": "IDOR",
+        },
+        {
+            "url": "http://example.com/",
+            "parameter": "q",
+            "method": "GET",
+            "type_hint": "INJECT",
+        },
+        {
+            "url": "http://example.com/api",
+            "parameter": "token",
+            "method": "POST",
+            "type_hint": "AUTH",
+        },
     ]
 
     # Initially all untested
@@ -190,11 +217,22 @@ def test_injection_point_key_normalizes_case():
 
 # ── session_to_context shows untested ────────────────────────────────────────
 
+
 def test_session_context_shows_untested():
     session = SessionData(target="example.com", session_id="ctx_test")
     session.injection_points = [
-        {"url": "http://example.com/", "parameter": "id", "method": "GET", "type_hint": "IDOR"},
-        {"url": "http://example.com/", "parameter": "q", "method": "GET", "type_hint": "INJECT"},
+        {
+            "url": "http://example.com/",
+            "parameter": "id",
+            "method": "GET",
+            "type_hint": "IDOR",
+        },
+        {
+            "url": "http://example.com/",
+            "parameter": "q",
+            "method": "GET",
+            "type_hint": "INJECT",
+        },
     ]
     # One tested, one not
     mark_injection_point_tested(session, "http://example.com/", "id", "GET")
@@ -208,7 +246,12 @@ def test_session_context_shows_untested():
 def test_session_context_all_tested():
     session = SessionData(target="example.com", session_id="ctx_test2")
     session.injection_points = [
-        {"url": "http://example.com/", "parameter": "id", "method": "GET", "type_hint": "IDOR"},
+        {
+            "url": "http://example.com/",
+            "parameter": "id",
+            "method": "GET",
+            "type_hint": "IDOR",
+        },
     ]
     mark_injection_point_tested(session, "http://example.com/", "id", "GET")
     session.scan_count = 1
@@ -217,6 +260,7 @@ def test_session_context_all_tested():
 
 
 # ── auto_load_skills_for_technologies ─────────────────────────────────────────
+
 
 def test_tech_skill_loads_wordpress():
     ctx, names = auto_load_skills_for_technologies({"WordPress": "5.8.1"})
@@ -232,9 +276,13 @@ def test_tech_skill_loads_nginx():
 
 def test_tech_skill_dedup_already_loaded():
     already = set()
-    ctx1, names1 = auto_load_skills_for_technologies({"WordPress": "5.8"}, already_loaded=already)
+    ctx1, names1 = auto_load_skills_for_technologies(
+        {"WordPress": "5.8"}, already_loaded=already
+    )
     # Second call with same already_loaded set should skip
-    ctx2, names2 = auto_load_skills_for_technologies({"WordPress": "5.8"}, already_loaded=already)
+    ctx2, names2 = auto_load_skills_for_technologies(
+        {"WordPress": "5.8"}, already_loaded=already
+    )
     assert ctx1 != ""
     assert ctx2 == ""  # already loaded
     assert names2 == []
@@ -247,6 +295,7 @@ def test_tech_skill_empty_technologies():
 
 
 # ── correlation dedup ─────────────────────────────────────────────────────────
+
 
 def test_corr_fingerprint_port():
     corr = {"type": "port", "port": 80}
@@ -270,7 +319,9 @@ def test_correlation_dedup_removes_already_suggested():
     # Second call — should be empty (all suggestions already seen)
     results2 = run_correlation(session)
     # PORT 80 and nginx were already suggested — shouldn't be in results2
-    port_80_in_r2 = any(r.get("type") == "port" and r.get("port") == 80 for r in results2)
+    port_80_in_r2 = any(
+        r.get("type") == "port" and r.get("port") == 80 for r in results2
+    )
     # At minimum the already-suggested ones should be filtered
     assert len(results2) <= len(results1)
     # After second call, no port:80 should appear (already seen)
@@ -287,6 +338,7 @@ def test_correlation_suggested_correlations_persisted():
 
 
 # ── path-context reclassification (SSRF → OPEN_REDIRECT) ────────────────────
+
 
 def test_load_redirect_path_indicators_returns_nonempty():
     """_load_redirect_path_indicators() must return indicators from patterns.json."""

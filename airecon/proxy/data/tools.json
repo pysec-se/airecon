@@ -2,6 +2,29 @@
     {
         "type": "function",
         "function": {
+            "name": "execute",
+            "description": "Execute a shell command inside the Kali Linux sandbox. All recon tools are pre-installed.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "command": {
+                        "type": "string",
+                        "description": "Shell command to run inside sandbox."
+                    },
+                    "timeout": {
+                        "type": "number",
+                        "description": "Optional timeout in seconds."
+                    }
+                },
+                "required": [
+                    "command"
+                ]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
             "name": "advanced_fuzz",
             "description": "Run advanced heuristics and intelligent fuzzing for Zero-Days. Uses fuzzer.py internally.",
             "parameters": {
@@ -97,13 +120,16 @@
                             "view_source",
                             "close",
                             "list_tabs",
+                            "screenshot",
                             "login_form",
                             "handle_totp",
                             "save_auth_state",
                             "inject_cookies",
-                            "oauth_authorize"
+                            "oauth_authorize",
+                            "check_auth_status",
+                            "wait_for_element"
                         ],
-                        "description": "The action to perform. Use get_network_logs to capture XHR/fetch API requests and responses like DevTools Network tab. Auth actions: login_form (fill+submit login), handle_totp (enter TOTP code), save_auth_state (capture cookies+localStorage), inject_cookies (inject session cookies), oauth_authorize (complete OAuth flow)."
+                        "description": "The action to perform. SCREENSHOT — screenshot: take a screenshot of the current page; returns screenshot_path (saved to workspace/output/). Use to visually inspect a page, verify login state, or capture CAPTCHA images manually. AUTH WORKFLOW — always read 'next_action' field in every response for guidance: (1) login_form → response has: login_success, captcha_detected, captcha_type, captcha_screenshot (auto-taken), mfa_required, login_error, next_action. (2) If captcha_detected=true: CAPTCHA screenshot already taken automatically (see captcha_screenshot path) → call request_user_input(input_type='captcha', prompt='Solve CAPTCHA in <path>'). (3) If mfa_required=true AND you have secret: handle_totp(totp_secret=BASE32SECRET) → check totp_success. If no secret: request_user_input(input_type='totp'). (4) For username-first flows (Google/GitHub/Microsoft): login_form(multi_step=true). (5) After success: save_auth_state. (6) Restore session: inject_cookies → goto URL. (7) OAuth/SSO: oauth_authorize(url=..., callback_prefix=...). (8) check_auth_status: verify if currently logged in (returns is_authenticated, confidence, username_display). (9) wait_for_element: wait for CSS selector to appear/disappear (use after SPA transitions or login redirects)."
                     },
                     "url": {
                         "type": "string",
@@ -155,23 +181,55 @@
                     },
                     "username_selector": {
                         "type": "string",
-                        "description": "CSS selector for username field in login_form (comma-separated fallbacks). Default tries common selectors."
+                        "description": "CSS selector for username/email field in login_form (comma-separated fallbacks). Default covers: input[type=email], input[name=username/user/email/login/mail], input[autocomplete=username/email], #username/#email/#user/#login. Override when default fails — first call view_source to find the correct selector."
                     },
                     "password_selector": {
                         "type": "string",
-                        "description": "CSS selector for password field in login_form. Default: input[type=\"password\"]."
+                        "description": "CSS selector for password field in login_form. Default: input[type='password']. Override for non-standard forms."
                     },
                     "submit_selector": {
                         "type": "string",
-                        "description": "CSS selector for submit button in login_form. Default tries button[type=submit]."
+                        "description": "CSS selector for submit button in login_form (comma-separated fallbacks). Default tries: button[type=submit], input[type=submit], button:has-text('Log in/Login/Sign in/Continue/Next/Submit'). Override when default fails."
                     },
                     "totp_secret": {
                         "type": "string",
-                        "description": "Base32 TOTP secret for handle_totp action (generates current TOTP code automatically)."
+                        "description": "Base32 TOTP secret for handle_totp action. Generates a fresh RFC 6238 code automatically. Example: 'JBSWY3DPEHPK3PXP'. If rejected, call handle_totp again immediately (new 30s window). For 8-digit codes use totp_digits=8. For 60s period use totp_period=60."
+                    },
+                    "multi_step": {
+                        "type": "boolean",
+                        "description": "For login_form: set true for username-first flows (Google, GitHub, Microsoft, enterprise SSO) where password field only appears AFTER submitting the username. Workflow: fill username → click Next → wait for password field → fill password → submit."
+                    },
+                    "totp_digits": {
+                        "type": "integer",
+                        "description": "For handle_totp: number of digits in the TOTP code. Default: 6 (standard RFC 6238). Use 8 for enterprise apps that require 8-digit codes."
+                    },
+                    "totp_period": {
+                        "type": "integer",
+                        "description": "For handle_totp: TOTP time step in seconds. Default: 30 (standard). Use 60 for older/non-standard apps with 60-second windows."
+                    },
+                    "wait_selector": {
+                        "type": "string",
+                        "description": "For wait_for_element: CSS selector to wait for. Example: 'div.dashboard', '#logout-button', '.error-message'."
+                    },
+                    "wait_timeout": {
+                        "type": "number",
+                        "description": "For wait_for_element: timeout in seconds. Default: 10."
+                    },
+                    "wait_state": {
+                        "type": "string",
+                        "enum": [
+                            "visible",
+                            "hidden",
+                            "attached",
+                            "detached"
+                        ],
+                        "description": "For wait_for_element: element state to wait for. Default: 'visible'."
                     },
                     "cookies": {
                         "type": "array",
-                        "items": {"type": "object"},
+                        "items": {
+                            "type": "object"
+                        },
                         "description": "Array of cookie objects [{name, value, domain, path}] for inject_cookies action."
                     },
                     "oauth_url": {
@@ -185,6 +243,40 @@
                 },
                 "required": [
                     "action"
+                ]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "request_user_input",
+            "description": "Pause the agent and request user-provided input (e.g., CAPTCHA, TOTP/OTP, password, or manual confirmation) before continuing.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "prompt": {
+                        "type": "string",
+                        "description": "Clear instruction to the user explaining exactly what to enter. Example: 'Please enter the 6-digit TOTP code from your authenticator app for target.com' or 'Solve the CAPTCHA shown in screenshot_20240101_120000.png and enter the text here'."
+                    },
+                    "input_type": {
+                        "type": "string",
+                        "enum": [
+                            "text",
+                            "totp",
+                            "captcha",
+                            "password",
+                            "otp"
+                        ],
+                        "description": "Type of expected input. 'totp' = 6-digit time-based code, 'captcha' = CAPTCHA solution text, 'otp' = one-time password (SMS/email), 'password' = sensitive credential, 'text' = anything else."
+                    },
+                    "timeout_seconds": {
+                        "type": "number",
+                        "description": "How long to wait for user input in seconds. Default: 300 (5 minutes). Use shorter timeout for time-sensitive inputs like TOTP."
+                    }
+                },
+                "required": [
+                    "prompt"
                 ]
             }
         }
@@ -217,7 +309,7 @@
         "type": "function",
         "function": {
             "name": "read_file",
-            "description": "Read content of a file from the workspace. For large files (nmap output, katana URLs, etc.), use offset and limit to read in pages and avoid overloading your context window.",
+            "description": "Read a file from the workspace with optional offset/limit pagination for large outputs.",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -244,7 +336,7 @@
         "type": "function",
         "function": {
             "name": "list_files",
-            "description": "List files and directories inside the workspace. Use this instead of `execute ls` to efficiently see what files exist for the current target without wasting shell execution. Returns file sizes and line counts.",
+            "description": "List files and directories in the workspace with metadata; prefer this over execute ls.",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -261,7 +353,7 @@
         "type": "function",
         "function": {
             "name": "web_search",
-            "description": "Search the web using SearXNG (preferred) with DuckDuckGo fallback. Use this to research payloads, CVEs, exploit techniques, WAF bypasses, tool flags, or any information needed during security testing.",
+            "description": "Search the web via SearXNG (DuckDuckGo fallback) for payloads, CVEs, bypasses, and testing references.",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -284,7 +376,7 @@
         "type": "function",
         "function": {
             "name": "create_vulnerability_report",
-            "description": "Create a vulnerability report for a discovered security issue.\n\nIMPORTANT: This tool checks for duplicate reports by title — a report with the same title as an existing one will be rejected. Do NOT attempt to re-submit a rejected report; move on to testing other areas.\n\nMINIMUM REQUIRED FIELDS: title, description, target, poc_description, poc_script_code.\n\nCTF MODE: When reporting a CTF flag, include the flag field AND provide comprehensive analysis — description (executive summary), technical_analysis (root cause), poc_description (step-by-step with HTTP evidence), poc_script_code (automated exploit script), impact, and remediation_steps. CTF reports should match professional penetration testing quality.\n\nFULL REPORT MODE: For bug bounty and penetration testing, provide all fields including CVSS components.\n\nDEDUPLICATION: If this tool returns with success=false and mentions a duplicate or existing title, DO NOT attempt to re-submit. Move on to testing other areas.",
+            "description": "Create a vulnerability report. Enforces duplicate-title checks; include required PoC fields for valid submissions.",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -322,51 +414,81 @@
                     },
                     "attack_vector": {
                         "type": "string",
-                        "enum": ["N", "A", "L", "P"],
+                        "enum": [
+                            "N",
+                            "A",
+                            "L",
+                            "P"
+                        ],
                         "description": "CVSS Attack Vector — how the attacker reaches the vulnerability.\nN=Network: exploitable remotely over the internet (SQLi, XSS, SSRF, IDOR, open redirect, API vuln).\nA=Adjacent: requires attacker on same local network/VLAN (ARP spoofing, internal-only API).\nL=Local: requires local OS access/shell (privilege escalation, local file read).\nP=Physical: requires physical device access.\nMost web vulnerabilities = N."
                     },
                     "attack_complexity": {
                         "type": "string",
-                        "enum": ["L", "H"],
+                        "enum": [
+                            "L",
+                            "H"
+                        ],
                         "description": "CVSS Attack Complexity — how reliably the attack can be repeated.\nL=Low: attack works consistently with no special conditions (SQLi, IDOR, open redirect, auth bypass, XSS, path traversal, most web vulns).\nH=High: requires specific conditions outside attacker control (race condition with narrow window, MitM required, target must have specific non-default config).\nDefault for most web vulns = L."
                     },
                     "privileges_required": {
                         "type": "string",
-                        "enum": ["N", "L", "H"],
+                        "enum": [
+                            "N",
+                            "L",
+                            "H"
+                        ],
                         "description": "CVSS Privileges Required — authentication level needed BEFORE exploiting.\nN=None: no login required (unauthenticated endpoint, public API, login-page SQLi).\nL=Low: any authenticated user can exploit (IDOR between regular users, stored XSS by normal user).\nH=High: only admin/privileged role can exploit (admin panel XSS, admin-only IDOR)."
                     },
                     "user_interaction": {
                         "type": "string",
-                        "enum": ["N", "R"],
+                        "enum": [
+                            "N",
+                            "R"
+                        ],
                         "description": "CVSS User Interaction — must a VICTIM perform an action for the exploit to work?\nN=None: attacker exploits directly with no victim interaction (SQLi, SSRF, IDOR, path traversal, auth bypass, server-side injection, unauthenticated RCE).\nR=Required: victim must click a link, visit a page, or take an action (reflected XSS, CSRF, open redirect, phishing-based attacks, DOM XSS via crafted URL).\nIMPORTANT: SQLi/SSRF/IDOR = N. Reflected XSS/CSRF/open redirect = R."
                     },
                     "scope": {
                         "type": "string",
-                        "enum": ["U", "C"],
+                        "enum": [
+                            "U",
+                            "C"
+                        ],
                         "description": "CVSS Scope — does the vulnerability's impact extend beyond the vulnerable component?\nU=Unchanged: impact stays within the vulnerable component/service (SQLi, IDOR, path traversal, auth bypass, reflected XSS same-session, open redirect, most web vulns). DEFAULT for most findings.\nC=Changed: attacker can impact OTHER components or OTHER users beyond the vulnerable service (stored XSS that steals cookies of OTHER users in their sessions, SSRF that reaches internal network services, XXE with OOB that contacts external systems, privilege escalation to OS level).\nWARNING: Do NOT use C just because the vuln is serious. Reflected XSS = U. Stored XSS affecting other users = C. Open redirect = U. SSRF to cloud metadata = C."
                     },
                     "confidentiality": {
                         "type": "string",
-                        "enum": ["N", "L", "H"],
+                        "enum": [
+                            "N",
+                            "L",
+                            "H"
+                        ],
                         "description": "CVSS Confidentiality Impact — what sensitive data can be read?\nN=None: no data read (pure injection with no data leak, availability-only impact).\nL=Low: some non-critical info exposed. Use L for: username enumeration, version disclosure, error stack traces, path disclosure, email addresses, public user metadata, wp-json user listing, HTTP headers leaking framework info.\nH=High: sensitive/private data compromised. Use H for: password/credential theft, session token theft, full database dump via SQLi, private user data (SSN, payment info), source code disclosure, admin data access via IDOR.\nDO NOT use H for username enumeration or version disclosure — these are L."
                     },
                     "integrity": {
                         "type": "string",
-                        "enum": ["N", "L", "H"],
+                        "enum": [
+                            "N",
+                            "L",
+                            "H"
+                        ],
                         "description": "CVSS Integrity Impact — what data can be modified?\nN=None: attacker cannot modify any data (read-only IDOR, info disclosure, open redirect).\nL=Low: limited data modification (minor stored XSS affecting only attacker's own account, parameter tampering with bounded effect).\nH=High: critical data/config can be modified or created (admin account creation, password change of any user, RCE writing files, mass data modification, SQLi UPDATE/DELETE, CSRF changing sensitive settings)."
                     },
                     "availability": {
                         "type": "string",
-                        "enum": ["N", "L", "H"],
+                        "enum": [
+                            "N",
+                            "L",
+                            "H"
+                        ],
                         "description": "CVSS Availability Impact — can the attacker disrupt service?\nN=None: no availability impact (information disclosure, redirect, read-only IDOR — the vast majority of web vulns).\nL=Low: degraded performance or intermittent service interruption.\nH=High: full service crash or DoS (RCE killing the process, ReDoS causing 100% CPU, billion laugh XML, GraphQL DoS query).\nMost web vulnerabilities = N for availability."
                     },
                     "endpoint": {
                         "type": "string",
-                        "description": "API endpoint(s) or URL path(s) \u2014 for web vulns, or repo path \u2014 for code vulns"
+                        "description": "API endpoint(s) or URL path(s) — for web vulns, or repo path — for code vulns"
                     },
                     "method": {
                         "type": "string",
-                        "description": "HTTP method(s) (GET, POST, etc.) \u2014 for web vulnerabilities."
+                        "description": "HTTP method(s) (GET, POST, etc.) — for web vulnerabilities."
                     },
                     "cve": {
                         "type": "string",
@@ -395,7 +517,7 @@
         "type": "function",
         "function": {
             "name": "quick_fuzz",
-            "description": "Quickly fuzz a URL with common vulnerability payloads (SQLi, XSS, Path Traversal, SSTI). Faster than advanced_fuzz — use when you need a rapid scan without specifying parameters manually. Automatically discovers and targets high-priority parameters.",
+            "description": "Run a fast fuzz scan on a URL using common payloads (SQLi, XSS, traversal, SSTI) with automatic parameter targeting.",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -421,7 +543,7 @@
         "type": "function",
         "function": {
             "name": "deep_fuzz",
-            "description": "Run a full deep interactive fuzzing session with real-time chain discovery. More thorough than advanced_fuzz — discovers exploit chains (e.g. SQLi+RCE, XSS+Cookie Steal). Use after quick_fuzz or advanced_fuzz already found hints of vulnerabilities.",
+            "description": "Run thorough interactive fuzzing with chain discovery after initial hints from quick_fuzz or advanced_fuzz.",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -454,7 +576,7 @@
         "type": "function",
         "function": {
             "name": "generate_wordlist",
-            "description": "Generate a targeted fuzzing wordlist from the internal payload database and save it to the workspace. Output includes actual exploit payloads (SQLi, XSS, SSTI, SSRF, path traversal, etc.) followed by parameter name mutations. Use the saved file path with ffuf or feroxbuster.",
+            "description": "Generate a targeted payload/parameter wordlist from internal data and save it to the workspace for ffuf/feroxbuster.",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -484,7 +606,7 @@
         "type": "function",
         "function": {
             "name": "caido_list_requests",
-            "description": "Query Caido HTTP proxy history using HTTPQL filter. Returns request ID, method, host, path, and response status. Use IDs for caido_send_request. Example filters: 'host.eq:\"target.com\"', 'method.eq:\"POST\"', 'resp.status.eq:200'.",
+            "description": "Query Caido history with HTTPQL filters and return request IDs, methods, paths, and statuses.",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -507,7 +629,7 @@
         "type": "function",
         "function": {
             "name": "caido_send_request",
-            "description": "Replay or modify an HTTP request via Caido. Provide either a request_id from caido_list_requests (to replay an existing request) or a raw_http string (to send a custom request). Use for IDOR testing, auth bypass, header injection, and manual verification.",
+            "description": "Replay or modify HTTP requests through Caido using a request_id or raw HTTP payload.",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -542,7 +664,7 @@
         "type": "function",
         "function": {
             "name": "caido_automate",
-            "description": "Start a Caido Automate fuzzing session (like Burp Intruder). Mark injection points with §FUZZ§ in the raw HTTP request — executor calculates byte offsets automatically. Use for parameter fuzzing, credential stuffing, and payload injection.",
+            "description": "Start a Caido Automate fuzzing session using §FUZZ§ markers to define injection points.",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -588,7 +710,7 @@
         "type": "function",
         "function": {
             "name": "caido_get_findings",
-            "description": "Retrieve all findings/annotations stored in Caido. Returns title, description, reporter, and associated request details. Use after manual testing to collect annotated vulnerabilities.",
+            "description": "Fetch findings/annotations stored in Caido, including title, description, reporter, and related request data.",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -605,13 +727,20 @@
         "type": "function",
         "function": {
             "name": "caido_intercept",
-            "description": "Control Caido's HTTP intercept. Check status, pause/resume capture, list queued intercept messages, forward a queued message (optionally with a modified raw HTTP request), or drop it. Use to monitor and manipulate in-flight HTTP traffic during active testing.",
+            "description": "Control Caido intercept: check status, pause/resume capture, list queued messages, forward (optionally modified), or drop.",
             "parameters": {
                 "type": "object",
                 "properties": {
                     "action": {
                         "type": "string",
-                        "enum": ["status", "pause", "resume", "list", "forward", "drop"],
+                        "enum": [
+                            "status",
+                            "pause",
+                            "resume",
+                            "list",
+                            "forward",
+                            "drop"
+                        ],
                         "description": "Action to perform: status (get intercept state: RUNNING/PAUSED), pause (stop capturing), resume (start capturing), list (show queued messages), forward (forward a queued message), drop (discard a queued message)"
                     },
                     "message_id": {
@@ -623,7 +752,9 @@
                         "description": "Modified raw HTTP request to send when forwarding (optional — omit to forward unchanged)"
                     }
                 },
-                "required": ["action"]
+                "required": [
+                    "action"
+                ]
             }
         }
     },
@@ -631,7 +762,7 @@
         "type": "function",
         "function": {
             "name": "caido_sitemap",
-            "description": "Browse the Caido proxy sitemap — the tree of discovered hosts, directories, and endpoints captured during testing. Call without parent_id to list root domains/hosts. Pass a node's id as parent_id to drill into its children. Use during RECON to enumerate all URLs/paths the proxy has seen.",
+            "description": "Browse Caido sitemap nodes (hosts/directories/endpoints); pass parent_id to drill into child nodes.",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -677,7 +808,7 @@
         "type": "function",
         "function": {
             "name": "spawn_agent",
-            "description": "Spawn a specialist subagent to deeply investigate a specific finding or endpoint. The subagent runs independently with a focused task (max 100 iterations) and returns discovered vulnerabilities merged into the parent session. Use when you find a hint that warrants deeper specialist investigation (e.g. SQLi error response → spawn sqli specialist).",
+            "description": "Spawn a specialist subagent for deep investigation of a specific finding/endpoint and merge results back to the session.",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -716,7 +847,7 @@
         "type": "function",
         "function": {
             "name": "schemathesis_fuzz",
-            "description": "Run API schema-aware fuzzing using Schemathesis against an OpenAPI/Swagger spec. Automatically generates and sends test cases for every documented endpoint, checking for crashes, 500 errors, validation failures, auth bypasses, and injection vulnerabilities. More thorough than manual fuzzing for REST/GraphQL APIs with a schema.",
+            "description": "Run schema-aware API fuzzing with Schemathesis against OpenAPI/Swagger specs to detect crashes, auth bypasses, and injections.",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -754,7 +885,7 @@
         "type": "function",
         "function": {
             "name": "code_analysis",
-            "description": "Run static code analysis (Semgrep) on a cloned repo or downloaded source code inside the Docker sandbox. Detects security vulnerabilities, CWE patterns, and OWASP Top 10 issues. Use after cloning a repository or downloading source files to find code-level vulnerabilities like SQL injection, XSS, command injection, hardcoded secrets, insecure crypto, etc.",
+            "description": "Run Semgrep static analysis on source code in the sandbox to detect security issues (OWASP/CWE patterns).",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -787,7 +918,7 @@
         "type": "function",
         "function": {
             "name": "http_observe",
-            "description": "Send a raw HTTP request from inside the sandbox and receive the full response (status line, ALL headers, body excerpt). Use this to establish baselines, test redirect behavior, observe exact server responses, and diff two responses to detect behavioral changes caused by input variation. This is the primary tool for Observer-Hypothesizer testing — always establish a baseline first, then probe with minimal variation.",
+            "description": "Send raw HTTP requests from the sandbox and return full response details; supports baseline save and response diffing.",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -834,7 +965,7 @@
         "type": "function",
         "function": {
             "name": "record_hypothesis",
-            "description": "Record or update a security hypothesis about the target. Use BEFORE testing a theory (status='pending'), DURING testing (status='testing'), and AFTER getting a result (status='confirmed' or 'refuted'). This keeps your investigation focused and avoids re-testing disproven theories.",
+            "description": "Create or update a security hypothesis with status (pending/testing/confirmed/refuted) and optional evidence.",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -848,7 +979,12 @@
                     },
                     "status": {
                         "type": "string",
-                        "enum": ["pending", "testing", "confirmed", "refuted"],
+                        "enum": [
+                            "pending",
+                            "testing",
+                            "confirmed",
+                            "refuted"
+                        ],
                         "description": "Current status: 'pending'=not yet tested, 'testing'=currently verifying, 'confirmed'=vulnerability proven, 'refuted'=tested and not vulnerable."
                     },
                     "hypothesis_id": {

@@ -1,4 +1,5 @@
 """Tests for the Hypothesis Engine in AgentState (models.py)."""
+
 from __future__ import annotations
 
 import pytest
@@ -31,8 +32,12 @@ class TestAddHypothesis:
         assert len(state.hypothesis_queue) == 0
 
     def test_deduplicates_similar_claims(self, state: AgentState) -> None:
-        id1 = state.add_hypothesis("IDOR on /api/user endpoint via user_id", "test plan")
-        id2 = state.add_hypothesis("IDOR on /api/user endpoint via user_id param", "test plan")
+        id1 = state.add_hypothesis(
+            "IDOR on /api/user endpoint via user_id", "test plan"
+        )
+        id2 = state.add_hypothesis(
+            "IDOR on /api/user endpoint via user_id param", "test plan"
+        )
         # Second should be deduplicated (Jaccard >= 0.80)
         assert id1 == id2
         assert len(state.hypothesis_queue) == 1
@@ -44,13 +49,17 @@ class TestAddHypothesis:
 
     def test_caps_at_max_hypotheses(self, state: AgentState) -> None:
         for i in range(MAX_HYPOTHESES + 5):
-            state.add_hypothesis(f"Unique hypothesis number {i} about endpoint {i}", f"plan {i}")
+            state.add_hypothesis(
+                f"Unique hypothesis number {i} about endpoint {i}", f"plan {i}"
+            )
         assert len(state.hypothesis_queue) <= MAX_HYPOTHESES
 
 
 class TestUpdateHypothesis:
     def test_updates_existing_status(self, state: AgentState) -> None:
-        hyp_id = state.add_hypothesis("Test SSRF on redirect param", "check Location header")
+        hyp_id = state.add_hypothesis(
+            "Test SSRF on redirect param", "check Location header"
+        )
         updated = state.update_hypothesis(hyp_id, "confirmed", "Got 302 to internal IP")
         assert updated is True
         h = state.hypothesis_queue[0]
@@ -132,9 +141,7 @@ class TestResolveHypothesesFromEvidence:
         assert confirmed == 0
 
     def test_ignores_low_confidence_evidence(self, state: AgentState) -> None:
-        state.add_hypothesis(
-            "SSRF via redirect parameter endpoint", "check Location"
-        )
+        state.add_hypothesis("SSRF via redirect parameter endpoint", "check Location")
         state.add_evidence(
             phase="RECON",
             source_tool="manual",
@@ -165,9 +172,7 @@ class TestBuildHypothesisContext:
         assert ctx == ""
 
     def test_contains_pending_hypothesis(self, state: AgentState) -> None:
-        state.add_hypothesis(
-            "IDOR via user_id parameter", "change id to 2 in request"
-        )
+        state.add_hypothesis("IDOR via user_id parameter", "change id to 2 in request")
         ctx = state.build_hypothesis_context()
         assert "<hypothesis_queue>" in ctx
         assert "IDOR via user_id parameter" in ctx

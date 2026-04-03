@@ -1,21 +1,3 @@
-"""Fuzzing Engine for Zero-Day Discovery
-
-This module provides intelligent fuzzing capabilities to discover:
-- Unknown vulnerabilities
-- Business logic flaws
-- Race conditions
-- Parameter pollution
-- Mass assignment
-- Improper input validation
-
-Engines provided:
-- Fuzzer: Core HTTP fuzzing engine (httpx-backed, concurrent)
-- MutationEngine: Creative payload mutation
-- ExpertHeuristics: Expert intuition heuristics + differential analysis
-- ExploitChainEngine: Creative exploit chaining for compounded impact
-- InteractiveRealTimeTester: Real-time streaming interactive testing mode
-"""
-
 from __future__ import annotations
 
 import asyncio
@@ -37,28 +19,10 @@ import httpx
 
 logger = logging.getLogger("airecon.fuzzer")
 
-
 def response_signature(status: int, body: str) -> str:
-    """Compact behavioral fingerprint for an HTTP response.
-
-    Format: ``status:body_len:md5_hex_of_first_1000_bytes``
-
-    Identical to zero_day_fuzzer.py's get_response_signature() pattern.
-    Used to detect behavioral changes between baseline and fuzz responses
-    without full body comparison — runs in O(1) time against a 1 KB window.
-
-    Two responses with the same signature are behaviourally identical;
-    different signatures mean something changed (status, size, or content).
-    """
     body_bytes = body.encode("utf-8", errors="replace")
-    digest = hashlib.md5(body_bytes[:1000], usedforsecurity=False).hexdigest()  # nosec B324
+    digest = hashlib.md5(body_bytes[:1000], usedforsecurity=False).hexdigest()
     return f"{status}:{len(body_bytes)}:{digest}"
-
-
-# ---------------------------------------------------------------------------
-# Constants
-# ---------------------------------------------------------------------------
-
 
 _data_file = Path(__file__).parent / "data" / "fuzzer_data.json"
 try:
@@ -83,16 +47,14 @@ WAF_SIGNATURES = _fuzzer_data.get("WAF_SIGNATURES", {})
 CHAIN_RULES = _fuzzer_data.get("CHAIN_RULES", {})
 CHAIN_PAYLOADS = _fuzzer_data.get("CHAIN_PAYLOADS", {})
 PARAM_TYPE_MAP: dict[str, list[str]] = _fuzzer_data.get("PARAM_TYPE_MAP", {})
-# Fallback order (low → high) used when not present in fuzzer_data.json.
-# Index 0 = lowest priority in sort key (-index), so CRITICAL must be last.
+
 _SEVERITY_ORDER: list[str] = _fuzzer_data.get(
     "_SEVERITY_ORDER",
     ["info", "low", "medium", "high", "critical"],
 )
 
-# Maps attack type from PARAM_TYPE_MAP → relevant fuzzing payload categories.
-# Smart payload routing: SSRF params only get ssrf payloads (not XSS/SQLi/etc.)
-# This reduces noise and focuses the fuzzer on high-probability findings.
+_FUZZ_GATHER_BATCH: int = 50
+
 _ATTACK_TYPE_TO_PAYLOADS: dict[str, list[str]] = {
     "IDOR":           ["idor", "parameter_pollution"],
     "SSRF":           ["ssrf"],
@@ -109,7 +71,6 @@ _CACHE_HEADER_RE = re.compile(
     re.IGNORECASE,
 )
 
-
 def _load_json_safely(path: Path, default: Any) -> Any:
     try:
         with open(path, "r", encoding="utf-8") as f:
@@ -117,7 +78,6 @@ def _load_json_safely(path: Path, default: Any) -> Any:
     except Exception as exc:
         logger.debug("Could not load %s: %s", path, exc)
         return default
-
 
 def _flatten_chain_entries(raw: Any) -> list[dict[str, Any]]:
     if isinstance(raw, dict):
@@ -127,7 +87,6 @@ def _flatten_chain_entries(raw: Any) -> list[dict[str, Any]]:
     else:
         return []
     return [entry for entry in candidate if isinstance(entry, dict)]
-
 
 _patterns_file = Path(__file__).parent / "data" / "patterns.json"
 _zeroday_file = Path(__file__).parent / "data" / "zeroday_patterns.json"
@@ -139,83 +98,52 @@ _ATTACK_CHAIN_LIBRARY: list[dict[str, Any]] = _flatten_chain_entries(
     _load_json_safely(_attack_chain_file, [])
 )
 
-# ---------------------------------------------------------------------------
-# Dataclasses
-# ---------------------------------------------------------------------------
-
-
 @dataclass
 class FuzzResult:
-    """Result of a single fuzzing test."""
-
     target: str
     parameter: str
     payload: str
     vuln_type: str
     severity: str
     evidence: str
-    confidence: float      # 0-1
+    confidence: float
     response_code: int
     response_length: int
     time_ms: float
 
-
 @dataclass
 class ChainLink:
-    """Single step in an exploit chain."""
-
     vuln_type: str
     parameter: str
     payload: str
-    prerequisite: str | None       # vuln_type that enabled this step
+    prerequisite: str | None
     impact_description: str
     confidence: float
 
-
 @dataclass
 class ExploitChain:
-    """A chain of exploits with compounded impact."""
-
     name: str
-    trigger_vuln: str              # First vulnerability that started the chain
+    trigger_vuln: str
     steps: list[ChainLink]
-    total_confidence: float        # Geometric mean of step confidences
-    combined_severity: str         # Escalated severity
-    narrative: str                 # Human-readable attack story
-
+    total_confidence: float
+    combined_severity: str
+    narrative: str
 
 @dataclass
 class RealTimeEvent:
-    """Event emitted during real-time fuzzing."""
-
-    # "finding", "progress", "chain_discovered", "complete", "error"
     event_type: str
     data: dict[str, Any]
     timestamp: float = field(default_factory=time.monotonic)
 
-
 @dataclass
 class ExpertGuidance:
-    """Expert-level guidance for testing."""
-
     recommendation: str
     reason: str
-    priority: str                  # critical, high, medium, low
+    priority: str
     tools_suggested: list[str]
     confidence: float
 
-
-# ---------------------------------------------------------------------------
-# Fuzzer — core HTTP fuzzing engine
-# ---------------------------------------------------------------------------
-
 class Fuzzer:
-    """Intelligent HTTP fuzzer for vulnerability discovery.
-
-    Uses httpx.AsyncClient for real HTTP requests and asyncio.Semaphore
-    for concurrency control.
-    """
-
     def __init__(
         self,
         target: str,
@@ -236,13 +164,12 @@ class Fuzzer:
         self.method = method.upper()
         self.headers: dict[str, str] = headers or {}
         self.results: list[FuzzResult] = []
-        self._baseline: dict[str, dict[str, Any]] = {}  # param → baseline data
+        self._baseline: dict[str, dict[str, Any]] = {}
         self._semaphore = asyncio.Semaphore(threads)
-        # Track timeout occurrences per (param, vuln_type) for time-based confirmation
+
         self._timeout_counts: dict[str, int] = {}
         self._direct_client: httpx.AsyncClient | None = None
-        
-        # Initialize WAF bypass engine
+
         self.enable_waf_bypass = enable_waf_bypass
         if enable_waf_bypass:
             from .agent.waf_bypass import WAFBypassEngine
@@ -250,13 +177,12 @@ class Fuzzer:
         else:
             self.waf_engine = None
         self.detected_wafs: list[str] = []
-        
-        # Initialize rate limiter
+
         self.enable_rate_limit = enable_rate_limit
         if enable_rate_limit:
             from .agent.rate_limiter import AdaptiveRateLimiter
             self.rate_limiter = AdaptiveRateLimiter(
-                base_delay=1.0 / threads,  # Rate limit to threads req/s
+                base_delay=1.0 / threads,
                 max_delay=60.0,
                 max_retries=5,
                 timeout=timeout,
@@ -264,7 +190,6 @@ class Fuzzer:
         else:
             self.rate_limiter = None
 
-        # Initialize auth recovery engine
         self.enable_auth_recovery = enable_auth_recovery
         if enable_auth_recovery:
             from .agent.auth_manager import AuthManager
@@ -274,7 +199,6 @@ class Fuzzer:
         self.auth_login_url = auth_login_url.strip() if isinstance(auth_login_url, str) and auth_login_url.strip() else None
 
     async def close(self) -> None:
-        """Release async resources owned by the fuzzer."""
         if self.waf_engine:
             await self.waf_engine.close()
         if self.rate_limiter:
@@ -292,18 +216,16 @@ class Fuzzer:
         await self.close()
 
     async def _get_direct_client(self) -> httpx.AsyncClient:
-        """Get a reusable direct HTTP client for probe/fuzz requests."""
         if self._direct_client is None:
             self._direct_client = httpx.AsyncClient(
                 timeout=self.timeout,
-                verify=False,  # nosec B501 - security testing tool
+                verify=False,  # nosec B501 - intentional for fuzzing; targets may have self-signed certs
                 follow_redirects=True,
                 headers=self.headers,
             )
         return self._direct_client
 
     def _request_kwargs_for_value(self, param: str, value: str) -> dict[str, Any]:
-        """Build request kwargs for one fuzz parameter/value pair."""
         kwargs: dict[str, Any] = {"headers": self.headers}
         if self.method == "GET":
             kwargs["params"] = {param: value}
@@ -318,7 +240,6 @@ class Fuzzer:
         extra_fields: dict[str, str] | None = None,
         login_url: str | None = None,
     ) -> None:
-        """Configure credentials for automatic auth recovery."""
         if not self.auth_manager:
             return
         self.auth_manager.set_credentials(username, password, extra_fields)
@@ -326,13 +247,11 @@ class Fuzzer:
             self.auth_login_url = login_url.strip()
 
     def set_auth_login_url(self, login_url: str) -> None:
-        """Configure login endpoint used during auth recovery."""
         clean = login_url.strip()
         if clean:
             self.auth_login_url = clean
 
     def _resolve_auth_login_url(self) -> str | None:
-        """Resolve safest login URL for automatic auth recovery."""
         if self.auth_login_url:
             return self.auth_login_url
         parsed = urlparse(self.target)
@@ -342,7 +261,6 @@ class Fuzzer:
         return None
 
     def _refresh_cookie_header_from_auth(self) -> None:
-        """Sync recovered session cookies into request headers."""
         if not self.auth_manager or not self.auth_manager.auth_cookies:
             return
         pairs: list[str] = []
@@ -361,7 +279,6 @@ class Fuzzer:
         param: str,
         value: str,
     ) -> httpx.Response:
-        """Attempt auth recovery and retry a blocked request once."""
         if not self.auth_manager:
             return response
         if response.status_code not in (401, 403):
@@ -403,7 +320,6 @@ class Fuzzer:
 
     @staticmethod
     def _response_elapsed_ms(response: httpx.Response, fallback_ms: float) -> float:
-        """Get request duration from response metadata with safe fallback."""
         ext_val = response.extensions.get("airecon_request_ms")
         if ext_val is not None:
             try:
@@ -521,19 +437,11 @@ class Fuzzer:
             return None, (time.monotonic() - t0) * 1000.0
 
     async def _fetch_baseline(self, param: str) -> dict[str, Any]:
-        """Fetch baseline response for a parameter with a benign value.
-
-        Sends 2 baseline requests to measure natural response variation
-        (dynamic CSRF tokens, timestamps, session IDs). The observed
-        length_variance is stored so differential analysis can ignore
-        fluctuations within the natural noise floor.
-        """
         if param in self._baseline:
             return self._baseline[param]
         try:
             samples: list[dict[str, Any]] = []
-            
-            # Use rate limiter if enabled
+
             if self.rate_limiter:
                 for _ in range(2):
                     t0 = time.monotonic()
@@ -556,7 +464,7 @@ class Fuzzer:
                         "headers": dict(resp.headers),
                     })
             else:
-                # Fallback to direct httpx
+
                 client = await self._get_direct_client()
                 for _ in range(2):
                     t0 = time.monotonic()
@@ -580,7 +488,6 @@ class Fuzzer:
                         "headers": dict(resp.headers),
                     })
 
-            # Detect WAF from baseline response
             if self.waf_engine and samples:
                 detected = self.waf_engine.detect_waf(
                     samples[0].get("headers", {}),
@@ -591,8 +498,6 @@ class Fuzzer:
                     self.detected_wafs = detected
                     logger.info(f"WAF detected during baseline: {', '.join(detected)}")
 
-            # Use first sample as canonical baseline body; compute length
-            # variance across both samples as the natural noise floor.
             length_variance = abs(samples[1]["length"] - samples[0]["length"])
             baseline = {
                 "body": samples[0]["body"],
@@ -614,12 +519,10 @@ class Fuzzer:
             return baseline
         except Exception as exc:
             logger.debug(f"Baseline fetch failed for param={param}: {exc}")
-            # Use status=-1 (not 200) so fuzz_parameters can skip unreachable
-            # params rather than including them with a misleading 200 baseline.
+
             return {"body": "", "status": -1, "time_ms": 0.0, "length": 0, "length_variance": 0}
 
     async def probe(self, param: str) -> dict[str, Any]:
-        """Compatibility probe API used by real-time tester and older tests."""
         baseline = await self._fetch_baseline(param)
         return {
             "status": int(baseline.get("status", -1)),
@@ -634,18 +537,6 @@ class Fuzzer:
         vuln_types: list[str] | None = None,
         param_type_hints: dict[str, str] | None = None,
     ) -> list[FuzzResult]:
-        """Fuzz multiple parameters concurrently.
-
-        Args:
-            params: Parameter names to fuzz.
-            vuln_types: Explicit payload categories. None = all categories.
-            param_type_hints: Optional {param_name: attack_type} mapping.
-                When provided, each param only receives payloads relevant to
-                its type (e.g. SSRF params get ssrf payloads, not XSS/SQLi).
-                Use session.injection_points to populate this.
-        """
-        # Reset per-session timeout tracking — prevents false positives when the
-        # Fuzzer instance is reused across multiple fuzz_parameters() calls.
         self._timeout_counts.clear()
 
         if not FUZZ_PAYLOADS:
@@ -655,15 +546,13 @@ class Fuzzer:
             )
             return []
 
-        # Build baseline for each param first
         baseline_tasks = [self._fetch_baseline(p) for p in params]
         baseline_results = await asyncio.gather(*baseline_tasks, return_exceptions=True)
 
-        # FIX #5 (High): Propagate baseline failures explicitly
-        # Check which params failed baseline and log them before filtering
         unreachable_params = []
         for i, (param, result) in enumerate(zip(params, baseline_results)):
-            if isinstance(result, Exception):
+            if isinstance(result, BaseException):
+
                 logger.warning(
                     f"Param '{param}' baseline fetch raised exception: {result}"
                 )
@@ -673,7 +562,7 @@ class Fuzzer:
                     f"Param '{param}' baseline returned status=-1 (target unreachable)"
                 )
                 unreachable_params.append(param)
-        
+
         if unreachable_params:
             logger.info(
                 f"Skipping {len(unreachable_params)}/{len(params)} params due to baseline failures: "
@@ -684,11 +573,9 @@ class Fuzzer:
 
         all_vuln_types = list(FUZZ_PAYLOADS.keys())
 
-        # Build all (param, payload, vuln_type) combos with smart payload routing
         tasks = []
         for param in clean_params:
-            # Smart selection: if we know the param type, only test relevant payloads.
-            # Falls back to explicit vuln_types or all categories.
+
             if param_type_hints and param in param_type_hints:
                 p_type = param_type_hints[param]
                 effective = _ATTACK_TYPE_TO_PAYLOADS.get(
@@ -700,7 +587,10 @@ class Fuzzer:
                 for payload in FUZZ_PAYLOADS.get(vt, []):
                     tasks.append(self._fuzz_single(param, payload, vt))
 
-        results = await asyncio.gather(*tasks, return_exceptions=True)
+        results: list[Any] = []
+        for _i in range(0, len(tasks), _FUZZ_GATHER_BATCH):
+            _batch = tasks[_i : _i + _FUZZ_GATHER_BATCH]
+            results.extend(await asyncio.gather(*_batch, return_exceptions=True))
 
         for r in results:
             if isinstance(r, FuzzResult) and r.confidence > 0.6:
@@ -709,7 +599,6 @@ class Fuzzer:
         return self.results
 
     def _filter_fuzzable_params(self, params: list[str]) -> list[str]:
-        """Filter params based on baseline accessibility and auth context."""
         has_auth = bool(self.headers)
         clean_params: list[str] = []
         for param in params:
@@ -745,11 +634,6 @@ class Fuzzer:
         *,
         skip_baseline: bool = False,
     ) -> AsyncIterator[FuzzResult]:
-        """Stream findings as they are discovered.
-
-        This method is intentionally sequential for predictable real-time
-        streaming and easier external mocking in tests.
-        """
         self._timeout_counts.clear()
         if not FUZZ_PAYLOADS:
             return
@@ -782,14 +666,15 @@ class Fuzzer:
         payload: str,
         vuln_type: str,
     ) -> FuzzResult | None:
-        """Fuzz a single parameter with a single payload."""
+        baseline = self._baseline.get(param, {
+            "body": "", "status": 200, "time_ms": 100.0, "length": 0, "length_variance": 0
+        })
+        resp: httpx.Response | None = None
+        elapsed: float = 0.0
+
         async with self._semaphore:
-            baseline = self._baseline.get(param, {
-                "body": "", "status": 200, "time_ms": 100.0, "length": 0, "length_variance": 0
-            })
             try:
-                resp: httpx.Response
-                # Use rate limiter if enabled
+
                 if self.rate_limiter:
                     t0 = time.monotonic()
                     rate_limited_resp = await self.rate_limiter.request(
@@ -798,7 +683,7 @@ class Fuzzer:
                         **self._request_kwargs_for_value(param, payload),
                     )
                     if rate_limited_resp is None:
-                        # Rate limiter exhausted retries
+
                         return None
                     resp = rate_limited_resp
                     elapsed = self._response_elapsed_ms(
@@ -806,7 +691,7 @@ class Fuzzer:
                         fallback_ms=(time.monotonic() - t0) * 1000.0,
                     )
                 else:
-                    # Fallback to direct httpx
+
                     client = await self._get_direct_client()
                     t0 = time.monotonic()
                     if self.method == "GET":
@@ -817,79 +702,9 @@ class Fuzzer:
 
                 resp = await self._maybe_recover_auth(resp, param=param, value=payload)
                 elapsed = self._response_elapsed_ms(resp, fallback_ms=elapsed)
-                
-                # WAF bypass: if 403 and WAF detected, try bypass strategies
-                if resp.status_code == 403 and self.waf_engine and self.detected_wafs:
-                    logger.info(
-                        f"403 detected on param={param} — attempting WAF bypass "
-                        f"for {', '.join(self.detected_wafs)}"
-                    )
-                    
-                    # Try WAF bypass for this payload
-                    bypass_result = await self.waf_engine.test_bypass(
-                        target_url=self.target,
-                        waf_type=self.detected_wafs[0],  # Use first detected WAF
-                        payload=payload,
-                        param_name=param,
-                        method=self.method,
-                        base_headers=self.headers,
-                    )
-                    
-                    if bypass_result.get("successful_bypasses"):
-                        logger.info(
-                            f"WAF bypass successful for {param}={payload}: "
-                            f"{bypass_result['successful_bypasses'][0]['strategy']}"
-                        )
-                        bypass_response = bypass_result.get("response")
-                        if isinstance(bypass_response, httpx.Response):
-                            resp = bypass_response
-                            elapsed = self._response_elapsed_ms(resp, fallback_ms=elapsed)
-                
-                fuzz_sig = response_signature(resp.status_code, resp.text)
-                baseline_sig = baseline.get("signature", "")
 
-                # Fast-path skip: identical signatures → behaviourally same as
-                # baseline, not worth full analysis.  Exception: time-based
-                # checks still run because timing is not captured in the sig.
-                _is_time_based = vuln_type in (
-                    "sql_injection", "command_injection", "time_based"
-                )
-                if baseline_sig and fuzz_sig == baseline_sig and not _is_time_based:
-                    return None
-
-                analysis = ExpertHeuristics.analyze_response_differential(
-                    baseline_body=baseline["body"],
-                    baseline_status=baseline["status"],
-                    baseline_time_ms=baseline["time_ms"],
-                    fuzz_body=resp.text,
-                    fuzz_status=resp.status_code,
-                    fuzz_time_ms=elapsed,
-                    payload=payload,
-                    vuln_type=vuln_type,
-                    baseline_length_variance=baseline.get("length_variance", 0),
-                    baseline_sig=baseline_sig,
-                    fuzz_sig=fuzz_sig,
-                )
-
-                if analysis["vuln_confirmed"] or analysis["confidence"] > 0.5:
-                    return FuzzResult(
-                        target=self.target,
-                        parameter=param,
-                        payload=payload,
-                        vuln_type=analysis.get("vuln_type", vuln_type),
-                        severity=_confidence_to_severity(
-                            analysis["confidence"]),
-                        evidence="; ".join(analysis["evidence"][:3]),
-                        confidence=analysis["confidence"],
-                        response_code=resp.status_code,
-                        response_length=len(resp.text),
-                        time_ms=elapsed,
-                    )
             except httpx.TimeoutException:
-                # A timeout MAY indicate time-based injection, but a single
-                # timeout is unreliable (slow network, rate-limited CDN, etc.).
-                # Require 2 independent timeouts for the same (param, vuln_type)
-                # before reporting — reduces false positives significantly.
+
                 if vuln_type in ("sql_injection", "ssti", "command_injection"):
                     hit_key = f"{param}:{vuln_type}"
                     self._timeout_counts[hit_key] = self._timeout_counts.get(hit_key, 0) + 1
@@ -913,10 +728,75 @@ class Fuzzer:
                         "Timeout hit #%d for param=%s vuln=%s — waiting for 2nd confirmation",
                         self._timeout_counts[hit_key], param, vuln_type,
                     )
+                return None
             except Exception as exc:
                 logger.debug(
                     f"Fuzz request error param={param} payload={payload!r}: {exc}"
                 )
+                return None
+
+        if resp is None:
+            return None
+
+        if resp.status_code == 403 and self.waf_engine and self.detected_wafs:
+            logger.info(
+                f"403 detected on param={param} — attempting WAF bypass "
+                f"for {', '.join(self.detected_wafs)}"
+            )
+            bypass_result = await self.waf_engine.test_bypass(
+                target_url=self.target,
+                waf_type=self.detected_wafs[0],
+                payload=payload,
+                param_name=param,
+                method=self.method,
+                base_headers=self.headers,
+            )
+            if bypass_result.get("successful_bypasses"):
+                logger.info(
+                    f"WAF bypass successful for {param}={payload}: "
+                    f"{bypass_result['successful_bypasses'][0]['strategy']}"
+                )
+                bypass_response = bypass_result.get("response")
+                if isinstance(bypass_response, httpx.Response):
+                    resp = bypass_response
+                    elapsed = self._response_elapsed_ms(resp, fallback_ms=elapsed)
+
+        fuzz_sig = response_signature(resp.status_code, resp.text)
+        baseline_sig = baseline.get("signature", "")
+
+        _is_time_based = vuln_type in (
+            "sql_injection", "command_injection", "time_based"
+        )
+        if baseline_sig and fuzz_sig == baseline_sig and not _is_time_based:
+            return None
+
+        analysis = ExpertHeuristics.analyze_response_differential(
+            baseline_body=baseline["body"],
+            baseline_status=baseline["status"],
+            baseline_time_ms=baseline["time_ms"],
+            fuzz_body=resp.text,
+            fuzz_status=resp.status_code,
+            fuzz_time_ms=elapsed,
+            payload=payload,
+            vuln_type=vuln_type,
+            baseline_length_variance=baseline.get("length_variance", 0),
+            baseline_sig=baseline_sig,
+            fuzz_sig=fuzz_sig,
+        )
+
+        if analysis["vuln_confirmed"] or analysis["confidence"] > 0.5:
+            return FuzzResult(
+                target=self.target,
+                parameter=param,
+                payload=payload,
+                vuln_type=analysis.get("vuln_type", vuln_type),
+                severity=_confidence_to_severity(analysis["confidence"]),
+                evidence="; ".join(analysis["evidence"][:3]),
+                confidence=analysis["confidence"],
+                response_code=resp.status_code,
+                response_length=len(resp.text),
+                time_ms=elapsed,
+            )
         return None
 
     @staticmethod
@@ -991,7 +871,6 @@ class Fuzzer:
         graphql_endpoints: list[str] | None = None,
         race_params: list[str] | None = None,
     ) -> list[FuzzResult]:
-        """Run phase-2 advanced probes: cloud SSRF, GraphQL, and race-condition tests."""
         findings: list[FuzzResult] = []
         findings.extend(await self._run_cloud_ssrf_exploitation(ssrf_params))
         findings.extend(await self._run_graphql_automation(graphql_endpoints))
@@ -1004,7 +883,6 @@ class Fuzzer:
         store_params: list[str] | None = None,
         trigger_paths: list[str] | None = None,
     ) -> list[FuzzResult]:
-        """Run phase-3 advanced probes: second-order and cache/desync testing."""
         findings: list[FuzzResult] = []
         findings.extend(await self._run_second_order_detection(store_params, trigger_paths))
         findings.extend(await self._run_http_desync_cache_testing())
@@ -1252,7 +1130,8 @@ class Fuzzer:
                 responses: list[httpx.Response] = []
                 timings: list[float] = []
                 for item in bursts:
-                    if isinstance(item, Exception):
+                    if isinstance(item, BaseException):
+
                         continue
                     resp, elapsed = item
                     if resp is None:
@@ -1478,7 +1357,6 @@ class Fuzzer:
         return findings
 
     def get_high_priority_targets(self) -> list[str]:
-        """Get high-priority parameters based on heuristics (deduplicated)."""
         priority: list[str] = []
         seen: set[str] = set()
 
@@ -1498,17 +1376,9 @@ class Fuzzer:
 
         return priority
 
-
-# ---------------------------------------------------------------------------
-# MutationEngine
-# ---------------------------------------------------------------------------
-
 class MutationEngine:
-    """Engine for creative mutation of payloads."""
-
     @staticmethod
     def mutate_payload(payload: str, technique: str) -> list[str]:
-        """Generate variations of a payload."""
         mutations = [payload]
 
         if technique == "encoding":
@@ -1516,14 +1386,14 @@ class MutationEngine:
             mutations.append(payload.replace(" ", "%20"))
             mutations.append(payload.replace("'", "%27"))
             mutations.append(payload.replace('"', "%22"))
-            # Double encoding
+
             mutations.append(payload.replace("/", "%252F"))
 
         elif technique == "case":
             mutations.append(payload.upper())
             mutations.append(payload.lower())
             mutations.append(payload.capitalize())
-            # Mixed case for WAF bypass
+
             mutations.append("".join(
                 c.upper() if i % 2 == 0 else c.lower()
                 for i, c in enumerate(payload)
@@ -1560,17 +1430,6 @@ class MutationEngine:
         base_words: list[str],
         max_size: int = 500,
     ) -> list[str]:
-        """Generate parameter name mutations (capped to avoid memory issues).
-
-        Generates variants useful for parameter discovery and bypass attempts:
-        - Privilege escalation suffixes (admin, root, superuser, privileged)
-        - Environment suffixes (dev, debug, staging, backup, internal)
-        - Common API/auth key suffixes (_id, _key, _token, _secret, _hash)
-        - Numeric suffixes (1, 2, 0, null, true, false, undefined)
-        - camelCase and snake_case variants
-        - Two-word combinations with _ and - separators
-        """
-        # Suffixes grouped by purpose (ordered: high-value first)
         _PRIVILEGE_SUFFIXES = [
             "admin", "root", "superuser", "administrator", "super",
             "owner", "master", "privileged", "god", "system",
@@ -1594,13 +1453,11 @@ class MutationEngine:
         combinations: list[str] = []
 
         def _add(item: str) -> bool:
-            """Add item if not duplicate. Returns False when cap reached."""
             if item not in seen:
                 seen.add(item)
                 combinations.append(item)
             return len(combinations) < max_size
 
-        # 1. Privilege + env suffixes — highest value for bypass/enumeration
         for suffix in _PRIVILEGE_SUFFIXES + _ENV_SUFFIXES + _DEMO_SUFFIXES:
             for word in base_words:
                 if not _add(f"{word}_{suffix}"):
@@ -1610,13 +1467,11 @@ class MutationEngine:
                 if not _add(f"{suffix}_{word}"):
                     return combinations
 
-        # 2. Key-type suffixes (already include underscore)
         for suffix in _KEY_SUFFIXES:
             for word in base_words:
                 if not _add(f"{word}{suffix}"):
                     return combinations
 
-        # 3. Numeric suffixes
         for suffix in _NUMERIC_SUFFIXES:
             for word in base_words:
                 if not _add(f"{word}{suffix}"):
@@ -1624,7 +1479,6 @@ class MutationEngine:
                 if not _add(f"{word}_{suffix}"):
                     return combinations
 
-        # 4. camelCase variants (userId, adminToken, etc.)
         for word in base_words:
             for suffix in _PRIVILEGE_SUFFIXES[:5] + \
                     ["Id", "Key", "Token", "Secret"]:
@@ -1632,7 +1486,6 @@ class MutationEngine:
                 if not _add(camel):
                     return combinations
 
-        # 5. Two-word combinations with _ and - separators
         for w1 in base_words:
             for w2 in base_words:
                 if w1 != w2:
@@ -1643,20 +1496,9 @@ class MutationEngine:
 
         return combinations
 
-
-# ---------------------------------------------------------------------------
-# ExpertHeuristics — fixed + extended with differential analysis
-# ---------------------------------------------------------------------------
-
 class ExpertHeuristics:
-    """Expert-level heuristics for vulnerability discovery."""
-
     @staticmethod
     def analyze_response(response: str) -> dict[str, Any]:
-        """Analyze a single response for vulnerability indicators.
-
-        Fixed: no double-counting, uses specific patterns, caps per-category.
-        """
         analysis: dict[str, Any] = {
             "is_vulnerable": False,
             "vuln_types": [],
@@ -1673,28 +1515,23 @@ class ExpertHeuristics:
                 analysis["vuln_types"].append(vuln)
                 seen_vulns.add(vuln)
 
-        # SQL error patterns (capped at 0.4 total for this category)
         sql_hit = False
         for pattern in VULNERABLE_PATTERNS["sql_error"]:
             if pattern in response_lower and not sql_hit:
                 _add("sql_injection", f"SQL error pattern: {pattern}", 0.4)
                 sql_hit = True
 
-        # Generic server errors
         for pattern in VULNERABLE_PATTERNS["generic_error"]:
             if pattern in response_lower:
                 _add("error_disclosure", f"Server error: {pattern}", 0.2)
-                break  # only count once
+                break
 
-        # Code execution indicators (separate category, no overlap with
-        # sql_error)
         code_hit = False
         for pattern in VULNERABLE_PATTERNS["code_execution"]:
             if pattern in response_lower and not code_hit:
                 _add("rce", f"Code execution indicator: {pattern}", 0.45)
                 code_hit = True
 
-        # Specific sensitive data (not generic words like "key", "admin")
         specific_sensitive = [
             "/etc/passwd",
             "root:x:",
@@ -1726,21 +1563,6 @@ class ExpertHeuristics:
         baseline_sig: str = "",
         fuzz_sig: str = "",
     ) -> dict[str, Any]:
-        """Differential response analysis — compare fuzz vs baseline.
-
-        Much lower false-positive rate than single-response analysis because
-        differences relative to a clean baseline are the signal.
-
-        baseline_length_variance: natural byte fluctuation observed between
-        two baseline requests (dynamic CSRF/timestamp fields). Used to raise
-        the noise floor for content-length anomaly detection so dynamic pages
-        don't trigger false positives.
-
-        baseline_sig / fuzz_sig: compact response signatures from
-        response_signature(). When provided and differing, this adds a
-        low-confidence behavioral-change signal covering cases where the
-        response changed but no specific error/injection keyword was matched.
-        """
         result: dict[str, Any] = {
             "vuln_confirmed": False,
             "confidence": 0.0,
@@ -1750,7 +1572,6 @@ class ExpertHeuristics:
         confidence = 0.0
         evidence: list[str] = []
 
-        # 1. Payload reflection — XSS/SSTI signal
         if payload and len(payload) > 3 and payload in fuzz_body:
             if payload not in baseline_body:
                 confidence += 0.6
@@ -1762,8 +1583,6 @@ class ExpertHeuristics:
                 elif any(t in payload for t in ["{{", "${", "<%= ", "#{"]):
                     result["vuln_type"] = "ssti"
 
-        # 2. Time-based anomaly
-        # Relative check: fuzz is 3x slower than baseline AND absolute >3s
         if (
             baseline_time_ms > 0
             and fuzz_time_ms > baseline_time_ms * 3
@@ -1774,16 +1593,14 @@ class ExpertHeuristics:
                 f"Time anomaly: baseline={baseline_time_ms:.0f}ms fuzz={fuzz_time_ms:.0f}ms"
             )
             result["vuln_type"] = f"time_based_{vuln_type}"
-        # Absolute fallback: when baseline fetch failed (baseline_time_ms==0),
-        # still flag extremely slow responses as suspicious.
+
         elif baseline_time_ms == 0 and fuzz_time_ms > 5000:
-            confidence += 0.40  # lower confidence — no baseline comparison available
+            confidence += 0.40
             evidence.append(
                 f"Time anomaly (no baseline): fuzz={fuzz_time_ms:.0f}ms exceeded 5s absolute threshold"
             )
             result["vuln_type"] = f"time_based_{vuln_type}"
 
-        # 3. Status code change
         if fuzz_status != baseline_status:
             if baseline_status == 200 and fuzz_status == 500:
                 confidence += 0.4
@@ -1798,10 +1615,6 @@ class ExpertHeuristics:
                     f"Redirect triggered (possible open redirect/SSRF): {fuzz_status}")
                 result["vuln_type"] = "open_redirect"
 
-        # 4. Content length anomaly
-        # Raise the noise floor using the observed baseline variance so that
-        # pages with dynamic content (CSRF tokens, timestamps, session IDs)
-        # don't generate false positives on normal fluctuation.
         baseline_len = len(baseline_body)
         fuzz_len = len(fuzz_body)
         if baseline_len > 0:
@@ -1816,7 +1629,6 @@ class ExpertHeuristics:
                 evidence.append(
                     "Response significantly smaller — possible truncation/filter")
 
-        # 5. SQL error patterns appearing in fuzz but not baseline
         fuzz_lower = fuzz_body.lower()
         baseline_lower = baseline_body.lower()
         for pattern in VULNERABLE_PATTERNS["sql_error"]:
@@ -1828,7 +1640,6 @@ class ExpertHeuristics:
                 result["vuln_type"] = "sql_injection"
                 break
 
-        # 6. Code execution patterns new in fuzz response
         for pattern in VULNERABLE_PATTERNS["code_execution"]:
             if pattern in fuzz_lower and pattern not in baseline_lower:
                 confidence += 0.45
@@ -1838,7 +1649,6 @@ class ExpertHeuristics:
                 result["vuln_type"] = "rce"
                 break
 
-        # 7. /etc/passwd or win paths appearing in fuzz
         lfi_signatures = [
             "/etc/passwd",
             "root:x:",
@@ -1852,10 +1662,6 @@ class ExpertHeuristics:
                 result["vuln_type"] = "path_traversal"
                 break
 
-        # 8. Behavioral signature mismatch (catch-all for subtle changes)
-        # Fires only when sigs are both present, differ, AND no other evidence
-        # already captured the change.  Low weight (0.15) — this signal alone
-        # won't cross the 0.55 confirmed threshold but boosts marginal cases.
         if baseline_sig and fuzz_sig and baseline_sig != fuzz_sig and not evidence:
             b_status, b_len, _ = baseline_sig.split(":", 2)
             f_status, f_len, _ = fuzz_sig.split(":", 2)
@@ -1878,7 +1684,6 @@ class ExpertHeuristics:
 
     @staticmethod
     def get_priority_parameters(url: str, method: str = "GET") -> list[str]:
-        """Get priority parameters based on URL analysis."""
         priority: list[str] = []
 
         if "login" in url or "signin" in url:
@@ -1897,7 +1702,7 @@ class ExpertHeuristics:
             priority.extend(
                 ["price", "amount", "quantity", "coupon", "discount"])
 
-        return list(dict.fromkeys(priority))  # deduplicate preserving order
+        return list(dict.fromkeys(priority))
 
     @staticmethod
     def get_attack_surface_heuristics(
@@ -1906,7 +1711,6 @@ class ExpertHeuristics:
         request_headers: dict[str, str],
         response_headers: dict[str, str],
     ) -> list[ExpertGuidance]:
-        """Detect tech stack and return targeted attack guidance."""
         guidance: list[ExpertGuidance] = []
         resp_lower = {k.lower(): v.lower()
                       for k, v in response_headers.items()}
@@ -1917,7 +1721,6 @@ class ExpertHeuristics:
         generator = resp_lower.get("x-generator", "")
         auth_header = req_lower.get("authorization", "")
 
-        # PHP detection
         if "php" in powered_by or ".php" in url:
             guidance.append(ExpertGuidance(
                 recommendation="Test PHP-specific vulnerabilities: type juggling, LFI, XXE",
@@ -1930,7 +1733,6 @@ class ExpertHeuristics:
                 confidence=0.85,
             ))
 
-        # WordPress
         if "wordpress" in generator or "/wp-" in url:
             guidance.append(ExpertGuidance(
                 recommendation="Run wpscan; check xmlrpc.php, wp-login.php brute force",
@@ -1940,7 +1742,6 @@ class ExpertHeuristics:
                 confidence=0.9,
             ))
 
-        # Apache
         if "apache" in server:
             guidance.append(ExpertGuidance(
                 recommendation="Test Apache path traversal, .htaccess disclosure, mod_status",
@@ -1950,7 +1751,6 @@ class ExpertHeuristics:
                 confidence=0.7,
             ))
 
-        # Nginx
         if "nginx" in server:
             guidance.append(ExpertGuidance(
                 recommendation="Test nginx alias traversal and off-by-slash misconfiguration",
@@ -1962,7 +1762,6 @@ class ExpertHeuristics:
                 confidence=0.7,
             ))
 
-        # JWT in Authorization header
         if auth_header.startswith("bearer ") and auth_header.count(".") == 2:
             guidance.append(ExpertGuidance(
                 recommendation="Test JWT: alg:none, weak HMAC secret, kid injection",
@@ -1972,7 +1771,6 @@ class ExpertHeuristics:
                 confidence=0.8,
             ))
 
-        # GraphQL
         if "graphql" in url or "gql" in url:
             guidance.append(ExpertGuidance(
                 recommendation="Test GraphQL: introspection, batching DoS, IDOR via IDs",
@@ -1982,7 +1780,6 @@ class ExpertHeuristics:
                 confidence=0.85,
             ))
 
-        # Numeric IDs in params → IDOR
         for k, v in params.items():
             if v.isdigit() and k.lower() in ("id", "user_id", "account_id", "order_id"):
                 guidance.append(ExpertGuidance(
@@ -2001,20 +1798,17 @@ class ExpertHeuristics:
         response_headers: dict[str, str],
         status_code: int,
     ) -> str | None:
-        """Identify WAF from response headers and status code."""
         headers_lower = {k.lower(): v.lower()
                          for k, v in response_headers.items()}
 
         for waf_name, sig in WAF_SIGNATURES.items():
-            # Header match
+
             for h in sig["headers"]:
                 if h in headers_lower:
                     return waf_name
-            # Status code + body pattern match requires body, check status at
-            # least
+
             if status_code in sig["status_codes"]:
-                # Tentative match on status alone — caller should verify body
-                # too
+
                 for h in sig["headers"]:
                     if any(h.split("-")[0] in k for k in headers_lower):
                         return waf_name
@@ -2023,7 +1817,6 @@ class ExpertHeuristics:
 
     @staticmethod
     def suggest_next_tests(vuln_type: str) -> list[str]:
-        """Suggest follow-up tests based on confirmed vulnerability type."""
         suggestions: dict[str, list[str]] = {
             "sql_injection": [
                 "Try UNION-based extraction: ' UNION SELECT table_name FROM information_schema.tables--",
@@ -2077,19 +1870,7 @@ class ExpertHeuristics:
             "Test in different HTTP methods (GET→POST→PUT)",
         ])
 
-
-# ---------------------------------------------------------------------------
-# ExploitChainEngine
-# ---------------------------------------------------------------------------
-
 class ExploitChainEngine:
-    """Discover and chain multiple vulnerabilities for compounded impact.
-
-    When a vulnerability is found, this engine automatically tests for
-    follow-on vulnerabilities that become possible, building a narrative
-    of chained exploits that significantly escalate overall severity.
-    """
-
     def __init__(self, fuzzer: Fuzzer):
         self.fuzzer = fuzzer
         self.discovered_chains: list[ExploitChain] = []
@@ -2099,12 +1880,11 @@ class ExploitChainEngine:
         self,
         initial_findings: list[FuzzResult],
     ) -> list[ExploitChain]:
-        """For each finding, test follow-on vulns and build exploit chains."""
         chains: list[ExploitChain] = []
 
         for finding in initial_findings:
             follow_ons = list(CHAIN_RULES.get(finding.vuln_type, []))
-            # Phase-3 chain extensions with active verification hooks.
+
             if finding.vuln_type in {"sql_injection", "xss", "ssti", "command_injection"}:
                 follow_ons.append("second_order_injection")
             if finding.vuln_type in {"open_redirect", "ssrf", "graphql", "xss"}:
@@ -2131,24 +1911,23 @@ class ExploitChainEngine:
         parent: FuzzResult,
         chain_vuln: str,
     ) -> ChainLink | None:
-        """Test if a follow-on vuln is exploitable given the parent finding."""
         specialized = await self._test_special_chain_step(parent, chain_vuln)
         if specialized is not None:
             return specialized
 
         payloads = CHAIN_PAYLOADS.get(chain_vuln, [])
         if not payloads:
-            # No HTTP test available — still record as theoretical chain step
+
             return ChainLink(
                 vuln_type=chain_vuln,
                 parameter=parent.parameter,
                 payload="[theoretical — no active test payload]",
                 prerequisite=parent.vuln_type,
                 impact_description=_chain_impact(parent.vuln_type, chain_vuln),
-                confidence=0.45,  # Theoretical confidence
+                confidence=0.45,
             )
 
-        for payload in payloads[:2]:  # Test at most 2 chain payloads
+        for payload in payloads[:2]:
             result = await self.fuzzer._fuzz_single(
                 parent.parameter, payload, chain_vuln
             )
@@ -2293,7 +2072,6 @@ class ExploitChainEngine:
 
     def prioritize_chains(
             self, chains: list[ExploitChain]) -> list[ExploitChain]:
-        """Sort chains by severity then confidence (highest first)."""
         _sev_lower = [s.lower() for s in _SEVERITY_ORDER]
 
         def _sort_key(c: ExploitChain) -> tuple[int, float]:
@@ -2304,7 +2082,6 @@ class ExploitChainEngine:
         return sorted(chains, key=_sort_key)
 
     def generate_chain_report(self, chain: ExploitChain) -> str:
-        """Generate human-readable exploit chain narrative."""
         return self.generate_chain_report_from_steps(
             chain.steps, self.fuzzer.target)
 
@@ -2327,7 +2104,6 @@ class ExploitChainEngine:
 
     @staticmethod
     def _compute_chain_severity(steps: list[ChainLink]) -> str:
-        """Escalate severity based on chain contents."""
         critical_types = {
             "rce",
             "rce_via_outfile",
@@ -2347,29 +2123,10 @@ class ExploitChainEngine:
         if all_types & high_types:
             return "high"
         if len(steps) >= 3:
-            return "high"  # Long chains escalate severity
+            return "high"
         return "medium"
 
-
-# ---------------------------------------------------------------------------
-# InteractiveRealTimeTester
-# ---------------------------------------------------------------------------
-
 class InteractiveRealTimeTester:
-    """Real-time fuzzing with live result streaming and exploit chaining.
-
-    Wraps Fuzzer and ExploitChainEngine to emit RealTimeEvents as an
-    async generator so callers can display results immediately.
-
-    Usage:
-        tester = InteractiveRealTimeTester("https://target.com/search")
-        async for event in tester.stream_fuzz(params=["q", "id"]):
-            if event.event_type == "finding":
-                logger.info("[%s] %s", event.data['severity'].upper(), event.data['vuln_type'])
-            elif event.event_type == "chain_discovered":
-                logger.info("Chain: %s", event.data['name'])
-    """
-
     def __init__(
         self,
         target: str,
@@ -2394,7 +2151,6 @@ class InteractiveRealTimeTester:
         self._chains: list[ExploitChain] = []
 
     async def probe_baseline(self, params: list[str]) -> dict[str, Any]:
-        """Fetch baseline responses for all params before fuzzing begins."""
         probe_fn = getattr(self.fuzzer, "probe", None)
         tasks: list[Awaitable[dict[str, Any]]]
         if callable(probe_fn):
@@ -2405,7 +2161,7 @@ class InteractiveRealTimeTester:
         results = await asyncio.gather(*tasks, return_exceptions=True)
         return {
             p: r for p, r in zip(params, results)
-            if not isinstance(r, Exception)
+            if not isinstance(r, BaseException)
         }
 
     async def stream_fuzz(
@@ -2413,7 +2169,6 @@ class InteractiveRealTimeTester:
         params: list[str] | None = None,
         vuln_types: list[str] | None = None,
     ) -> AsyncIterator[RealTimeEvent]:
-        """Async generator: yields RealTimeEvents as fuzzing progresses."""
         params = params or self.fuzzer.get_high_priority_targets()[:10]
         vuln_types = vuln_types or list(FUZZ_PAYLOADS.keys())
         fuzz_fn = getattr(self.fuzzer, "fuzz", None)
@@ -2422,7 +2177,6 @@ class InteractiveRealTimeTester:
             and getattr(fuzz_fn, "__func__", None) is Fuzzer.fuzz
         )
 
-        # Baseline phase
         yield RealTimeEvent(
             event_type="progress",
             data={"phase": "baseline", "params": params,
@@ -2431,7 +2185,7 @@ class InteractiveRealTimeTester:
         if is_native_fuzz:
             await self.probe_baseline(params)
         else:
-            # Custom fuzz providers may not require or support baseline probing.
+
             logger.debug("Skipping baseline probe for custom fuzz provider")
 
         total = sum(len(FUZZ_PAYLOADS.get(vt, []))
@@ -2444,8 +2198,6 @@ class InteractiveRealTimeTester:
                   "message": f"Starting {total} fuzz tests..."},
         )
 
-        # Stream findings from fuzzer API (supports monkeypatched generators in tests).
-        # For performance and correctness, baseline was already captured above.
         try:
             if is_native_fuzz:
                 finding_stream = self.fuzzer.fuzz(
@@ -2481,7 +2233,7 @@ class InteractiveRealTimeTester:
                 if self.on_finding:
                     try:
                         self.on_finding(result)
-                    except Exception:  # nosec B110 - callback is optional
+                    except Exception:
                         pass
 
                 yield RealTimeEvent(
@@ -2498,8 +2250,6 @@ class InteractiveRealTimeTester:
                     },
                 )
 
-                # In streaming mode we only know processed findings from the
-                # public generator. Keep progress monotonic and bounded.
                 if done % 20 == 0:
                     bounded_done = min(done, total)
                     yield RealTimeEvent(
@@ -2523,7 +2273,6 @@ class InteractiveRealTimeTester:
             )
             return
 
-        # Chain discovery phase
         if self._findings:
             yield RealTimeEvent(
                 event_type="progress",
@@ -2558,13 +2307,11 @@ class InteractiveRealTimeTester:
         )
 
     async def stop(self) -> None:
-        """Signal graceful stop."""
         self._stop_event.set()
         await self.fuzzer.close()
 
     @staticmethod
     def _coerce_fuzz_result(raw: Any) -> FuzzResult | None:
-        """Accept native FuzzResult or dict-like legacy findings."""
         if isinstance(raw, FuzzResult):
             return raw
         if not isinstance(raw, dict):
@@ -2599,7 +2346,6 @@ class InteractiveRealTimeTester:
         )
 
     def get_summary(self) -> dict[str, Any]:
-        """Return current findings and chains summary."""
         sev_counts: dict[str, int] = {}
         for f in self._findings:
             sev_counts[f.severity] = sev_counts.get(f.severity, 0) + 1
@@ -2618,11 +2364,6 @@ class InteractiveRealTimeTester:
             ],
         }
 
-
-# ---------------------------------------------------------------------------
-# Internal helpers
-# ---------------------------------------------------------------------------
-
 def _confidence_to_severity(confidence: float) -> str:
     if confidence >= 0.85:
         return "critical"
@@ -2634,15 +2375,12 @@ def _confidence_to_severity(confidence: float) -> str:
         return "low"
     return "info"
 
-
 def _geometric_mean(values: list[float]) -> float:
     if not values:
         return 0.0
     return math.exp(sum(math.log(max(v, 1e-9)) for v in values) / len(values))
 
-
 def _chain_impact(trigger: str, follow_on: str) -> str:
-    """Describe the combined impact of trigger + follow-on vuln."""
     impact_map = {
         ("xss", "csrf"): "Attacker can forge state-changing requests from victim's browser",
         ("xss", "session_hijacking"): "Attacker can steal session cookies and take over accounts",
@@ -2666,17 +2404,11 @@ def _chain_impact(trigger: str, follow_on: str) -> str:
         f"Chained {trigger} enables {follow_on} exploitation"
     )
 
-
-# ---------------------------------------------------------------------------
-# Public convenience functions
-# ---------------------------------------------------------------------------
-
 async def quick_fuzz_url(
         url: str,
         params: list[str] | None = None,
         headers: dict[str, str] | None = None,
 ) -> list[FuzzResult]:
-    """Quick fuzz a URL with common payloads and return findings."""
     params = params or ["q", "search", "id", "page"]
     async with Fuzzer(url, threads=5, timeout=15, headers=headers) as fuzzer:
         return await fuzzer.fuzz_parameters(
@@ -2684,23 +2416,10 @@ async def quick_fuzz_url(
             vuln_types=["sql_injection", "xss", "path_traversal", "ssti"],
         )
 
-
 def generate_fuzz_wordlist(
     max_combinations: int = 300,
     vuln_types: list[str] | None = None,
 ) -> list[str]:
-    """Generate fuzzing wordlist combining exploit payloads + parameter name mutations.
-
-    Priority order:
-    1. Exploit payloads from FUZZ_PAYLOADS (SQLi, XSS, SSTI, SSRF, etc.) — always included first
-    2. FUZZ_POINTS parameter names (for parameter discovery mode)
-    3. MutationEngine suffix/combination variants (capped to max_combinations)
-
-    Args:
-        max_combinations: Cap on parameter name mutation variants (default 300, max 1000).
-        vuln_types: Filter payload categories (e.g. ["sql_injection", "xss"]).
-                    None = include all categories.
-    """
     all_payloads: dict[str, list[str]] = _fuzzer_data.get("FUZZ_PAYLOADS", {})
     categories = vuln_types if vuln_types else list(all_payloads.keys())
 
@@ -2712,16 +2431,13 @@ def generate_fuzz_wordlist(
             seen.add(item)
             result.append(item)
 
-    # 1. Exploit payloads first — these are the most valuable entries
     for cat in categories:
         for payload in all_payloads.get(cat, []):
             _add(payload)
 
-    # 2. Parameter names for discovery mode (ffuf -u url?FUZZ=value)
     for param in FUZZ_POINTS:
         _add(param)
 
-    # 3. Mutation combinations (capped)
     for combo in MutationEngine.generate_wordlist_combinations(
         FUZZ_POINTS, max_size=max_combinations
     ):

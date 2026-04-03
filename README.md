@@ -4,7 +4,7 @@
 <h4 align="center">AI-Powered Autonomous Penetration Testing Agent</h4>
 <p align="center">
   <img src="https://img.shields.io/badge/language-python-green.svg">
-  <img src="https://img.shields.io/badge/version-v0.1.6--beta-green.svg">
+  <img src="https://img.shields.io/badge/version-v0.1.7--beta-green.svg">
   <img src="https://img.shields.io/badge/python-3.12%2B-blue.svg">
   <img src="https://img.shields.io/badge/LLM-Ollama%20(local)-orange.svg">
   <a href="https://github.com/pikpikcu/airecon/blob/master/LICENSE">
@@ -95,27 +95,45 @@ airecon --version
 
 ## Configuration
 
-Config file: `~/.airecon/config.json` (auto-generated on first run).
+Config file: `~/.airecon/config.yaml` (auto-generated on first run).
 
-```json
-{
-    "ollama_url": "http://127.0.0.1:11434",
-    "ollama_model": "qwen3.5:122b",
-    "ollama_timeout": 2400.0,
-    "ollama_num_ctx": 131072,
-    "ollama_num_ctx_small": 65536,
-    "ollama_temperature": 0.15,
-    "ollama_num_predict": 32768,
-    "ollama_keep_alive": "60m",
-    "proxy_port": 3000,
-    "command_timeout": 900.0,
-    "docker_auto_build": true,
-    "deep_recon_autostart": true,
-    "agent_max_tool_iterations": 800,
-    "allow_destructive_testing": false,
-    "searxng_url": "http://localhost:8080",
-    "vuln_similarity_threshold": 0.7
-}
+```yaml
+
+# ======================================
+# Ollama Connection
+# ======================================
+# Ollama API endpoint. For remote servers use http://IP:11434
+ollama_url: "http://127.0.0.1:11434"
+# Model to use. Recommended: qwen3.5:122b for best reasoning
+ollama_model: "qwen3.5:122b"
+# Total request timeout (seconds). 300s = 5 min. Increase for slow remote servers.
+ollama_timeout: 300.0
+# Per-chunk stream timeout (seconds). 180s for 122B model prefill over network.
+ollama_chunk_timeout: 180.0
+
+# ======================================
+# Ollama Model Settings
+# ======================================
+# Context window size. 131072 = 128K (full). Reduce to 65536 if VRAM < 24GB.
+ollama_num_ctx: 131072
+# Context for CTF/summary mode. 65536 = 64K (half VRAM usage).
+ollama_num_ctx_small: 65536
+# LLM temperature. 0.15 = deterministic. Range: 0.0–0.3 for pentesting.
+ollama_temperature: 0.15
+# Max tokens to generate. 32768 for detailed tool responses.
+ollama_num_predict: 32768
+# Enable extended thinking mode (for Qwen3.5+).
+ollama_enable_thinking: true
+# Auto-detected: model supports <think> blocks.
+ollama_supports_thinking: true
+# Auto-detected: model supports native tool calling.
+ollama_supports_native_tools: true
+# Max concurrent Ollama requests. Keep 1 for 122B models.
+ollama_max_concurrent_requests: 1
+# Protect first N tokens from KV eviction. 8192 = protect system prompt (~8K tokens).
+ollama_num_keep: 8192
+# Prevent repetition loops. 1.05 = mild. Range: 1.0–1.2.
+ollama_repeat_penalty: 1.05
 ```
 
 | Key | Default | Notes |
@@ -129,8 +147,9 @@ Config file: `~/.airecon/config.json` (auto-generated on first run).
 | `vuln_similarity_threshold` | `0.7` | Jaccard dedup threshold for vulnerabilities. |
 
 **Remote Ollama:**
-```json
-{ "ollama_url": "http://192.168.1.100:11434", "ollama_model": "qwen3:32b" }
+```yaml
+"ollama_url": "http://192.168.1.100:11434" 
+"ollama_model": "qwen3:32b" 
 ```
 
 ---

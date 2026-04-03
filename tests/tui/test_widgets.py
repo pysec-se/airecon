@@ -1,15 +1,17 @@
 import pytest
 from textual.app import App, ComposeResult
+from textual.geometry import Offset
+from textual.selection import Selection
+
 from airecon.tui.widgets.chat import ChatPanel
 from airecon.tui.widgets.status import StatusBar
 
-# Minimal app for chat widget tests
+
 class ChatWidgetTestApp(App):
     def compose(self) -> ComposeResult:
         yield ChatPanel(id="chat")
 
 
-# Minimal app for status widget tests
 class StatusWidgetTestApp(App):
     def compose(self) -> ComposeResult:
         yield StatusBar(id="status")
@@ -25,7 +27,6 @@ async def test_chat_panel_add_messages():
         chat.add_error_message("System error")
         chat.add_system_message("System notification")
 
-        # We verify that standard messages were mounted to the ChatPanel
         assert len(list(chat.query(".user-message"))) > 0
         assert len(list(chat.query(".assistant-message"))) > 0
 
@@ -35,25 +36,39 @@ async def test_chat_panel_tool_lifecycle():
     async with ChatWidgetTestApp().run_test() as pilot:
         chat = pilot.app.query_one("#chat", ChatPanel)
 
-        # Start a mock tool call
         chat.add_tool_start("tool-123", "execute", {"command": "ls"})
         await pilot.pause()
 
         assert "tool-123" in chat._active_tools
         tool_widget = chat._active_tools["tool-123"]
 
-        # Append output without newlines to ensure it stays in buffer
         chat.append_tool_output("tool-123", "file1.txt ")
         await pilot.pause()
-        # Verify text was buffered
         assert "file1.txt" in tool_widget._live_output_buffer
 
-        # End tool call
         chat.update_tool_end("tool-123", True, 0.5, "output content")
         await pilot.pause()
 
-        # Ensure it was popped from active tool tracking
         assert "tool-123" not in chat._active_tools
+
+
+@pytest.mark.asyncio
+async def test_chat_text_selection_auto_copies_to_clipboard():
+    async with ChatWidgetTestApp().run_test() as pilot:
+        chat = pilot.app.query_one("#chat", ChatPanel)
+        chat.add_assistant_message("copy this text")
+        await pilot.pause()
+
+        selected = pilot.app.query_one(".msg-body")
+        copied: list[str] = []
+
+        pilot.app.copy_to_clipboard = lambda value: copied.append(value)
+        selected.screen.get_selected_text = lambda: "copy this text"
+
+        selected.selection_updated(Selection(Offset(0, 0), Offset(0, 4)))
+        await pilot.pause(0.45)
+
+        assert copied == ["copy this text"]
 
 
 @pytest.mark.asyncio
@@ -61,11 +76,9 @@ async def test_status_bar_updates():
     async with StatusWidgetTestApp().run_test() as pilot:
         status_bar = pilot.app.query_one("#status", StatusBar)
 
-        # Update metrics
         status_bar.set_status(ollama="online", docker="offline", exec_used=5)
         await pilot.pause()
 
-        # Assert against the new separated labels
         metrics_content = str(status_bar.query_one("#status-metrics").render())
         assert "online" in metrics_content or "●" in metrics_content
         assert "offline" in metrics_content or "○" in metrics_content
@@ -74,29 +87,32 @@ async def test_status_bar_updates():
         assert "5" in exec_content
 
 
-def test_status_bar_formats_million_tokens():
+def test_status_bar_formats_million_tokens_as_int_unit():
     status_bar = StatusBar()
-    assert status_bar._format_token_count(1_250_000).endswith("M")
+    assert status_bar._format_token_count(1_250_000) == "1M"
+
+
+def test_status_bar_formats_thousand_tokens_as_int_unit():
+    status_bar = StatusBar()
+    assert status_bar._format_token_count(987_654) == "987K"
 
 
 def test_status_bar_set_status_coerces_numeric_fields():
     status_bar = StatusBar()
     status_bar.set_status(
-        tokens="1000000",
-        token_limit="65536",
+        tokens="abc",
+        token_limit="xyz",
         exec_used="7",
         subagents="2",
         caido_findings="9",
     )
 
-    assert status_bar.token_count == 1_000_000
+    assert status_bar.token_count == 0
     assert status_bar.token_limit == 65_536
     assert status_bar.exec_used == 7
     assert status_bar.subagents_spawned == 2
     assert status_bar.caido_findings == 9
 
-
-# ── StatusBar caido rendering ─────────────────────────────────────────────────
 
 @pytest.mark.asyncio
 async def test_status_bar_caido_active_shows_indicator():
@@ -106,17 +122,19 @@ async def test_status_bar_caido_active_shows_indicator():
         await pilot.pause()
         content = str(status_bar.query_one("#status-caido-exec").render())
         assert "Caido" in content
+        assert "ON" in content
         assert "5" in content
 
 
 @pytest.mark.asyncio
-async def test_status_bar_caido_inactive_hides_indicator():
+async def test_status_bar_caido_inactive_shows_off_state():
     async with StatusWidgetTestApp().run_test() as pilot:
         status_bar = pilot.app.query_one("#status", StatusBar)
         status_bar.set_status(caido_active=False)
         await pilot.pause()
         content = str(status_bar.query_one("#status-caido-exec").render())
-        assert "Caido" not in content
+        assert "Caido" in content
+        assert "OFF" in content
 
 
 def test_status_bar_caido_active_reactive_default_false():
@@ -130,8 +148,6 @@ def test_status_bar_caido_findings_negative_clamped():
     status_bar.set_status(caido_findings="-3")
     assert status_bar.caido_findings == 0
 
-
-# ── StatusBar token color scale ───────────────────────────────────────────────
 
 def test_status_bar_token_color_low():
     assert StatusBar._token_color_for_cumulative(500_000) == "#00d4aa"
@@ -148,7 +164,7 @@ def test_status_bar_token_color_high():
 def test_status_bar_format_token_billion():
     status_bar = StatusBar()
     result = status_bar._format_token_count(1_500_000_000)
-    assert result.endswith("B")
+    assert result == "1B"
 
 
 def test_status_bar_format_token_zero():

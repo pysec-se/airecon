@@ -11,10 +11,8 @@ from ..config import get_workspace_root
 
 logger = logging.getLogger("airecon.agent")
 
-
 class _WorkspaceMixin:
 
-    # Extensions never treated as domain names
     _FILE_EXTENSIONS = frozenset({
         "json", "txt", "xml", "html", "htm", "csv", "yaml", "yml", "md", "rst",
         "py", "js", "ts", "sh", "rb", "go", "php", "java", "c", "cpp", "h",
@@ -49,13 +47,13 @@ class _WorkspaceMixin:
                     path = os.path.join(output_dir, f)
                     size = os.path.getsize(path)
                     lines = 0
-                    # Skip line-counting for large files to avoid slow reads
+
                     if size < 1_000_000 and ext in {
                             ".txt", ".csv", ".out", ".log", ".nmap"}:
                         try:
                             with open(path, "r", errors="ignore") as fh:
                                 lines = sum(1 for _ in fh)
-                        except Exception:  # nosec B110 - line count is optional
+                        except Exception:
                             pass
                     info = f"- /workspace/{target}/output/{f} ({size} bytes"
                     if lines:
@@ -91,7 +89,6 @@ class _WorkspaceMixin:
         seen: set[str] = set()
         targets: list[str] = []
 
-        # Match IPv4 addresses first (with optional port: 192.168.1.1:8080)
         for m in re.finditer(
                 r"\b((?:\d{1,3}\.){3}\d{1,3}(?::\d{1,5})?)\b", text):
             candidate = m.group(1)
@@ -101,7 +98,6 @@ class _WorkspaceMixin:
                     seen.add(candidate)
                     targets.append(candidate)
 
-        # Match localhost with optional port
         for m in re.finditer(
                 r"\b(localhost(?::\d{1,5})?)\b", text, re.IGNORECASE):
             candidate = m.group(1).lower()
@@ -109,7 +105,6 @@ class _WorkspaceMixin:
                 seen.add(candidate)
                 targets.append(candidate)
 
-        # Match domain names (TLD must be 2+ alpha chars)
         for m in re.finditer(
                 r"\b[a-z0-9.-]+\.[a-z]{2,}\b", text, re.IGNORECASE):
             candidate = m.group(0).lower()
@@ -131,9 +126,9 @@ class _WorkspaceMixin:
                        "test.com"} or val.endswith(".example.com")
 
     def _replace_placeholder_targets(self, data: Any) -> Any:
-        if not self.state.active_target:  # type: ignore[attr-defined]
+        if not self.state.active_target:
             return data
-        target = self.state.active_target  # type: ignore[attr-defined]
+        target = self.state.active_target
         if isinstance(data, str):
             return data.replace("example.com", target).replace(
                 "test.com", target)
@@ -158,16 +153,15 @@ class _WorkspaceMixin:
         if not isinstance(arguments, dict):
             return {}
         args = dict(arguments)
-        if self.state.active_target:  # type: ignore[attr-defined]
+        if self.state.active_target:
             args = self._replace_placeholder_targets(args)
         return args
 
     def _save_tool_output(
         self, tool_name: str, args: dict[str, Any], result: dict[str, Any]
     ) -> str | None:
-        """Save tool output to workspace. Returns the saved file path or None."""
         try:
-            # type: ignore[attr-defined]
+
             target = self.state.active_target or "unknown"
             base_dir = str(get_workspace_root() / target)
 
@@ -185,7 +179,6 @@ class _WorkspaceMixin:
             timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
             succeeded = result.get("success", False)
 
-            # Always save the full JSON record to command/
             json_filepath = os.path.join(
                 command_dir, f"{tool_name}_{timestamp}.json")
             with open(json_filepath, "w") as f:
@@ -196,38 +189,32 @@ class _WorkspaceMixin:
                 )
 
             if not succeeded:
-                self._last_output_file = json_filepath  # type: ignore[attr-defined]
+                self._last_output_file = json_filepath
                 return json_filepath
 
-            # These tools do not produce meaningful recon data for output/.
-            # The JSON record in command/ already contains everything needed.
-            # output/ should only hold files created explicitly by tools via -o
-            # flags.
             _SKIP_OUTPUT_TXT = {
-                "execute",          # uses -o flags for output, already in command/
-                "create_file",      # its "result" is just a success message, not data
-                "read_file",        # raw file content already saved separately
-                "list_files",       # directory listing, no need to persist
-                "web_search",       # auto-saved to output/dork_results.txt by executor
-                "browser_action",   # auto-saved to output/source_*.txt etc. by executor
-                "create_vulnerability_report",  # saved to vulnerabilities/ folder
-                "advanced_fuzz",    # findings embedded in JSON, no separate txt needed
-                "quick_fuzz",       # findings embedded in JSON, no separate txt needed
-                "deep_fuzz",        # summary + findings embedded in JSON, no separate txt needed
+                "execute",
+                "create_file",
+                "read_file",
+                "list_files",
+                "web_search",
+                "browser_action",
+                "create_vulnerability_report",
+                "advanced_fuzz",
+                "quick_fuzz",
+                "deep_fuzz",
                 "run_parallel_agents",
-                "caido_list_requests",   # structured JSON, already in command/
-                "caido_send_request",    # task ID result, already in command/
-                "caido_automate",        # task ID result, already in command/
-                "caido_get_findings",    # findings embedded in JSON, no separate txt needed
-                "caido_set_scope",       # scope config, already in command/
-                "spawn_agent",           # findings embedded in JSON, merged into session
+                "caido_list_requests",
+                "caido_send_request",
+                "caido_automate",
+                "caido_get_findings",
+                "caido_set_scope",
+                "spawn_agent",
             }
             if tool_name in _SKIP_OUTPUT_TXT:
-                self._last_output_file = json_filepath  # type: ignore[attr-defined]
+                self._last_output_file = json_filepath
                 return json_filepath
 
-            # For non-execute tools (browser_action, web_search, etc.):
-            # save meaningful output to output/
             txt_content = ""
             if isinstance(result, dict) and "result" in result:
                 res_data = result["result"]
@@ -241,10 +228,10 @@ class _WorkspaceMixin:
                 txt_filepath = os.path.join(output_dir, txt_filename)
                 with open(txt_filepath, "w") as f:
                     f.write(str(txt_content))
-                self._last_output_file = txt_filepath  # type: ignore[attr-defined]
+                self._last_output_file = txt_filepath
                 return txt_filepath
             else:
-                self._last_output_file = json_filepath  # type: ignore[attr-defined]
+                self._last_output_file = json_filepath
                 return json_filepath
 
         except Exception as e:

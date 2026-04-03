@@ -4,7 +4,25 @@ from airecon.proxy.agent.models import AgentState
 from unittest import mock
 import asyncio
 import concurrent.futures
+import inspect
 from functools import partial
+
+
+def pytest_addoption(parser):
+    """Register asyncio-related ini options when pytest-asyncio is absent."""
+    parser.addini("asyncio_mode", "Compatibility shim for pytest-asyncio")
+    parser.addini(
+        "asyncio_default_fixture_loop_scope",
+        "Compatibility shim for pytest-asyncio",
+    )
+
+
+def pytest_configure(config):
+    """Register custom markers used by the test suite."""
+    config.addinivalue_line(
+        "markers",
+        "asyncio: mark test as asynchronous (compat for environments without pytest-asyncio)",
+    )
 
 
 class _PatchProxy:
@@ -17,9 +35,7 @@ class _PatchProxy:
         return self._owner._start(mock.patch(target, *args, **kwargs))
 
     def object(self, target, attribute: str, *args, **kwargs):
-        return self._owner._start(
-            mock.patch.object(target, attribute, *args, **kwargs)
-        )
+        return self._owner._start(mock.patch.object(target, attribute, *args, **kwargs))
 
 
 class _SimpleMocker:
@@ -86,3 +102,24 @@ def sample_parsed_nmap_output():
         "items": ["80/tcp open http", "443/tcp open https"],
         "total_count": 2,
     }
+
+
+@pytest.hookimpl(tryfirst=True)
+def pytest_pyfunc_call(pyfuncitem):
+    """Fallback async test executor when pytest-asyncio isn't available.
+
+    Some environments run tests without optional plugins installed. In that case,
+    pytest can't execute `async def` tests and fails before assertions run.
+    """
+    if pyfuncitem.config.pluginmanager.hasplugin("asyncio"):
+        return None
+
+    testfunction = pyfuncitem.obj
+    if not inspect.iscoroutinefunction(testfunction):
+        return None
+
+    funcargs = {
+        arg: pyfuncitem.funcargs[arg] for arg in pyfuncitem._fixtureinfo.argnames
+    }
+    asyncio.run(testfunction(**funcargs))
+    return True

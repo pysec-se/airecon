@@ -1,6 +1,3 @@
-"""
-Vulnerability reporting tool for AIRecon.
-"""
 from __future__ import annotations
 
 import logging
@@ -21,7 +18,6 @@ try:
     from cvss import CVSS3
 except ImportError:
     CVSS3 = None
-
 
 def calculate_cvss_and_severity(
     attack_vector: str,
@@ -57,11 +53,9 @@ def calculate_cvss_and_severity(
         logger.exception("Failed to calculate CVSS")
         return 0.0, "unknown", ""
 
-
 def _validate_required_fields(**kwargs: str | None) -> list[str]:
     validation_errors: list[str] = []
 
-    # Only truly required fields — title, description, target, and PoC
     required_fields = {
         "title": "Title cannot be empty",
         "description": "Description cannot be empty",
@@ -76,7 +70,6 @@ def _validate_required_fields(**kwargs: str | None) -> list[str]:
             validation_errors.append(error_msg)
 
     return validation_errors
-
 
 def _validate_cvss_parameters(**kwargs: str) -> list[str]:
     validation_errors: list[str] = []
@@ -101,54 +94,43 @@ def _validate_cvss_parameters(**kwargs: str) -> list[str]:
 
     return validation_errors
 
-
 def _sanitize_target_name(value: str) -> str:
-    """Normalize target/workspace token into a safe directory name."""
     cleaned = re.sub(r"[^a-zA-Z0-9._-]+", "_", value).strip("._-")
     return cleaned
 
-
 def _extract_target_token(raw_target: str) -> str:
-    """Extract a meaningful target token from URL/domain/path-like input."""
     raw = (raw_target or "").strip()
     if not raw:
         return ""
 
-    # Handle @/path and [file:xyz] placeholder strings.
     if raw.startswith("@"):
         raw = raw[1:]
     if raw.startswith("[file:") and raw.endswith("]"):
         raw = raw[6:-1]
 
-    # URL target → use host.
     parsed = urlparse(raw if "://" in raw else "")
     if parsed.netloc:
         return parsed.netloc
 
-    # URL-like input without scheme (example.com/path) → use host segment.
     if "/" in raw and not raw.startswith(("/", ".", "@")):
         host_candidate = raw.split("/", 1)[0]
         host_only = host_candidate.split(":", 1)[0]
         if "." in host_only and re.fullmatch(r"[a-zA-Z0-9.-]+", host_only):
             return host_only
 
-    # Workspace path (/workspace/<target>/...) → infer target segment.
     if raw.startswith("/workspace/"):
         parts = [p for p in raw.split("/") if p]
         if len(parts) >= 2:
             return parts[1]
 
-    # Absolute or relative path input → use directory name / file stem.
     if "/" in raw or raw.startswith("."):
         path_like = Path(raw)
-        # For files, prefer stem so challenge.exe -> challenge
+
         if path_like.suffix:
             return path_like.stem or path_like.name
         return path_like.name or path_like.stem
 
-    # Plain host/token input.
     return raw
-
 
 def _is_filesystem_like_target(raw_target: str) -> bool:
     raw = (raw_target or "").strip()
@@ -163,15 +145,7 @@ def _is_filesystem_like_target(raw_target: str) -> bool:
         or raw.startswith("../")
     )
 
-
 def _resolve_report_workspace_target(target: str, active_target: str | None) -> str:
-    """Resolve final workspace target folder for vulnerability report output.
-
-    Rules:
-    - Use active target when input looks like @/file or filesystem path.
-    - Preserve domain normalization for subdomain vs parent domain.
-    - Never return empty; fallback to 'unknown_target'.
-    """
     target_token = _extract_target_token(target)
     target_clean = _sanitize_target_name(target_token)
 
@@ -181,10 +155,10 @@ def _resolve_report_workspace_target(target: str, active_target: str | None) -> 
         active_clean = _sanitize_target_name(active_token)
 
     if active_clean:
-        # File/folder reference contexts should always store in active workspace.
+
         if _is_filesystem_like_target(target) or not target_clean:
             return active_clean
-        # Keep parent-domain workspace for subdomains.
+
         if target_clean != active_clean and (
             target_clean.endswith("." + active_clean)
             or active_clean.endswith("." + target_clean)
@@ -193,18 +167,17 @@ def _resolve_report_workspace_target(target: str, active_target: str | None) -> 
 
     return target_clean or active_clean or "unknown_target"
 
-
 def create_vulnerability_report(
     title: str,
     description: str,
     target: str,
     poc_description: str,
     poc_script_code: str,
-    # Optional text fields (required for full reports, optional for CTF)
+
     impact: str = "",
     technical_analysis: str = "",
     remediation_steps: str = "",
-    # CVSS Breakdown Components (optional — skip for CTF)
+
     attack_vector: str | None = None,
     attack_complexity: str | None = None,
     privileges_required: str | None = None,
@@ -213,13 +186,13 @@ def create_vulnerability_report(
     confidentiality: str | None = None,
     integrity: str | None = None,
     availability: str | None = None,
-    # Optional fields
+
     endpoint: str | None = None,
     method: str | None = None,
     cve: str | None = None,
     suggested_fix: str | None = None,
     flag: str | None = None,
-    # Internal injection
+
     _workspace_root: str | None = None,
     _active_target: str | None = None,
 ) -> dict[str, Any]:
@@ -232,8 +205,7 @@ def create_vulnerability_report(
         poc_script_code=poc_script_code,
     )
 
-    # Determine if CVSS was provided (all 8 params must be present)
-    cvss_params = {
+    raw_cvss_params = {
         "attack_vector": attack_vector,
         "attack_complexity": attack_complexity,
         "privileges_required": privileges_required,
@@ -243,7 +215,22 @@ def create_vulnerability_report(
         "integrity": integrity,
         "availability": availability,
     }
-    has_cvss = all(v is not None for v in cvss_params.values())
+    _provided_cvss = sum(1 for v in raw_cvss_params.values() if v is not None and str(v).strip())
+    has_cvss = _provided_cvss == len(raw_cvss_params)
+
+    if 0 < _provided_cvss < len(raw_cvss_params):
+        return {
+            "success": False,
+            "message": "Validation failed",
+            "errors": [
+                "Partial CVSS metrics provided. Supply all 8 CVSS base metrics or none.",
+            ],
+        }
+
+    cvss_params = {
+        k: (str(v).strip().upper() if v is not None else None)
+        for k, v in raw_cvss_params.items()
+    }
 
     if has_cvss:
         validation_errors.extend(
@@ -254,7 +241,6 @@ def create_vulnerability_report(
         return {"success": False, "message": "Validation failed",
                 "errors": validation_errors}
 
-    # Validate CVE format if provided
     if cve and cve.strip():
         if not _CVE_RE.match(cve.strip()):
             return {
@@ -262,7 +248,6 @@ def create_vulnerability_report(
                 "message": f"Invalid CVE format: '{cve}'. Must match CVE-YYYY-NNNN+ (e.g., CVE-2024-1234). Use web_search to verify CVE IDs.",
             }
 
-    # Calculate CVSS only if all params were provided
     if has_cvss:
         cvss_score, severity, cvss_vector = calculate_cvss_and_severity(
             **cvss_params)  # type: ignore[arg-type]
@@ -283,27 +268,14 @@ def create_vulnerability_report(
     except Exception as e:
         return {"success": False, "message": f"Failed to create directory: {e}"}
 
-    # Generate filename
-    slug = re.sub(r'[^a-zA-Z0-9]', '_', title).lower()
-    # Truncate slug if too long
+    slug = re.sub(r'[^a-zA-Z0-9]+', '_', title).strip('_').lower()
+    if not slug:
+        slug = "report"
     slug = slug[:50]
     filename = f"{slug}.md"
     filepath = os.path.join(vuln_dir, filename)
     report_id = slug
 
-    # Check for duplicate file (simple check)
-    if os.path.exists(filepath):
-        return {
-            "success": False,
-            "message": f"Report '{filename}' already exists. Title collision detected.",
-            "duplicate_of": report_id,
-            "duplicate_title": title,
-            "confidence": 1.0,
-            "reason": "Exact title match with existing report.",
-        }
-
-    # Generate Markdown Content — adapt format based on whether CVSS/full
-    # fields provided
     md_content = f"# {title}\n\n"
     md_content += f"**ID**: {report_id}\n"
 
@@ -347,7 +319,7 @@ def create_vulnerability_report(
         md_content += f"\n## Reference\n**CVE**: {cve}\n"
 
     try:
-        with open(filepath, "w", encoding="utf-8") as f:
+        with open(filepath, "x", encoding="utf-8") as f:
             f.write(md_content)
 
         result: dict[str, Any] = {
@@ -362,5 +334,14 @@ def create_vulnerability_report(
         if flag:
             result["flag"] = flag
         return result
+    except FileExistsError:
+        return {
+            "success": False,
+            "message": f"Report '{filename}' already exists. Title collision detected.",
+            "duplicate_of": report_id,
+            "duplicate_title": title,
+            "confidence": 1.0,
+            "reason": "Exact title match with existing report.",
+        }
     except Exception as e:
         return {"success": False, "message": f"Failed to write report file: {e}"}

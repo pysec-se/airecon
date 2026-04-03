@@ -274,14 +274,18 @@ class TestParseWhatWeb:
     """Test whatweb output parsing."""
 
     def test_parse_whatweb_json(self):
-        output = json.dumps([{
-            "target": "http://example.com",
-            "plugins": {
-                "nginx": {"version": ["1.18.0"]},
-                "Bootstrap": {"version": ["3.3.7"]},
-                "PHP": {"version": ["7.4.3"]}
-            }
-        }])
+        output = json.dumps(
+            [
+                {
+                    "target": "http://example.com",
+                    "plugins": {
+                        "nginx": {"version": ["1.18.0"]},
+                        "Bootstrap": {"version": ["3.3.7"]},
+                        "PHP": {"version": ["7.4.3"]},
+                    },
+                }
+            ]
+        )
         parsed = _parse_whatweb(output)
         assert parsed.tool == "whatweb"
         assert "nginx" in parsed.technologies
@@ -295,18 +299,35 @@ Summary   : nginx[1.18.0], Bootstrap[3.3.7], PHP[7.4.3]"""
         # Should extract technologies
 
     def test_parse_whatweb_multiple_targets(self):
-        output = json.dumps([{"target": "http://example.com", "plugins": {"nginx": {"version": ["1.18.0"]}}}, {"target": "http://api.example.com", "plugins": {"nginx": {"version": ["1.19.0"]}}}])
+        output = json.dumps(
+            [
+                {
+                    "target": "http://example.com",
+                    "plugins": {"nginx": {"version": ["1.18.0"]}},
+                },
+                {
+                    "target": "http://api.example.com",
+                    "plugins": {"nginx": {"version": ["1.19.0"]}},
+                },
+            ]
+        )
         parsed = _parse_whatweb(output)
         assert parsed.total_count >= 1
 
     def test_parse_whatweb_version_merging(self):
         """Test that multiple versions of same tech are handled."""
-        output = json.dumps([
-            {"target": "http://api.example.com",
-             "plugins": {"nginx": {"version": ["1.18.0"]}}},
-            {"target": "http://admin.example.com",
-             "plugins": {"nginx": {"version": ["1.19.0"]}}}
-        ])
+        output = json.dumps(
+            [
+                {
+                    "target": "http://api.example.com",
+                    "plugins": {"nginx": {"version": ["1.18.0"]}},
+                },
+                {
+                    "target": "http://admin.example.com",
+                    "plugins": {"nginx": {"version": ["1.19.0"]}},
+                },
+            ]
+        )
         parsed = _parse_whatweb(output)
         # Should mention nginx
         assert "nginx" in parsed.technologies
@@ -317,20 +338,35 @@ class TestParseHttpx:
 
     def test_parse_httpx_json_basic(self):
         output = (
-            json.dumps({"url": "http://example.com", "status_code": 200, "title": "Example Domain"}) + "\n" +
-            json.dumps({"url": "https://example.com", "status_code": 200, "title": "Example Domain"})
+            json.dumps(
+                {
+                    "url": "http://example.com",
+                    "status_code": 200,
+                    "title": "Example Domain",
+                }
+            )
+            + "\n"
+            + json.dumps(
+                {
+                    "url": "https://example.com",
+                    "status_code": 200,
+                    "title": "Example Domain",
+                }
+            )
         )
         parsed = _parse_httpx(output)
         assert parsed.total_count == 2
         assert len(parsed.items) == 2
 
     def test_parse_httpx_with_tech_detect(self):
-        output = json.dumps({
-            "url": "http://example.com",
-            "status_code": 200,
-            "title": "Home",
-            "tech": ["nginx/1.18.0", "Bootstrap/3.3.7"]
-        })
+        output = json.dumps(
+            {
+                "url": "http://example.com",
+                "status_code": 200,
+                "title": "Home",
+                "tech": ["nginx/1.18.0", "Bootstrap/3.3.7"],
+            }
+        )
         parsed = _parse_httpx(output)
         assert "nginx" in parsed.technologies
         assert parsed.technologies["nginx"] == "1.18.0"
@@ -355,19 +391,28 @@ class TestParseFFuf:
 
     def test_parse_ffuf_csv_format(self):
         """ffuf -of json format is more reliable."""
-        output = json.dumps({"results": [{"url": "http://example.com/admin", "status": 302}, {"url": "http://example.com/api", "status": 200}]})
+        output = json.dumps(
+            {
+                "results": [
+                    {"url": "http://example.com/admin", "status": 302},
+                    {"url": "http://example.com/api", "status": 200},
+                ]
+            }
+        )
         parsed = _parse_ffuf(output)
         # Should parse as JSON
         assert parsed.total_count >= 1
 
     def test_parse_ffuf_json_format(self):
         """ffuf -of json format."""
-        output = json.dumps({
-            "results": [
-                {"url": "http://example.com/admin", "status": 302},
-                {"url": "http://example.com/api", "status": 200}
-            ]
-        })
+        output = json.dumps(
+            {
+                "results": [
+                    {"url": "http://example.com/admin", "status": 302},
+                    {"url": "http://example.com/api", "status": 200},
+                ]
+            }
+        )
         parsed = _parse_ffuf(output)
         assert parsed.total_count >= 2
 
@@ -429,8 +474,7 @@ class TestParseToolOutputIntegration:
         """Test command with cd prefix is handled correctly."""
         output = "80/tcp open http"
         parsed = parse_tool_output(
-            "cd /workspace/target && nmap -sV example.com",
-            output
+            "cd /workspace/target && nmap -sV example.com", output
         )
         assert parsed is not None
 
@@ -439,7 +483,9 @@ class TestParseToolOutputIntegration:
         from airecon.proxy.agent.output_parser import DEFAULT_MAX_ITEMS
 
         # Create output with more items than DEFAULT_MAX_ITEMS
-        subdomains = "\n".join([f"sub{i}.example.com" for i in range(DEFAULT_MAX_ITEMS + 10)])
+        subdomains = "\n".join(
+            [f"sub{i}.example.com" for i in range(DEFAULT_MAX_ITEMS + 10)]
+        )
         parsed = parse_tool_output("subfinder -d example.com", subdomains)
 
         assert parsed is not None

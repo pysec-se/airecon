@@ -16,6 +16,7 @@ from airecon.proxy.agent.loop import AgentLoop
 # record_tested_endpoint
 # ─────────────────────────────────────────────────────────────
 
+
 class TestRecordTestedEndpoint:
     def test_adds_get_endpoint(self):
         s = SessionData()
@@ -88,6 +89,7 @@ class TestRecordTestedEndpoint:
 # SessionData.tested_endpoints default
 # ─────────────────────────────────────────────────────────────
 
+
 class TestTestedEndpointsDefault:
     def test_default_empty(self):
         s = SessionData()
@@ -103,6 +105,7 @@ class TestTestedEndpointsDefault:
 # ─────────────────────────────────────────────────────────────
 # AgentLoop._record_tested_endpoint
 # ─────────────────────────────────────────────────────────────
+
 
 def _make_loop_with_session() -> tuple[AgentLoop, SessionData]:
     loop = AgentLoop(ollama=MagicMock(), engine=MagicMock())
@@ -181,9 +184,7 @@ class TestRecordTestedEndpointLoop:
 
     def test_execute_no_url_does_nothing(self):
         loop, session = _make_loop_with_session()
-        loop._record_tested_endpoint(
-            "execute", {"command": "ls /workspace/output/"}
-        )
+        loop._record_tested_endpoint("execute", {"command": "ls /workspace/output/"})
         assert session.tested_endpoints == []
 
     def test_web_search_ignored(self):

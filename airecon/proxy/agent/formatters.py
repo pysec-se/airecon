@@ -14,21 +14,12 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger("airecon.agent")
 
-# Cache for --help output per tool binary (avoids re-running)
 _help_cache: dict[str, str] = {}
 _help_lookup_inflight: set[str] = set()
 
-# ---------------------------------------------------------------------------
-# Inline security hints injected into tool output
-# ---------------------------------------------------------------------------
-# Loaded from port_correlations.json and tech_correlations.json at import time.
-# No hardcoded data — single source of truth lives in the data/ directory.
-
 _DATA_DIR = Path(__file__).parent.parent / "data"
 
-
 def _load_port_hints() -> dict[int, str]:
-    """Build {port: action_hint} from port_correlations.json."""
     try:
         raw = json.loads((_DATA_DIR / "port_correlations.json").read_text(encoding="utf-8"))
         hints: dict[int, str] = {}
@@ -42,7 +33,7 @@ def _load_port_hints() -> dict[int, str]:
             tools: list[str] = info.get("tools", [])
             sev: str = info.get("severity", "")
             parts = [service]
-            # Show first two vulns for breadth, highlight CVEs
+
             if vulns:
                 parts.append("check: " + "; ".join(vulns[:2]))
             if tools:
@@ -55,9 +46,7 @@ def _load_port_hints() -> dict[int, str]:
         logger.debug("Could not load port_correlations.json: %s", exc)
         return {}
 
-
 def _load_tech_hints() -> dict[str, str]:
-    """Build {tech_lower: action_hint} from tech_correlations.json."""
     try:
         raw = json.loads((_DATA_DIR / "tech_correlations.json").read_text(encoding="utf-8"))
         hints: dict[str, str] = {}
@@ -78,15 +67,11 @@ def _load_tech_hints() -> dict[str, str]:
         logger.debug("Could not load tech_correlations.json: %s", exc)
         return {}
 
-
 _PORT_HINTS: dict[int, str] = _load_port_hints()
 _TECH_HINTS: dict[str, str] = _load_tech_hints()
 
-# Nmap/httpx open port pattern: "80/tcp  open" or "port 80 open" or "[80]"
-# Detects raw HTTP responses in curl -i / curl -v output
 _HTTP_RESPONSE_START_RE = re.compile(r"^\s*HTTP/[12](?:\.\d)?\s+\d{3}", re.MULTILINE)
 
-# Security-relevant response headers to surface prominently
 _SEC_HEADERS = (
     "location",
     "set-cookie",
@@ -102,25 +87,12 @@ _SEC_HEADERS = (
     "x-generator",
 )
 
-# Schemes in Location header that indicate security issues
-# Non-https schemes that indicate potentially dangerous redirects
-# http:// removed — standard HTTP redirects are normal, not suspicious
-# Only javascript:, data:, vbscript:, // (protocol-relative) are meaningful attack vectors
 _SUSPICIOUS_REDIRECT_SCHEMES = ("javascript:", "data:", "vbscript:", "//")
 
-
 def _extract_http_response_summary(raw_output: str) -> str | None:
-    """Parse raw HTTP response (from curl -i) and return a structured security summary.
-
-    Surfaces security-relevant headers so Ollama does not need to read raw text.
-    Called automatically whenever execute tool output looks like an HTTP response.
-    Returns None if the output is not a raw HTTP response.
-    """
     if not _HTTP_RESPONSE_START_RE.search(raw_output[:200]):
         return None
 
-    # When curl follows redirects, there may be multiple response blocks.
-    # Split on HTTP/ to get all blocks; we want the LAST one (final response).
     blocks = re.split(r"(?m)(?=^HTTP/)", raw_output.strip())
     blocks = [b for b in blocks if b.strip()]
     target_block = blocks[-1] if blocks else raw_output
@@ -128,7 +100,6 @@ def _extract_http_response_summary(raw_output: str) -> str | None:
     lines = target_block.splitlines()
     status_line = lines[0].strip() if lines else ""
 
-    # Parse headers until blank line
     headers: dict[str, str] = {}
     body_start = len(lines)
     for i, line in enumerate(lines[1:], 1):
@@ -138,7 +109,7 @@ def _extract_http_response_summary(raw_output: str) -> str | None:
         if ":" in line:
             name, _, val = line.partition(":")
             key = name.strip().lower()
-            # Concatenate duplicate headers (e.g. multiple Set-Cookie)
+
             if key in headers:
                 headers[key] = headers[key] + "; " + val.strip()
             else:
@@ -149,7 +120,6 @@ def _extract_http_response_summary(raw_output: str) -> str | None:
 
     parts: list[str] = [f"[HTTP RESPONSE] {status_line}"]
 
-    # Surface security-relevant headers first
     for h in _SEC_HEADERS:
         val = headers.get(h)
         if not val:
@@ -179,40 +149,31 @@ def _extract_http_response_summary(raw_output: str) -> str | None:
         else:
             parts.append(f"  {h}: {val}")
 
-    # Show which security headers are ABSENT
     absent = [h for h in ("content-security-policy", "x-frame-options") if h not in headers]
     if absent:
         parts.append(f"  [MISSING security headers: {', '.join(absent)}]")
 
-    # Body excerpt
     if body_excerpt:
         parts.append(f"  Body ({len(body_excerpt)} chars shown): {body_excerpt[:300]}")
 
     return "\n".join(parts)
 
-
 _PORT_OPEN_RE = re.compile(
-    r"\b(\d{2,5})/(?:tcp|udp)\s+open"      # nmap: 80/tcp  open
-    r"|\bport\s+(\d{2,5})\s+open"           # generic: port 80 open
-    r"|\[(\d{2,5})\]",                       # httpx: [80]
+    r"\b(\d{2,5})/(?:tcp|udp)\s+open"
+    r"|\bport\s+(\d{2,5})\s+open"
+    r"|\[(\d{2,5})\]",
 )
 
-# All tech names use non-alphanumeric boundary matching to avoid false positives.
-# e.g. "go" must not match "google", "flask" must not match "flasked",
-# "django" must not match "djangorestframework".
 _TECH_HINT_RE: dict[str, re.Pattern[str]] = {
     tech: re.compile(rf"(?<![a-z0-9]){re.escape(tech)}(?![a-z0-9])")
     for tech in _TECH_HINTS
 }
 
-
 def _extract_security_hints(output: str) -> list[str]:
-    """Scan tool output for open ports and tech stack, return actionable hints."""
     hints: list[str] = []
     seen: set[int | str] = set()
     out_lower = output.lower()
 
-    # Port-based hints
     for m in _PORT_OPEN_RE.finditer(output):
         port_str = m.group(1) or m.group(2) or m.group(3)
         if not port_str:
@@ -222,7 +183,6 @@ def _extract_security_hints(output: str) -> list[str]:
             hints.append(f"  PORT {port}: {_PORT_HINTS[port]}")
             seen.add(port)
 
-    # Technology-based hints — all use word-boundary regex to prevent false matches
     for tech, hint in _TECH_HINTS.items():
         if tech in seen:
             continue
@@ -233,9 +193,8 @@ def _extract_security_hints(output: str) -> list[str]:
 
     return hints
 
-
 class _FormatterMixin:
-    # Attributes provided by AgentLoop — declared here for type checkers only.
+
     if TYPE_CHECKING:
         state: AgentState
     def _smart_format_tool_result(
@@ -245,9 +204,7 @@ class _FormatterMixin:
         success: bool,
         command: str = "",
     ) -> str:
-        # CTF mode: tight cap at 1000 chars per tool output — aligns with the
-        # 1500-char per-message cap in _get_tool_result_cap() so the two passes
-        # don't fight each other, and keeps the rolling window under budget.
+
         _ctf = getattr(self, "_ctf_mode", False)
         MAX_TOTAL = 1000 if _ctf else 12000
 
@@ -266,8 +223,7 @@ class _FormatterMixin:
                 parts.append(f"STDOUT: {stdout_msg.strip()[:2000]}")
 
             combined = (error_msg + stderr_msg + stdout_msg).lower()
-            # Extract real tool binary from command (strip cd prefix, sudo,
-            # etc.)
+
             cmd_clean = re.sub(
                 r"^cd\s+/workspace/[^\s]+\s*&&\s*",
                 "",
@@ -305,7 +261,7 @@ class _FormatterMixin:
                     "syntax error",
                 )
             ):
-                # AUTO-CORRECT: Run --help and inject valid flags
+
                 help_text = self._auto_help_lookup(tool_bin)
                 if help_text:
                     parts.append(
@@ -360,8 +316,6 @@ class _FormatterMixin:
                     "DO NOT invent results."
                 )
 
-            # Strip HTML before parsing — raw HTML floods context with tag soup.
-            # Applied early so both structured parser and raw fallback get clean text.
             _stdout_head = stdout[:400].lower()
             _is_html = (
                 "<!doctype html" in _stdout_head
@@ -369,27 +323,25 @@ class _FormatterMixin:
                 or ("<html" in _stdout_head and "<body" in _stdout_head)
             )
             if _is_html:
-                # Remove script/style blocks (no useful pentest info)
+
                 stdout = re.sub(
                     r"<(script|style)[^>]*>.*?</(script|style)>",
                     " ",
                     stdout,
                     flags=re.DOTALL | re.IGNORECASE,
                 )
-                # Strip all remaining HTML tags
+
                 stdout = re.sub(r"<[^>]+>", " ", stdout)
-                # Collapse whitespace and keep non-empty lines
+
                 stdout = "\n".join(
                     ln.strip()
                     for ln in re.sub(r"[ \t]+", " ", stdout).splitlines()
                     if ln.strip()
                 )
 
-            # Detect raw HTTP response (curl -i output) and surface security summary
             _http_summary = _extract_http_response_summary(stdout)
             if _http_summary:
-                # Prepend structured summary; keep first 2000 chars of raw output
-                # so Ollama can verify headers/body independently if needed.
+
                 body = _http_summary + "\n\nRAW:\n" + stdout.strip()[:2000]
                 if len(body) > MAX_TOTAL:
                     body = body[:MAX_TOTAL] + "\n... (truncated)"
@@ -398,7 +350,6 @@ class _FormatterMixin:
                     body += "\n\n[SECURITY CONTEXT — act on these]\n" + "\n".join(hints)
                 return body
 
-            # Try structured parsing first
             parsed = parse_tool_output(command, stdout)
             if parsed and parsed.total_count > 0:
                 parts = [parsed.summary]
@@ -416,16 +367,15 @@ class _FormatterMixin:
                 body = "\n".join(parts)
                 if len(body) > MAX_TOTAL:
                     body = body[:MAX_TOTAL] + "\n... (truncated)"
-                # Append inline security hints
+
                 hints = _extract_security_hints(stdout)
                 if hints:
                     body += "\n\n[SECURITY CONTEXT — act on these]\n" + "\n".join(hints)
                 return body
 
-            # Fallback: raw truncation (HTML already stripped above if applicable)
             lines = stdout.strip().split("\n")
             total = len(lines)
-            # Use tighter head/tail in CTF mode to minimise context usage.
+
             _head_n, _tail_n = (30, 5) if _ctf else (60, 15)
             if total > (_head_n + _tail_n):
                 head = "\n".join(lines[:_head_n])
@@ -441,7 +391,6 @@ class _FormatterMixin:
             if len(body) > MAX_TOTAL:
                 body = body[:MAX_TOTAL] + "\n... (truncated)"
 
-            # Append inline security hints for ports/techs found in output
             hints = _extract_security_hints(stdout)
             if hints:
                 body += "\n\n[SECURITY CONTEXT — act on these]\n" + "\n".join(hints)
@@ -549,24 +498,15 @@ class _FormatterMixin:
             return "Result (unserializable). Check output file."
 
     def _auto_help_lookup(self, tool_binary: str) -> str | None:
-        """Run <tool> --help inside Docker and extract valid flags.
-
-        In async runtime, this method warms the cache in the background and
-        returns cached results when available.
-
-        Returns compact help text or None if lookup fails.
-        Caches results to avoid re-running for the same tool.
-        """
         if tool_binary in _help_cache:
             return _help_cache[tool_binary] if _help_cache[tool_binary] else None
 
-        # Skip if engine not available
         engine = getattr(self, "engine", None)
         if not engine:
             return None
 
         def _blocking_lookup() -> str | None:
-            # Use thread pool to avoid asyncio event loop issues
+
             import concurrent.futures
 
             try:
@@ -598,7 +538,6 @@ class _FormatterMixin:
             if not stdout.strip() or len(stdout) < 20:
                 return None
 
-            # Extract flag lines (lines starting with -, or containing --)
             lines = stdout.strip().split("\n")
             flag_lines: list[str] = []
             usage_lines: list[str] = []
@@ -612,7 +551,7 @@ class _FormatterMixin:
                     usage_lines.append(stripped)
 
             if not flag_lines and not usage_lines:
-                # No flags found — return first 30 lines as-is
+
                 return "\n".join(lines[:30])
 
             parts: list[str] = []
@@ -620,7 +559,7 @@ class _FormatterMixin:
                 parts.append("USAGE: " + usage_lines[0])
             if flag_lines:
                 parts.append("VALID FLAGS:")
-                for flag in flag_lines[:25]:  # Cap at 25 flags
+                for flag in flag_lines[:25]:
                     parts.append(f"  {flag}")
 
             compact = "\n".join(parts)
@@ -636,7 +575,6 @@ class _FormatterMixin:
         except RuntimeError:
             running_loop = None
 
-        # Async runtime: warm cache in background without blocking the loop.
         if running_loop is not None:
             if tool_binary not in _help_lookup_inflight:
                 _help_lookup_inflight.add(tool_binary)
@@ -653,7 +591,6 @@ class _FormatterMixin:
                 running_loop.create_task(_populate_cache())
             return None
 
-        # Sync runtime: resolve immediately.
         compact = _blocking_lookup()
         _help_cache[tool_binary] = compact or ""
         return compact

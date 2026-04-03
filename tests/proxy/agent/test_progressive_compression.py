@@ -1,4 +1,5 @@
 """Tests for Progressive Context Summarization in AgentLoop."""
+
 from __future__ import annotations
 
 from unittest.mock import AsyncMock, MagicMock
@@ -14,6 +15,7 @@ from airecon.proxy.agent.models import AgentState
 def _make_loop() -> "AgentLoop":  # type: ignore[name-defined]  # noqa: F821
     """Create a minimal AgentLoop with mocked engine and ollama."""
     from airecon.proxy.agent.loop import AgentLoop
+
     loop = AgentLoop.__new__(AgentLoop)
     loop.state = AgentState()
     loop.ollama = AsyncMock()
@@ -95,10 +97,12 @@ class TestCompressOldToolOutputs:
         # Add 25 non-system messages (5 old + 20 recent)
         for i in range(25):
             role = "tool" if i % 2 == 0 else "assistant"
-            loop.state.conversation.append({
-                "role": role,
-                "content": "A" * 500 + f" result number {i}",
-            })
+            loop.state.conversation.append(
+                {
+                    "role": role,
+                    "content": "A" * 500 + f" result number {i}",
+                }
+            )
 
         loop._compress_old_tool_outputs()
 
@@ -111,16 +115,19 @@ class TestCompressOldToolOutputs:
         loop = _make_loop()
         # Add exactly 20 non-system messages (all tool)
         for i in range(20):
-            loop.state.conversation.append({
-                "role": "tool",
-                "content": "B" * 500,
-            })
+            loop.state.conversation.append(
+                {
+                    "role": "tool",
+                    "content": "B" * 500,
+                }
+            )
 
         loop._compress_old_tool_outputs()
 
         # All 20 are within the keep-recent window → none compressed
         compressed = [
-            m for m in loop.state.conversation
+            m
+            for m in loop.state.conversation
             if m.get("role") == "tool" and m["content"].startswith("[COMPRESSED]")
         ]
         assert len(compressed) == 0
@@ -135,7 +142,8 @@ class TestCompressOldToolOutputs:
 
         # Short messages should NOT be compressed
         compressed = [
-            m for m in loop.state.conversation
+            m
+            for m in loop.state.conversation
             if m.get("role") == "tool" and m["content"].startswith("[COMPRESSED]")
         ]
         assert len(compressed) == 0
@@ -143,15 +151,18 @@ class TestCompressOldToolOutputs:
     def test_does_not_compress_system_messages(self) -> None:
         loop = _make_loop()
         for i in range(25):
-            loop.state.conversation.append({
-                "role": "system",
-                "content": "D" * 500,
-            })
+            loop.state.conversation.append(
+                {
+                    "role": "system",
+                    "content": "D" * 500,
+                }
+            )
 
         loop._compress_old_tool_outputs()
 
         compressed = [
-            m for m in loop.state.conversation
+            m
+            for m in loop.state.conversation
             if m.get("role") == "system" and m["content"].startswith("[COMPRESSED]")
         ]
         assert len(compressed) == 0

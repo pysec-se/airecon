@@ -13,8 +13,8 @@ from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 
-
 # ── Helpers ──────────────────────────────────────────────────────────
+
 
 def _make_agent_loop():
     """Create a minimal AgentLoop with mocked dependencies."""
@@ -35,6 +35,7 @@ def _make_agent_loop():
 
 # ── 1. _enforce_char_budget: first user message protection ───────────
 
+
 class TestEnforceCharBudget:
     """_enforce_char_budget must protect the first user message from trimming."""
 
@@ -46,15 +47,17 @@ class TestEnforceCharBudget:
     def test_first_user_message_never_trimmed(self):
         """The original task message (first user) must survive budget enforcement."""
         scope_msg = "pentest target.com — scope: *.target.com only, NO WAF bypass"
-        loop = self._build_loop_with_conversation([
-            {"role": "system", "content": "You are AIRecon."},
-            {"role": "user", "content": scope_msg},
-            # Many large tool results to trigger budget enforcement
-            *[
-                {"role": "tool", "name": "execute", "content": "x" * 5000}
-                for _ in range(20)
-            ],
-        ])
+        loop = self._build_loop_with_conversation(
+            [
+                {"role": "system", "content": "You are AIRecon."},
+                {"role": "user", "content": scope_msg},
+                # Many large tool results to trigger budget enforcement
+                *[
+                    {"role": "tool", "name": "execute", "content": "x" * 5000}
+                    for _ in range(20)
+                ],
+            ]
+        )
 
         # Force a very small budget so compression is triggered
         asyncio.run(loop._enforce_char_budget(num_ctx=100))
@@ -69,13 +72,18 @@ class TestEnforceCharBudget:
     def test_subsequent_user_messages_can_be_trimmed(self):
         """Follow-up user messages (not the first) are eligible for compression."""
         large_followup = "q" * 5000
-        loop = self._build_loop_with_conversation([
-            {"role": "system", "content": "You are AIRecon."},
-            {"role": "user", "content": "pentest target.com"},  # first — protected
-            {"role": "assistant", "content": "Starting scan."},
-            {"role": "user", "content": large_followup},  # second — compressible
-            *[{"role": "tool", "name": "execute", "content": "x" * 5000} for _ in range(10)],
-        ])
+        loop = self._build_loop_with_conversation(
+            [
+                {"role": "system", "content": "You are AIRecon."},
+                {"role": "user", "content": "pentest target.com"},  # first — protected
+                {"role": "assistant", "content": "Starting scan."},
+                {"role": "user", "content": large_followup},  # second — compressible
+                *[
+                    {"role": "tool", "name": "execute", "content": "x" * 5000}
+                    for _ in range(10)
+                ],
+            ]
+        )
 
         asyncio.run(loop._enforce_char_budget(num_ctx=200))
 
@@ -123,11 +131,13 @@ class TestEnforceCharBudget:
         # Build a conversation that is between the two budgets:
         # total chars ≈ 25000 — over effective budget but under full budget.
         big_tool_result = "x" * 25_000
-        loop = self._build_loop_with_conversation([
-            {"role": "system", "content": "You are AIRecon."},
-            {"role": "user", "content": "pentest target.com"},
-            {"role": "tool", "name": "execute", "content": big_tool_result},
-        ])
+        loop = self._build_loop_with_conversation(
+            [
+                {"role": "system", "content": "You are AIRecon."},
+                {"role": "user", "content": "pentest target.com"},
+                {"role": "tool", "name": "execute", "content": big_tool_result},
+            ]
+        )
 
         cfg_mock = MagicMock()
         cfg_mock.ollama_num_predict = num_predict
@@ -136,9 +146,7 @@ class TestEnforceCharBudget:
             asyncio.run(loop._enforce_char_budget(num_ctx=num_ctx))
 
         # Tool result must have been compressed (budget was exceeded)
-        tool_msg = next(
-            m for m in loop.state.conversation if m.get("role") == "tool"
-        )
+        tool_msg = next(m for m in loop.state.conversation if m.get("role") == "tool")
         assert len(tool_msg["content"]) < len(big_tool_result), (
             "Tool result was NOT compressed — budget likely used full num_ctx "
             "instead of (num_ctx - num_predict), missing the hallucination fix"
@@ -148,11 +156,13 @@ class TestEnforceCharBudget:
         """Runtime adaptive num_predict should drive the budget when provided."""
         num_ctx = 10_000
         tool_result = "x" * 22_000
-        loop = self._build_loop_with_conversation([
-            {"role": "system", "content": "You are AIRecon."},
-            {"role": "user", "content": "pentest target.com"},
-            {"role": "tool", "name": "execute", "content": tool_result},
-        ])
+        loop = self._build_loop_with_conversation(
+            [
+                {"role": "system", "content": "You are AIRecon."},
+                {"role": "user", "content": "pentest target.com"},
+                {"role": "tool", "name": "execute", "content": tool_result},
+            ]
+        )
 
         # Set tools_ollama = [] so tools overhead = 0, isolating the num_predict effect.
         # Explicit runtime reservation = 1000 → budget = (10000 - 1000 - 0) * 3 = 27k chars
@@ -164,6 +174,7 @@ class TestEnforceCharBudget:
 
 
 # ── 1b. watchdog_forced_calls resets after successful tool calls ─────
+
 
 class TestWatchdogCounterReset:
     """_watchdog_forced_calls must reset to 0 after a successful tool call."""
@@ -203,6 +214,7 @@ class TestWatchdogCounterReset:
 
 
 # ── 2. tool_flag_conflicts: token-based, no URL false positives ──────
+
 
 class TestToolFlagConflicts:
     """Tool-flag conflict detection must use token matching, not substring search."""
@@ -247,8 +259,12 @@ class TestToolFlagConflicts:
 
     def test_curl_with_data_value_not_rejected(self):
         """curl with -d containing flag-like text in value must NOT be rejected."""
-        result = self._execute_check('curl https://target.com -d "location=main&page=1"')
-        assert result == [], "False positive: data value should not trigger flag conflict"
+        result = self._execute_check(
+            'curl https://target.com -d "location=main&page=1"'
+        )
+        assert result == [], (
+            "False positive: data value should not trigger flag conflict"
+        )
 
     def test_nmap_with_masscan_flags_rejected(self):
         """nmap with masscan-only flags must be rejected."""
@@ -266,7 +282,9 @@ class TestToolFlagConflicts:
 
     def test_valid_curl_command_not_rejected(self):
         """Standard curl with valid flags must pass through."""
-        result = self._execute_check("curl -s -o /dev/null -w '%{http_code}' https://target.com")
+        result = self._execute_check(
+            "curl -s -o /dev/null -w '%{http_code}' https://target.com"
+        )
         assert result == []
 
     def test_unknown_binary_not_affected(self):
@@ -276,6 +294,7 @@ class TestToolFlagConflicts:
 
 
 # ── 3. output_parser_tool_patterns loaded from JSON ──────────────────
+
 
 class TestOutputParserToolPatterns:
     """output_parser_tool_patterns in tools_meta.json drives parser selection."""
@@ -295,12 +314,18 @@ class TestOutputParserToolPatterns:
         cases = [
             ("nmap -sV target.com", "nmap"),
             ("subfinder -d target.com", "subfinder"),
-            ("amass enum -passive -d target.com", "subfinder"),  # amass → subfinder parser
+            (
+                "amass enum -passive -d target.com",
+                "subfinder",
+            ),  # amass → subfinder parser
             ("httpx -u https://target.com -sc", "httpx"),
             ("katana -u https://target.com", "url_list"),
             ("ffuf -w wordlist.txt -u https://target.com/FUZZ", "ffuf"),
             ("sqlmap -u https://target.com/page?id=1", "sqlmap"),
-            ("ghauri -u https://target.com/page?id=1", "sqlmap"),  # ghauri → sqlmap parser
+            (
+                "ghauri -u https://target.com/page?id=1",
+                "sqlmap",
+            ),  # ghauri → sqlmap parser
             ("dalfox url https://target.com/search?q=test", "dalfox"),
             ("nikto -h https://target.com", "nikto"),
             ("wpscan --url https://target.com", "wpscan"),
@@ -322,7 +347,13 @@ class TestOutputParserToolPatterns:
         """All parser types referenced in tools_meta.json must exist in _PARSERS."""
         from airecon.proxy.agent.output_parser import _PARSERS
 
-        tools_meta = Path(__file__).resolve().parents[3] / "airecon" / "proxy" / "data" / "tools_meta.json"
+        tools_meta = (
+            Path(__file__).resolve().parents[3]
+            / "airecon"
+            / "proxy"
+            / "data"
+            / "tools_meta.json"
+        )
         data = json.loads(tools_meta.read_text(encoding="utf-8"))
         patterns = data.get("output_parser_tool_patterns", {})
 
@@ -355,6 +386,7 @@ class TestOutputParserToolPatterns:
 
 
 # ── 4. skill/session alignment and stale-skill pruning ────────────────
+
 
 class TestSkillSessionAlignment:
     def test_auto_load_returns_relative_skill_paths(self):
@@ -437,6 +469,7 @@ class TestStaleSkillPruning:
 
 
 # ── 5. context/objective fixes from review findings ───────────────────
+
 
 class TestExploitContextAndObjectives:
     def test_inject_exploit_context_uses_finding_field(self):

@@ -25,6 +25,7 @@ def tmp_sessions_dir(tmp_path):
 # find_prior_session
 # ─────────────────────────────────────────────────────────────
 
+
 class TestFindPriorSession:
     def test_returns_none_when_no_sessions_dir(self, tmp_path):
         missing = tmp_path / "nonexistent"
@@ -99,6 +100,7 @@ class TestFindPriorSession:
 # ─────────────────────────────────────────────────────────────
 # merge_prior_findings
 # ─────────────────────────────────────────────────────────────
+
 
 class TestMergePriorFindings:
     def _prior(self, **kwargs) -> SessionData:

@@ -10,6 +10,7 @@ from airecon.proxy.agent.output_parser import (
 
 # ── detect_tool edge cases ────────────────────────────────────────────────────
 
+
 class TestDetectToolEdgeCases:
     def test_detect_with_cd_prefix(self):
         cmd = "cd /workspace/session_abc && nmap -sV 10.0.0.1"
@@ -43,7 +44,9 @@ class TestDetectToolEdgeCases:
         assert detect_tool("waybackurls example.com") == "url_list"
 
     def test_detect_dirsearch_maps_to_url_list(self):
-        assert detect_tool("dirsearch -u http://example.com -w wordlist.txt") == "url_list"
+        assert (
+            detect_tool("dirsearch -u http://example.com -w wordlist.txt") == "url_list"
+        )
 
     def test_detect_unknown_returns_none(self):
         assert detect_tool("joomscan -u http://example.com") is None
@@ -54,13 +57,16 @@ class TestDetectToolEdgeCases:
 
 # ── Nuclei output parsing ─────────────────────────────────────────────────────
 
+
 class TestNucleiParser:
     def test_nuclei_json_lines_basic(self):
-        line = json.dumps({
-            "template-id": "cve-2021-44228",
-            "info": {"name": "Log4Shell", "severity": "critical"},
-            "matched-at": "http://example.com/api"
-        })
+        line = json.dumps(
+            {
+                "template-id": "cve-2021-44228",
+                "info": {"name": "Log4Shell", "severity": "critical"},
+                "matched-at": "http://example.com/api",
+            }
+        )
         parsed = parse_tool_output("nuclei -t cves/", line)
         assert parsed is not None
         assert parsed.tool == "nuclei"
@@ -70,9 +76,27 @@ class TestNucleiParser:
 
     def test_nuclei_multiple_severities_sorted(self):
         lines = [
-            json.dumps({"template-id": "info-t", "info": {"name": "Info Finding", "severity": "info"}, "matched-at": "http://x.com"}),
-            json.dumps({"template-id": "crit-t", "info": {"name": "Critical Bug", "severity": "critical"}, "matched-at": "http://x.com"}),
-            json.dumps({"template-id": "high-t", "info": {"name": "High Risk", "severity": "high"}, "matched-at": "http://x.com"}),
+            json.dumps(
+                {
+                    "template-id": "info-t",
+                    "info": {"name": "Info Finding", "severity": "info"},
+                    "matched-at": "http://x.com",
+                }
+            ),
+            json.dumps(
+                {
+                    "template-id": "crit-t",
+                    "info": {"name": "Critical Bug", "severity": "critical"},
+                    "matched-at": "http://x.com",
+                }
+            ),
+            json.dumps(
+                {
+                    "template-id": "high-t",
+                    "info": {"name": "High Risk", "severity": "high"},
+                    "matched-at": "http://x.com",
+                }
+            ),
         ]
         parsed = parse_tool_output("nuclei -t all/", "\n".join(lines))
         assert parsed is not None
@@ -98,11 +122,31 @@ class TestNucleiParser:
         assert parsed is None
 
     def test_nuclei_summary_contains_severity_counts(self):
-        lines = "\n".join([
-            json.dumps({"template-id": "t1", "info": {"name": "A", "severity": "high"}, "matched-at": "http://x"}),
-            json.dumps({"template-id": "t2", "info": {"name": "B", "severity": "high"}, "matched-at": "http://x"}),
-            json.dumps({"template-id": "t3", "info": {"name": "C", "severity": "low"}, "matched-at": "http://x"}),
-        ])
+        lines = "\n".join(
+            [
+                json.dumps(
+                    {
+                        "template-id": "t1",
+                        "info": {"name": "A", "severity": "high"},
+                        "matched-at": "http://x",
+                    }
+                ),
+                json.dumps(
+                    {
+                        "template-id": "t2",
+                        "info": {"name": "B", "severity": "high"},
+                        "matched-at": "http://x",
+                    }
+                ),
+                json.dumps(
+                    {
+                        "template-id": "t3",
+                        "info": {"name": "C", "severity": "low"},
+                        "matched-at": "http://x",
+                    }
+                ),
+            ]
+        )
         parsed = parse_tool_output("nuclei -t exposures/", lines)
         assert parsed is not None
         assert "high" in parsed.summary.lower() or "2" in parsed.summary
@@ -110,16 +154,21 @@ class TestNucleiParser:
 
 # ── WhatWeb output parsing ────────────────────────────────────────────────────
 
+
 class TestWhatWebParser:
     def test_whatweb_json_format(self):
-        data = json.dumps([{
-            "target": "http://example.com",
-            "plugins": {
-                "nginx": {"version": ["1.18.0"]},
-                "PHP": {"version": ["8.1.0"]},
-                "Bootstrap": {"version": ["4.6.0"]},
-            }
-        }])
+        data = json.dumps(
+            [
+                {
+                    "target": "http://example.com",
+                    "plugins": {
+                        "nginx": {"version": ["1.18.0"]},
+                        "PHP": {"version": ["8.1.0"]},
+                        "Bootstrap": {"version": ["4.6.0"]},
+                    },
+                }
+            ]
+        )
         parsed = parse_tool_output("whatweb -a 3 http://example.com", data)
         assert parsed is not None
         assert parsed.tool == "whatweb"
@@ -128,10 +177,9 @@ class TestWhatWebParser:
         assert parsed.total_count == 3
 
     def test_whatweb_json_plugin_no_version(self):
-        data = json.dumps([{
-            "target": "http://example.com",
-            "plugins": {"React": {}, "webpack": {}}
-        }])
+        data = json.dumps(
+            [{"target": "http://example.com", "plugins": {"React": {}, "webpack": {}}}]
+        )
         parsed = parse_tool_output("whatweb http://example.com", data)
         assert parsed is not None
         assert "React" in parsed.technologies
@@ -151,8 +199,7 @@ class TestWhatWebParser:
 
     def test_whatweb_text_no_version_bare_names(self):
         stdout = (
-            "WhatWeb report for http://example.com\n"
-            "Summary   : Apache, WordPress\n"
+            "WhatWeb report for http://example.com\nSummary   : Apache, WordPress\n"
         )
         parsed = parse_tool_output("whatweb http://example.com", stdout)
         assert parsed is not None
@@ -168,6 +215,7 @@ class TestWhatWebParser:
 
 # ── Nmap XML parsing ──────────────────────────────────────────────────────────
 
+
 class TestNmapXMLParser:
     def _xml_output(self, ports):
         """Build minimal nmap XML with given port specs."""
@@ -177,23 +225,25 @@ class TestNmapXMLParser:
                 f'<port protocol="{proto}" portid="{portid}">'
                 f'<state state="{state}"/>'
                 f'<service name="{service}" product="{product}" version="{version}"/>'
-                f'</port>'
+                f"</port>"
             )
         return (
             '<?xml version="1.0"?>'
-            '<nmaprun>'
+            "<nmaprun>"
             '<host><status state="up"/>'
             '<address addr="10.0.0.1" addrtype="ipv4"/>'
-            f'<ports>{port_els}</ports>'
-            '</host>'
-            '</nmaprun>'
+            f"<ports>{port_els}</ports>"
+            "</host>"
+            "</nmaprun>"
         )
 
     def test_nmap_xml_open_ports(self):
-        xml = self._xml_output([
-            ("80", "tcp", "open", "http", "Apache", "2.4.51"),
-            ("443", "tcp", "open", "https", "nginx", "1.18.0"),
-        ])
+        xml = self._xml_output(
+            [
+                ("80", "tcp", "open", "http", "Apache", "2.4.51"),
+                ("443", "tcp", "open", "https", "nginx", "1.18.0"),
+            ]
+        )
         parsed = parse_tool_output("nmap -sV -oX -", xml)
         assert parsed is not None
         assert parsed.tool == "nmap"
@@ -201,17 +251,21 @@ class TestNmapXMLParser:
         assert any("80" in item for item in parsed.items)
 
     def test_nmap_xml_filtered_ports_included(self):
-        xml = self._xml_output([
-            ("22", "tcp", "filtered", "ssh", "", ""),
-        ])
+        xml = self._xml_output(
+            [
+                ("22", "tcp", "filtered", "ssh", "", ""),
+            ]
+        )
         parsed = parse_tool_output("nmap -sS", xml)
         assert parsed is not None
         assert parsed.total_count == 1
 
     def test_nmap_xml_closed_ports_excluded(self):
-        xml = self._xml_output([
-            ("8080", "tcp", "closed", "http-proxy", "", ""),
-        ])
+        xml = self._xml_output(
+            [
+                ("8080", "tcp", "closed", "http-proxy", "", ""),
+            ]
+        )
         parsed = parse_tool_output("nmap -p 8080", xml)
         assert parsed is not None
         assert parsed.total_count == 0
@@ -232,6 +286,7 @@ class TestNmapXMLParser:
 
 # ── Naabu parsing ─────────────────────────────────────────────────────────────
 
+
 class TestNaabuParser:
     def test_naabu_host_port_lines(self):
         stdout = "10.0.0.1:80\n10.0.0.1:443\n10.0.0.2:22\n"
@@ -250,6 +305,7 @@ class TestNaabuParser:
 
 
 # ── Subfinder / line-list parsing ────────────────────────────────────────────
+
 
 class TestSubfinderParser:
     def test_subfinder_basic(self):
@@ -280,18 +336,23 @@ class TestSubfinderParser:
 
 # ── Generic smart parser fallback ────────────────────────────────────────────
 
+
 class TestGenericSmartParserExtended:
     def test_unknown_tool_gets_tool_name_from_command(self):
         stdout = "[*] Found: victim1.com\n[*] Found: victim2.com\n"
         parsed = parse_tool_output("theHarvester -d example.com", stdout)
         assert parsed is not None
-        assert parsed.tool == "theharvester"  # extract_primary_binary always returns lowercase
+        assert (
+            parsed.tool == "theharvester"
+        )  # extract_primary_binary always returns lowercase
 
     def test_json_lines_detected_auto(self):
-        lines = "\n".join([
-            json.dumps({"host": f"sub{i}.example.com", "ip": f"1.1.1.{i}"})
-            for i in range(5)
-        ])
+        lines = "\n".join(
+            [
+                json.dumps({"host": f"sub{i}.example.com", "ip": f"1.1.1.{i}"})
+                for i in range(5)
+            ]
+        )
         parsed = parse_tool_output("customtool -d example.com", lines)
         assert parsed is not None
         assert parsed.total_count == 5

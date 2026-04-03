@@ -1,15 +1,3 @@
-"""Comprehensive Output Correlation Engine for airecon.
-
-Correlation rules are stored as JSON files in data/ and loaded at import time:
-  - data/port_correlations.json        (40+ port rules)
-  - data/tech_correlations.json        (86+ technology rules)
-  - data/cve_correlations.json         (50+ CVE rules)
-  - data/attack_chains.json            (32+ attack chain patterns)
-  - data/business_logic_patterns.json  (18+ business logic patterns)
-  - data/patterns.json                 (17+ expert testing patterns)
-  - data/zeroday_patterns.json         (17+ zero-day discovery patterns)
-"""
-
 from __future__ import annotations
 
 import json
@@ -25,7 +13,6 @@ logger = logging.getLogger("airecon.correlation")
 
 _DATA_DIR = Path(__file__).parent / "data"
 
-
 def _load(filename: str, default: Any = None) -> Any:
     path = _DATA_DIR / filename
     if default is None:
@@ -37,8 +24,6 @@ def _load(filename: str, default: Any = None) -> Any:
         logger.error(f"Failed to load {filename}: {e}")
         return default
 
-
-# PORT_CORRELATIONS keys are integers in Python but strings in JSON
 PORT_CORRELATIONS: dict[int, dict] = {
     int(k): v for k, v in _load("port_correlations.json").items()
 }
@@ -46,7 +31,7 @@ PORT_CORRELATIONS: dict[int, dict] = {
 TECH_CORRELATIONS: dict[str, dict] = _load("tech_correlations.json")
 CVE_CORRELATIONS: dict[str, dict] = _load("cve_correlations.json")
 _attack_chains_raw = _load("attack_chains.json", default=[])
-# Support both formats: new {"chains": [...]} dict and legacy flat list
+
 ATTACK_CHAINS: list[dict] = (
     _attack_chains_raw.get("chains", [])
     if isinstance(_attack_chains_raw, dict)
@@ -58,8 +43,6 @@ EXPERT_TESTING_PATTERNS: dict[str, dict] = _load(
     "patterns.json")
 ZERODAY_PATTERNS: dict[str, dict] = _load("zeroday_patterns.json")
 
-# Dynamic URL path → technology map built from tech_correlations paths.
-# Replaces 6-entry hardcoded dict — now covers all 86+ technologies.
 _URL_TECH_MAP: dict[str, str] = {
     path.lower(): tech
     for tech, info in TECH_CORRELATIONS.items()
@@ -67,16 +50,11 @@ _URL_TECH_MAP: dict[str, str] = {
     if path
 }
 
-# Pre-compiled boundary-aware regexes for each URL path in _URL_TECH_MAP.
-# Using word-boundary / delimiter check avoids false positives like "admin"
-# matching "/administrator".  Compiled once at module load for performance.
 _URL_TECH_PATH_RES: dict[str, re.Pattern[str]] = {
     path: re.compile(re.escape(path) + r"(?:[/?# ]|$)")
     for path in _URL_TECH_MAP
 }
 
-# Injection point type → attack chain keyword mapping.
-# Connects session.injection_points type_hints to relevant ATTACK_CHAINS entries.
 _INJECTION_TO_CHAIN_KEYWORD: dict[str, str] = {
     "IDOR":           "IDOR",
     "SSRF":           "SSRF",
@@ -86,11 +64,10 @@ _INJECTION_TO_CHAIN_KEYWORD: dict[str, str] = {
     "AUTH":           "JWT",
 }
 
-# Minimum ratio of required_findings that must match to include a chain.
 _CHAIN_MIN_MATCH_RATIO: float = float(
     get_tuning("correlation.chain_min_match_ratio", 0.5)
 )
-# Maximum synthesized chains returned (prevent context flooding).
+
 _CHAIN_MAX_RESULTS: int = int(
     get_tuning("correlation.chain_max_results", 10)
 )
@@ -115,39 +92,26 @@ _CHAIN_CONFIDENCE_TUNING = {
         get_tuning("correlation.confidence.attack_chain_min_matches_with_vuln_anchor", 2)
     ),
 }
-# Word-boundary pattern to avoid short-word false positives (e.g. "log" in "catalog").
+
 _WORD_BOUNDARY_RE = re.compile(r"\b{}\b", re.IGNORECASE)
 
-
 def _normalize_port_token(port_value: Any) -> int | None:
-    """Return normalized int port from common token formats.
-
-    Supports values like:
-    - 443
-    - "443"
-    - "443/tcp"
-    Returns None for unparsable values.
-    """
     try:
         return int(str(port_value).split("/", 1)[0])
     except (TypeError, ValueError):
         return None
 
-
 def _signal_matches(haystack: str, needle: str) -> bool:
-    """Return True if a required signal matches text with low false positives."""
     n = needle.strip().lower()
     if not n:
         return False
-    # Phrase-like signals keep substring semantics.
+
     if " " in n or any(ch in n for ch in ("/", ":", "-", "_")):
         return n in haystack
-    # Single-word signals use boundaries to avoid partial-token noise.
+
     return re.search(r"\b" + re.escape(n) + r"\b", haystack, re.IGNORECASE) is not None
 
-
 def build_attack_graph(session: SessionData) -> dict[str, Any] | None:
-    """Build a lightweight attack graph from correlated session signals."""
     nodes: list[dict[str, Any]] = []
     edges: list[dict[str, Any]] = []
     node_ids: set[str] = set()
@@ -163,12 +127,10 @@ def build_attack_graph(session: SessionData) -> dict[str, Any] | None:
             "severity": severity.upper(),
         })
 
-    # Technology nodes
     for tech, version in list(getattr(session, "technologies", {}).items())[:15]:
         label = f"{tech} {version}".strip()
         _add_node(f"tech:{tech.lower()}", "technology", label, "LOW")
 
-    # Service nodes from correlated ports
     for host, ports in list(getattr(session, "open_ports", {}).items())[:20]:
         if not isinstance(ports, list):
             continue
@@ -179,7 +141,6 @@ def build_attack_graph(session: SessionData) -> dict[str, Any] | None:
             svc = PORT_CORRELATIONS.get(p_norm, {}).get("service", f"port {p_norm}")
             _add_node(f"svc:{host}:{p_norm}", "service", f"{host}:{p_norm} ({svc})", "LOW")
 
-    # Injection type nodes
     inj_types = sorted({
         str(pt.get("type_hint", "")).upper()
         for pt in getattr(session, "injection_points", [])
@@ -188,10 +149,9 @@ def build_attack_graph(session: SessionData) -> dict[str, Any] | None:
     for inj in inj_types[:10]:
         _add_node(f"inj:{inj}", "injection", inj, "MEDIUM")
 
-    # Vulnerability nodes
     vulns = getattr(session, "vulnerabilities", [])
     sev_rank = {"CRITICAL": 4, "HIGH": 3, "MEDIUM": 2, "LOW": 1, "INFO": 0}
-    vuln_nodes: list[tuple[str, str, str, dict[str, Any]]] = []  # (node_id, text, severity, raw)
+    vuln_nodes: list[tuple[str, str, str, dict[str, Any]]] = []
     for idx, v in enumerate(vulns[:20]):
         finding = str(v.get("title") or v.get("finding") or "").strip()
         if not finding:
@@ -210,7 +170,6 @@ def build_attack_graph(session: SessionData) -> dict[str, Any] | None:
         _add_node(node_id, "vulnerability", finding, sev)
         vuln_nodes.append((node_id, finding.lower(), sev, v))
 
-    # Edges: tech/injection/service -> vulnerability
     tech_keys = list(getattr(session, "technologies", {}).keys())
     for node_id, vuln_text, _, _ in vuln_nodes:
         for tech in tech_keys[:15]:
@@ -260,12 +219,6 @@ def build_attack_graph(session: SessionData) -> dict[str, Any] | None:
     if not unique_edges:
         return None
 
-    # Causal risk model:
-    # - severity_component: inherent impact from vulnerability severities
-    # - exploitability_component: presence of PoC/report/evidence-backed findings
-    # - convergence_component: independent upstream signal types converging on each vuln
-    # - killchain_component: breadth of attack-chain stages observed in graph
-    # - uncertainty_penalty: many weak/unverified vulns should reduce confidence
     avg_severity = sum(sev_rank.get(sev, 0) for _, _, sev, _ in vuln_nodes) / max(1, len(vuln_nodes))
     severity_component = min(1.0, avg_severity / 4.0)
 
@@ -335,25 +288,14 @@ def build_attack_graph(session: SessionData) -> dict[str, Any] | None:
         },
     }
 
-
 def synthesize_attack_chains(session: SessionData) -> list[dict]:
-    """Cross-correlate multiple signal types to produce ranked attack chains.
 
-    Unlike the existing per-signal attack_chain entries which fire on ANY single
-    match, this function requires >= 50% of required_findings to be satisfied
-    simultaneously and scores each chain by how many signals converge.
-
-    Returns a list of ``synthesized_chain`` dicts sorted by (severity, confidence)
-    descending, capped at ``_CHAIN_MAX_RESULTS``.
-    """
-    # --- Build signal bag from all session data sources ---
-    # Ports: service names from open_ports, mapped through PORT_CORRELATIONS
     port_signals: list[str] = []
     for host_ports in session.open_ports.values():
         if not isinstance(host_ports, list):
             continue
         for p in host_ports:
-            # Handle int ports and common string forms like "443" or "443/tcp".
+
             p_int = _normalize_port_token(p)
             if p_int is None:
                 continue
@@ -361,14 +303,12 @@ def synthesize_attack_chains(session: SessionData) -> list[dict]:
             if info:
                 port_signals.append(info.get("service", "").lower())
 
-    # Technologies
     techs = session.technologies
     if isinstance(techs, dict):
         tech_signals = [f"{n} {v}".lower() for n, v in techs.items()]
     else:
         tech_signals = [str(t).lower() for t in techs]
 
-    # Injection point type hints
     inj_signals = [
         ip.get("type_hint", "").lower()
         for ip in getattr(session, "injection_points", [])
@@ -376,10 +316,8 @@ def synthesize_attack_chains(session: SessionData) -> list[dict]:
     ]
     inj_signal_str = " ".join(inj_signals)
 
-    # URL paths (token-level, not raw full URLs)
     url_signals = " ".join(session.urls).lower()
 
-    # Existing vulnerability findings
     vuln_signals = " ".join(
         v.get("title", v.get("finding", "")).lower()
         for v in getattr(session, "vulnerabilities", [])
@@ -392,11 +330,9 @@ def synthesize_attack_chains(session: SessionData) -> list[dict]:
         "url": url_signals,
         "vuln": vuln_signals,
     }
-    # Single searchable string is still used as coarse pre-check, but
-    # confidence now depends on cross-source convergence.
+
     full_signal_str = " ".join(source_texts.values())
 
-    # --- Score each chain ---
     scored: list[tuple[int, float, dict]] = []
     for chain in ATTACK_CHAINS:
         req = chain.get("required_findings", [])
@@ -416,7 +352,7 @@ def synthesize_attack_chains(session: SessionData) -> list[dict]:
                 for source_name, source_blob in source_texts.items():
                     if source_blob and _signal_matches(source_blob, f_lower):
                         matched_sources.add(source_name)
-                # Stronger signal if corroborated by explicit vulnerability/injection evidence.
+
                 if (
                     _signal_matches(vuln_signals, f_lower)
                     or _signal_matches(inj_signal_str, f_lower)
@@ -482,17 +418,10 @@ def synthesize_attack_chains(session: SessionData) -> list[dict]:
             "matched_sources": sorted(matched_sources),
         }))
 
-    # Sort by severity descending, then confidence descending
     scored.sort(key=lambda x: (x[0], x[1]), reverse=True)
     return [item[2] for item in scored[:_CHAIN_MAX_RESULTS]]
 
-
 def _corr_fingerprint(corr: dict) -> str:
-    """Build a stable dedup key for a correlation result.
-
-    Used to prevent the same suggestion being re-injected into context
-    every 10 iterations.  Format: "<type>:<key>".
-    """
     ctype = corr.get("type", "unknown")
     if ctype == "port":
         return f"port:{corr.get('port', '?')}"
@@ -519,23 +448,12 @@ def _corr_fingerprint(corr: dict) -> str:
         )
     return f"{ctype}:{str(corr)[:40]}"
 
-
 def run_correlation(session: SessionData) -> list[dict]:
-    """Run full correlation analysis on session data.
-
-    Already-suggested correlations (tracked in session.suggested_correlations)
-    are filtered out so the LLM doesn't see the same hint every 10 iterations.
-    New suggestions are added to session.suggested_correlations after the call
-    (caller responsibility: loop.py updates session after injecting results).
-    """
     results = []
     _already_suggested: set[str] = set(
         getattr(session, "suggested_correlations", [])
     )
 
-    # Port-based correlations.
-    # session.open_ports is always dict[str, list[int]] — {host: [80, 443, 22]}
-    # as produced by update_from_parsed_output() in session.py.
     for port, info in PORT_CORRELATIONS.items():
         for host, host_ports in session.open_ports.items():
             if not isinstance(host_ports, list):
@@ -556,14 +474,13 @@ def run_correlation(session: SessionData) -> list[dict]:
                     }
                 )
 
-    # Handle technologies as either a dict {name: version} or a set {name}
     techs = session.technologies
     if isinstance(techs, dict):
         tech_str = " ".join(
             f"{name} {version}" for name, version in techs.items()
         ).lower()
     else:
-        # set of technology names
+
         tech_str = " ".join(str(t) for t in techs).lower()
     for tech, info in TECH_CORRELATIONS.items():
         if re.search(r"\b" + re.escape(tech.lower()) + r"\b", tech_str):
@@ -578,7 +495,6 @@ def run_correlation(session: SessionData) -> list[dict]:
                 }
             )
 
-    # CVE Correlations based on discovered technologies
     for cve_id, cve_info in CVE_CORRELATIONS.items():
         targets = cve_info.get("targets", [])
         for target in targets:
@@ -591,10 +507,8 @@ def run_correlation(session: SessionData) -> list[dict]:
                         "severity": cve_info.get("severity", "HIGH"),
                     }
                 )
-                break  # Don't add the same CVE multiple times if multiple targets match
+                break
 
-    # URL-based correlations — dynamically built from tech_correlations paths.
-    # Detects 86+ technologies based on known paths in discovered URLs.
     url_str = " ".join(session.urls).lower()
     seen_url_techs: set[str] = set()
     for path, tech in _URL_TECH_MAP.items():
@@ -612,8 +526,6 @@ def run_correlation(session: SessionData) -> list[dict]:
             )
             seen_url_techs.add(tech)
 
-    # Expert testing patterns — normalize indicator case, also check ip_param_names
-    # so idor_hotspot fires when user_id/order_id appear as injection_point params.
     ip_param_names_early: set[str] = {
         pt.get("parameter", "").lower().rstrip("[]")
         for pt in getattr(session, "injection_points", [])
@@ -637,7 +549,6 @@ def run_correlation(session: SessionData) -> list[dict]:
                 }
             )
 
-    # Zero-day discovery patterns — normalize indicator case
     for pattern_name, pattern_info in ZERODAY_PATTERNS.items():
         indicators = pattern_info.get("indicators", [])
         if any(ind.lower() in url_str or ind.lower() in tech_str for ind in indicators):
@@ -651,9 +562,6 @@ def run_correlation(session: SessionData) -> list[dict]:
                 }
             )
 
-    # Injection point-based attack chain suggestions.
-    # Maps discovered param types (IDOR/SSRF/etc.) to relevant attack chains.
-    # This connects URL discovery → parameter analysis → exploit path.
     injection_points = getattr(session, "injection_points", [])
     if injection_points:
         type_counts: dict[str, int] = {}
@@ -685,12 +593,9 @@ def run_correlation(session: SessionData) -> list[dict]:
                             "severity": chain.get("severity", "HIGH"),
                         }
                     )
-                    break  # one chain suggestion per injection type
+                    break
 
-    # Business Logic patterns — check URL paths and injection_points params.
-    # Param names like 'price', 'amount', 'coupon' in injection_points are strong
-    # business logic indicators even if not visible in the URL path.
-    ip_param_names: set[str] = ip_param_names_early  # reuse set computed above
+    ip_param_names: set[str] = ip_param_names_early
     for pattern_name, pattern_info in BUSINESS_LOGIC_PATTERNS.items():
         indicators = pattern_info.get("indicators", [])
         if (any(ind.lower() in url_str for ind in indicators) or
@@ -705,7 +610,6 @@ def run_correlation(session: SessionData) -> list[dict]:
                 }
             )
 
-    # Attack Chains based on current vulnerabilities and context
     vuln_names_str = " ".join([v.get("title", v.get("finding", ""))
                               for v in getattr(session, "vulnerabilities", [])]).lower()
     full_attack_context = url_str + " " + tech_str + " " + vuln_names_str
@@ -723,8 +627,7 @@ def run_correlation(session: SessionData) -> list[dict]:
         def _attack_signal_match(blob: str, needle: str) -> bool:
             if _signal_matches(blob, needle):
                 return True
-            # Light plural/singular normalization to reduce brittle misses
-            # (e.g. "cookie" vs "cookies").
+
             if _signal_matches(blob, f"{needle}s"):
                 return True
             if needle.endswith("y") and _signal_matches(blob, f"{needle[:-1]}ies"):
@@ -777,21 +680,13 @@ def run_correlation(session: SessionData) -> list[dict]:
                 }
             )
 
-    # Synthesized cross-signal attack chains — cross-correlate port + tech +
-    # injection + URL + vuln signals together for higher-fidelity suggestions.
     synthesized = synthesize_attack_chains(session)
     results.extend(synthesized)
 
-    # Attack graph synthesis — structural map of pivots and likely chains.
     graph = build_attack_graph(session)
     if graph:
         results.append(graph)
 
-    # --- DEDUP FILTER ---
-    # Remove correlations the LLM has already seen this session to prevent
-    # context flooding.  New results are registered in session so future calls
-    # skip them.  High-severity correlations (CRITICAL) are re-suggested after
-    # 5 injections to keep them visible throughout a long session.
     _high_severities = {"CRITICAL", "HIGH"}
     _already_injected_count = len(_already_suggested)
     filtered: list[dict] = []
@@ -800,9 +695,7 @@ def run_correlation(session: SessionData) -> list[dict]:
     for r in results:
         fp = _corr_fingerprint(r)
         sev = str(r.get("severity", "MEDIUM")).upper()
-        # Always show CRITICAL/HIGH correlations on first encounter;
-        # re-surface them if the session has grown significantly (every 5 new
-        # suggestions) so they're not buried after early iterations.
+
         already_seen = fp in _already_suggested
         resurface = (
             already_seen
@@ -814,7 +707,6 @@ def run_correlation(session: SessionData) -> list[dict]:
             if not already_seen:
                 new_fingerprints.append(fp)
 
-    # Persist new fingerprints into session so they're skipped next time.
     _sc = getattr(session, "suggested_correlations", None)
     if _sc is not None:
         for fp in new_fingerprints:

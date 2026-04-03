@@ -27,17 +27,30 @@ class TestExtractPrimaryBinaryBasic:
 
 class TestExtractPrimaryBinaryWorkspacePrefix:
     def test_strips_cd_workspace_prefix(self):
-        assert extract_primary_binary("cd /workspace/target && nmap -sV 10.0.0.1") == "nmap"
+        assert (
+            extract_primary_binary("cd /workspace/target && nmap -sV 10.0.0.1")
+            == "nmap"
+        )
 
     def test_strips_cd_workspace_with_domain(self):
-        assert extract_primary_binary("cd /workspace/example.com && gobuster dir -u http://example.com") == "gobuster"
+        assert (
+            extract_primary_binary(
+                "cd /workspace/example.com && gobuster dir -u http://example.com"
+            )
+            == "gobuster"
+        )
 
     def test_strips_cd_workspace_no_subdir(self):
         """cd /workspace && (without subdirectory) must be stripped (regression fix)."""
         assert extract_primary_binary("cd /workspace && nmap -sV target") == "nmap"
 
     def test_strips_cd_workspace_no_subdir_subfinder(self):
-        assert extract_primary_binary("cd /workspace && subfinder -d target.com -o subs.txt") == "subfinder"
+        assert (
+            extract_primary_binary(
+                "cd /workspace && subfinder -d target.com -o subs.txt"
+            )
+            == "subfinder"
+        )
 
 
 class TestExtractPrimaryBinarySudo:
@@ -56,7 +69,10 @@ class TestExtractPrimaryBinaryTimeout:
         assert extract_primary_binary("timeout 30 nmap -sV target") == "nmap"
 
     def test_timeout_with_unit(self):
-        assert extract_primary_binary("timeout 5m gobuster dir -u http://target") == "gobuster"
+        assert (
+            extract_primary_binary("timeout 5m gobuster dir -u http://target")
+            == "gobuster"
+        )
 
     def test_timeout_with_double_dash(self):
         assert extract_primary_binary("timeout 10 -- nmap target") == "nmap"
@@ -67,7 +83,9 @@ class TestExtractPrimaryBinaryStdbuf:
         assert extract_primary_binary("stdbuf -oL nmap -sV target") == "nmap"
 
     def test_stdbuf_multiple_flags(self):
-        assert extract_primary_binary("stdbuf -oL -eL ffuf -w wordlist -u URL") == "ffuf"
+        assert (
+            extract_primary_binary("stdbuf -oL -eL ffuf -w wordlist -u URL") == "ffuf"
+        )
 
 
 class TestExtractPrimaryBinaryEnv:
@@ -75,7 +93,9 @@ class TestExtractPrimaryBinaryEnv:
         assert extract_primary_binary("env TERM=xterm nmap target") == "nmap"
 
     def test_env_multiple_assignments(self):
-        assert extract_primary_binary("env FOO=bar BAZ=qux nuclei -u target") == "nuclei"
+        assert (
+            extract_primary_binary("env FOO=bar BAZ=qux nuclei -u target") == "nuclei"
+        )
 
     def test_env_dash_i(self):
         assert extract_primary_binary("env -i nmap target") == "nmap"
@@ -89,7 +109,10 @@ class TestExtractPrimaryBinaryShellTrampoline:
         assert extract_primary_binary("bash -c 'nmap -sV target'") == "nmap"
 
     def test_sh_c(self):
-        assert extract_primary_binary("sh -c 'gobuster dir -u http://target'") == "gobuster"
+        assert (
+            extract_primary_binary("sh -c 'gobuster dir -u http://target'")
+            == "gobuster"
+        )
 
     def test_bash_lc(self):
         assert extract_primary_binary("bash -lc 'nuclei -u target'") == "nuclei"

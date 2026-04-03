@@ -13,6 +13,7 @@ from airecon.proxy.semgrep import (
 
 # ── get_default_rules ─────────────────────────────────────────────────────────
 
+
 def test_get_default_rules_returns_list():
     rules = get_default_rules()
     assert isinstance(rules, list)
@@ -32,6 +33,7 @@ def test_get_default_rules_returns_copy():
 
 
 # ── build_semgrep_command ─────────────────────────────────────────────────────
+
 
 def test_build_semgrep_command_default_rules():
     cmd = build_semgrep_command("/workspace/repo")
@@ -76,9 +78,18 @@ def test_build_semgrep_command_has_safety_flags():
 
 # ── parse_semgrep_results ─────────────────────────────────────────────────────
 
-def _make_result(rule_id="test.rule", severity="WARNING", message="Test issue",
-                 path="app.py", start_line=10, end_line=15,
-                 cwe=None, owasp=None, confidence="HIGH"):
+
+def _make_result(
+    rule_id="test.rule",
+    severity="WARNING",
+    message="Test issue",
+    path="app.py",
+    start_line=10,
+    end_line=15,
+    cwe=None,
+    owasp=None,
+    confidence="HIGH",
+):
     return {
         "check_id": rule_id,
         "path": path,
@@ -93,16 +104,18 @@ def _make_result(rule_id="test.rule", severity="WARNING", message="Test issue",
                 "owasp": owasp or ["A03:2021"],
                 "confidence": confidence,
                 "references": ["https://owasp.org/"],
-            }
-        }
+            },
+        },
     }
 
 
 def test_parse_semgrep_results_basic():
-    raw = json.dumps({
-        "results": [_make_result()],
-        "errors": [],
-    })
+    raw = json.dumps(
+        {
+            "results": [_make_result()],
+            "errors": [],
+        }
+    )
     result = parse_semgrep_results(raw)
     assert result["total"] == 1
     assert len(result["findings"]) == 1
@@ -115,14 +128,16 @@ def test_parse_semgrep_results_basic():
 
 
 def test_parse_semgrep_results_multiple_severities():
-    raw = json.dumps({
-        "results": [
-            _make_result("r1", "ERROR"),
-            _make_result("r2", "WARNING"),
-            _make_result("r3", "ERROR"),
-        ],
-        "errors": [],
-    })
+    raw = json.dumps(
+        {
+            "results": [
+                _make_result("r1", "ERROR"),
+                _make_result("r2", "WARNING"),
+                _make_result("r3", "ERROR"),
+            ],
+            "errors": [],
+        }
+    )
     result = parse_semgrep_results(raw)
     assert result["total"] == 3
     assert "ERROR: 2" in result["summary"]
@@ -138,10 +153,12 @@ def test_parse_semgrep_results_empty():
 
 
 def test_parse_semgrep_results_with_errors():
-    raw = json.dumps({
-        "results": [],
-        "errors": [{"type": "ParseError", "message": "Syntax error in file"}]
-    })
+    raw = json.dumps(
+        {
+            "results": [],
+            "errors": [{"type": "ParseError", "message": "Syntax error in file"}],
+        }
+    )
     result = parse_semgrep_results(raw)
     assert len(result["errors"]) == 1
     assert result["errors"][0]["type"] == "ParseError"
@@ -155,15 +172,18 @@ def test_parse_semgrep_results_bad_json():
 
 
 def test_parse_semgrep_results_code_snippet_extracted():
-    raw = json.dumps({
-        "results": [_make_result()],
-        "errors": [],
-    })
+    raw = json.dumps(
+        {
+            "results": [_make_result()],
+            "errors": [],
+        }
+    )
     result = parse_semgrep_results(raw)
     assert result["findings"][0]["code_snippet"] == "dangerous_code()"
 
 
 # ── run_code_analysis (async, mocked engine) ──────────────────────────────────
+
 
 @pytest.fixture
 def mock_engine():
@@ -174,10 +194,12 @@ def mock_engine():
 
 @pytest.mark.asyncio
 async def test_run_code_analysis_success(mock_engine):
-    good_json = json.dumps({
-        "results": [_make_result("xss.reflect", "ERROR", "Reflected XSS")],
-        "errors": [],
-    })
+    good_json = json.dumps(
+        {
+            "results": [_make_result("xss.reflect", "ERROR", "Reflected XSS")],
+            "errors": [],
+        }
+    )
     # First call: which semgrep (install check)
     # Second call: actual scan
     mock_engine.execute_tool.side_effect = [
@@ -220,8 +242,7 @@ async def test_run_code_analysis_with_custom_rules(mock_engine):
         {"success": True, "result": json.dumps({"results": [], "errors": []})},
     ]
     await run_code_analysis(
-        mock_engine, "/workspace/app",
-        rules=["p/python"], languages=["python"]
+        mock_engine, "/workspace/app", rules=["p/python"], languages=["python"]
     )
     # Verify the scan command contains our custom rules
     scan_call = mock_engine.execute_tool.call_args_list[1]
