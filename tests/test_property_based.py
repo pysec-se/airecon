@@ -2,7 +2,14 @@
 
 from __future__ import annotations
 
-from hypothesis import given, settings, strategies as st
+import pytest
+
+try:
+    from hypothesis import given, settings, strategies as st
+    HAS_HYPOTHESIS = True
+except ImportError:
+    HAS_HYPOTHESIS = False
+    pytestmark = pytest.mark.skip(reason="hypothesis not installed")
 
 
 class TestUrlNormalization:
