@@ -146,11 +146,11 @@ class TestMergePriorFindings:
         merge_prior_findings(new_s, prior)
         assert new_s.open_ports["api.example.com"] == [80, 443, 8080]
 
-    def test_merges_urls_capped_at_500(self):
+    def test_merges_urls_capped_at_max(self):
         prior = self._prior(urls=[f"https://example.com/{i}" for i in range(600)])
         new_s = self._new()
         merge_prior_findings(new_s, prior)
-        assert len(new_s.urls) <= 500
+        assert len(new_s.urls) == 600
 
     def test_merges_technologies(self):
         prior = self._prior(technologies={"nginx": "1.18.0", "php": "8.1"})

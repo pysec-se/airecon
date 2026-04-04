@@ -20,6 +20,7 @@ class _FuzzingExecutorMixin:
         arguments: dict[str, Any],
     ) -> tuple[bool, float, dict[str, Any], str | None]:
         from ..fuzzer import Fuzzer
+
         self._last_output_file = None
         start_time = time.time()
 
@@ -29,9 +30,14 @@ class _FuzzingExecutorMixin:
         _valid_vuln_types = set(_FUZZ_PAYLOAD_KEYS.keys())
         _raw_vuln_types = arguments.get("vuln_types")
         if _raw_vuln_types and isinstance(_raw_vuln_types, list):
-            vuln_types = [v for v in _raw_vuln_types if isinstance(v, str) and v in _valid_vuln_types] or list(_valid_vuln_types)
+            vuln_types = [
+                v
+                for v in _raw_vuln_types
+                if isinstance(v, str) and v in _valid_vuln_types
+            ] or list(_valid_vuln_types)
         else:
             vuln_types = list(_valid_vuln_types)
+
         def _as_bool(value: Any, default: bool = True) -> bool:
             if value is None:
                 return default
@@ -42,11 +48,13 @@ class _FuzzingExecutorMixin:
             if isinstance(value, str):
                 return value.strip().lower() in {"1", "true", "yes", "y", "on"}
             return default
+
         def _as_str_list(value: Any) -> list[str] | None:
             if not isinstance(value, list):
                 return None
             cleaned = [str(v).strip() for v in value if str(v).strip()]
             return cleaned or None
+
         enable_phase2 = _as_bool(arguments.get("phase2"), default=True)
         ssrf_params = _as_str_list(arguments.get("ssrf_params"))
         graphql_endpoints = _as_str_list(arguments.get("graphql_endpoints"))
@@ -128,8 +136,10 @@ class _FuzzingExecutorMixin:
 
         self.state.tool_history.append(
             ToolExecution(
-                tool_name=tool_name, arguments=arguments,
-                result=res_dict, duration=duration,
+                tool_name=tool_name,
+                arguments=arguments,
+                result=res_dict,
+                duration=duration,
                 status="success" if success else "error",
             )
         )
@@ -142,8 +152,10 @@ class _FuzzingExecutorMixin:
         try:
             if self._session and self._session.target:
                 session_target = self._session.target.strip()
-        except Exception:
-            pass
+        except Exception as e:
+            logger.debug(
+                "Expected failure reading session target for scope check: %s", e
+            )
 
         if not session_target or not target_url:
             return True
@@ -172,6 +184,7 @@ class _FuzzingExecutorMixin:
         arguments: dict[str, Any],
     ) -> tuple[bool, float, dict[str, Any], str | None]:
         from ..fuzzer import quick_fuzz_url
+
         self._last_output_file = None
         start_time = time.time()
 
@@ -179,10 +192,13 @@ class _FuzzingExecutorMixin:
         params = arguments.get("params") or None
 
         if not self._is_target_in_scope(target):
-            session_target = getattr(getattr(self, "_session", None), "target", "unknown")
+            session_target = getattr(
+                getattr(self, "_session", None), "target", "unknown"
+            )
             logger.warning(
                 "quick_fuzz scope violation — target %r is outside session scope %r. Skipping.",
-                target, session_target,
+                target,
+                session_target,
             )
             oos_result = {
                 "success": False,
@@ -196,8 +212,11 @@ class _FuzzingExecutorMixin:
             duration = time.time() - start_time
             self.state.tool_history.append(
                 ToolExecution(
-                    tool_name=tool_name, arguments=arguments,
-                    result=oos_result, duration=duration, status="error",
+                    tool_name=tool_name,
+                    arguments=arguments,
+                    result=oos_result,
+                    duration=duration,
+                    status="error",
                 )
             )
             self.state.tool_counts["total"] += 1
@@ -205,14 +224,16 @@ class _FuzzingExecutorMixin:
 
         try:
             results = await quick_fuzz_url(
-                url=target, params=params,
+                url=target,
+                params=params,
                 headers=self._build_fuzz_headers(),
             )
 
             if not results:
                 res_dict = {
                     "success": True,
-                    "result": "No vulnerabilities found with confidence > 0.60."}
+                    "result": "No vulnerabilities found with confidence > 0.60.",
+                }
             else:
                 findings_list = [
                     f"Param: {r.parameter} | Vuln: {r.vuln_type} | "
@@ -236,7 +257,8 @@ class _FuzzingExecutorMixin:
                     "success": True,
                     "stdout": "\n".join(stdout_lines),
                     "findings": findings_list,
-                    "total": len(findings_list)}
+                    "total": len(findings_list),
+                }
 
             try:
                 self._save_tool_output(tool_name, arguments, res_dict)
@@ -251,8 +273,10 @@ class _FuzzingExecutorMixin:
         duration = time.time() - start_time
         self.state.tool_history.append(
             ToolExecution(
-                tool_name=tool_name, arguments=arguments,
-                result=res_dict, duration=duration,
+                tool_name=tool_name,
+                arguments=arguments,
+                result=res_dict,
+                duration=duration,
                 status="success" if success else "error",
             )
         )
@@ -272,10 +296,13 @@ class _FuzzingExecutorMixin:
         vuln_types = arguments.get("vuln_types") or None
 
         if not self._is_target_in_scope(target):
-            session_target = getattr(getattr(self, "_session", None), "target", "unknown")
+            session_target = getattr(
+                getattr(self, "_session", None), "target", "unknown"
+            )
             logger.warning(
                 "deep_fuzz scope violation — target %r is outside session scope %r. Skipping.",
-                target, session_target,
+                target,
+                session_target,
             )
             oos_result = {
                 "success": False,
@@ -288,12 +315,16 @@ class _FuzzingExecutorMixin:
             duration = time.time() - start_time
             self.state.tool_history.append(
                 ToolExecution(
-                    tool_name=tool_name, arguments=arguments,
-                    result=oos_result, duration=duration, status="error",
+                    tool_name=tool_name,
+                    arguments=arguments,
+                    result=oos_result,
+                    duration=duration,
+                    status="error",
                 )
             )
             self.state.tool_counts["total"] += 1
             return False, duration, oos_result, None
+
         def _as_bool(value: Any, default: bool = True) -> bool:
             if value is None:
                 return default
@@ -304,11 +335,13 @@ class _FuzzingExecutorMixin:
             if isinstance(value, str):
                 return value.strip().lower() in {"1", "true", "yes", "y", "on"}
             return default
+
         def _as_str_list(value: Any) -> list[str] | None:
             if not isinstance(value, list):
                 return None
             cleaned = [str(v).strip() for v in value if str(v).strip()]
             return cleaned or None
+
         enable_phase2 = _as_bool(arguments.get("phase2"), default=True)
         enable_phase3 = _as_bool(arguments.get("phase3"), default=True)
         ssrf_params = _as_str_list(arguments.get("ssrf_params"))
@@ -336,8 +369,11 @@ class _FuzzingExecutorMixin:
 
         try:
             from ..fuzzer import InteractiveRealTimeTester
+
             tester = InteractiveRealTimeTester(
-                target, threads=10, timeout=20,
+                target,
+                threads=10,
+                timeout=20,
                 headers=self._build_fuzz_headers(),
                 auth_login_url=auth_login_url,
             )
@@ -404,8 +440,10 @@ class _FuzzingExecutorMixin:
         duration = time.time() - start_time
         self.state.tool_history.append(
             ToolExecution(
-                tool_name=tool_name, arguments=arguments,
-                result=res_dict, duration=duration,
+                tool_name=tool_name,
+                arguments=arguments,
+                result=res_dict,
+                duration=duration,
                 status="success" if success else "error",
             )
         )
@@ -418,13 +456,13 @@ class _FuzzingExecutorMixin:
         arguments: dict[str, Any],
     ) -> tuple[bool, float, dict[str, Any], str | None]:
         from ..fuzzer import generate_fuzz_wordlist
+
         self._last_output_file = None
         start_time = time.time()
 
         raw_output_file = arguments.get("output_file", "wordlist.txt")
         output_file = Path(raw_output_file).name or "wordlist.txt"
-        max_combinations = min(
-            int(arguments.get("max_combinations", 300)), 1000)
+        max_combinations = min(int(arguments.get("max_combinations", 300)), 1000)
         vuln_types = arguments.get("vuln_types") or None
 
         try:
@@ -462,8 +500,10 @@ class _FuzzingExecutorMixin:
         duration = time.time() - start_time
         self.state.tool_history.append(
             ToolExecution(
-                tool_name=tool_name, arguments=arguments,
-                result=res_dict, duration=duration,
+                tool_name=tool_name,
+                arguments=arguments,
+                result=res_dict,
+                duration=duration,
                 status="success" if success else "error",
             )
         )
@@ -479,7 +519,8 @@ class _FuzzingExecutorMixin:
         if auth_cookies:
             cookie_str = "; ".join(
                 f"{c.get('name', '')}={c.get('value', '')}"
-                for c in auth_cookies if c.get("name")
+                for c in auth_cookies
+                if c.get("name")
             )
             if cookie_str:
                 headers["Cookie"] = cookie_str

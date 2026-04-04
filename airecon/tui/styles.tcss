@@ -418,21 +418,25 @@ StreamingMessage .streaming-indicator {
    ═══════════════════════════════════════════ */
 
 ThinkingSpinner {
-    height: 1;
+    height: auto;
+    min-height: 6;
     width: auto;
     margin: 1 1;
     padding: 0 1;
     background: transparent;
-    align: left middle;
+    align: left top;
 }
 
-#thinking-spinner {
-    width: 4;
+ThinkingSpinner .thinking-row {
     height: 1;
-    color: #00d4aa;
 }
 
-.thinking-label {
+ThinkingSpinner .buddy-part {
+    color: #f59e0b;
+    text-style: bold;
+}
+
+ThinkingSpinner .thinking-label {
     color: #8b949e;
     text-style: italic;
     width: auto;

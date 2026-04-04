@@ -12,6 +12,7 @@ ERROR_LOG = "error.log"
 AI_REASONING_LOG = "ai_log_reasoning.log"
 HTTP_PROXY_LOG = "http_proxy.log"
 
+
 def setup_logging(
     log_dir: str | Path = LOG_DIR,
     level: int = logging.DEBUG,
@@ -48,8 +49,10 @@ def setup_logging(
         for _h in list(_lg.handlers):
             try:
                 _h.close()
-            except Exception:
-                pass
+            except Exception as e:
+                logging.getLogger(__name__).debug(
+                    "Expected failure closing old handler for %s: %s", _name, e
+                )
         _lg.handlers.clear()
 
     root = logging.getLogger()
@@ -86,8 +89,16 @@ def setup_logging(
     uv_access.addHandler(_http_fh)
     uv_access.propagate = False
 
-    for _noisy in ("httpx", "httpcore", "watchfiles", "asyncio",
-                   "markdown_it", "uvicorn", "uvicorn.error", "multipart"):
+    for _noisy in (
+        "httpx",
+        "httpcore",
+        "watchfiles",
+        "asyncio",
+        "markdown_it",
+        "uvicorn",
+        "uvicorn.error",
+        "multipart",
+    ):
         logging.getLogger(_noisy).setLevel(logging.WARNING)
 
     logging.getLogger("airecon.logger").info(

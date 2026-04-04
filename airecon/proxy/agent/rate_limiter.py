@@ -10,6 +10,7 @@ import httpx
 
 logger = logging.getLogger("airecon.proxy.agent.rate_limiter")
 
+
 class AdaptiveRateLimiter:
     def __init__(
         self,
@@ -53,7 +54,6 @@ class AdaptiveRateLimiter:
 
         for attempt in range(self.max_retries):
             try:
-
                 await self._apply_rate_limit(domain)
 
                 loop = asyncio.get_running_loop()
@@ -79,7 +79,7 @@ class AdaptiveRateLimiter:
             except httpx.TimeoutException:
                 logger.warning("Request timeout on attempt %d", attempt + 1)
                 if attempt < self.max_retries - 1:
-                    await asyncio.sleep(self.base_delay * (2 ** attempt))
+                    await asyncio.sleep(self.base_delay * (2**attempt))
                     continue
                 return None
 
@@ -128,17 +128,12 @@ class AdaptiveRateLimiter:
                 delay = int(retry_after)
                 logger.info("Retry-After header: %ds", delay)
             except ValueError:
-
                 delay = self.base_delay * 2
         else:
-
             hit_count = self.rate_limit_hits.get(domain, 0) + 1
             self.rate_limit_hits[domain] = hit_count
 
-            delay = min(
-                self.base_delay * (2 ** hit_count),
-                self.max_delay
-            )
+            delay = min(self.base_delay * (2**hit_count), self.max_delay)
 
         jitter = random.uniform(0.8, 1.2)
         delay *= jitter
@@ -154,10 +149,7 @@ class AdaptiveRateLimiter:
         hit_count = self.rate_limit_hits.get(domain, 0) + 1
         self.rate_limit_hits[domain] = hit_count
 
-        delay = min(
-            self.base_delay * (2 ** hit_count),
-            self.max_delay
-        )
+        delay = min(self.base_delay * (2**hit_count), self.max_delay)
 
         jitter = random.uniform(0.5, 1.5)
         delay *= jitter
@@ -194,9 +186,8 @@ class AdaptiveRateLimiter:
             loop = asyncio.get_running_loop()
             loop.create_task(old_client.aclose())
         except RuntimeError:
-
             try:
                 asyncio.run(old_client.aclose())
-            except Exception:
-                pass
+            except Exception as e:
+                logger.debug("Expected failure closing old httpx client: %s", e)
         logger.info("Proxy configured: %s", proxy_url)

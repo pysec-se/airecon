@@ -3,10 +3,12 @@ from __future__ import annotations
 import asyncio
 import heapq
 import logging
+import os
 import re
 import uuid
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
+from time import monotonic
 from typing import Any
 from urllib.parse import urlparse
 
@@ -18,6 +20,7 @@ MAX_TOOL_ITERATIONS = 2000
 MAX_TOOL_HISTORY = 100
 MAX_OBJECTIVES = 64
 MAX_EVIDENCE = 200
+MAX_EVIDENCE_DEDUP_SCAN = 120
 MAX_HYPOTHESES = 32
 MAX_CAUSAL_OBSERVATIONS = 2000
 MAX_CAUSAL_INTERVENTIONS = 300
@@ -26,20 +29,33 @@ MAX_CAUSAL_EDGES = 512
 FLAG_PATTERN = re.compile(r"flag\{[^}]+\}", re.IGNORECASE)
 
 _THINK_BLOCK_RE = re.compile(r"<think>.*?</think>", re.DOTALL | re.IGNORECASE)
-
 _THINK_OPEN_RE = re.compile(r"<think>(?!</think>).*$", re.DOTALL | re.IGNORECASE)
-
 _SEVERITY_MULTIPLIER: dict[int, float] = {5: 2.0, 4: 1.5, 3: 1.0, 2: 0.7, 1: 0.5}
-
 _MAX_TOOL_RESULT_CHARS = 50_000
+_MIN_SEVERITY_FOR_PRESERVATION = 4
+_MIN_CONFIDENCE_FOR_PRESERVATION = 0.75
+
 
 def _get_evidence_similarity_threshold() -> float:
     try:
         config = get_config()
         return float(config.evidence_similarity_threshold)
-    except Exception:
-
+    except Exception as e:
+        logger.debug(
+            "Expected failure reading evidence similarity threshold from config: %s", e
+        )
         return 0.70
+
+
+def _get_evidence_dedup_scan_limit() -> int:
+    raw = str(os.environ.get("AIRECON_EVIDENCE_DEDUP_SCAN", "")).strip()
+    if raw:
+        try:
+            return max(20, min(int(raw), 1000))
+        except ValueError:
+            pass
+    return MAX_EVIDENCE_DEDUP_SCAN
+
 
 def _truncate_tool_result(result: dict[str, Any]) -> dict[str, Any]:
     if not isinstance(result, dict):
@@ -50,13 +66,18 @@ def _truncate_tool_result(result: dict[str, Any]) -> dict[str, Any]:
             result[k] = v[:_MAX_TOOL_RESULT_CHARS] + " ... [TRUNCATED]"
     return result
 
+
 def _get_context_limits():
     try:
         config = get_config()
         dynamic_default = max(100, min(10000, int(config.ollama_num_ctx) // 128))
         configured_max = int(config.agent_max_conversation_messages or 0)
-        max_conversation_messages = configured_max if configured_max > 0 else dynamic_default
-        trigger_ratio = max(0.5, min(0.95, float(config.agent_compression_trigger_ratio)))
+        max_conversation_messages = (
+            configured_max if configured_max > 0 else dynamic_default
+        )
+        trigger_ratio = max(
+            0.5, min(0.95, float(config.agent_compression_trigger_ratio))
+        )
         return {
             "max_conversation_messages": max_conversation_messages,
             "compression_trigger": int(max_conversation_messages * trigger_ratio),
@@ -65,7 +86,6 @@ def _get_context_limits():
             "llm_compression_num_predict": config.agent_llm_compression_num_predict,
         }
     except Exception:
-
         return {
             "max_conversation_messages": 1024,
             "compression_trigger": 819,
@@ -74,12 +94,14 @@ def _get_context_limits():
             "llm_compression_num_predict": 1024,
         }
 
+
 def jaccard_similarity(a: str, b: str) -> float:
     tokens_a = set(a.lower().split())
     tokens_b = set(b.lower().split())
     if not tokens_a or not tokens_b:
         return 0.0
     return len(tokens_a & tokens_b) / len(tokens_a | tokens_b)
+
 
 def _calculate_objective_confidence(
     summary: str,
@@ -106,6 +128,7 @@ def _calculate_objective_confidence(
 
     return min(score, 1.0)
 
+
 @dataclass
 class ToolExecution:
     tool_name: str
@@ -114,10 +137,12 @@ class ToolExecution:
     duration: float = 0.0
     status: str = "pending"
 
+
 @dataclass
 class AgentEvent:
     type: str
     data: dict[str, Any] = field(default_factory=dict)
+
 
 @dataclass
 class CausalObservation:
@@ -155,6 +180,7 @@ class CausalObservation:
             timestamp=str(raw.get("timestamp", "")).strip(),
         )
 
+
 @dataclass
 class CausalHypothesis:
     hypothesis_id: str
@@ -181,6 +207,7 @@ class CausalHypothesis:
             updated_at=str(raw.get("updated_at", "")).strip(),
         )
 
+
 @dataclass
 class CausalEdge:
     cause: str
@@ -196,6 +223,7 @@ class CausalEdge:
             relation=str(raw.get("relation", "supports")).strip().lower(),
             confidence=max(0.0, min(float(raw.get("confidence", 0.5) or 0.5), 1.0)),
         )
+
 
 @dataclass
 class CausalIntervention:
@@ -221,6 +249,7 @@ class CausalIntervention:
             timestamp=str(raw.get("timestamp", "")).strip(),
         )
 
+
 @dataclass
 class CausalState:
     observations: list[CausalObservation] = field(default_factory=list)
@@ -229,7 +258,9 @@ class CausalState:
     interventions: list[CausalIntervention] = field(default_factory=list)
     posterior: dict[str, float] = field(default_factory=dict)
 
-    def record_observation(self, observation: CausalObservation | dict[str, Any]) -> bool:
+    def record_observation(
+        self, observation: CausalObservation | dict[str, Any]
+    ) -> bool:
         obs = (
             observation
             if isinstance(observation, CausalObservation)
@@ -248,14 +279,16 @@ class CausalState:
             self.observations = self.observations[-MAX_CAUSAL_OBSERVATIONS:]
         return True
 
-    def add_intervention(self, intervention: CausalIntervention | dict[str, Any]) -> None:
+    def add_intervention(
+        self, intervention: CausalIntervention | dict[str, Any]
+    ) -> None:
         iv = (
             intervention
             if isinstance(intervention, CausalIntervention)
             else CausalIntervention.from_dict(intervention)
         )
         if not iv.intervention_id:
-            iv.intervention_id = f"iv_{len(self.interventions)+1}"
+            iv.intervention_id = f"iv_{len(self.interventions) + 1}"
         if not iv.timestamp:
             iv.timestamp = datetime.now(timezone.utc).isoformat()
         self.interventions.append(iv)
@@ -272,7 +305,6 @@ class CausalState:
                 and existing.effect == ce.effect
                 and existing.relation == ce.relation
             ):
-
                 if ce.confidence > existing.confidence:
                     existing.confidence = ce.confidence
                 return False
@@ -288,7 +320,7 @@ class CausalState:
             else CausalHypothesis.from_dict(hypothesis)
         )
         if not h.hypothesis_id:
-            h.hypothesis_id = f"hyp_{len(self.hypotheses)+1}"
+            h.hypothesis_id = f"hyp_{len(self.hypotheses) + 1}"
         h.updated_at = datetime.now(timezone.utc).isoformat()
         for idx, existing in enumerate(self.hypotheses):
             if existing.hypothesis_id == h.hypothesis_id:
@@ -307,8 +339,7 @@ class CausalState:
             "edges": [e.__dict__ for e in self.edges],
             "interventions": [i.__dict__ for i in self.interventions],
             "posterior": {
-                str(k): max(0.0, min(float(v), 1.0))
-                for k, v in self.posterior.items()
+                str(k): max(0.0, min(float(v), 1.0)) for k, v in self.posterior.items()
             },
         }
 
@@ -348,12 +379,14 @@ class CausalState:
             }
         return state
 
+
 @dataclass
 class AgentState:
     conversation: list[dict[str, Any]] = field(default_factory=list)
     tool_history: list[ToolExecution] = field(default_factory=list)
     tool_counts: dict[str, int] = field(
-        default_factory=lambda: {"exec": 0, "total": 0, "subagents": 0})
+        default_factory=lambda: {"exec": 0, "total": 0, "subagents": 0}
+    )
     token_usage: dict[str, int] = field(
         default_factory=lambda: {
             "used": 0,
@@ -366,9 +399,7 @@ class AgentState:
         }
     )
     skills_used: list[str] = field(default_factory=list)
-    planned_tools: list[str] = field(
-        default_factory=list
-    )
+    planned_tools: list[str] = field(default_factory=list)
     iteration: int = 0
     max_iterations: int = MAX_TOOL_ITERATIONS
     active_target: str | None = None
@@ -380,7 +411,9 @@ class AgentState:
 
     phase_tool_usage: dict[str, dict[str, int]] = field(default_factory=dict)
 
-    tool_effectiveness: dict[str, dict[str, dict[str, int]]] = field(default_factory=dict)
+    tool_effectiveness: dict[str, dict[str, dict[str, int]]] = field(
+        default_factory=dict
+    )
 
     http_baselines: dict[str, dict[str, Any]] = field(default_factory=dict)
 
@@ -394,7 +427,9 @@ class AgentState:
 
     objective_dependencies: dict[str, list[str]] = field(default_factory=dict)
 
-    _compress_failures: list[bool] = field(default_factory=list, repr=False, compare=False)
+    _compress_failures: list[bool] = field(
+        default_factory=list, repr=False, compare=False
+    )
 
     def add_message(
         self,
@@ -451,12 +486,11 @@ class AgentState:
         self.conversation = system_msgs + kept_non_system
 
         if len(self.conversation) > limits["max_conversation_messages"]:
+            self.conversation = self.conversation[
+                -limits["max_conversation_messages"] :
+            ]
 
-            self.conversation = self.conversation[-limits["max_conversation_messages"]:]
-
-    def ensure_phase_objectives(
-        self, phase: str, defaults: list[str]
-    ) -> None:
+    def ensure_phase_objectives(self, phase: str, defaults: list[str]) -> None:
         if not defaults:
             return
 
@@ -521,7 +555,9 @@ class AgentState:
 
         if len(self.dead_hosts) > 500:
             self.dead_hosts = self.dead_hosts[-500:]
-        logger.info("Dead host recorded: %s (total: %d)", normalised, len(self.dead_hosts))
+        logger.info(
+            "Dead host recorded: %s (total: %d)", normalised, len(self.dead_hosts)
+        )
         return True
 
     def add_failure(
@@ -534,21 +570,49 @@ class AgentState:
     ) -> str:
         if not error_type:
             error_lower = error_detail.lower()
-            if any(x in error_lower for x in ["nxdomain", "name_not_resolved", "could not resolve", "dead host",
-                                               "connection refused", "no route to host", "network is unreachable",
-                                               "failed to connect", "couldn't connect", "curl: (7)"]):
+            if any(
+                x in error_lower
+                for x in [
+                    "nxdomain",
+                    "name_not_resolved",
+                    "could not resolve",
+                    "dead host",
+                    "connection refused",
+                    "no route to host",
+                    "network is unreachable",
+                    "failed to connect",
+                    "couldn't connect",
+                    "curl: (7)",
+                ]
+            ):
                 error_type = "network"
-            elif any(x in error_lower for x in ["401", "403", "unauthorized", "forbidden", "authentication"]):
+            elif any(
+                x in error_lower
+                for x in ["401", "403", "unauthorized", "forbidden", "authentication"]
+            ):
                 error_type = "auth"
-            elif any(x in error_lower for x in ["timeout", "timed out", "max retries", "curl: (28)"]):
+            elif any(
+                x in error_lower
+                for x in ["timeout", "timed out", "max retries", "curl: (28)"]
+            ):
                 error_type = "timeout"
             elif any(x in error_lower for x in ["404", "not found", "no such"]):
                 error_type = "not_found"
-            elif any(x in error_lower for x in ["429", "rate limit", "too many requests"]):
+            elif any(
+                x in error_lower for x in ["429", "rate limit", "too many requests"]
+            ):
                 error_type = "rate_limit"
-            elif any(x in error_lower for x in ["<!doctype", "<html", "text/html", "empty response",
-                                                 "curl: (22)", "the requested url returned error"]):
-
+            elif any(
+                x in error_lower
+                for x in [
+                    "<!doctype",
+                    "<html",
+                    "text/html",
+                    "empty response",
+                    "curl: (22)",
+                    "the requested url returned error",
+                ]
+            ):
                 error_type = "network"
             else:
                 error_type = "other"
@@ -572,14 +636,20 @@ class AgentState:
             "error_detail": error_detail[:500],
             "retry_count": 0,
             "last_retry_iteration": self.iteration,
-            "suggested_action": suggested_actions.get(error_type, suggested_actions["other"]),
+            "suggested_action": suggested_actions.get(
+                error_type, suggested_actions["other"]
+            ),
             "timestamp": datetime.now(timezone.utc).isoformat(),
         }
 
         self.failure_log.append(failure_entry)
         logger.info(
             "Failure recorded: %s (%s) on %s — type=%s, retry=%d",
-            name, failure_category, target or "unknown", error_type, 0
+            name,
+            failure_category,
+            target or "unknown",
+            error_type,
+            0,
         )
 
         if len(self.failure_log) > 50:
@@ -605,14 +675,18 @@ class AgentState:
                 if failure["retry_count"] >= limit:
                     logger.info(
                         "Retry blocked for %s: already retried %d/%d times",
-                        failure["name"], failure["retry_count"], limit
+                        failure["name"],
+                        failure["retry_count"],
+                        limit,
                     )
                     return False
                 failure["retry_count"] += 1
                 failure["last_retry_iteration"] = self.iteration
                 logger.info(
                     "Retry allowed for %s: attempt %d/%d",
-                    failure["name"], failure["retry_count"], limit
+                    failure["name"],
+                    failure["retry_count"],
+                    limit,
                 )
                 return True
 
@@ -626,7 +700,9 @@ class AgentState:
             self.objective_dependencies[objective].append(depends_on)
             logger.info(
                 "Dependency added: '%s' depends on '%s' (total deps: %d)",
-                objective, depends_on, len(self.objective_dependencies[objective])
+                objective,
+                depends_on,
+                len(self.objective_dependencies[objective]),
             )
 
     def get_blocked_objectives(self) -> list[str]:
@@ -660,7 +736,6 @@ class AgentState:
         for objective, deps in self.objective_dependencies.items():
             obj_lower = objective.lower()
             if obj_lower in cyclic:
-
                 blocked.append(objective)
                 continue
             for dep in deps:
@@ -684,9 +759,15 @@ class AgentState:
         return {
             "total": len(self.failure_log),
             "by_type": by_type,
-            "most_common": max(by_type.items(), key=lambda x: x[1])[0] if by_type else None,
+            "most_common": max(by_type.items(), key=lambda x: x[1])[0]
+            if by_type
+            else None,
             "recent_failures": [
-                {"name": f["name"], "type": f["error_type"], "suggested_action": f["suggested_action"]}
+                {
+                    "name": f["name"],
+                    "type": f["error_type"],
+                    "suggested_action": f["suggested_action"],
+                }
                 for f in recent
             ],
         }
@@ -706,7 +787,9 @@ class AgentState:
             return False
 
         if confidence < 0.70:
-            confidence = _calculate_objective_confidence(clean_summary, artifact, source_tool, severity)
+            confidence = _calculate_objective_confidence(
+                clean_summary, artifact, source_tool, severity
+            )
 
         phase_key = phase.upper()
         tags = tags or []
@@ -717,9 +800,17 @@ class AgentState:
             (artifact or "").strip().lower(),
         )
 
+        _dedup_start = monotonic()
         summary_lower = clean_summary.lower()
-        for existing in self.evidence_log:
-
+        scan_limit = _get_evidence_dedup_scan_limit()
+        recent_evidence = self.evidence_log[-scan_limit:]
+        if len(self.evidence_log) > scan_limit:
+            logger.debug(
+                "Evidence dedup scan window capped: total=%d scan=%d",
+                len(self.evidence_log),
+                scan_limit,
+            )
+        for existing in recent_evidence:
             prev_key = (
                 str(existing.get("phase", "")).upper(),
                 str(existing.get("source_tool", "")).strip().lower(),
@@ -730,10 +821,12 @@ class AgentState:
                 return False
 
             if str(existing.get("phase", "")).upper() != phase_key:
-
                 if confidence >= 0.85:
                     existing_summary = str(existing.get("summary", "")).strip().lower()
-                    if self._jaccard_similarity(summary_lower, existing_summary) >= 0.85:
+                    if (
+                        self._jaccard_similarity(summary_lower, existing_summary)
+                        >= 0.85
+                    ):
                         logger.debug(
                             "Evidence dedup (cross-phase, high-confidence): '%s...' ~ '%s...'",
                             summary_lower[:40],
@@ -743,7 +836,10 @@ class AgentState:
                 continue
 
             existing_summary = str(existing.get("summary", "")).strip().lower()
-            if self._jaccard_similarity(summary_lower, existing_summary) >= _get_evidence_similarity_threshold():
+            if (
+                self._jaccard_similarity(summary_lower, existing_summary)
+                >= _get_evidence_similarity_threshold()
+            ):
                 logger.debug(
                     "Evidence dedup (semantic): '%s...' ~ '%s...'",
                     summary_lower[:40],
@@ -751,11 +847,22 @@ class AgentState:
                 )
                 return False
 
+        _dedup_elapsed = monotonic() - _dedup_start
+        if _dedup_elapsed >= 1.0:
+            logger.warning(
+                "Evidence dedup slow path: %.2fs (scan=%d total=%d)",
+                _dedup_elapsed,
+                len(recent_evidence),
+                len(self.evidence_log),
+            )
+
         clamped_severity = max(1, min(int(severity), 5))
         if clamped_severity != severity:
             logger.warning(
                 "Evidence severity clamped from %d to %d: %s",
-                severity, clamped_severity, clean_summary[:100]
+                severity,
+                clamped_severity,
+                clean_summary[:100],
             )
         severity = clamped_severity
 
@@ -778,6 +885,7 @@ class AgentState:
                 conf = float(e.get("confidence", 0.0))
                 sev = int(e.get("severity", 3))
                 return conf * _SEVERITY_MULTIPLIER.get(sev, 1.0)
+
             kept = heapq.nlargest(
                 MAX_EVIDENCE,
                 self.evidence_log,
@@ -831,7 +939,9 @@ class AgentState:
         return self.phase_tool_usage.get(phase, {}).get(tool_name, 0)
 
     def get_active_chains(self) -> list[dict[str, Any]]:
-        return [c for c in self.exploit_chains if c.get("status") in ("planning", "active")]
+        return [
+            c for c in self.exploit_chains if c.get("status") in ("planning", "active")
+        ]
 
     def update_chain_step(
         self,
@@ -866,7 +976,12 @@ class AgentState:
             return ""
 
         for existing in self.hypothesis_queue:
-            if jaccard_similarity(claim.lower(), str(existing.get("claim", "")).lower()) >= 0.80:
+            if (
+                jaccard_similarity(
+                    claim.lower(), str(existing.get("claim", "")).lower()
+                )
+                >= 0.80
+            ):
                 return str(existing.get("id", ""))
 
         hyp_id = f"h_{self.iteration}_{len(self.hypothesis_queue)}"
@@ -884,12 +999,14 @@ class AgentState:
             }
         )
         if len(self.hypothesis_queue) > MAX_HYPOTHESES:
-
             self.hypothesis_queue = sorted(
                 self.hypothesis_queue,
                 key=lambda h: (
-                    0 if str(h.get("status", "")) in ("pending", "testing") else
-                    1 if str(h.get("status", "")) == "confirmed" else 2,
+                    0
+                    if str(h.get("status", "")) in ("pending", "testing")
+                    else 1
+                    if str(h.get("status", "")) == "confirmed"
+                    else 2,
                     int(h.get("iteration_formed", 0)),
                 ),
             )[:MAX_HYPOTHESES]
@@ -914,7 +1031,8 @@ class AgentState:
 
     def get_pending_hypotheses(self, max_items: int = 5) -> list[dict[str, Any]]:
         pending = [
-            h for h in self.hypothesis_queue
+            h
+            for h in self.hypothesis_queue
             if str(h.get("status", "pending")) in ("pending", "testing")
         ]
         pending.sort(key=lambda h: int(h.get("iteration_formed", 0)))
@@ -923,7 +1041,8 @@ class AgentState:
     def resolve_hypotheses_from_evidence(self) -> int:
         confirmed_count = 0
         high_evidence = [
-            e for e in self.evidence_log
+            e
+            for e in self.evidence_log
             if int(e.get("severity", 1)) >= 4
             and float(e.get("confidence", 0.0)) >= 0.75
         ]
@@ -947,18 +1066,16 @@ class AgentState:
     def build_hypothesis_context(self, max_pending: int = 4) -> str:
         pending = self.get_pending_hypotheses(max_items=max_pending)
         confirmed = [
-            h for h in self.hypothesis_queue
-            if str(h.get("status", "")) == "confirmed"
+            h for h in self.hypothesis_queue if str(h.get("status", "")) == "confirmed"
         ][-3:]
         refuted = [
-            h for h in self.hypothesis_queue
-            if str(h.get("status", "")) == "refuted"
+            h for h in self.hypothesis_queue if str(h.get("status", "")) == "refuted"
         ][-2:]
 
         if not pending and not confirmed:
             return ""
 
-        lines = ['<hypothesis_queue>']
+        lines = ["<hypothesis_queue>"]
         if pending:
             lines.append("  <pending>")
             for h in pending:
@@ -967,26 +1084,26 @@ class AgentState:
                 plan = h.get("test_plan", "")
                 status = h.get("status", "pending")
                 lines.append(f'    <hypothesis id="{hid}" status="{status}">')
-                lines.append(f'      <claim>{claim}</claim>')
+                lines.append(f"      <claim>{claim}</claim>")
                 if plan:
-                    lines.append(f'      <test_plan>{plan}</test_plan>')
-                lines.append('    </hypothesis>')
+                    lines.append(f"      <test_plan>{plan}</test_plan>")
+                lines.append("    </hypothesis>")
             lines.append("  </pending>")
         if confirmed:
             lines.append("  <confirmed>")
             for h in confirmed:
-                lines.append(f'    - [{h.get("id", "")}] {h.get("claim", "")}')
+                lines.append(f"    - [{h.get('id', '')}] {h.get('claim', '')}")
             lines.append("  </confirmed>")
         if refuted:
             lines.append("  <refuted_do_not_retry>")
             for h in refuted:
-                lines.append(f'    - [{h.get("id", "")}] {h.get("claim", "")}')
+                lines.append(f"    - [{h.get('id', '')}] {h.get('claim', '')}")
             lines.append("  </refuted_do_not_retry>")
         lines.append(
             "  <instruction>Pick one PENDING hypothesis and execute its test_plan "
             "via tool call. Use record_hypothesis to update status after testing.</instruction>"
         )
-        lines.append('</hypothesis_queue>')
+        lines.append("</hypothesis_queue>")
         return "\n".join(lines)
 
     def get_phase_context(
@@ -999,7 +1116,8 @@ class AgentState:
         phase_key = phase.upper()
 
         pending = [
-            o for o in self.objective_queue
+            o
+            for o in self.objective_queue
             if str(o.get("phase", "")).upper() == phase_key
             and str(o.get("status", "pending")).lower() != "done"
         ]
@@ -1008,7 +1126,8 @@ class AgentState:
         )[:max_objectives]
 
         completed = [
-            o for o in self.objective_queue
+            o
+            for o in self.objective_queue
             if str(o.get("phase", "")).upper() == phase_key
             and str(o.get("status", "")).lower() == "done"
         ][:max_objectives]
@@ -1016,13 +1135,15 @@ class AgentState:
         _CONF_FLOOR = 0.65
         if filter_evidence_by_phase:
             evidence = [
-                e for e in reversed(self.evidence_log)
+                e
+                for e in reversed(self.evidence_log)
                 if str(e.get("phase", "")).upper() == phase_key
                 and float(e.get("confidence", 1.0)) >= _CONF_FLOOR
             ][:max_evidence]
         else:
             evidence = [
-                e for e in reversed(self.evidence_log)
+                e
+                for e in reversed(self.evidence_log)
                 if float(e.get("confidence", 1.0)) >= _CONF_FLOOR
             ][:max_evidence]
 
@@ -1042,7 +1163,13 @@ class AgentState:
 
         has_dead = bool(self.dead_hosts)
         has_failures = bool(self.failure_log)
-        if not pending and not evidence and not completed and not has_dead and not has_failures:
+        if (
+            not pending
+            and not evidence
+            and not completed
+            and not has_dead
+            and not has_failures
+        ):
             return ""
 
         lines = [f'<objective_focus phase="{phase_key}">']
@@ -1064,10 +1191,18 @@ class AgentState:
                 artifact = ev.get("artifact")
                 artifact_note = f" [{artifact}]" if artifact else ""
                 sev = int(ev.get("severity", 1))
-                sev_label = {5: "CRITICAL", 4: "HIGH", 3: "MEDIUM", 2: "LOW", 1: "INFO"}.get(sev, "INFO")
+                sev_label = {
+                    5: "CRITICAL",
+                    4: "HIGH",
+                    3: "MEDIUM",
+                    2: "LOW",
+                    1: "INFO",
+                }.get(sev, "INFO")
                 owasp_tags = [t for t in ev.get("tags", []) if t.startswith("owasp:")]
                 owasp_note = f" {','.join(owasp_tags)}" if owasp_tags else ""
-                lines.append(f"    - [{src}][{sev_label}]{owasp_note} {summary}{artifact_note}")
+                lines.append(
+                    f"    - [{src}][{sev_label}]{owasp_note} {summary}{artifact_note}"
+                )
             lines.append("  </recent_evidence>")
 
         if self.dead_hosts:
@@ -1086,7 +1221,9 @@ class AgentState:
                 for error_type, count in failure_summary["by_type"].items():
                     lines.append(f"      - {error_type}: {count}")
             if failure_summary.get("most_common"):
-                lines.append(f"    Most common: {failure_summary['most_common']} errors")
+                lines.append(
+                    f"    Most common: {failure_summary['most_common']} errors"
+                )
             if failure_summary.get("recent_failures"):
                 lines.append("    Recent failures (learn from these):")
                 for failure in failure_summary["recent_failures"][:5]:
@@ -1113,6 +1250,7 @@ class AgentState:
 
     def patch_objectives(self, ops: list[dict[str, Any]]) -> int:
         from .pipeline import PipelinePhase
+
         _valid_phases = {p.value for p in PipelinePhase}
 
         changed = 0
@@ -1132,7 +1270,8 @@ class AgentState:
                 if _effective_phase not in _valid_phases:
                     logger.warning(
                         "patch_objectives: Invalid phase '%s' in op '%s', defaulting to RECON",
-                        phase, op_type
+                        phase,
+                        op_type,
                     )
                     _effective_phase = "RECON"
 
@@ -1155,7 +1294,8 @@ class AgentState:
                 if after_title:
                     idx = next(
                         (
-                            i for i, o in enumerate(self.objective_queue)
+                            i
+                            for i, o in enumerate(self.objective_queue)
                             if str(o.get("title", "")).strip().lower() == after_title
                         ),
                         -1,
@@ -1171,7 +1311,8 @@ class AgentState:
             elif op_type == "remove":
                 before = len(self.objective_queue)
                 self.objective_queue = [
-                    o for o in self.objective_queue
+                    o
+                    for o in self.objective_queue
                     if not (
                         str(o.get("title", "")).strip().lower() == title.lower()
                         and (not phase or str(o.get("phase", "")).upper() == phase)
@@ -1183,9 +1324,8 @@ class AgentState:
             elif op_type == "modify":
                 new_title = str(op.get("new_title", "")).strip()
                 for obj in self.objective_queue:
-                    if (
-                        str(obj.get("title", "")).strip().lower() == title.lower()
-                        and (not phase or str(obj.get("phase", "")).upper() == phase)
+                    if str(obj.get("title", "")).strip().lower() == title.lower() and (
+                        not phase or str(obj.get("phase", "")).upper() == phase
                     ):
                         if new_title:
                             obj["title"] = new_title
@@ -1201,7 +1341,7 @@ class AgentState:
                 if _done_phase not in _valid_phases:
                     logger.warning(
                         "patch_objectives: Invalid phase '%s' in op 'done', defaulting to RECON",
-                        phase
+                        phase,
                     )
                     _done_phase = "RECON"
                 self.mark_objective(
@@ -1210,10 +1350,10 @@ class AgentState:
                 changed += 1
 
             elif op_type == "reorder":
-
                 obj = next(
                     (
-                        o for o in self.objective_queue
+                        o
+                        for o in self.objective_queue
                         if str(o.get("title", "")).strip().lower() == title.lower()
                         and (not phase or str(o.get("phase", "")).upper() == phase)
                     ),
@@ -1225,8 +1365,10 @@ class AgentState:
                     if after_title:
                         idx = next(
                             (
-                                i for i, o in enumerate(self.objective_queue)
-                                if str(o.get("title", "")).strip().lower() == after_title
+                                i
+                                for i, o in enumerate(self.objective_queue)
+                                if str(o.get("title", "")).strip().lower()
+                                == after_title
                             ),
                             -1,
                         )
@@ -1276,6 +1418,8 @@ class AgentState:
         PROTECTED_PREFIXES = (
             "[SYSTEM: RECOVERY STATE",
             "[SYSTEM: PINNED CONTEXT",
+            "[SYSTEM: STRICT_SCOPE_MODE",
+            "[SYSTEM: MEMORY BRAIN",
             "[SYSTEM: RECOVERY MODE",
             "[SYSTEM: COMPRESSION SUMMARY",
         )
@@ -1304,19 +1448,19 @@ class AgentState:
             protected_system = protected_system[-2:]
 
         limits = _get_context_limits()
-        compress_boundary = max(0, len(other_messages) - limits["uncompressed_keep_count"])
+        compress_boundary = max(
+            0, len(other_messages) - limits["uncompressed_keep_count"]
+        )
         for i in range(compress_boundary):
             msg = other_messages[i]
             content = msg.get("content", "")
             role = msg.get("role", "")
 
             if role == "tool" and len(content) > 200:
-
                 if "COMMAND FAILED" in content:
                     first_line = content.split("\n")[0]
                     msg["content"] = f"[COMPRESSED] {first_line}"
                 elif "TOTAL:" in content:
-
                     for line in content.split("\n"):
                         if "TOTAL:" in line:
                             msg["content"] = f"[COMPRESSED] {line.strip()}"
@@ -1328,8 +1472,7 @@ class AgentState:
                     msg["content"] = f"[COMPRESSED] Tool result ({len(content)} chars)"
 
             elif (
-                role == "assistant" and not msg.get(
-                    "tool_calls") and len(content) > 500
+                role == "assistant" and not msg.get("tool_calls") and len(content) > 500
             ):
                 msg["content"] = content[:200] + "... [truncated]"
 
@@ -1344,10 +1487,20 @@ class AgentState:
                 m for m in other_messages if id(m) not in dropped_text_ids
             ]
 
-        budget = max_messages - len(core_system) - len(ephemeral_system) - len(protected_system)
+        budget = (
+            max_messages
+            - len(core_system)
+            - len(ephemeral_system)
+            - len(protected_system)
+        )
         if len(other_messages) <= budget:
-            self.conversation = core_system + ephemeral_system + protected_system + other_messages
-            logger.info("Truncated (compressed + text-drop): %d messages", len(self.conversation))
+            self.conversation = (
+                core_system + ephemeral_system + protected_system + other_messages
+            )
+            logger.info(
+                "Truncated (compressed + text-drop): %d messages",
+                len(self.conversation),
+            )
             return
 
         must_keep = []
@@ -1367,25 +1520,24 @@ class AgentState:
 
             start_idx = len(can_trim) - tail_budget
             while start_idx > 0:
-
                 found_orphan = False
                 for i in range(start_idx, len(can_trim)):
                     if can_trim[i].get("role") == "tool":
-
                         for j in range(i - 1, start_idx - 1, -1):
-                            if can_trim[j].get("role") == "assistant" and can_trim[j].get("tool_calls"):
-
+                            if can_trim[j].get("role") == "assistant" and can_trim[
+                                j
+                            ].get("tool_calls"):
                                 break
                         else:
-
                             found_orphan = True
 
                             for j in range(i - 1, -1, -1):
-                                if can_trim[j].get("role") == "assistant" and can_trim[j].get("tool_calls"):
+                                if can_trim[j].get("role") == "assistant" and can_trim[
+                                    j
+                                ].get("tool_calls"):
                                     start_idx = j + 1
                                     break
                             else:
-
                                 start_idx -= 1
                             break
                 if not found_orphan:
@@ -1406,15 +1558,15 @@ class AgentState:
             ),
         }
 
-        rebuilt = must_keep + \
-            ([separator] if dropped_count > 0 else []) + trimmed
+        rebuilt = must_keep + ([separator] if dropped_count > 0 else []) + trimmed
         repaired = self._repair_tool_pairs(
             core_system + ephemeral_system + protected_system + rebuilt
         )
         self.conversation = repaired
         logger.info(
             "Truncated (pair-preserving): %d messages (dropped %d older messages)",
-            len(self.conversation), dropped_count,
+            len(self.conversation),
+            dropped_count,
         )
 
     @staticmethod
@@ -1424,7 +1576,8 @@ class AgentState:
             if msg.get("role") == "assistant":
                 for tc in msg.get("tool_calls") or []:
                     cid = (
-                        tc.get("id", "") if isinstance(tc, dict)
+                        tc.get("id", "")
+                        if isinstance(tc, dict)
                         else getattr(tc, "id", "") or ""
                     )
                     if cid:
@@ -1440,7 +1593,8 @@ class AgentState:
         orphaned_results = result_call_ids - surviving_call_ids
         if orphaned_results:
             messages = [
-                m for m in messages
+                m
+                for m in messages
                 if not (
                     m.get("role") == "tool"
                     and m.get("tool_call_id") in orphaned_results
@@ -1448,7 +1602,8 @@ class AgentState:
             ]
             logger.debug(
                 "Pair repair: dropped %d orphaned tool result(s) %s",
-                len(orphaned_results), orphaned_results,
+                len(orphaned_results),
+                orphaned_results,
             )
 
         missing_results = surviving_call_ids - result_call_ids
@@ -1459,19 +1614,24 @@ class AgentState:
                 if msg.get("role") == "assistant":
                     for tc in msg.get("tool_calls") or []:
                         cid = (
-                            tc.get("id", "") if isinstance(tc, dict)
+                            tc.get("id", "")
+                            if isinstance(tc, dict)
                             else getattr(tc, "id", "") or ""
                         )
                         if cid in missing_results:
-                            patched.append({
-                                "role": "tool",
-                                "tool_call_id": cid,
-                                "content": (
-                                    "[Tool result unavailable — "
-                                    "earlier context was compressed]"
-                                ),
-                            })
-                            logger.debug("Pair repair: inserted stub for call_id=%s", cid)
+                            patched.append(
+                                {
+                                    "role": "tool",
+                                    "tool_call_id": cid,
+                                    "content": (
+                                        "[Tool result unavailable — "
+                                        "earlier context was compressed]"
+                                    ),
+                                }
+                            )
+                            logger.debug(
+                                "Pair repair: inserted stub for call_id=%s", cid
+                            )
             messages = patched
 
         return messages
@@ -1482,7 +1642,10 @@ class AgentState:
 
     @staticmethod
     def _extract_subdomains(content: str) -> set[str]:
-        pattern = re.compile(r"\b([a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?(?:\.[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?)+(?::\d+)?)\b", re.IGNORECASE)
+        pattern = re.compile(
+            r"\b([a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?(?:\.[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?)+(?::\d+)?)\b",
+            re.IGNORECASE,
+        )
         matches = pattern.findall(content)
 
         subdomains = set()
@@ -1518,7 +1681,9 @@ class AgentState:
         patterns = [
             re.compile(r"CVE-\d{4}-\d+", re.IGNORECASE),
             re.compile(r"CWE-\d+", re.IGNORECASE),
-            re.compile(r"(?i)(sql\s*injection|xss|csrf|ssrf|lfi|rfi|xxe|rce)", re.IGNORECASE),
+            re.compile(
+                r"(?i)(sql\s*injection|xss|csrf|ssrf|lfi|rfi|xxe|rce)", re.IGNORECASE
+            ),
         ]
         vulns = set()
         for p in patterns:
@@ -1542,6 +1707,7 @@ class AgentState:
             try:
                 import json
                 from pathlib import Path
+
                 tools_path = Path(__file__).parent.parent / "data" / "tools_meta.json"
                 with open(tools_path) as f:
                     meta = json.load(f)
@@ -1572,13 +1738,16 @@ class AgentState:
 
                 AgentState._extract_tools._tool_names = list(all_tools)
 
-            except Exception:
-
+            except Exception as e:
+                logging.getLogger(__name__).debug(
+                    "Expected failure reading tool names: %s", e
+                )
                 AgentState._extract_tools._tool_names = []
 
         content_lower = content.lower()
         return {
-            tool for tool in AgentState._extract_tools._tool_names
+            tool
+            for tool in AgentState._extract_tools._tool_names
             if tool.lower() in content_lower
         }
 
@@ -1591,6 +1760,14 @@ class AgentState:
             if phase in content_upper:
                 found.add(phase)
         return found
+
+    @staticmethod
+    def _extract_injection_types(content: str) -> set[str]:
+        pattern = re.compile(
+            r"\b(SQL|XSS|CMD|RFI|LFI|SSRF|XXE|SSTI|LDAP|XPath|XPath|\bInj|\bInj|\bInj|\bInj|\bInj)\b",
+            re.IGNORECASE,
+        )
+        return set(m.group(1).upper() for m in pattern.finditer(content))
 
     @staticmethod
     def _extract_key_info(content: str, max_chars: int = 500) -> str:
@@ -1630,7 +1807,17 @@ class AgentState:
         keep_recent: int | None = None,
         num_ctx: int | None = None,
         num_predict: int | None = None,
+        phase: str | None = None,
     ) -> None:
+        """Improved compression for pentesting/bugbounty/CTF that preserves critical context.
+
+        Key improvements:
+        1. Phase-aware compression - different rules for RECON vs EXPLOIT
+        2. Evidence preservation - never lose high-severity findings
+        3. Hypothesis protection - keeps attack hypotheses intact
+        4. Injection point tracking - preserves discovered injection points
+        5. Tool chain preservation - remembers successful tool sequences
+        """
         limits = _get_context_limits()
         if keep_recent is None:
             keep_recent = 30
@@ -1639,16 +1826,17 @@ class AgentState:
         if num_predict is None:
             num_predict = limits["llm_compression_num_predict"]
 
-        non_system = [
-            m for m in self.conversation if m.get("role") != "system"]
+        if phase is None:
+            phase = "RECON"
+
+        non_system = [m for m in self.conversation if m.get("role") != "system"]
         if len(non_system) <= keep_recent + 1:
             return
 
-        system_msgs = [
-            m for m in self.conversation if m.get("role") == "system"]
+        system_msgs = [m for m in self.conversation if m.get("role") == "system"]
         first_user = non_system[0]
-        to_compress = non_system[1: len(non_system) - keep_recent]
-        keep_tail = non_system[len(non_system) - keep_recent:]
+        to_compress = non_system[1 : len(non_system) - keep_recent]
+        keep_tail = non_system[len(non_system) - keep_recent :]
 
         if len(to_compress) < 5:
             return
@@ -1657,7 +1845,7 @@ class AgentState:
         summaries: list[dict[str, Any]] = []
 
         for i in range(0, len(to_compress), CHUNK_SIZE):
-            chunk = to_compress[i: i + CHUNK_SIZE]
+            chunk = to_compress[i : i + CHUNK_SIZE]
 
             extracted_data = {
                 "subdomains": set(),
@@ -1667,20 +1855,46 @@ class AgentState:
                 "credentials": set(),
                 "tools_used": set(),
                 "phases": set(),
+                "injection_types": set(),
+                "evidence_high_severity": [],
+                "hypotheses_pending": [],
             }
 
             for m in chunk:
                 content = str(m.get("content", ""))
                 role = m.get("role", "unknown")
 
-                extracted_data["subdomains"].update(AgentState._extract_subdomains(content))
+                extracted_data["subdomains"].update(
+                    AgentState._extract_subdomains(content)
+                )
                 extracted_data["urls"].update(AgentState._extract_urls(content))
                 extracted_data["ports"].update(AgentState._extract_ports(content))
                 extracted_data["vulns"].update(AgentState._extract_vulns(content))
-                extracted_data["credentials"].update(AgentState._extract_credentials(content))
+                extracted_data["credentials"].update(
+                    AgentState._extract_credentials(content)
+                )
                 extracted_data["tools_used"].update(AgentState._extract_tools(content))
+                extracted_data["injection_types"].update(
+                    AgentState._extract_injection_types(content)
+                )
                 if role == "system":
                     extracted_data["phases"].update(AgentState._extract_phases(content))
+
+                if (
+                    "SEV=5]" in content
+                    or "SEV=4]" in content
+                    or "[CRITICAL]" in content
+                    or "[HIGH]" in content
+                ):
+                    extracted_data["evidence_high_severity"].append(content[:500])
+
+                if (
+                    "PENDING" in content
+                    or "TODO" in content
+                    or "TEST" in content
+                    or "hypothesis" in content.lower()
+                ):
+                    extracted_data["hypotheses_pending"].append(content[:300])
 
             chunk_text_parts = []
             for m in chunk:
@@ -1694,26 +1908,64 @@ class AgentState:
             chunk_text = "\n".join(chunk_text_parts)
 
             context_header = []
+            context_critical = []
+
             if extracted_data["subdomains"]:
-                context_header.append(f"CRITICAL SUBDOMAINS: {', '.join(sorted(extracted_data['subdomains']))}")
+                subs_list = ", ".join(sorted(extracted_data["subdomains"])[:20])
+                context_header.append(f"DISCOVERED SUBDOMAINS: {subs_list}")
+                context_critical.append(f"SUBDOMAINS: {subs_list}")
+
             if extracted_data["urls"]:
-                context_header.append(f"CRITICAL URLS: {', '.join(sorted(extracted_data['urls'])[:10])}")
+                urls_str = ", ".join(sorted(extracted_data["urls"])[:15])
+                context_header.append(f"DISCOVERED URLs: {urls_str}")
+                context_critical.append(f"URLS: {urls_str}")
+
             if extracted_data["ports"]:
-                context_header.append(f"OPEN PORTS: {', '.join(sorted(extracted_data['ports']))}")
+                ports_str = ", ".join(sorted(extracted_data["ports"])[:10])
+                context_header.append(f"OPEN PORTS: {ports_str}")
+                context_critical.append(f"PORTS: {ports_str}")
+
             if extracted_data["vulns"]:
-                context_header.append(f"VULNERABILITIES: {', '.join(sorted(extracted_data['vulns']))}")
+                vulns_str = ", ".join(sorted(extracted_data["vulns"])[:10])
+                context_header.append(f"VULNERABILITIES FOUND: {vulns_str}")
+                context_critical.append(f"VULNS: {vulns_str}")
+
+            if extracted_data["injection_types"]:
+                inj_str = ", ".join(sorted(extracted_data["injection_types"])[:5])
+                context_header.append(f"INJECTION TYPES: {inj_str}")
+                context_critical.append(f"INJECTIONS: {inj_str}")
+
             if extracted_data["credentials"]:
-                context_header.append(f"CREDENTIALS: {', '.join(sorted(extracted_data['credentials']))}")
+                creds_str = ", ".join(sorted(extracted_data["credentials"])[:3])
+                context_header.append(f"CREDENTIALS FOUND: {creds_str}")
+                context_critical.append(f"CREDENTIALS: {creds_str}")
 
-            context_str = "\n".join(context_header) if context_header else "No critical data extracted."
+            if extracted_data["tools_used"]:
+                tools_str = ", ".join(sorted(extracted_data["tools_used"])[:8])
+                context_critical.append(f"TOOLS: {tools_str}")
 
-            recent_failures = sum(self._compress_failures[-10:]) if self._compress_failures else 0
+            phase_context = ""
+            if phase == "EXPLOIT":
+                phase_context = "\nEXPLICIT INSTRUCTION: This is EXPLOIT phase. Prioritize vulnerability PoCs, exploit chains, and flag retrieval. Do not lose evidence of working exploits."
+            elif phase == "ANALYSIS":
+                phase_context = "\nEXPLICIT INSTRUCTION: This is ANALYSIS phase. Focus on correlation, evidence linking, and strategic planning."
+            elif phase == "RECON":
+                phase_context = "\nEXPLICIT INSTRUCTION: This is RECON phase. Focus on discovery, enumeration, and mapping attack surface."
+
+            context_str = (
+                "\n".join(context_header)
+                if context_header
+                else "No critical data extracted."
+            )
+
+            recent_failures = (
+                sum(self._compress_failures[-10:]) if self._compress_failures else 0
+            )
             if recent_failures >= 3:
                 logger.warning(
-                    "LLM compression circuit breaker tripped (%d/10 failures) — using truncation",
+                    "LLM compression circuit breaker tripped (%d/10 failures) — using fallback",
                     recent_failures,
                 )
-
                 if len(chunk) > 5:
                     summaries.extend(chunk[-5:])
                 else:
@@ -1727,29 +1979,36 @@ class AgentState:
                     {
                         "role": "system",
                         "content": (
-                            "You are a memory compressor for an AI security testing agent.\n"
-                            "TASK: Summarize the conversation into 2-4 DENSE technical sentences.\n"
-                            "CRITICAL: You MUST preserve ALL items listed in the CRITICAL DATA section.\n"
+                            f"You are a memory compressor for an AI security testing agent.\n"
+                            f"CURRENT PHASE: {phase}{phase_context}\n\n"
+                            "TASK: Summarize the conversation into 2-4 DENSE technical sentences.\n\n"
+                            "RULES:\n"
+                            "1. PRESERVE ALL items in CRITICAL DATA section (exact IPs, ports, URLs)\n"
+                            "2. For EXPLOIT phase: Keep vulnerability Proof-of-Concepts and exploitation steps\n"
+                            "3. For RECON phase: Keep discovery chain and enumeration results\n"
+                            "4. NEVER lose CVE IDs, severity ratings, or flag patterns\n"
+                            "5. Convert tool outputs to actionable findings\n\n"
                             "FORMAT: Technical, specific, no fluff. Example:\n"
-                            "'Discovered subdomains: api.example.com, admin.example.com (ports 80, 443). "
-                            "Found SQL injection at /login?id= (CVE-2024-1234). Credentials: admin:password123.'\n"
-                            "DO NOT: Add greetings, explanations, or generic statements."
+                            "'Discovered api.example.com (80, 443), admin.example.com (80). "
+                            "SQLi at /login?id=1 (CVE-2024-1234, HIGH). "
+                            "Credentials: admin:password123.'\n\n"
+                            "DO NOT: Add greetings, explanations, or generic statements.\n"
+                            "DO: Use abbreviations (sub=domain, url=path, port=80) to save tokens"
                         ),
                     },
                     {
                         "role": "user",
-                        "content": f"CRITICAL DATA TO PRESERVE:\n{context_str}\n\nCONVERSATION TO COMPRESS:\n{chunk_text}"
+                        "content": f"CRITICAL DATA TO PRESERVE:\n{context_str}\n\nCONVERSATION TO COMPRESS:\n{chunk_text}",
                     },
                 ]
 
-                _timeout = 180.0 if "122b" in ollama.model.lower() else 90.0
-
+                _timeout = 30.0 if "122b" in ollama.model.lower() else 20.0
                 summary_text = await asyncio.wait_for(
                     ollama.complete(
                         messages=compression_prompt,
                         options={
                             "num_ctx": num_ctx,
-                            "num_predict": 400,
+                            "num_predict": 256,
                             "temperature": 0.05,
                         },
                         max_retries=1,
@@ -1764,13 +2023,19 @@ class AgentState:
 
                 if extracted_data["subdomains"]:
                     for subdomain in list(extracted_data["subdomains"])[:3]:
-                        if subdomain.split(".")[0] not in summary_lower:
+                        sub_short = subdomain.split(".")[0]
+                        if sub_short and sub_short not in summary_lower:
                             missing_critical.append(subdomain)
 
-                if not summary_text.strip() or len(summary_text.strip()) < 20:
+                if extracted_data["vulns"]:
+                    for vuln in list(extracted_data["vulns"])[:2]:
+                        if vuln.lower().split()[0] not in summary_lower:
+                            missing_critical.append(vuln)
+
+                if not summary_text.strip() or len(summary_text.strip()) < 30:
                     logger.warning(
-                        "LLM compression returned empty/garbage response (%d chars) — using extraction fallback",
-                        len(summary_text.strip()) if summary_text else 0
+                        "LLM compression returned too short response (%d chars) — using extraction fallback",
+                        len(summary_text.strip()) if summary_text else 0,
                     )
                     raise ValueError("Empty summary from LLM")
 
@@ -1781,21 +2046,28 @@ class AgentState:
                 final_summary = summary_text.strip()
 
                 if missing_critical:
-
-                    missing_str = f" [AUTO-APPENDED: {', '.join(missing_critical)}]"
+                    missing_str = f" [MISSING:{', '.join(missing_critical)}]"
                     final_summary += missing_str
                     logger.info(
                         "Compression post-process: appended %d missing critical items",
-                        len(missing_critical)
+                        len(missing_critical),
                     )
 
-                summaries.append({
-                    "role": "system",
-                    "content": f"[COMPRESSED MEMORY]: {final_summary}",
-                })
+                phase_marker = f"[{phase}_COMP]" if phase else "[COMP]"
+                final_summary = f"{phase_marker} {final_summary}"
+
+                summaries.append(
+                    {
+                        "role": "system",
+                        "content": f"[COMPRESSED MEMORY]: {final_summary}",
+                    }
+                )
                 logger.info(
-                    "LLM compression: %d messages → summary in %.1fs (%d chars)",
-                    len(chunk), _elapsed, len(final_summary),
+                    "LLM compression (%s): %d messages → summary in %.1fs (%d chars)",
+                    phase,
+                    len(chunk),
+                    _elapsed,
+                    len(final_summary),
                 )
 
             except asyncio.TimeoutError:
@@ -1806,10 +2078,13 @@ class AgentState:
                 self._compress_failures.append(True)
 
                 if context_header:
-                    summaries.append({
-                        "role": "system",
-                        "content": "[AUTO-SUMMARY]: " + "; ".join(context_header),
-                    })
+                    summaries.append(
+                        {
+                            "role": "system",
+                            "content": f"[{phase}_SUMMARY]: "
+                            + "; ".join(context_header),
+                        }
+                    )
                 elif len(chunk) > 5:
                     summaries.extend(chunk[-5:])
                 else:
@@ -1823,10 +2098,13 @@ class AgentState:
                 self._compress_failures.append(True)
 
                 if context_header:
-                    summaries.append({
-                        "role": "system",
-                        "content": "[AUTO-SUMMARY]: " + "; ".join(context_header),
-                    })
+                    summaries.append(
+                        {
+                            "role": "system",
+                            "content": f"[{phase}_SUMMARY]: "
+                            + "; ".join(context_header),
+                        }
+                    )
                 elif len(chunk) > 5:
                     summaries.extend(chunk[-5:])
                 else:
@@ -1835,6 +2113,10 @@ class AgentState:
         before = len(self.conversation)
         self.conversation = system_msgs + [first_user] + summaries + keep_tail
         logger.info(
-            "Memory compressed: %d messages → %d summaries (%d → %d total)",
-            len(to_compress), len(summaries), before, len(self.conversation),
+            "Memory compressed (%s): %d messages → %d summaries (%d → %d total)",
+            phase,
+            len(to_compress),
+            len(summaries),
+            before,
+            len(self.conversation),
         )

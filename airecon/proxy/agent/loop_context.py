@@ -10,8 +10,9 @@ from .session import get_untested_injection_points
 
 logger = logging.getLogger("airecon.agent")
 
+
 class _ContextMixin:
-    _MAX_TOOL_RESULT_CHARS: int = 15_000
+    _MAX_TOOL_RESULT_CHARS: int = 3_000
 
     def _inject_exploit_vuln_context(self) -> None:
         if not self._session:
@@ -46,7 +47,13 @@ class _ContextMixin:
                 )
                 sev_raw = str(v.get("severity", "")).strip()
                 if sev_raw in {"5", "4", "3", "2", "1"}:
-                    sev = {"5": "CRITICAL", "4": "HIGH", "3": "MEDIUM", "2": "LOW", "1": "INFO"}[sev_raw]
+                    sev = {
+                        "5": "CRITICAL",
+                        "4": "HIGH",
+                        "3": "MEDIUM",
+                        "2": "LOW",
+                        "1": "INFO",
+                    }[sev_raw]
                 else:
                     sev = sev_raw
                 if not sev:
@@ -74,11 +81,13 @@ class _ContextMixin:
         )
 
         vuln_ctx = "\n".join(lines)
-        self.state.conversation.append({
-            "role": "system",
-            "content": vuln_ctx,
-            "_bucket": "protected_system",
-        })
+        self.state.conversation.append(
+            {
+                "role": "system",
+                "content": vuln_ctx,
+                "_bucket": "protected_system",
+            }
+        )
 
     def _compact_phase_context(self, from_phase: str) -> None:
         msgs = self.state.conversation
@@ -112,7 +121,10 @@ class _ContextMixin:
             logger.info(
                 "Phase transition compaction (%s→next): %d tool msgs, "
                 "%d thinking strips, ~%d chars freed",
-                from_phase, compacted_tools, compacted_thinking, chars_freed,
+                from_phase,
+                compacted_tools,
+                compacted_thinking,
+                chars_freed,
             )
 
     def _messages_for_ollama(self) -> list[dict[str, Any]]:
@@ -139,18 +151,26 @@ class _ContextMixin:
     def _get_tool_result_cap(self) -> int:
         if self._ctf_mode:
             return 1500
-        ctx = self._adaptive_num_ctx if self._adaptive_num_ctx > 0 else get_config().ollama_num_ctx
+        ctx = (
+            self._adaptive_num_ctx
+            if self._adaptive_num_ctx > 0
+            else get_config().ollama_num_ctx
+        )
 
         base_cap = max(3_000, min(self._MAX_TOOL_RESULT_CHARS, int(ctx * 0.08 * 3)))
 
         used = self.state.token_usage.get("used", 0)
         ratio = used / max(ctx, 1)
+        if ratio >= 0.90:
+            return max(1_000, base_cap // 16)
         if ratio >= 0.75:
-            return max(2_000, base_cap // 8)
+            return max(1_500, base_cap // 10)
         if ratio >= 0.60:
-            return max(3_000, base_cap // 4)
-        if ratio >= 0.40:
-            return max(5_000, base_cap // 2)
+            return max(2_000, base_cap // 6)
+        if ratio >= 0.45:
+            return max(3_000, base_cap // 3)
+        if ratio >= 0.30:
+            return max(4_000, base_cap // 2)
         return base_cap
 
     def _cap_tool_result(self, content: str) -> str:
@@ -160,11 +180,46 @@ class _ContextMixin:
         head = int(cap * 0.70)
         tail = int(cap * 0.10)
         omitted = len(content) - head - tail
-        return (
-            content[:head]
-            + f"\n...[{omitted} chars omitted]...\n"
-            + content[-tail:]
-        )
+        return content[:head] + f"\n...[{omitted} chars omitted]...\n" + content[-tail:]
+
+    def _drop_stale_tool_results(self) -> int:
+
+        msgs = self.state.conversation
+        if len(msgs) <= 8:
+            return 0
+
+        non_system = [(i, m) for i, m in enumerate(msgs) if m.get("role") != "system"]
+        if len(non_system) <= 5:
+            return 0
+
+        keep_from_idx = non_system[-5][0] if len(non_system) > 5 else 0
+
+        dropped = 0
+        chars_freed = 0
+        new_conversation = []
+        for i, msg in enumerate(msgs):
+            if i < keep_from_idx and msg.get("role") == "tool":
+                tool_name = msg.get("tool_call_id", "unknown")
+                placeholder = {
+                    "role": "tool",
+                    "content": "[Tool result dropped to save context]",
+                    "tool_call_id": tool_name,
+                }
+                new_conversation.append(placeholder)
+                dropped += 1
+                chars_freed += len(str(msg.get("content", "")))
+            else:
+                new_conversation.append(msg)
+
+        if dropped > 0:
+            self.state.conversation = new_conversation
+            logger.info(
+                "Dropped %d stale tool results (%d chars freed) — "
+                "prevents Ollama progressive slowdown",
+                dropped,
+                chars_freed,
+            )
+        return dropped
 
     async def _call_compression_llm(
         self,
@@ -227,13 +282,13 @@ class _ContextMixin:
                     {"role": "system", "content": system_content},
                     {"role": "user", "content": user_content},
                 ],
-
                 options={"num_predict": 2048, "temperature": 0.1},
             )
             return summary.strip()
         except Exception as exc:
             logger.warning(
-                "Iterative compression LLM call failed: %s — falling back to truncation", exc
+                "Iterative compression LLM call failed: %s — falling back to truncation",
+                exc,
             )
             return ""
 
@@ -252,7 +307,7 @@ class _ContextMixin:
         _tools_count = len(self._tools_ollama) if self._tools_ollama is not None else 20
         _tools_overhead = _tools_count * 500
         effective_input_ctx = max(1024, num_ctx - effective_predict - _tools_overhead)
-        budget = effective_input_ctx * 3
+        budget = int(effective_input_ctx * 0.50)
         total = sum(
             len(str(m.get("content") or ""))
             + len(str(m.get("tool_calls") or ""))
@@ -264,82 +319,139 @@ class _ContextMixin:
 
         logger.warning(
             "Pre-call char budget exceeded: %d chars > %d budget (num_ctx=%d) — compressing",
-            total, budget, num_ctx,
+            total,
+            budget,
+            num_ctx,
         )
 
-        assistant_indices = [
-            i for i, m in enumerate(self.state.conversation)
-            if m.get("role") == "assistant" and m.get("thinking")
-        ]
-
-        for idx in assistant_indices[:-3]:
-            thinking_len = len(str(self.state.conversation[idx].get("thinking", "")))
-            self.state.conversation[idx].pop("thinking", None)
-            total -= thinking_len
-            if total <= budget:
-                logger.info("Budget restored after thinking strip (%d msgs)", len(assistant_indices))
-                return
-
-        compress_cap = max(300, budget // max(1, len(self.state.conversation)))
-        first_user_seen = False
-        for msg in self.state.conversation:
-            role = msg.get("role")
-            if role == "user" and not first_user_seen:
-                first_user_seen = True
-                continue
-            if role in ("tool", "user"):
-                content = str(msg.get("content", ""))
-                if len(content) > compress_cap:
-                    msg["content"] = content[:compress_cap] + f"...[hard-trimmed {len(content)} chars]"
-
+        # Step 1: Drop stale tool results (fast, no LLM)
+        self._drop_stale_tool_results()
         total = sum(
             len(str(m.get("content") or ""))
+            + len(str(m.get("tool_calls") or ""))
             + len(str(m.get("thinking") or ""))
             for m in self.state.conversation
         )
         if total <= budget:
+            logger.info("Budget satisfied after dropping stale tool results")
             return
 
-        _non_system = [m for m in self.state.conversation if m.get("role") != "system"]
-        _keep_recent_non_sys = 15
-        _candidates = _non_system[:max(0, len(_non_system) - _keep_recent_non_sys)]
-        if len(_candidates) >= 5:
-            _summary = await self._call_compression_llm(_candidates)
-            if _summary:
-                self._compression_summary = _summary
-
-                self.state.conversation = [
-                    m for m in self.state.conversation
-                    if not str(m.get("content", "")).startswith("[SYSTEM: COMPRESSION SUMMARY")
-                ]
-
-                _first_non_sys_idx = next(
-                    (i for i, m in enumerate(self.state.conversation)
-                     if m.get("role") != "system"),
-                    len(self.state.conversation),
+        # Step 2: Strip thinking from all but last 2 assistant messages
+        assistant_indices = [
+            i
+            for i, m in enumerate(self.state.conversation)
+            if m.get("role") == "assistant" and m.get("thinking")
+        ]
+        for idx in assistant_indices[:-2]:
+            thinking_len = len(str(self.state.conversation[idx].get("thinking", "")))
+            self.state.conversation[idx].pop("thinking", None)
+            total -= thinking_len
+            if total <= budget:
+                logger.info(
+                    "Budget restored after thinking strip (%d msgs)",
+                    len(assistant_indices),
                 )
-                self.state.conversation.insert(
-                    _first_non_sys_idx,
+                return
+
+        # Step 3: Aggressively compress old tool outputs
+        self._compress_old_tool_outputs(aggressive=True)
+        total = sum(
+            len(str(m.get("content") or "")) + len(str(m.get("thinking") or ""))
+            for m in self.state.conversation
+        )
+        if total <= budget:
+            logger.info("Budget satisfied after compressing tool outputs")
+            return
+
+        # Step 4: Fast truncation — preserve scope/target context
+        _non_system = [m for m in self.state.conversation if m.get("role") != "system"]
+        _first_user = None
+        _non_first_user = []
+        for m in _non_system:
+            if m.get("role") == "user" and _first_user is None:
+                _first_user = m
+            else:
+                _non_first_user.append(m)
+
+        _keep_recent_non_sys = 6
+        _drop_count = max(0, len(_non_first_user) - _keep_recent_non_sys)
+
+        if _drop_count >= 2:
+            # Build summary BEFORE dropping to preserve context
+            tool_counts: dict[str, int] = {}
+            url_refs: list[str] = []
+            vuln_refs: list[str] = []
+            for m in _non_first_user[:_drop_count]:
+                if m.get("role") == "assistant" and m.get("tool_calls"):
+                    for tc in m.get("tool_calls", []):
+                        fn = tc.get("function", {}).get("name", "unknown")
+                        tool_counts[fn] = tool_counts.get(fn, 0) + 1
+                content = str(m.get("content", ""))
+                for line in content.split("\n"):
+                    if "http" in line and len(line) < 200:
+                        url_refs.append(line.strip()[:120])
+                    # Preserve vulnerability references
+                    for kw in ("CVE-", "XSS", "SQLi", "RCE", "SSRF", "LFI", "FLAG{"):
+                        if kw in line:
+                            vuln_refs.append(line.strip()[:150])
+                            break
+
+            summary_parts = [
+                f"[SYSTEM: AUTO-TRUNCATED — {_drop_count} old messages removed]",
+                f"Tools used: {', '.join(f'{k}({v})' for k, v in list(tool_counts.items())[:10])}",
+            ]
+            if url_refs:
+                summary_parts.append(f"URLs explored: {', '.join(url_refs[:5])}")
+            if vuln_refs:
+                summary_parts.append(f"Security findings: {', '.join(vuln_refs[:5])}")
+            summary_parts.append(
+                "Earlier results already examined. Focus on current findings."
+            )
+
+            _summary = "\n".join(summary_parts)
+
+            system_msgs = [
+                m for m in self.state.conversation if m.get("role") == "system"
+            ]
+            recent_others = _non_first_user[-_keep_recent_non_sys:]
+
+            kept = system_msgs[:]
+            if _first_user:
+                kept.append(_first_user)
+            kept.append({"role": "system", "content": _summary})
+            # Always append critical findings context to preserve scope/intelligence
+            _critical = self._build_critical_findings_context()
+            if _critical:
+                kept.append(
                     {
                         "role": "system",
-                        "content": f"[SYSTEM: COMPRESSION SUMMARY]\n{_summary}",
-                    },
+                        "content": _critical,
+                        "_bucket": "protected_system",
+                    }
                 )
-                logger.info(
-                    "Iterative compression: %d messages summarised → %d chars pinned",
-                    len(_candidates), len(_summary),
-                )
+            kept.extend(recent_others)
 
-                total = sum(
-                    len(str(m.get("content") or "")) + len(str(m.get("thinking") or ""))
-                    for m in self.state.conversation
-                )
-                if total <= budget:
-                    return
+            self.state.conversation = kept
 
-        _min_msgs = 8 if self._ctf_mode else 15
-        target_msgs = max(_min_msgs, len(self.state.conversation) // (3 if self._ctf_mode else 2))
+            logger.info(
+                "Fast compression: dropped %d msgs → %d messages (first user + critical findings preserved)",
+                _drop_count,
+                len(self.state.conversation),
+            )
+            return
+
+        # Step 5: Emergency truncation — keep minimal context
+        _min_msgs = 8 if self._ctf_mode else 12
+        target_msgs = max(
+            _min_msgs, len(self.state.conversation) // (3 if self._ctf_mode else 2)
+        )
         self.state.truncate_conversation(max_messages=target_msgs)
+        # Re-inject critical findings after truncation
+        _critical = self._build_critical_findings_context()
+        if _critical:
+            self.state.conversation.append(
+                {"role": "system", "content": _critical, "_bucket": "protected_system"}
+            )
         logger.warning(
             "Pre-call char budget: after truncation → %d messages",
             len(self.state.conversation),
@@ -381,17 +493,16 @@ class _ContextMixin:
 
         if s.subdomains:
             parts.append(
-                f"SUBDOMAINS ({len(s.subdomains)}): {', '.join(s.subdomains[:20])}"
+                f"SUBDOMAINS ({len(s.subdomains)}): {', '.join(s.subdomains[:10])}"
             )
-            if len(s.subdomains) > 20:
-                parts.append(f"... and {len(s.subdomains) - 20} more")
+            if len(s.subdomains) > 10:
+                parts.append(f"... and {len(s.subdomains) - 10} more")
 
         if s.live_hosts:
             parts.append(
-                f"LIVE HOSTS ({len(s.live_hosts)}): {', '.join(s.live_hosts[:15])}"
+                f"LIVE HOSTS ({len(s.live_hosts)}): {', '.join(s.live_hosts[:8])}"
             )
         elif s.subdomains:
-
             parts.append(
                 "WARNING: subdomains enumerated but NOT YET validated. "
                 "Run: httpx -l output/subdomains.txt -sc -o output/live_hosts.txt "
@@ -400,12 +511,24 @@ class _ContextMixin:
 
         if s.open_ports:
             port_summary = []
-            for host, ports in list(s.open_ports.items())[:10]:
+            for host, ports in list(s.open_ports.items())[:5]:
                 port_summary.append(f"{host}:{','.join(map(str, ports[:5]))}")
             parts.append(f"OPEN PORTS: {'; '.join(port_summary)}")
 
         if s.urls:
-            parts.append(f"URLs ({len(s.urls)}): {', '.join(s.urls[:10])}")
+            parts.append(f"URLs ({len(s.urls)}): {', '.join(s.urls[:5])}")
+            if len(s.urls) > 5:
+                parts.append(f"... and {len(s.urls) - 5} more URLs")
+
+            # URL intelligence — classify and warn about static assets
+            try:
+                from .url_intelligence import build_url_intelligence_context
+                _url_ctx = build_url_intelligence_context(list(s.urls))
+                if _url_ctx:
+                    parts.append("")
+                    parts.append(_url_ctx)
+            except Exception as _url_err:
+                logger.debug("URL intelligence build failed: %s", _url_err)
 
         if s.vulnerabilities:
             vuln_vals = []
@@ -428,13 +551,17 @@ class _ContextMixin:
             for pt in show:
                 path = urlparse(pt.get("url", "")).path or pt.get("url", "")
                 ip_lines.append(
-                    f"  [{pt.get('type_hint','?')}] {pt.get('parameter','?')} @ {path}"
+                    f"  [{pt.get('type_hint', '?')}] {pt.get('parameter', '?')} @ {path}"
                 )
             untested_note = f"{len(untested)} UNTESTED" if untested else "all tested"
             parts.append(
                 f"INJECTION POINTS ({len(all_ips)} total, {untested_note}, {tested_count} tested):\n"
                 + "\n".join(ip_lines)
-                + (f"\n  ... +{len(untested) - 8} more untested" if len(untested) > 8 else "")
+                + (
+                    f"\n  ... +{len(untested) - 8} more untested"
+                    if len(untested) > 8
+                    else ""
+                )
             )
 
         if s.technologies:
@@ -448,7 +575,6 @@ class _ContextMixin:
             parts.append(f"COMPLETED PHASES: {', '.join(s.completed_phases)}")
 
         if s.tested_endpoints:
-
             shown = s.tested_endpoints[-20:]
             remainder = len(s.tested_endpoints) - len(shown)
             ep_note = (
@@ -465,41 +591,123 @@ class _ContextMixin:
         return "\n".join(parts)
 
     def _build_compressed_findings_summary(self) -> str:
-        if not self._session and not self.state.hypothesis_queue and not self.state.evidence_log:
+        active_target = str(self.state.active_target or "").strip()
+        if (
+            not self._session
+            and not self.state.hypothesis_queue
+            and not self.state.evidence_log
+            and not active_target
+        ):
             return ""
 
-        parts: list[str] = ["[SYSTEM: PINNED CONTEXT — confirmed findings, hypotheses, gaps]"]
+        parts: list[str] = [
+            "[SYSTEM: PINNED CONTEXT — confirmed findings, hypotheses, gaps]"
+        ]
         added_any = False
+
+        scope_anchor = str(getattr(self, "_scope_anchor_target", "") or "").strip()
+        if active_target:
+            parts.append(f"SCOPE TARGET: {active_target}")
+            if scope_anchor:
+                parts.append(f"SCOPE ANCHOR: {scope_anchor}")
+            parts.append(
+                f"SCOPE LOCK: {'ACTIVE' if getattr(self, '_scope_lock_active', False) else 'INACTIVE'}"
+            )
+            added_any = True
+
+        memory_health = getattr(self, "_memory_health_status", {})
+        if isinstance(memory_health, dict) and memory_health:
+            if memory_health.get("ok"):
+                parts.append(
+                    "MEMORY BRAIN: OK "
+                    f"(target_sessions={int(memory_health.get('target_sessions', 0))}, "
+                    f"target_findings={int(memory_health.get('target_findings', 0))}, "
+                    f"patterns={int(memory_health.get('patterns_total', 0))}, "
+                    f"high_quality_patterns={int(memory_health.get('high_quality_patterns', 0))})"
+                )
+            else:
+                parts.append(
+                    "MEMORY BRAIN: DEGRADED "
+                    f"({str(memory_health.get('error', 'unknown'))[:120]})"
+                )
+            added_any = True
 
         if self._session and self._session.vulnerabilities:
             vulns = self._session.vulnerabilities[:10]
-            vlines = [f"  - {v.get('finding', '')[:120]}" for v in vulns]
+            vlines = []
+            for v in vulns:
+                finding = v.get("finding", "")
+                title = v.get("title", "")
+                severity = v.get("severity", v.get("severity_level", "MEDIUM"))
+                confidence = v.get("confidence", 0.0)
+                proof = (
+                    v.get("proof", v.get("evidence", ""))[:60]
+                    if isinstance(v.get("evidence", ""), list)
+                    else v.get("proof", "")[:60]
+                )
+                flag = v.get("flag", "")
+
+                line_parts = [f"[{severity}]{'' if not flag else '[FLAG]'}"]
+                if title:
+                    line_parts.append(title[:40])
+                else:
+                    line_parts.append(finding[:40])
+                if confidence > 0.7:
+                    line_parts.append(f"(conf={int(confidence * 100)}%)")
+                if proof:
+                    line_parts.append(f"[{proof}...]")
+
+                vlines.append("  - " + " ".join(line_parts))
+
             parts.append(f"CONFIRMED VULNS ({len(self._session.vulnerabilities)}):")
             parts.extend(vlines)
             added_any = True
 
         pending_hyps = self.state.get_pending_hypotheses(max_items=5)
         if pending_hyps:
-            parts.append("ACTIVE HYPOTHESES TO TEST:")
-            for h in pending_hyps:
-                parts.append(f"  [{h.get('id','')}] {h.get('claim','')[:100]}")
-                if h.get("test_plan"):
-                    parts.append(f"    → {h.get('test_plan','')[:80]}")
+            parts.append("ACTIVE HYPOTHESES TO TEST (DO NOT LOSE):")
+            for i, h in enumerate(pending_hyps):
+                claim = h.get("claim", "")[:80]
+                test_plan = h.get("test_plan", "")[:60]
+                confidence = h.get("confidence", 0.0)
+                evidences = h.get("evidence_refs", [])[:2]
+                evidence_str = f"[{len(evidences)}ev]" if evidences else ""
+
+                parts.append(
+                    f"  [{i + 1}] [{confidence * 100:.0f}%]{evidence_str} {claim}"
+                )
+                if test_plan:
+                    parts.append(f"       → {test_plan}")
             added_any = True
 
         if self.state.evidence_log:
             high_ev = [
-                e for e in self.state.evidence_log
+                e
+                for e in self.state.evidence_log
                 if int(e.get("severity", 1)) >= 4
                 and float(e.get("confidence", 0.0)) >= 0.75
-            ][-5:]
+            ][:5]
             if high_ev:
-                parts.append("HIGH-VALUE EVIDENCE:")
+                parts.append("HIGH-VALUE EVIDENCE (CRITICAL - DO NOT COMPRESS):")
                 for ev in high_ev:
+                    summary = ev.get("summary", ev.get("finding", ""))[:90]
+                    source = ev.get("source_tool", "tool")
+                    severity = ev.get("severity", 1)
+                    confidence = ev.get("confidence", 0.0)
                     parts.append(
-                        f"  [{ev.get('source_tool','tool')}][SEV={ev.get('severity',1)}] "
-                        f"{ev.get('summary','')[:120]}"
+                        f"  [{source}][SEV={severity}][{int(confidence * 100)}%] {summary}"
                     )
+                added_any = True
+
+        if self._session and self._session.injection_points:
+            untested = get_untested_injection_points(self._session)
+            if untested:
+                parts.append(f"UNTESTED INJECTION POINTS ({len(untested)} remaining):")
+                for pt in untested[:5]:
+                    param = pt.get("parameter", "?")
+                    url_path = pt.get("url", "")[:50]
+                    inj_type = pt.get("type_hint", "??")
+                    parts.append(f"  [{inj_type}] {param} @ {url_path}")
                 added_any = True
 
         if not added_any:
@@ -520,7 +728,9 @@ class _ContextMixin:
 
         done_lines: list[str] = []
         if self._session and self._session.completed_phases:
-            done_lines.append(f"Phases completed: {', '.join(self._session.completed_phases)}")
+            done_lines.append(
+                f"Phases completed: {', '.join(self._session.completed_phases)}"
+            )
         if self._session and self._session.subdomains:
             done_lines.append(f"Subdomains enumerated: {len(self._session.subdomains)}")
         if self._session and self._session.live_hosts:
@@ -528,22 +738,27 @@ class _ContextMixin:
         if self._session and self._session.vulnerabilities:
             done_lines.append(
                 f"Vulnerabilities confirmed: {len(self._session.vulnerabilities)} "
-                f"({', '.join(v.get('finding','')[:50] for v in self._session.vulnerabilities[:3])})"
+                f"({', '.join(v.get('finding', '')[:50] for v in self._session.vulnerabilities[:3])})"
             )
         if self._session and self._session.tested_endpoints:
-            done_lines.append(f"Endpoints tested: {len(self._session.tested_endpoints)}")
+            done_lines.append(
+                f"Endpoints tested: {len(self._session.tested_endpoints)}"
+            )
 
         current_phase_str = "UNKNOWN"
         if self.pipeline:
             try:
                 current_phase_str = self.pipeline.get_current_phase().value
-            except Exception:
-                pass
+            except Exception as e:
+                logger.debug(
+                    "Expected failure getting current phase for context: %s", e
+                )
 
         in_progress_lines: list[str] = [f"Current phase: {current_phase_str}"]
 
         active_objs = [
-            o for o in (self.state.objective_queue or [])
+            o
+            for o in (self.state.objective_queue or [])
             if o.get("status") == "pending"
         ][:3]
         for obj in active_objs:
@@ -553,7 +768,7 @@ class _ContextMixin:
 
         pending_hyps = self.state.get_pending_hypotheses(max_items=3)
         for h in pending_hyps:
-            in_progress_lines.append(f"  [hypothesis] {h.get('claim','')[:80]}")
+            in_progress_lines.append(f"  [hypothesis] {h.get('claim', '')[:80]}")
 
         if done_lines or in_progress_lines:
             lines.append("## Progress")
@@ -574,8 +789,8 @@ class _ContextMixin:
         if self._session and self._session.waf_profiles:
             for host, wp in list(self._session.waf_profiles.items())[:2]:
                 decision_lines.append(
-                    f"WAF detected on {host}: {wp.get('waf_name','?')} "
-                    f"(confidence={wp.get('confidence',0):.0%})"
+                    f"WAF detected on {host}: {wp.get('waf_name', '?')} "
+                    f"(confidence={wp.get('confidence', 0):.0%})"
                 )
         if decision_lines:
             lines.append("## Key Context")
@@ -589,8 +804,8 @@ class _ContextMixin:
                 for pt in untested:
                     path = urlparse(pt.get("url", "")).path or pt.get("url", "")
                     lines.append(
-                        f"    [{pt.get('type_hint','?')}] "
-                        f"{pt.get('parameter','?')} @ {path}"
+                        f"    [{pt.get('type_hint', '?')}] "
+                        f"{pt.get('parameter', '?')} @ {path}"
                     )
 
         if len(lines) <= 1:
@@ -599,11 +814,11 @@ class _ContextMixin:
 
     def _compress_old_tool_outputs(self, *, aggressive: bool = False) -> None:
         non_system = [m for m in self.state.conversation if m.get("role") != "system"]
-        keep_window = 10 if aggressive else 20
+        keep_window = 4 if aggressive else 8
         if len(non_system) <= keep_window:
             return
 
-        stub_max = 100 if (aggressive or self.state.iteration > 100) else 200
+        stub_max = 60 if (aggressive or self.state.iteration > 30) else 120
 
         force_recompress = aggressive
 
@@ -621,13 +836,20 @@ class _ContextMixin:
                 key_info = AgentState._extract_key_info(content, max_chars=stub_max)
                 msg["content"] = f"[COMPRESSED] {key_info.strip()}"
                 compress_count += 1
-            elif role == "tool" and is_stub and force_recompress and len(content) > stub_max + 20:
-
+            elif (
+                role == "tool"
+                and is_stub
+                and force_recompress
+                and len(content) > stub_max + 20
+            ):
                 msg["content"] = content[: stub_max + len("[COMPRESSED] ")]
                 compress_count += 1
 
         if compress_count:
             logger.debug(
                 "Compressed %d tool outputs at iter %d (aggressive=%s, stub=%d chars)",
-                compress_count, self.state.iteration, aggressive, stub_max,
+                compress_count,
+                self.state.iteration,
+                aggressive,
+                stub_max,
             )

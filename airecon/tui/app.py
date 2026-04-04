@@ -28,6 +28,7 @@ from .widgets.workspace import WorkspacePanel, WorkspaceTree
 
 logger = logging.getLogger("airecon.tui")
 
+
 class QuitConfirmScreen(ModalScreen[bool]):
     DEFAULT_CSS = ""
 
@@ -52,30 +53,36 @@ class QuitConfirmScreen(ModalScreen[bool]):
         elif event.key == "n":
             self.dismiss(False)
 
+
 class UserInputModal(ModalScreen[str | None]):
     _TYPE_META: dict[str, tuple[str, str, str, bool]] = {
         "totp": (
-            "🔐", "TOTP / 2FA Code",
+            "🔐",
+            "TOTP / 2FA Code",
             "⏱  Code expires every 30s — enter it quickly after seeing this dialog.",
             True,
         ),
         "captcha": (
-            "🤖", "CAPTCHA Answer",
+            "🤖",
+            "CAPTCHA Answer",
             "Look at the CAPTCHA image (path shown below) and type the text you see.",
             False,
         ),
         "password": (
-            "🔑", "Password",
+            "🔑",
+            "Password",
             "Input is masked. Press Enter or click Submit when done.",
             True,
         ),
         "otp": (
-            "📱", "One-Time Password (SMS / Email)",
+            "📱",
+            "One-Time Password (SMS / Email)",
             "Check your phone or email for the OTP code. It may expire in 60–120s.",
             True,
         ),
         "text": (
-            "✏️ ", "Input Required",
+            "✏️ ",
+            "Input Required",
             "",
             False,
         ),
@@ -88,6 +95,7 @@ class UserInputModal(ModalScreen[str | None]):
 
     def _extract_screenshot_path(self) -> str | None:
         import re
+
         m = re.search(r"(/[\w/.\-_]+\.png)", self._prompt_text)
         return m.group(1) if m else None
 
@@ -141,6 +149,7 @@ class UserInputModal(ModalScreen[str | None]):
         if event.key == "escape":
             self.dismiss(None)
 
+
 class AIReconApp(App):
     TITLE = "AIRecon"
     SUB_TITLE = "AI Security Reconnaissance"
@@ -153,12 +162,7 @@ class AIReconApp(App):
         Binding("ctrl+r", "reset", "Reset", show=True),
         Binding("pageup", "scroll_chat_up", "Scroll Up", show=False),
         Binding("pagedown", "scroll_chat_down", "Scroll Down", show=False),
-        Binding(
-            "escape",
-            "cancel_generation",
-            "Stop AI",
-            show=True,
-            priority=True),
+        Binding("escape", "cancel_generation", "Stop AI", show=True, priority=True),
     ]
 
     def action_scroll_chat_up(self) -> None:
@@ -194,6 +198,9 @@ class AIReconApp(App):
         self._current_tool_id: str | None = None
         self._status_task: asyncio.Task | None = None
         self._health_check_task: asyncio.Task | None = None
+        self._user_input_poll_task: asyncio.Task | None = None
+        self._active_user_input_request_id: str = ""
+        self._handled_user_input_request_ids: set[str] = set()
         self.current_context_path: Path | None = None
         self.active_file_content: str | None = None
         self.active_file_path: Path | None = None
@@ -214,12 +221,17 @@ class AIReconApp(App):
         if isinstance(content, (dict, list)):
             try:
                 return json.dumps(content, ensure_ascii=False, indent=2)
-            except Exception:
+            except Exception as e:
+                logger.debug(
+                    "Expected failure in _history_content_to_text json.dumps: %s", e
+                )
                 return str(content)
         return str(content)
 
     @classmethod
-    def _history_entries_to_render(cls, messages: list[dict[str, Any]], limit: int = 250) -> list[tuple[str, str]]:
+    def _history_entries_to_render(
+        cls, messages: list[dict[str, Any]], limit: int = 250
+    ) -> list[tuple[str, str]]:
         rendered: list[tuple[str, str]] = []
         for msg in (messages or [])[-limit:]:
             if not isinstance(msg, dict):
@@ -292,7 +304,9 @@ class AIReconApp(App):
         return self._ollama_degraded_until > time.monotonic()
 
     def _should_show_ollama_degraded(self, ollama_ok: bool) -> bool:
-        return bool(ollama_ok and self._processing and self._is_ollama_degraded_active())
+        return bool(
+            ollama_ok and self._processing and self._is_ollama_degraded_active()
+        )
 
     def _mark_ollama_degraded(self, reason: str = "") -> None:
         if not self._processing:
@@ -302,11 +316,13 @@ class AIReconApp(App):
             time.monotonic() + self._OLLAMA_DEGRADED_SECONDS,
         )
         if reason:
-            logger.warning("Marking Ollama status degraded due to recovery event: %s", reason)
+            logger.warning(
+                "Marking Ollama status degraded due to recovery event: %s", reason
+            )
         try:
             self.query_one("#status-bar", StatusBar).set_status(ollama_degraded=True)
-        except Exception:
-            pass
+        except Exception as e:
+            logger.debug("Expected failure in _mark_ollama_degraded set_status: %s", e)
 
     def compose(self) -> ComposeResult:
         yield Header()
@@ -332,13 +348,13 @@ class AIReconApp(App):
 
         try:
             self.query_one("#copy-toast-wrap", Container).display = False
-        except Exception:
-            pass
+        except Exception as e:
+            logger.debug("Expected failure in on_mount hide copy toast: %s", e)
 
         try:
             self.query_one("#workspace-panel", WorkspacePanel).reload()
-        except Exception:
-            pass
+        except Exception as e:
+            logger.debug("Expected failure in on_mount reload workspace: %s", e)
 
         chat = self.query_one("#chat-panel", ChatPanel)
         chat.add_assistant_message(
@@ -353,6 +369,7 @@ class AIReconApp(App):
             "[#58a6ff]/help[/#58a6ff] [#484f58]·[/#484f58] "
             "[#58a6ff]/skills[/#58a6ff] [#484f58]·[/#484f58] "
             "[#58a6ff]/mcp[/#58a6ff] [#484f58]·[/#484f58] "
+            "[#58a6ff]/shell[/#58a6ff] [#484f58]·[/#484f58] "
             "[#58a6ff]/status[/#58a6ff] [#484f58]·[/#484f58] "
             "[#58a6ff]/clear[/#58a6ff]\n"
             "\n"
@@ -387,14 +404,15 @@ class AIReconApp(App):
             self._status_task = asyncio.create_task(self._poll_services())
 
     async def on_unmount(self) -> None:
-        if hasattr(self, '_session_id') and self._session_id:
+        if hasattr(self, "_session_id") and self._session_id:
             try:
                 from airecon.proxy.agent.session import load_session, save_session
+
                 session = load_session(self._session_id)
                 if session and session.target:
                     save_session(session)
-            except Exception:
-                pass
+            except Exception as e:
+                logger.debug("Expected failure in on_unmount save_session: %s", e)
 
         if self._status_task and not self._status_task.done():
             self._status_task.cancel()
@@ -423,8 +441,10 @@ class AIReconApp(App):
             self.query_one("#recon-bar", Static).update(
                 f"[bold #3b82f6]{char}[/]  [#8b949e]esc  interrupt[/]"
             )
-        except Exception:
-            pass
+        except Exception as e:
+            logger.debug(
+                "Expected failure in _tick_recon_spinner update recon-bar: %s", e
+            )
 
     def _show_recon_spinner(self) -> None:
         try:
@@ -433,17 +453,18 @@ class AIReconApp(App):
                 f"[bold #3b82f6]{self._SPINNER_CHARS[0]}[/]  [#8b949e]esc  interrupt[/]"
             )
             bar.styles.height = 1
-        except Exception:
-            pass
+        except Exception as e:
+            logger.debug("Expected failure in _show_recon_spinner: %s", e)
 
     def _hide_recon_spinner(self) -> None:
         try:
             self.query_one("#recon-bar", Static).styles.height = 0
-        except Exception:
-            pass
+        except Exception as e:
+            logger.debug("Expected failure in _hide_recon_spinner: %s", e)
 
     async def on_workspace_tree_file_selected(
-            self, event: WorkspaceTree.FileSelected) -> None:
+        self, event: WorkspaceTree.FileSelected
+    ) -> None:
         chat = self.query_one(ChatPanel)
         try:
             file_path = event.path
@@ -454,41 +475,55 @@ class AIReconApp(App):
 
                 if workspace_root in abs_path.parents:
                     rel = abs_path.relative_to(workspace_root)
-                    if len(
-                            rel.parts) > 1:
+                    if len(rel.parts) > 1:
                         search_path = abs_path
                         target_path = None
 
                         while search_path != workspace_root:
-                            if any((search_path / folder).is_dir()
-                                   for folder in ['vulnerabilities', 'output', 'command', 'tools']):
+                            if any(
+                                (search_path / folder).is_dir()
+                                for folder in [
+                                    "vulnerabilities",
+                                    "output",
+                                    "command",
+                                    "tools",
+                                ]
+                            ):
                                 target_path = search_path
                                 break
                             search_path = search_path.parent
 
                         if not target_path:
-                            target_path = abs_path if abs_path.is_dir() else abs_path.parent
+                            target_path = (
+                                abs_path if abs_path.is_dir() else abs_path.parent
+                            )
 
                         self.query_one(
-                            "#workspace-panel",
-                            WorkspacePanel).update_vulnerabilities_path(target_path)
+                            "#workspace-panel", WorkspacePanel
+                        ).update_vulnerabilities_path(target_path)
                     else:
                         self.query_one(
-                            "#workspace-panel",
-                            WorkspacePanel).clear_vulnerabilities_view()
-            except Exception:
-                pass
+                            "#workspace-panel", WorkspacePanel
+                        ).clear_vulnerabilities_view()
+            except Exception as e:
+                logger.debug(
+                    "Expected failure in on_workspace_tree_file_selected clear vuln view: %s",
+                    e,
+                )
 
             def _read_file_sync() -> str:
                 try:
                     if file_path.stat().st_size > 50_000:
-                        with open(file_path, "r", encoding="utf-8", errors="replace") as f:
+                        with open(
+                            file_path, "r", encoding="utf-8", errors="replace"
+                        ) as f:
                             return f.read(50_000) + "\n... [TRUNCATED CONTEXT] ..."
                     return file_path.read_text(encoding="utf-8", errors="replace")
                 except Exception as exc:
                     return f"Error reading file: {exc}"
 
             import asyncio
+
             content = await asyncio.to_thread(_read_file_sync)
 
             self.active_file_path = file_path
@@ -507,7 +542,8 @@ class AIReconApp(App):
             self.active_file_content = None
 
     def on_workspace_tree_directory_selected(
-            self, event: WorkspaceTree.DirectorySelected) -> None:
+        self, event: WorkspaceTree.DirectorySelected
+    ) -> None:
         if event.control is not None and event.control.id != "workspace-tree":
             return
 
@@ -522,8 +558,8 @@ class AIReconApp(App):
             if workspace_root in abs_path.parents or abs_path == workspace_root:
                 if abs_path == workspace_root:
                     self.query_one(
-                        "#workspace-panel",
-                        WorkspacePanel).clear_vulnerabilities_view()
+                        "#workspace-panel", WorkspacePanel
+                    ).clear_vulnerabilities_view()
                     return
 
                 rel = abs_path.relative_to(workspace_root)
@@ -532,8 +568,15 @@ class AIReconApp(App):
                     target_path = None
 
                     while search_path != workspace_root:
-                        if any((search_path / folder).is_dir()
-                               for folder in ['vulnerabilities', 'output', 'command', 'tools']):
+                        if any(
+                            (search_path / folder).is_dir()
+                            for folder in [
+                                "vulnerabilities",
+                                "output",
+                                "command",
+                                "tools",
+                            ]
+                        ):
                             target_path = search_path
                             break
                         search_path = search_path.parent
@@ -542,10 +585,13 @@ class AIReconApp(App):
                         target_path = abs_path if abs_path.is_dir() else abs_path.parent
 
                     self.query_one(
-                        "#workspace-panel",
-                        WorkspacePanel).update_vulnerabilities_path(target_path)
-        except Exception:
-            pass
+                        "#workspace-panel", WorkspacePanel
+                    ).update_vulnerabilities_path(target_path)
+        except Exception as e:
+            logger.debug(
+                "Expected failure in on_workspace_tree_directory_selected update vuln path: %s",
+                e,
+            )
 
     async def _poll_services(self) -> None:
         status_bar = self.query_one("#status-bar", StatusBar)
@@ -568,7 +614,9 @@ class AIReconApp(App):
                     exec_used = tool_counts.get("exec", 0)
                     subagents = tool_counts.get("subagents", 0)
                     token_info = agent_stats.get("token_usage", {})
-                    tokens_used = token_info.get("cumulative", token_info.get("used", 0))
+                    tokens_used = token_info.get(
+                        "cumulative", token_info.get("used", 0)
+                    )
                     tokens_limit = token_info.get("limit", 65536)
                     skills_info = agent_stats.get("skills_used", [])
                     caido_data = agent_stats.get("caido", {})
@@ -594,11 +642,16 @@ class AIReconApp(App):
                             f"✅ Connected — **{model}** ready with Docker sandbox"
                         )
                         try:
-                            sess_resp = await self._http.get("/api/session/current", timeout=3.0)
+                            sess_resp = await self._http.get(
+                                "/api/session/current", timeout=3.0
+                            )
                             if sess_resp.status_code == 200:
                                 sess = sess_resp.json().get("session")
-                                # Only show session banner for explicit resume mode.
-                                if sess and self._session_id and sess.get("session_id") == self._session_id:
+                                if (
+                                    sess
+                                    and self._session_id
+                                    and sess.get("session_id") == self._session_id
+                                ):
                                     sid = sess.get("session_id", "?")
                                     target = sess.get("target") or "no target yet"
                                     scans = sess.get("scan_count", 0)
@@ -606,13 +659,22 @@ class AIReconApp(App):
                                         f"🔖 Active session: `{sid}` — {target}"
                                         + (f" ({scans} scans)" if scans else "")
                                     )
-                        except Exception:
-                            pass
+                        except Exception as e:
+                            error_str = str(e).strip()
+                            if error_str:
+                                logger.debug(
+                                    "Expected failure in _poll_services show session info: %s",
+                                    e,
+                                )
 
                         await self._restore_history_if_resumed(chat)
                         break
-            except Exception:
-                pass
+            except Exception as e:
+                error_str = str(e).strip()
+                if error_str:
+                    logger.debug(
+                        "Expected failure in _poll_services status check: %s", e
+                    )
 
             await asyncio.sleep(1.0)
 
@@ -622,16 +684,19 @@ class AIReconApp(App):
                 try:
                     resp = await self._http.get("/api/status", timeout=3.0)
                     data = resp.json()
-                except Exception:
-                    pass
+                except Exception as e:
+                    error_str = str(e).strip()
+                    if error_str:
+                        logger.debug(
+                            "Expected failure in _poll_services get status data: %s", e
+                        )
                 ollama_ok = data.get("ollama", {}).get("connected", False)
                 docker_ok = data.get("docker", {}).get("connected", False)
                 issues = []
                 if not ollama_ok:
                     issues.append("Ollama offline (check `ollama serve`)")
                 if not docker_ok:
-                    issues.append(
-                        "Docker sandbox not running (check Docker daemon)")
+                    issues.append("Docker sandbox not running (check Docker daemon)")
                 detail = " · ".join(issues) if issues else "services not ready"
                 chat.add_error_message(
                     f"⚠️ Proxy is running but services are not ready: {detail}\n"
@@ -649,8 +714,10 @@ class AIReconApp(App):
 
             try:
                 self.query_one("#workspace-panel", WorkspacePanel).reload()
-            except Exception:
-                pass
+            except Exception as e:
+                logger.debug(
+                    "Expected failure in _poll_services loop reload workspace: %s", e
+                )
 
             try:
                 resp = await self._http.get("/api/status", timeout=3.0)
@@ -661,9 +728,13 @@ class AIReconApp(App):
                     model = data.get("ollama", {}).get("model", "—")
                     tool_counts = data.get("agent", {}).get("tool_counts", {})
                     exec_used = tool_counts.get("exec", 0)
-                    subagents = tool_counts.get("subagents", 0) + self._file_agents_running
+                    subagents = (
+                        tool_counts.get("subagents", 0) + self._file_agents_running
+                    )
                     token_info = data.get("agent", {}).get("token_usage", {})
-                    tokens_used = token_info.get("cumulative", token_info.get("used", 0))
+                    tokens_used = token_info.get(
+                        "cumulative", token_info.get("used", 0)
+                    )
                     tokens_limit = token_info.get("limit", 65536)
                     skills_info = data.get("agent", {}).get("skills_used", [])
                     caido_data = data.get("agent", {}).get("caido", {})
@@ -683,8 +754,12 @@ class AIReconApp(App):
                         caido_active=caido_active,
                         caido_findings=caido_findings,
                     )
-            except Exception:
-                pass
+            except Exception as e:
+                error_str = str(e).strip()
+                if error_str:
+                    logger.debug(
+                        "Expected failure in _poll_services loop set_status: %s", e
+                    )
 
     async def _check_services(self, verbose: bool = False) -> None:
         status_bar = self.query_one("#status-bar", StatusBar)
@@ -722,10 +797,10 @@ class AIReconApp(App):
                 if verbose:
                     status_md = f"""## 🟢 AIRecon Status Report
 
-- **Ollama**: {'✅ Online' if ollama_ok else '❌ Offline'}
+- **Ollama**: {"✅ Online" if ollama_ok else "❌ Offline"}
   - URL: `{ollama.get("url", "Unknown")}`
   - Model: `{model}`
-- **Docker Sandbox**: {'✅ Running' if docker_ok else '❌ Stopped'}
+- **Docker Sandbox**: {"✅ Running" if docker_ok else "❌ Stopped"}
   - Image: `{docker.get("image", "airecon-sandbox")}`
 
 - **Messages**: {agent.get("message_count", 0)}
@@ -767,7 +842,9 @@ class AIReconApp(App):
                 if not self._processing:
                     break
 
-                _status_timeout = _HTTP_TIMEOUT_ACTIVE if self._processing else _HTTP_TIMEOUT_IDLE
+                _status_timeout = (
+                    _HTTP_TIMEOUT_ACTIVE if self._processing else _HTTP_TIMEOUT_IDLE
+                )
                 resp = await self._http.get("/api/status", timeout=_status_timeout)
                 if resp.status_code == 200:
                     data = resp.json()
@@ -800,8 +877,11 @@ class AIReconApp(App):
                             try:
                                 chat.end_streaming()
                                 chat.end_thinking()
-                            except Exception:
-                                pass
+                            except Exception as e:
+                                logger.debug(
+                                    "Expected failure in _docker_health_monitor end streaming: %s",
+                                    e,
+                                )
                             break
                         else:
                             logger.warning(
@@ -826,7 +906,9 @@ class AIReconApp(App):
                     consecutive_http_failures = 0
                 else:
                     sse_age = time.monotonic() - self._last_sse_activity
-                    _EXTENDED_SSE_WINDOW = 180.0 if self._processing else _SSE_RECENT_WINDOW
+                    _EXTENDED_SSE_WINDOW = (
+                        180.0 if self._processing else _SSE_RECENT_WINDOW
+                    )
                     if sse_age < _EXTENDED_SSE_WINDOW and is_proxy_alive():
                         logger.debug(
                             "Status endpoint returned HTTP %s but SSE is recent (%.0fs) and proxy thread is alive — treating as transient",
@@ -858,10 +940,14 @@ class AIReconApp(App):
                 _EXTENDED_SSE_WINDOW = 180.0 if self._processing else _SSE_RECENT_WINDOW
 
                 if sse_age < _EXTENDED_SSE_WINDOW:
-                    if consecutive_http_failures > 0 and consecutive_http_failures % 3 == 0:
+                    if (
+                        consecutive_http_failures > 0
+                        and consecutive_http_failures % 3 == 0
+                    ):
                         logger.debug(
                             "Health check timeout (SSE age=%.0fs) — event loop saturated, skipping (count=%d)",
-                            sse_age, consecutive_http_failures,
+                            sse_age,
+                            consecutive_http_failures,
                         )
                     consecutive_http_failures = 0
                     consecutive_docker_failures = 0
@@ -894,7 +980,7 @@ class AIReconApp(App):
                         consecutive_http_failures * 5,
                         sse_age,
                     )
-                    # Avoid false UI alarm while SSE is still active/recent.
+
                     if sse_age >= 180.0:
                         try:
                             chat = self.query_one("#chat-panel", ChatPanel)
@@ -902,8 +988,11 @@ class AIReconApp(App):
                                 chat.add_system_message(
                                     "Proxy temporarily unreachable; auto-recovery in progress (up to 90s)."
                                 )
-                        except Exception:
-                            pass
+                        except Exception as e:
+                            logger.debug(
+                                "Expected failure in _docker_health_monitor show system message: %s",
+                                e,
+                            )
                     continue
 
             if (
@@ -911,9 +1000,6 @@ class AIReconApp(App):
                 or proxy_fatal
                 or consecutive_http_failures >= _HTTP_HARD_THRESHOLD
             ):
-                # If proxy thread is still alive and there is no fatal crash signal,
-                # keep waiting longer before hard-abort. Under heavy LLM/tool load,
-                # /api/status can timeout repeatedly while the SSE worker is still alive.
                 if (
                     proxy_thread_alive
                     and not proxy_fatal
@@ -953,15 +1039,16 @@ class AIReconApp(App):
                             "Please restart AIRecon."
                         )
                         self._processing = False
-                except Exception:
-                    pass
+                except Exception as e:
+                    logger.debug(
+                        "Expected failure in _docker_health_monitor show error: %s", e
+                    )
                 break
 
     def _start_health_monitor(self) -> None:
         if not self._health_check_task:
             self._health_check_task = asyncio.create_task(
-                self._docker_health_monitor(),
-                name="docker-health-monitor"
+                self._docker_health_monitor(), name="docker-health-monitor"
             )
             logger.debug("Started Docker health monitor")
 
@@ -976,7 +1063,8 @@ class AIReconApp(App):
         self._open_file_preview(message.output_file)
 
     def on_directory_tree_file_selected(
-            self, event: DirectoryTree.FileSelected) -> None:
+        self, event: DirectoryTree.FileSelected
+    ) -> None:
         self._open_file_preview(str(event.path))
 
     def _open_file_preview(self, file_path: str) -> None:
@@ -988,15 +1076,13 @@ class AIReconApp(App):
             if p.exists():
                 if p.is_dir():
                     return
-                self.push_screen(
-                    FilePreviewScreen(
-                        str(p)), self.on_preview_result)
+                self.push_screen(FilePreviewScreen(str(p)), self.on_preview_result)
             else:
                 self.query_one(ChatPanel).add_error_message(
-                    f"File not found: {file_path}")
+                    f"File not found: {file_path}"
+                )
         except Exception as e:
-            self.query_one(ChatPanel).add_error_message(
-                f"Failed to open file: {e}")
+            self.query_one(ChatPanel).add_error_message(f"Failed to open file: {e}")
 
     async def on_preview_result(self, result: Any) -> None:
         if isinstance(result, FilePreviewScreen.Submitted):
@@ -1004,8 +1090,7 @@ class AIReconApp(App):
             _abs = Path(abs_path)
             _cwd = Path(os.getcwd())
             display_path = (
-                str(_abs.relative_to(_cwd))
-                if _abs.is_relative_to(_cwd) else abs_path
+                str(_abs.relative_to(_cwd)) if _abs.is_relative_to(_cwd) else abs_path
             )
 
             chat = self.query_one(ChatPanel)
@@ -1035,18 +1120,18 @@ class AIReconApp(App):
         self.active_file_content = None
 
     def on_command_input_at_path_changed(
-            self, event: CommandInput.AtPathChanged) -> None:
+        self, event: CommandInput.AtPathChanged
+    ) -> None:
         try:
             completer = self.query_one("#path-completer", PathCompleter)
             if event.fragment is None:
                 completer.hide()
             else:
                 completer.show_for(event.fragment)
-        except Exception:
-            pass
+        except Exception as e:
+            logger.debug("Expected failure in on_command_input_at_path_changed: %s", e)
 
-    def on_command_input_tab_pressed(
-            self, event: CommandInput.TabPressed) -> None:
+    def on_command_input_tab_pressed(self, event: CommandInput.TabPressed) -> None:
         try:
             slash_completer = self.query_one("#slash-completer", SlashCompleter)
             if slash_completer.display:
@@ -1056,8 +1141,11 @@ class AIReconApp(App):
                     cmd_input.do_slash_completion(cmd)
                     slash_completer.hide()
                 return
-        except Exception:
-            pass
+        except Exception as e:
+            logger.debug(
+                "Expected failure in on_command_input_tab_pressed slash completer: %s",
+                e,
+            )
 
         try:
             completer = self.query_one("#path-completer", PathCompleter)
@@ -1072,47 +1160,53 @@ class AIReconApp(App):
                 completer.show_for(path)
             else:
                 completer.hide()
-        except Exception:
-            pass
+        except Exception as e:
+            logger.debug(
+                "Expected failure in on_command_input_tab_pressed path completer: %s", e
+            )
 
     def on_command_input_escape_completion(
-            self, event: CommandInput.EscapeCompletion) -> None:
+        self, event: CommandInput.EscapeCompletion
+    ) -> None:
         try:
             slash_completer = self.query_one("#slash-completer", SlashCompleter)
             if slash_completer.display:
                 slash_completer.hide()
-        except Exception:
-            pass
+        except Exception as e:
+            logger.debug(
+                "Expected failure in on_command_input_escape_completion slash completer: %s",
+                e,
+            )
         try:
             completer = self.query_one("#path-completer", PathCompleter)
             if completer.display:
                 completer.hide()
-        except Exception:
-            pass
+        except Exception as e:
+            logger.debug(
+                "Expected failure in on_command_input_escape_completion path completer: %s",
+                e,
+            )
 
-    def on_command_input_slash_changed(
-            self, event: CommandInput.SlashChanged) -> None:
+    def on_command_input_slash_changed(self, event: CommandInput.SlashChanged) -> None:
         try:
             completer = self.query_one("#slash-completer", SlashCompleter)
             if event.fragment is None:
                 completer.hide()
             else:
                 completer.show_for(event.fragment)
-        except Exception:
-            pass
+        except Exception as e:
+            logger.debug("Expected failure in on_command_input_slash_changed: %s", e)
 
-    def on_slash_completer_completed(
-            self, event: SlashCompleter.Completed) -> None:
+    def on_slash_completer_completed(self, event: SlashCompleter.Completed) -> None:
         try:
             cmd_input = self.query_one("#command-input", CommandInput)
             cmd_input.do_slash_completion(event.command)
             self.query_one("#slash-completer", SlashCompleter).hide()
             cmd_input.focus()
-        except Exception:
-            pass
+        except Exception as e:
+            logger.debug("Expected failure in on_slash_completer_completed: %s", e)
 
-    def on_path_completer_completed(
-            self, event: PathCompleter.Completed) -> None:
+    def on_path_completer_completed(self, event: PathCompleter.Completed) -> None:
         try:
             cmd_input = self.query_one("#command-input", CommandInput)
             cmd_input.do_completion(event.path)
@@ -1122,23 +1216,28 @@ class AIReconApp(App):
             else:
                 completer.hide()
             cmd_input.focus()
-        except Exception:
-            pass
+        except Exception as e:
+            logger.debug("Expected failure in on_path_completer_completed: %s", e)
 
-    async def on_command_input_submitted(
-            self, message: CommandInput.Submitted) -> None:
+    async def on_command_input_submitted(self, message: CommandInput.Submitted) -> None:
         user_input = message.value.strip()
         if not user_input:
             return
 
         try:
             self.query_one("#slash-completer", SlashCompleter).hide()
-        except Exception:
-            pass
+        except Exception as e:
+            logger.debug(
+                "Expected failure in on_command_input_submitted hide slash completer: %s",
+                e,
+            )
         try:
             self.query_one("#path-completer", PathCompleter).hide()
-        except Exception:
-            pass
+        except Exception as e:
+            logger.debug(
+                "Expected failure in on_command_input_submitted hide path completer: %s",
+                e,
+            )
 
         if user_input.startswith("/"):
             await self._handle_slash_command(user_input)
@@ -1166,7 +1265,8 @@ class AIReconApp(App):
         self._chat_worker = self.run_worker(self._stream_chat_response(prompt))
 
     async def _stream_chat_response(
-            self, prompt: str, inject_context: bool = True) -> None:
+        self, prompt: str, inject_context: bool = True
+    ) -> None:
         logger.debug(f"Starting chat stream for prompt: {prompt[:50]}...")
         self._processing = True
         chat = self.query_one("#chat-panel", ChatPanel)
@@ -1174,7 +1274,6 @@ class AIReconApp(App):
         self._start_health_monitor()
 
         try:
-
             if inject_context and self.active_file_content and self.active_file_path:
                 file_ext = self.active_file_path.suffix.lower()
                 file_path_str = str(self.active_file_path.resolve())
@@ -1184,14 +1283,21 @@ class AIReconApp(App):
                 if file_ext == ".json":
                     try:
                         parsed_content = json.loads(self.active_file_content)
-                        if isinstance(parsed_content,
-                                      dict) and "result" in parsed_content:
+                        if (
+                            isinstance(parsed_content, dict)
+                            and "result" in parsed_content
+                        ):
                             result_data = parsed_content["result"]
-                            if isinstance(result_data,
-                                          dict) and "stdout" in result_data:
+                            if (
+                                isinstance(result_data, dict)
+                                and "stdout" in result_data
+                            ):
                                 stdout_content = result_data["stdout"].strip()
                                 domains = [
-                                    d.strip() for d in stdout_content.split("\n") if d.strip()]
+                                    d.strip()
+                                    for d in stdout_content.split("\n")
+                                    if d.strip()
+                                ]
                                 count = len(domains)
 
                                 file_context_message_parts.append(
@@ -1208,54 +1314,72 @@ class AIReconApp(App):
                                 )
                         else:
                             file_context_message_parts.append(
-                                f"User loaded file: {file_path_str} (JSON). Content snippet: {self.active_file_content[:500]}...")
+                                f"User loaded file: {file_path_str} (JSON). Content snippet: {self.active_file_content[:500]}..."
+                            )
 
                     except json.JSONDecodeError:
                         file_context_message_parts.append(
-                            f"User loaded file: {file_path_str} (Raw Content). Snippet: {self.active_file_content[:500]}...")
+                            f"User loaded file: {file_path_str} (Raw Content). Snippet: {self.active_file_content[:500]}..."
+                        )
                 else:
                     file_context_message_parts.append(
-                        f"User loaded file: {file_path_str}. Content snippet: {self.active_file_content[:500]}...")
+                        f"User loaded file: {file_path_str}. Content snippet: {self.active_file_content[:500]}..."
+                    )
 
                 context_str = "\n".join(file_context_message_parts)
                 prompt_with_context = f"[SYSTEM: ACTIVE FILE CONTEXT]\n{context_str}\n\n[USER PROMPT]\n{prompt}"
 
-                _ctx_file_name = self.active_file_path.name if self.active_file_path else "file"
+                _ctx_file_name = (
+                    self.active_file_path.name if self.active_file_path else "file"
+                )
                 self._clear_active_file_context()
                 chat.add_system_message(
-                    f"[dim]Sent context from {_ctx_file_name}[/dim]")
+                    f"[dim]Sent context from {_ctx_file_name}[/dim]"
+                )
             else:
                 prompt_with_context = prompt
 
-            # Preflight with short retries to absorb transient proxy restarts.
-            # This prevents immediate hard-fail when proxy socket is briefly unavailable.
+            _chat_request_id = uuid.uuid4().hex[:12]
+            logger.info("chat_trace_tui id=%s phase=preflight_start", _chat_request_id)
             _preflight_ok = False
             for _attempt in range(3):
                 try:
                     _status_resp = await self._http.get("/api/status", timeout=2.5)
                     if _status_resp.status_code == 200:
                         _preflight_ok = True
+                        logger.info(
+                            "chat_trace_tui id=%s phase=preflight_ok attempt=%d",
+                            _chat_request_id,
+                            _attempt + 1,
+                        )
                         break
                 except Exception as _e:
                     logger.debug(
-                        "Chat preflight attempt %d failed: %s",
+                        "Chat preflight attempt %d failed (id=%s): %s",
                         _attempt + 1,
+                        _chat_request_id,
                         _e,
                     )
 
                 if _attempt < 2:
-                    await asyncio.sleep(0.4 * (2 ** _attempt))
+                    await asyncio.sleep(0.4 * (2**_attempt))
 
             if not _preflight_ok:
                 logger.warning(
-                    "Chat preflight could not confirm proxy readiness after retries; attempting stream anyway"
+                    "Chat preflight could not confirm proxy readiness after retries (id=%s); attempting stream anyway",
+                    _chat_request_id,
                 )
 
+            logger.info("chat_trace_tui id=%s phase=stream_connect", _chat_request_id)
             logger.debug(f"Connecting to proxy at {self.proxy_url}/api/chat")
             async with self._http.stream(
                 "POST",
                 "/api/chat",
-                json={"message": prompt_with_context, "stream": True},
+                json={
+                    "message": prompt_with_context,
+                    "stream": True,
+                    "request_id": _chat_request_id,
+                },
                 headers={"Accept": "text/event-stream"},
                 timeout=httpx.Timeout(30.0, read=None),
             ) as resp:
@@ -1263,7 +1387,9 @@ class AIReconApp(App):
 
                 if resp.status_code != 200:
                     body = await resp.aread()
-                    error_msg = f"Proxy error ({resp.status_code}): {body.decode()[:500]}"
+                    error_msg = (
+                        f"Proxy error ({resp.status_code}): {body.decode()[:500]}"
+                    )
                     logger.error(error_msg)
                     chat.add_error_message(error_msg)
                     return
@@ -1289,17 +1415,39 @@ class AIReconApp(App):
                         event = json.loads(data_str)
                     except json.JSONDecodeError as e:
                         logger.warning(
-                            f"Failed to parse SSE JSON: {data_str[:100]} - {e}")
+                            f"Failed to parse SSE JSON: {data_str[:100]} - {e}"
+                        )
                         continue
 
                     self._last_sse_activity = time.monotonic()
 
                     event_type = str(event.get("type", "") or "").strip()
+                    
+                    if event_type.startswith("subagent_"):
+                        logger.info("TUI SSE event: type=%s, keys=%s", event_type, list(event.keys())[:10])
+                    
+                    event_req_id = str(
+                        event.get("request_id", _chat_request_id) or _chat_request_id
+                    )
                     if not event_type:
-                        logger.debug("Received SSE payload without event type; ignoring")
+                        logger.debug(
+                            "Received SSE payload without event type; ignoring"
+                        )
                         continue
 
-                    logger.debug(f"Received event: {event_type}")
+                    if event_type in {
+                        "tool_start",
+                        "tool_end",
+                        "error",
+                        "done",
+                        "progress",
+                        "user_input_required",
+                    }:
+                        logger.info(
+                            "chat_trace_tui id=%s phase=%s", event_req_id, event_type
+                        )
+                    else:
+                        logger.debug("Received event: %s", event_type)
 
                     if event_type == "text":
                         content = event.get("content", "")
@@ -1328,8 +1476,7 @@ class AIReconApp(App):
                         tool_id = str(event.get("tool_id", "0"))
                         tool_name = event.get("tool", "unknown")
                         arguments = event.get("arguments", {})
-                        logger.info(
-                            f"Tool Start: {tool_name} args={arguments}")
+                        logger.info(f"Tool Start: {tool_name} args={arguments}")
                         chat.end_streaming()
                         chat.end_thinking()
                         streaming_started = False
@@ -1356,17 +1503,18 @@ class AIReconApp(App):
                         skills_info = event.get("skills_used", []) or []
                         caido_data = event.get("caido", {}) or {}
 
-                        logger.info(
-                            f"Tool End: success={success} duration={duration}")
+                        logger.info(f"Tool End: success={success} duration={duration}")
 
                         if not hasattr(chat, "_active_tools"):
                             chat._active_tools = {}
-                        captured_tool_msg = chat._active_tools.pop(
-                            tool_id, None)
+                        captured_tool_msg = chat._active_tools.pop(tool_id, None)
 
                         def update_ui_on_tool_end(
                             _msg=captured_tool_msg,
-                            _s=success, _d=duration, _r=result_preview, _o=output_file,
+                            _s=success,
+                            _d=duration,
+                            _r=result_preview,
+                            _o=output_file,
                             _tc=tool_counts,
                             _ti=token_info,
                             _sk=skills_info,
@@ -1377,48 +1525,117 @@ class AIReconApp(App):
                             chat.scroll_end(animate=False)
 
                             try:
-                                status_bar = self.query_one(
-                                    "#status-bar", StatusBar)
+                                status_bar = self.query_one("#status-bar", StatusBar)
                                 status_update_kwargs = {}
 
                                 if _tc:
                                     status_update_kwargs["exec_used"] = _tc.get(
-                                        "exec", 0)
+                                        "exec", 0
+                                    )
                                     status_update_kwargs["subagents"] = _tc.get(
-                                        "subagents", 0)
+                                        "subagents", 0
+                                    )
 
                                 if _ti:
                                     status_update_kwargs["tokens"] = _ti.get(
-                                        "cumulative", _ti.get("used", 0))
+                                        "cumulative", _ti.get("used", 0)
+                                    )
                                     status_update_kwargs["token_limit"] = _ti.get(
-                                        "limit", 65536)
+                                        "limit", 65536
+                                    )
 
                                 if _sk:
                                     status_update_kwargs["skills"] = _sk
 
                                 if _cd:
                                     status_update_kwargs["caido_active"] = _cd.get(
-                                        "active", False)
+                                        "active", False
+                                    )
                                     status_update_kwargs["caido_findings"] = _cd.get(
-                                        "findings_count", 0)
+                                        "findings_count", 0
+                                    )
 
                                 if status_update_kwargs:
-                                    status_bar.set_status(
-                                        **status_update_kwargs)
-                            except Exception:
-                                pass
+                                    status_bar.set_status(**status_update_kwargs)
+                            except Exception as e:
+                                logger.debug(
+                                    "Expected failure in update_ui_on_tool_end set_status: %s",
+                                    e,
+                                )
 
                             try:
                                 import time as _time
+
                                 now = _time.monotonic()
                                 if now - self._last_workspace_reload >= 10.0:
                                     self._last_workspace_reload = now
                                     self.query_one(
-                                        "#workspace-panel", WorkspacePanel).reload()
-                            except Exception:
-                                pass
+                                        "#workspace-panel", WorkspacePanel
+                                    ).reload()
+                            except Exception as e:
+                                logger.debug(
+                                    "Expected failure in update_ui_on_tool_end reload workspace: %s",
+                                    e,
+                                )
 
                         self.call_later(update_ui_on_tool_end)
+
+                    elif event_type == "subagent_text":
+                        subagent_id = event.get("target", "") or event.get("subagent_id", "")
+                        content = event.get("content", "")
+                        if content and subagent_id:
+                            if subagent_id not in chat._active_subagents:
+                                label = "Orchestrator" if subagent_id == "orchestrator" else f"Target: {subagent_id}"
+                                chat.add_subagent_block(subagent_id, label)
+                            chat.subagent_append_text(subagent_id, content)
+                            _now = time.monotonic()
+                            if _now - self._last_scroll_time >= 0.3:
+                                chat.scroll_end(animate=False)
+                                self._last_scroll_time = _now
+
+                    elif event_type == "subagent_tool_start":
+                        subagent_id = event.get("target", "") or event.get("subagent_id", "")
+                        tool_id = str(event.get("tool_id", "0"))
+                        tool_name = event.get("tool", "unknown")
+                        arguments = event.get("arguments", {})
+
+                        if subagent_id:
+                            if subagent_id not in chat._active_subagents:
+                                label = "Orchestrator" if subagent_id == "orchestrator" else f"Target: {subagent_id}"
+                                chat.add_subagent_block(subagent_id, label)
+                            chat.subagent_add_tool(subagent_id, tool_id, tool_name, arguments)
+                            logger.debug(f"SubAgent Tool Start: {subagent_id}::{tool_name}")
+
+                    elif event_type == "subagent_tool_output":
+                        subagent_id = event.get("target", "") or event.get("subagent_id", "")
+                        tool_id = str(event.get("tool_id", "0"))
+                        content = event.get("content", "")
+                        
+                        if content and subagent_id:
+                            chat.subagent_append_tool_output(subagent_id, tool_id, content)
+                            _now = time.monotonic()
+                            if _now - self._last_scroll_time >= 0.3:
+                                chat.scroll_end(animate=False)
+                                self._last_scroll_time = _now
+
+                    elif event_type == "subagent_tool_end":
+                        subagent_id = event.get("target", "") or event.get("subagent_id", "")
+                        tool_id = str(event.get("tool_id", "0"))
+                        success = event.get("success", False)
+                        duration = event.get("duration", 0.0)
+                        
+                        if subagent_id:
+                            chat.subagent_update_tool_end(
+                                subagent_id, tool_id, success, duration, "", ""
+                            )
+                            logger.debug(f"SubAgent Tool End: {subagent_id}::{tool_id}")
+
+                    elif event_type == "subagent_complete":
+                        subagent_id = event.get("target", "") or event.get("subagent_id", "")
+                        if subagent_id and subagent_id in chat._active_subagents:
+                            block = chat._active_subagents[subagent_id]
+                            block.finish(success=True)
+                            logger.debug(f"SubAgent Complete: {subagent_id}")
 
                     elif event_type == "error":
                         error_msg = event.get("message", "Unknown error")
@@ -1430,7 +1647,6 @@ class AIReconApp(App):
                             chat.add_error_message(error_msg)
 
                         self.call_later(show_error_safely)
-
                         logger.error(f"Error event received: {error_msg}")
 
                     elif event_type == "user_input_required":
@@ -1450,8 +1666,7 @@ class AIReconApp(App):
                                 UserInputModal(prompt_txt, inp_type)
                             )
                             cancelled = value is None
-                            
-                            # Retry logic with exponential backoff (max 3 attempts)
+
                             _submit_success = False
                             for _attempt in range(3):
                                 try:
@@ -1468,18 +1683,19 @@ class AIReconApp(App):
                                         break
                                     logger.warning(
                                         "user-input submit attempt %d failed: %s",
-                                        _attempt + 1, resp.text
+                                        _attempt + 1,
+                                        resp.text,
                                     )
                                 except Exception as _e:
                                     logger.error(
                                         "user-input submit attempt %d failed: %s",
-                                        _attempt + 1, _e
+                                        _attempt + 1,
+                                        _e,
                                     )
-                                
-                                # Exponential backoff: 0.5s, 1s, 2s
+
                                 if _attempt < 2:
-                                    await asyncio.sleep(0.5 * (2 ** _attempt))
-                            
+                                    await asyncio.sleep(0.5 * (2**_attempt))
+
                             if not _submit_success:
                                 logger.error(
                                     "user-input submit failed after 3 attempts. "
@@ -1507,8 +1723,7 @@ class AIReconApp(App):
         except httpx.ReadTimeout as e:
             msg = f"Read timeout: {e}"
             logger.error(msg)
-            chat.add_error_message(
-                "Request timed out. The operation took too long.")
+            chat.add_error_message("Request timed out. The operation took too long.")
         except Exception as e:
             msg = f"Unexpected error in stream worker: {e}"
             logger.exception(msg)
@@ -1519,8 +1734,10 @@ class AIReconApp(App):
             try:
                 chat.end_streaming()
                 chat.end_thinking()
-            except Exception:
-                pass
+            except Exception as e:
+                logger.debug(
+                    "Expected failure in finally end streaming/thinking: %s", e
+                )
             if not self._file_agents_running:
                 self._hide_recon_spinner()
             logger.debug("Stream worker finished")
@@ -1540,8 +1757,10 @@ class AIReconApp(App):
 
         try:
             self.query_one("#status-bar", StatusBar).subagents_spawned += 1
-        except Exception:
-            pass
+        except Exception as e:
+            logger.debug(
+                "Expected failure in _stream_file_analysis increment subagents: %s", e
+            )
 
         try:
             async with self._http.stream(
@@ -1606,7 +1825,8 @@ class AIReconApp(App):
                     elif event_type == "tool_end":
                         tool_id = str(event.get("tool_id", "0"))
                         chat.subagent_update_tool_end(
-                            agent_id, tool_id,
+                            agent_id,
+                            tool_id,
                             event.get("success", False),
                             event.get("duration", 0.0),
                             event.get("result_preview", ""),
@@ -1629,11 +1849,12 @@ class AIReconApp(App):
                 self._hide_recon_spinner()
             try:
                 status_bar = self.query_one("#status-bar", StatusBar)
-                status_bar.subagents_spawned = max(
-                    0, status_bar.subagents_spawned - 1
+                status_bar.subagents_spawned = max(0, status_bar.subagents_spawned - 1)
+            except Exception as e:
+                logger.debug(
+                    "Expected failure in _stream_file_analysis finally decrement subagents: %s",
+                    e,
                 )
-            except Exception:
-                pass
 
     async def _refresh_mcp_until_ready(self, show_tools: bool = False) -> None:
         chat = self.query_one("#chat-panel", ChatPanel)
@@ -1649,7 +1870,11 @@ class AIReconApp(App):
                 if init_count > 0:
                     continue
 
-                lines: list[str] = [f"MCP Servers ({len(servers)})", "", "Configured MCP servers:"]
+                lines: list[str] = [
+                    f"MCP Servers ({len(servers)})",
+                    "",
+                    "Configured MCP servers:",
+                ]
                 any_ready = False
                 for s in servers:
                     name = s.get("name", "?")
@@ -1667,12 +1892,15 @@ class AIReconApp(App):
                                 lines.append(f"  - {t}")
                     elif status == "error":
                         lines.append("")
-                        lines.append(f"🔴 {name} - Error ({tool_error or 'unknown error'})")
+                        lines.append(
+                            f"🔴 {name} - Error ({tool_error or 'unknown error'})"
+                        )
 
                 if any_ready:
                     chat.add_assistant_message("\n".join(lines))
                 return
-            except Exception:
+            except Exception as e:
+                logger.debug("Expected failure in _refresh_mcp_until_ready: %s", e)
                 continue
 
     async def _handle_slash_command(self, cmd: str) -> None:
@@ -1687,6 +1915,7 @@ class AIReconApp(App):
                 "- /tools                List available tools\n"
                 "- /skills               Show AI skills\n"
                 "- /mcp                  Manage MCP servers\n"
+                "- /shell <command>      Run command in AIRecon Kali Docker shell\n"
                 "- /reset                Reset conversation\n"
                 "- /clear                Clear chat display\n\n"
                 "Note: For authenticated MCP endpoint, use auth:user/pass or auth:apikey:<token> after URL."
@@ -1701,10 +1930,13 @@ class AIReconApp(App):
                     skills = data.get("skills", [])
 
                     from collections import Counter
+
                     cat_counts: Counter = Counter(
                         s.get("category", "uncategorized") for s in skills
                     )
-                    lines = [f"AI Skills & Capabilities — {len(skills)} skills loaded\n"]
+                    lines = [
+                        f"AI Skills & Capabilities — {len(skills)} skills loaded\n"
+                    ]
                     for cat, count in sorted(cat_counts.items()):
                         lines.append(f"  {cat:<22} {count} skills")
                     lines.append(
@@ -1718,10 +1950,68 @@ class AIReconApp(App):
                 chat.add_error_message(f"Error: {e}")
             self._processing = False
 
+        elif cmd.startswith("/shell"):
+            shell_cmd = cmd[len("/shell") :].strip()
+            if not shell_cmd:
+                chat.add_assistant_message(
+                    "Usage: /shell <command>\n"
+                    "Runs command inside AIRecon Kali Docker sandbox, not host shell.\n"
+                    "Blocked interactive multiplexers: tmux, screen, byobu, zellij, abduco, dtach."
+                )
+                self._processing = False
+                return
+            try:
+                chat.add_system_message(f"$ {shell_cmd}")
+                resp = await self._http.post(
+                    "/api/shell",
+                    json={"command": shell_cmd},
+                    timeout=180.0,
+                )
+                data = resp.json() if resp.content else {}
+                if resp.status_code == 200:
+                    stdout = str(data.get("stdout", "") or "")
+                    stderr = str(data.get("stderr", "") or "")
+                    exit_code = data.get("exit_code")
+                    success = bool(data.get("success", False))
+                    body_lines: list[str] = ["### AIRecon", ""]
+                    if stdout.strip():
+                        body_lines.extend(["```bash", stdout.rstrip(), "```", ""])
+                    else:
+                        body_lines.extend(["```text", "(no stdout)", "```", ""])
+                    if stderr.strip():
+                        body_lines.extend(
+                            ["#### stderr", "```text", stderr.rstrip(), "```", ""]
+                        )
+                    body_lines.append(f"`exit_code: {exit_code}`")
+                    body = "\n".join(body_lines)
+                    if success:
+                        chat.add_assistant_message(body, markup=False)
+                    else:
+                        chat.add_assistant_message(body, markup=False)
+                else:
+                    err = str(data.get("error", "Shell command failed"))
+                    body = "\n".join(
+                        [
+                            "### AIRecon",
+                            "",
+                            "#### shell error",
+                            "```text",
+                            err,
+                            "```",
+                        ]
+                    )
+                    chat.add_assistant_message(body, markup=False)
+            except Exception as e:
+                chat.add_error_message(f"Shell request failed: {e}")
+            self._processing = False
+            return
+
         elif cmd.startswith("/mcp"):
             parts = cmd.split()
 
-            if len(parts) == 1 or (len(parts) >= 2 and parts[1] in {"help", "-h", "--help"}):
+            if len(parts) == 1 or (
+                len(parts) >= 2 and parts[1] in {"help", "-h", "--help"}
+            ):
                 chat.add_assistant_message(
                     "MCP command usage:\n"
                     "- /mcp add http://mcp_url auth:user/pass|auth:apikey:<token> [name]\n"
@@ -1740,29 +2030,40 @@ class AIReconApp(App):
                 if len(parts) >= 3 and not parts[2].startswith("-"):
                     target_name = parts[2].strip()
                     try:
-                        resp = await self._http.get(f"/api/mcp/tools/{target_name}", timeout=30.0)
+                        resp = await self._http.get(
+                            f"/api/mcp/tools/{target_name}", timeout=30.0
+                        )
                         if resp.status_code == 200:
                             data = resp.json()
                             tools = data.get("tools", [])
                             total_tools = data.get("total_tools", 0)
                             truncated = bool(data.get("truncated", False))
-                            # Limit display to first 10 tools to avoid overwhelming context
                             display_tools = tools[:15]
                             lines = [f"MCP Tools: {target_name}"]
                             if truncated:
-                                lines.append(f"Showing {len(display_tools)} of {total_tools} tools")
+                                lines.append(
+                                    f"Showing {len(display_tools)} of {total_tools} tools"
+                                )
                             else:
                                 lines.append(f"Total tools: {total_tools}")
                             lines.append("")
                             for t in display_tools:
-                                tool_name = t.get("name", "?") if isinstance(t, dict) else str(t)
+                                tool_name = (
+                                    t.get("name", "?")
+                                    if isinstance(t, dict)
+                                    else str(t)
+                                )
                                 lines.append(f"- {tool_name}")
                             if truncated and len(tools) > 15:
                                 rest_count = len(tools) - 15
-                                lines.append(f"... {rest_count} more tools omitted. Use `action='search_tools'` in mcp_* tool with a keyword to find specific tools.")
+                                lines.append(
+                                    f"... {rest_count} more tools omitted. Use `action='search_tools'` in mcp_* tool with a keyword to find specific tools."
+                                )
                             chat.add_assistant_message("\n".join(lines))
                         else:
-                            chat.add_error_message(f"MCP list {target_name} failed ({resp.status_code}): {resp.text[:300]}")
+                            chat.add_error_message(
+                                f"MCP list {target_name} failed ({resp.status_code}): {resp.text[:300]}"
+                            )
                     except Exception as e:
                         chat.add_error_message(f"MCP list {target_name} failed: {e}")
                     self._processing = False
@@ -1782,8 +2083,12 @@ class AIReconApp(App):
                         else:
                             lines: list[str] = [f"MCP Servers ({len(servers)})\n"]
                             if init_count > 0:
-                                lines.append(f"⏳ MCP servers are starting up ({init_count} initializing)...")
-                                lines.append("Note: First startup may take longer. Tool availability will update automatically.\n")
+                                lines.append(
+                                    f"⏳ MCP servers are starting up ({init_count} initializing)..."
+                                )
+                                lines.append(
+                                    "Note: First startup may take longer. Tool availability will update automatically.\n"
+                                )
 
                             lines.append("Configured MCP servers:")
                             for s in servers:
@@ -1807,27 +2112,39 @@ class AIReconApp(App):
                                 if not enabled:
                                     lines.append(f"⚪ {name} - Disabled")
                                 elif status == "ready":
-                                    lines.append(f"🟢 {name} - Ready ({display_text} tools)")
+                                    lines.append(
+                                        f"🟢 {name} - Ready ({display_text} tools)"
+                                    )
                                     if show_tools and tools:
                                         lines.append("  Tools:")
                                         for t in tools:
                                             lines.append(f"  - {t}")
                                 elif status == "error":
-                                    lines.append(f"🔴 {name} - Error ({tool_error or 'unknown error'})")
+                                    lines.append(
+                                        f"🔴 {name} - Error ({tool_error or 'unknown error'})"
+                                    )
                                 else:
                                     init_for = int(s.get("initializing_for") or 0)
-                                    lines.append(f"🟡 {name} - Initializing... ({init_for}s)")
+                                    lines.append(
+                                        f"🟡 {name} - Initializing... ({init_for}s)"
+                                    )
 
                             chat.add_assistant_message("\n".join(lines))
 
                             if init_count > 0:
-                                self.run_worker(self._refresh_mcp_until_ready(show_tools=show_tools), exclusive=False)
+                                self.run_worker(
+                                    self._refresh_mcp_until_ready(
+                                        show_tools=show_tools
+                                    ),
+                                    exclusive=False,
+                                )
                     else:
-                        chat.add_error_message(f"MCP list failed ({resp.status_code}): {resp.text[:300]}")
+                        chat.add_error_message(
+                            f"MCP list failed ({resp.status_code}): {resp.text[:300]}"
+                        )
                 except Exception as e:
                     chat.add_error_message(
-                        "MCP list request failed or timed out. "
-                        f"Details: {e}"
+                        f"MCP list request failed or timed out. Details: {e}"
                     )
                 self._processing = False
                 return
@@ -1836,11 +2153,9 @@ class AIReconApp(App):
                 mcp_url = parts[2].strip()
                 mcp_name = None
                 mcp_auth = None
-                # Parse optional auth and name from remaining args
                 for p in parts[3:]:
                     if p.startswith("auth:"):
-                        # Handle auth:user/pass or auth:apikey:<token>
-                        auth_val = p[len("auth:"):]
+                        auth_val = p[len("auth:") :]
                         mcp_auth = auth_val
                     elif mcp_name is None:
                         mcp_name = p.strip()
@@ -1859,7 +2174,9 @@ class AIReconApp(App):
                             "Tool registry refreshed automatically."
                         )
                     else:
-                        chat.add_error_message(f"MCP add failed ({resp.status_code}): {resp.text[:300]}")
+                        chat.add_error_message(
+                            f"MCP add failed ({resp.status_code}): {resp.text[:300]}"
+                        )
                 except Exception as e:
                     chat.add_error_message(f"Error MCP add: {e}")
                 self._processing = False
@@ -1871,9 +2188,13 @@ class AIReconApp(App):
                 try:
                     resp = await self._http.post(endpoint, json={"name": mcp_name})
                     if resp.status_code == 200:
-                        chat.add_assistant_message(f"MCP server '{mcp_name}' {sub}d successfully.")
+                        chat.add_assistant_message(
+                            f"MCP server '{mcp_name}' {sub}d successfully."
+                        )
                     else:
-                        chat.add_error_message(f"MCP {sub} failed ({resp.status_code}): {resp.text[:300]}")
+                        chat.add_error_message(
+                            f"MCP {sub} failed ({resp.status_code}): {resp.text[:300]}"
+                        )
                 except Exception as e:
                     chat.add_error_message(f"MCP {sub} failed: {e}")
                 self._processing = False
@@ -1923,21 +2244,22 @@ class AIReconApp(App):
             info_text = """## ℹ️ AIRecon Information
 
 **Key Bindings:**
-- `ESC`: Stop current generation/thinking.
-- `Ctrl+C`: Quit the application.
-- `Ctrl+L`: Clear chat history.
-- `Ctrl+R`: Reset conversation (clears context).
-- `PgUp`/`PgDn`: Scroll chat.
+- ESC: Stop current generation/thinking.
+- Ctrl+C: Quit the application.
+- Ctrl+L: Clear chat history.
+- Ctrl+R: Reset conversation (clears context).
+- PgUp/PgDn: Scroll chat.
 
 **Commands:**
-- `/help`: Show this help message.
-- `/info`: Show AIRecon information.
-- `/status`: Check service status.
-- `/tools`: List available tools.
-- `/skills`: Show AI skills.
-- `/mcp`: Manage MCP servers.
-- `/reset`: Reset conversation.
-- `/clear`: Clear chat history.
+- /help: Show this help message.
+- /info: Show AIRecon information.
+- /status: Check service status.
+- /tools: List available tools.
+- /skills: Show AI skills.
+- /mcp: Manage MCP servers.
+- /shell <command>: Run command in AIRecon Kali Docker shell.
+- /reset: Reset conversation.
+- /clear: Clear chat history.
 
 **Tips:**
 - You can ask the AI to run scans, search the web, or browse pages.
@@ -1951,7 +2273,8 @@ class AIReconApp(App):
             self.action_clear()
         else:
             chat.add_error_message(
-                f"Unknown command: `{cmd}`. Type `/help` for available commands.")
+                f"Unknown command: `{cmd}`. Type `/help` for available commands."
+            )
 
     def action_clear(self) -> None:
         self.query_one("#chat-panel", ChatPanel).clear_messages()
@@ -1964,8 +2287,7 @@ class AIReconApp(App):
             await self._http.post("/api/reset")
             chat.clear_messages()
             workspace.reload()
-            chat.add_assistant_message(
-                "Conversation reset. Ready for a new session.")
+            chat.add_assistant_message("Conversation reset. Ready for a new session.")
             self._clear_active_file_context()
         except Exception as e:
             chat.add_error_message(f"Reset failed: {e}")
@@ -1978,8 +2300,11 @@ class AIReconApp(App):
 
         chat = self.query_one("#chat-panel", ChatPanel)
         chat.add_system_message(
-            "🛑 User stopped progress (killing running tools, agent stays active)...")
-        self.notify("Tools stopped - agent ready for next command.", severity="information")
+            "🛑 User stopped progress (killing running tools, agent stays active)..."
+        )
+        self.notify(
+            "Tools stopped - agent ready for next command.", severity="information"
+        )
 
         chat.end_streaming()
         chat.end_thinking()
@@ -1993,13 +2318,14 @@ class AIReconApp(App):
         def _on_dismiss(confirmed: bool | None) -> None:
             if confirmed:
                 self.run_worker(self.action_quit(), exclusive=True)
+
         self.push_screen(QuitConfirmScreen(), _on_dismiss)
 
     async def action_quit(self) -> None:
         try:
             await self._http.post("/api/stop", timeout=2.0)
-        except Exception:
-            pass
+        except Exception as e:
+            logger.debug("Expected failure in action_quit send stop: %s", e)
 
         if self._status_task and not self._status_task.done():
             self._status_task.cancel()
@@ -2015,23 +2341,26 @@ class AIReconApp(App):
             model = cfg.ollama_model
 
             cmd = [
-                "curl", "-s", "-X", "POST", f"{ollama_url}/api/generate",
-                "-d", json.dumps({"model": model, "keep_alive": 0})
+                "curl",
+                "-s",
+                "-X",
+                "POST",
+                f"{ollama_url}/api/generate",
+                "-d",
+                json.dumps({"model": model, "keep_alive": 0}),
             ]
 
             subprocess.run(
-                cmd,
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
-                timeout=2)
+                cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=2
+            )
 
-        except Exception:
-            pass
+        except Exception as e:
+            logger.debug("Expected failure in action_quit curl unload model: %s", e)
 
         try:
             await self._http.aclose()
-        except Exception:
-            pass
+        except Exception as e:
+            logger.debug("Expected failure in action_quit http close: %s", e)
 
         self.exit()
 
@@ -2039,8 +2368,8 @@ class AIReconApp(App):
         await asyncio.sleep(seconds)
         try:
             self.query_one("#copy-toast-wrap", Container).display = False
-        except Exception:
-            pass
+        except Exception as e:
+            logger.debug("Expected failure in _hide_copy_toast_after_delay: %s", e)
 
     def _show_copy_toast(self, message: str = "Copied to clipboard") -> None:
         try:
@@ -2050,18 +2379,21 @@ class AIReconApp(App):
             wrap.display = True
             if self._copy_toast_task and not self._copy_toast_task.done():
                 self._copy_toast_task.cancel()
-            self._copy_toast_task = asyncio.create_task(self._hide_copy_toast_after_delay(1.2))
-        except Exception:
-            pass
+            self._copy_toast_task = asyncio.create_task(
+                self._hide_copy_toast_after_delay(1.2)
+            )
+        except Exception as e:
+            logger.debug("Expected failure in _show_copy_toast: %s", e)
 
     def copy_to_clipboard(self, content: str) -> None:
         try:
             import pyperclip
+
             pyperclip.copy(content)
             self._show_copy_toast("Copied to clipboard")
         except ImportError:
             self.notify(
-                "pyperclip not installed. Clipboard disabled.",
-                severity="warning")
+                "pyperclip not installed. Clipboard disabled.", severity="warning"
+            )
         except Exception as e:
             self.notify(f"Clipboard error: {e}", severity="error")

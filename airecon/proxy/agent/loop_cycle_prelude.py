@@ -15,6 +15,12 @@ from .session import save_session, session_to_context
 
 logger = logging.getLogger("airecon.agent")
 
+try:
+    from ..server import _trace_chat_event
+except (ImportError, ValueError):
+    def _trace_chat_event(*args, **kwargs):
+        pass
+
 
 def _chain_step_to_text(step: Any) -> str:
     if isinstance(step, str):
@@ -32,9 +38,10 @@ def _chain_step_to_text(step: Any) -> str:
 
 class _CyclePreludeMixin:
     async def _run_iteration_housekeeping(self, cfg: Any, current_phase: Any) -> None:
-        # FIX 2026-03-31: Check Ollama context pressure every 10 iterations
         if self.state.iteration % 10 == 0:
             self._check_ollama_context_pressure()
+
+        self._enforce_scope_target_integrity()
 
         if (
             self._session
@@ -61,6 +68,17 @@ class _CyclePreludeMixin:
         ):
             self._save_to_memory_realtime()
             self._last_memory_save_iteration = self.state.iteration
+
+        _memory_health_interval = max(1, int(getattr(self, "_memory_health_interval", 10) or 10))
+        if (
+            self._session
+            and self._session.target
+            and self.state.iteration > 0
+            and self.state.iteration % _memory_health_interval == 0
+            and self.state.iteration != getattr(self, "_last_memory_health_check_iteration", -1)
+        ):
+            self._check_memory_brain_health()
+            self._last_memory_health_check_iteration = self.state.iteration
 
         _budget_ratio = self.state.iteration / max(self.state.max_iterations, 1)
         if _budget_ratio >= 1.0 and self._budget_pressure_level < 4:
@@ -288,6 +306,10 @@ class _CyclePreludeMixin:
                         })
                 except Exception as _cp_err:
                     logger.debug("Chain planner error: %s", _cp_err)
+
+        trace_id = getattr(self, "_current_trace_id", None)
+        if trace_id:
+            _trace_chat_event(trace_id, "iteration_prepare", iteration=self.state.iteration)
 
         explore_ctx = self._build_exploration_directive(current_phase)
         if explore_ctx:
@@ -704,16 +726,16 @@ class _CyclePreludeMixin:
         )
         _pressure_compress = (
             self.state.iteration > 0
-            and _presummary_ratio >= 0.50
-            and self.state.iteration % 5 == 0
+            and _presummary_ratio >= 0.35
         )
-        if self.state.iteration > 0 and (
-            self.state.iteration % 20 == 0 or _pressure_compress
-        ):
-            self._compress_old_tool_outputs(aggressive=_pressure_compress)
+        _compress_now = (
+            self.state.iteration > 0 and
+            (_presummary_ratio >= 0.30 or self.state.iteration % 5 == 0)
+        )
+        if _compress_now:
+            self._compress_old_tool_outputs(aggressive=_pressure_compress or self.state.iteration > 50)
             pinned = self._build_compressed_findings_summary()
             if pinned:
-
                 self.state.conversation = [
                     m for m in self.state.conversation
                     if not m.get("content", "").startswith("[SYSTEM: PINNED CONTEXT")
@@ -732,39 +754,50 @@ class _CyclePreludeMixin:
         _cur_token_ratio = (
             self.state.token_usage.get("used", 0) / max(_cur_effective_ctx, 1)
         )
-        if _cur_token_ratio > 0.60:
-            _ctx_interval = 5
-        elif self.state.iteration > 150:
-            _ctx_interval = 10
-        else:
-            _ctx_interval = 15
-        if self.state.iteration % _ctx_interval == 0:
+        _early_pressure = _cur_token_ratio >= 0.40
+        _aggressive = self._ctf_mode or _early_pressure or self.state.iteration > 100
+
+        if self.state.iteration % 5 == 0 or _aggressive:
 
             if self.state.iteration >= 20:
                 self._prune_stale_skills(max_age_iterations=10)
+
+            if hasattr(self.state, 'token_usage'):
+                self.state.token_usage["used"] = self._recompute_used_tokens_from_conversation()
+
+            current_phase = self._get_current_phase().value if self._get_current_phase() else "RECON"
 
             _compress_ctx = min(8192, _cur_ctx_limit // 4)
             try:
                 await self.state.compress_with_llm(
                     self.ollama, keep_recent=30,
                     num_ctx=_compress_ctx, num_predict=1024,
+                    phase=current_phase,
                 )
 
-                _estimated_post_compress = _compress_ctx // 3
-                self.state.token_usage["used"] = min(
-                    self.state.token_usage.get("used", 0),
-                    _estimated_post_compress
-                )
+                self.state.token_usage["used"] = self._recompute_used_tokens_from_conversation()
                 logger.info(
-                    "Compression successful: used=%d tokens (estimated post-compress)",
+                    "Compression: token_usage after compression = %d",
                     self.state.token_usage["used"]
                 )
             except Exception as compress_err:
 
                 logger.warning(
-                    "LLM compression failed (%s) — using truncate-only",
+                    "LLM compression failed (%s) — using aggressive truncate",
                     str(compress_err)[:100],
                 )
+                self.state.conversation = self.state.conversation[:50]
+
+            self.state.token_usage["used"] = self._recompute_used_tokens_from_conversation()
+
+            _token_used = self.state.token_usage.get("used", 0)
+            _ctx_limit = self._adaptive_num_ctx or cfg.ollama_num_ctx
+            if _token_used > _ctx_limit * 0.8:
+                logger.warning(
+                    "Token limit exceeded (%d/%d) - forcing aggressive truncation",
+                    _token_used, _ctx_limit
+                )
+                self.state.conversation = self.state.conversation[:40]
 
             critical_context = self._build_critical_findings_context()
 

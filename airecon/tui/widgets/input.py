@@ -1,6 +1,9 @@
 from __future__ import annotations
 
+import json
 import logging
+import os
+from pathlib import Path
 
 from textual.app import ComposeResult
 from textual.binding import Binding
@@ -17,6 +20,7 @@ _SLASH_COMMANDS: tuple[tuple[str, str], ...] = (
     ("/tools",  "List all available agent tools"),
     ("/skills", "Browse AI skill knowledge base"),
     ("/mcp",    "Manage MCP servers (/mcp list, /mcp add <url>)"),
+    ("/shell",  "Run command in AIRecon Kali Docker shell"),
     ("/reset",  "Reset conversation context"),
     ("/clear",  "Clear the chat display"),
 )
@@ -51,8 +55,8 @@ class SlashCompleter(Widget):
         self.display = False
         try:
             self.query_one("#slash-list", ListView).clear()
-        except Exception:
-            pass
+        except Exception as e:
+            logger.debug("Expected failure in SlashCompleter.hide clear list: %s", e)
 
     def get_first_command(self) -> str | None:
         try:
@@ -103,16 +107,23 @@ class CommandInput(TextArea):
             self.fragment = fragment
             super().__init__()
 
-    def __init__(self, **kwargs) -> None:
+    def __init__(
+            self,
+            history_file: str | Path | None = None,
+            history_limit: int | None = None,
+            **kwargs,
+    ) -> None:
         super().__init__(**kwargs)
         self.show_line_numbers = False
-        # Keep chat input visually informative when empty.
-        # Without explicit placeholder text the input bar can look blank.
         self.placeholder = "Type message…  (/help for commands, Shift+Enter newline)"
+        self._history_file = self._resolve_history_file(history_file)
+        self._history_limit = self._resolve_history_limit(history_limit)
         self._history: list[str] = []
         self._history_index: int = -1
+        self._history_draft: str = ""
         self._last_at_fragment: str | None = None
         self._last_slash_fragment: str | None = None
+        self._load_history()
 
     def on_key(self, event) -> None:
         if event.key == "tab":
@@ -150,21 +161,21 @@ class CommandInput(TextArea):
             lines = self.text.splitlines() or [""]
             try:
                 self.cursor_location = (len(lines) - 1, len(lines[-1]))
-            except Exception:
-                pass
+            except Exception as e:
+                logger.debug("Expected failure in action_undo set cursor: %s", e)
 
     def action_select_all_text(self) -> None:
         try:
             super().action_select_all()
             return
-        except Exception:
-            pass
+        except Exception as e:
+            logger.debug("Expected failure in action_select_all_text super: %s", e)
 
         try:
             self.select_all()  # type: ignore[attr-defined]
             return
-        except Exception:
-            pass
+        except Exception as e:
+            logger.debug("Expected failure in action_select_all_text select_all: %s", e)
 
         try:
             from textual.geometry import Offset
@@ -173,14 +184,15 @@ class CommandInput(TextArea):
             lines = self.text.split("\n") or [""]
             end = Offset(len(lines) - 1, len(lines[-1]))
             self.selection = Selection(Offset(0, 0), end)
-        except Exception:
-            pass
+        except Exception as e:
+            logger.debug("Expected failure in action_select_all_text manual selection: %s", e)
 
     def action_submit(self) -> None:
         value = self.text.strip()
         if value:
-            self._history.insert(0, value)
+            self._record_history(value)
             self._history_index = -1
+            self._history_draft = ""
             self._last_at_fragment = None
             self._last_slash_fragment = None
             self.post_message(self.Submitted(value))
@@ -189,6 +201,8 @@ class CommandInput(TextArea):
 
     def action_history_up(self) -> None:
         if self._history:
+            if self._history_index == -1:
+                self._history_draft = self.text
             if self._history_index < len(self._history) - 1:
                 self._history_index += 1
             self.text = self._history[self._history_index]
@@ -200,7 +214,8 @@ class CommandInput(TextArea):
             self.text = self._history[self._history_index]
         elif self._history_index == 0:
             self._history_index = -1
-            self.text = ""
+            self.text = self._history_draft
+            self._history_draft = ""
         self._move_cursor_to_end()
 
     def do_slash_completion(self, command: str) -> None:
@@ -293,6 +308,66 @@ class CommandInput(TextArea):
             return None
 
         return fragment
+
+    def _resolve_history_file(self, history_file: str | Path | None) -> Path:
+        if history_file is not None:
+            return Path(history_file).expanduser()
+        env_path = os.environ.get("AIRECON_PROMPT_HISTORY_FILE", "").strip()
+        if env_path:
+            return Path(env_path).expanduser()
+        return Path.home() / ".airecon" / "history.log"
+
+    def _resolve_history_limit(self, history_limit: int | None) -> int:
+        if history_limit is not None:
+            return max(1, history_limit)
+        env_value = os.environ.get("AIRECON_PROMPT_HISTORY_LIMIT", "").strip()
+        if env_value:
+            try:
+                return max(1, int(env_value))
+            except ValueError:
+                logger.debug("Invalid AIRECON_PROMPT_HISTORY_LIMIT: %s", env_value)
+        return 500
+
+    def _load_history(self) -> None:
+        try:
+            if not self._history_file.exists():
+                return
+            loaded: list[str] = []
+            with self._history_file.open("r", encoding="utf-8") as f:
+                for raw_line in f:
+                    line = raw_line.strip()
+                    if not line:
+                        continue
+                    try:
+                        parsed = json.loads(line)
+                        if isinstance(parsed, dict):
+                            value = str(parsed.get("prompt", "")).strip()
+                        elif isinstance(parsed, str):
+                            value = parsed.strip()
+                        else:
+                            value = str(parsed).strip()
+                    except json.JSONDecodeError:
+                        value = line
+                    if value:
+                        loaded.append(value)
+            if loaded:
+                self._history = list(reversed(loaded[-self._history_limit:]))
+        except Exception as e:
+            logger.debug("Failed to load prompt history from %s: %s", self._history_file, e)
+
+    def _record_history(self, value: str) -> None:
+        self._history.insert(0, value)
+        if len(self._history) > self._history_limit:
+            self._history = self._history[:self._history_limit]
+        self._append_history_to_file(value)
+
+    def _append_history_to_file(self, value: str) -> None:
+        try:
+            self._history_file.parent.mkdir(parents=True, exist_ok=True)
+            with self._history_file.open("a", encoding="utf-8") as f:
+                f.write(json.dumps({"prompt": value}, ensure_ascii=False) + "\n")
+        except Exception as e:
+            logger.debug("Failed to write prompt history to %s: %s", self._history_file, e)
 
     def _move_cursor_to_end(self) -> None:
         lines = self.text.splitlines() or [""]

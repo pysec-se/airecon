@@ -7,6 +7,7 @@ import os
 import re
 import shutil
 import subprocess
+import threading
 import time
 from pathlib import Path
 from typing import Any
@@ -19,40 +20,45 @@ logger = logging.getLogger("airecon.caido")
 class CaidoClient:
     BASE_URL = "http://127.0.0.1:48080/graphql"
     _token: str | None = None
+    _state_lock = threading.Lock()
 
-    # Avoid warning spam when /api/status polls frequently while Caido is down.
-    _auth_fail_warn_interval_sec=60.0
-    _last_auth_fail_warn_ts=0.0
-    _auth_fail_count=0
+    _auth_fail_warn_interval_sec = 60.0
+    _last_auth_fail_warn_ts = 0.0
+    _auth_fail_count = 0
 
-    _bootstrap_cooldown_sec=120.0
-    _last_bootstrap_attempt_ts=0.0
+    _bootstrap_cooldown_sec = 120.0
+    _last_bootstrap_attempt_ts = 0.0
 
     @classmethod
     def _warn_auth_failure(cls, err: Exception) -> None:
-        cls._auth_fail_count += 1
-        now = time.monotonic()
-        should_warn = (
-            cls._last_auth_fail_warn_ts == 0.0
-            or (now - cls._last_auth_fail_warn_ts) >= cls._auth_fail_warn_interval_sec
-        )
-        if should_warn:
-            logger.warning(
-                "Caido auth failed (is Caido running?): %s [failures=%d, cooldown=%.0fs]",
-                err,
-                cls._auth_fail_count,
-                cls._auth_fail_warn_interval_sec,
+        with cls._state_lock:
+            cls._auth_fail_count += 1
+            now = time.monotonic()
+            should_warn = (
+                cls._last_auth_fail_warn_ts == 0.0
+                or (now - cls._last_auth_fail_warn_ts)
+                >= cls._auth_fail_warn_interval_sec
             )
-            cls._last_auth_fail_warn_ts = now
-        else:
-            logger.debug("Caido auth still unavailable: %s", err)
+            if should_warn:
+                logger.warning(
+                    "Caido auth failed (is Caido running?): %s [failures=%d, cooldown=%.0fs]",
+                    err,
+                    cls._auth_fail_count,
+                    cls._auth_fail_warn_interval_sec,
+                )
+                cls._last_auth_fail_warn_ts = now
+            else:
+                logger.debug("Caido auth still unavailable: %s", err)
 
     @classmethod
     def _mark_auth_success(cls) -> None:
-        if cls._auth_fail_count:
-            logger.info("Caido auth recovered after %d failures", cls._auth_fail_count)
-        cls._auth_fail_count=0
-        cls._last_auth_fail_warn_ts=0.0
+        with cls._state_lock:
+            if cls._auth_fail_count:
+                logger.info(
+                    "Caido auth recovered after %d failures", cls._auth_fail_count
+                )
+            cls._auth_fail_count = 0
+            cls._last_auth_fail_warn_ts = 0.0
 
     @classmethod
     async def _try_guest_login(cls) -> str | None:
@@ -113,14 +119,13 @@ class CaidoClient:
     @classmethod
     async def _try_bootstrap(cls) -> None:
         now = time.monotonic()
-        # Enforce cooldown only after at least one real bootstrap attempt timestamp exists.
-        # This avoids false skips when monotonic clocks are patched or start near zero in tests.
-        if (
-            cls._last_bootstrap_attempt_ts > 0.0
-            and (now - cls._last_bootstrap_attempt_ts) < cls._bootstrap_cooldown_sec
-        ):
-            return
-        cls._last_bootstrap_attempt_ts = now
+        with cls._state_lock:
+            if (
+                cls._last_bootstrap_attempt_ts > 0.0
+                and (now - cls._last_bootstrap_attempt_ts) < cls._bootstrap_cooldown_sec
+            ):
+                return
+            cls._last_bootstrap_attempt_ts = now
 
         cmd = cls._find_bootstrap_command()
         if not cmd:
@@ -158,7 +163,9 @@ class CaidoClient:
                 output[-300:],
             )
         else:
-            logger.warning("Caido bootstrap completed but no Access Token found in output")
+            logger.warning(
+                "Caido bootstrap completed but no Access Token found in output"
+            )
 
     @classmethod
     async def _get_token(cls, allow_bootstrap: bool = False) -> str | None:
@@ -175,7 +182,6 @@ class CaidoClient:
         if not allow_bootstrap:
             return None
 
-        # Last-resort: try running host bootstrap once, then re-auth.
         await cls._try_bootstrap()
 
         if cls._token:
@@ -225,14 +231,18 @@ class CaidoClient:
                 return resp.json()
 
         except httpx.TimeoutException as e:
-            logger.error("Caido GQL request timed out: %s", e)
+            logger.debug("Caido GQL request timed out (Caido may not be running): %s", e)
             return {
                 "errors": [
                     {"message": "Caido request timed out after 30s. Is Caido running?"}
                 ]
             }
         except Exception as e:
-            logger.error("Caido GQL error: %s", e)
+            error_msg = str(e).lower()
+            if "connection" in error_msg or "refused" in error_msg:
+                logger.debug("Caido not available: %s", e)
+            else:
+                logger.error("Caido GQL error: %s", e)
             return {"errors": [{"message": str(e)}]}
 
     @classmethod

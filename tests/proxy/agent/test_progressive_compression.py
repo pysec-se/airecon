@@ -22,6 +22,9 @@ def _make_loop() -> "AgentLoop":  # type: ignore[name-defined]  # noqa: F821
     loop.engine = MagicMock()
     loop._session = None
     loop._ctf_mode = False
+    loop._scope_anchor_target = ""
+    loop._scope_lock_active = False
+    loop._memory_health_status = {}
     return loop
 
 
@@ -90,6 +93,32 @@ class TestBuildCompressedFindingsSummary:
         result = loop._build_compressed_findings_summary()
         assert result.startswith("[SYSTEM: PINNED CONTEXT")
 
+    def test_pinned_summary_includes_scope_context(self) -> None:
+        loop = _make_loop()
+        loop.state.active_target = "example.com"
+        loop._scope_anchor_target = "example.com"
+        loop._scope_lock_active = True
+
+        result = loop._build_compressed_findings_summary()
+        assert "SCOPE TARGET: example.com" in result
+        assert "SCOPE ANCHOR: example.com" in result
+        assert "SCOPE LOCK: ACTIVE" in result
+
+    def test_pinned_summary_includes_memory_health(self) -> None:
+        loop = _make_loop()
+        loop.state.active_target = "example.com"
+        loop._memory_health_status = {
+            "ok": True,
+            "target_sessions": 2,
+            "target_findings": 7,
+            "patterns_total": 9,
+            "high_quality_patterns": 3,
+        }
+
+        result = loop._build_compressed_findings_summary()
+        assert "MEMORY BRAIN: OK" in result
+        assert "target_sessions=2" in result
+
 
 class TestCompressOldToolOutputs:
     def test_compresses_old_tool_messages(self) -> None:
@@ -111,10 +140,10 @@ class TestCompressOldToolOutputs:
         compressed = [m for m in tool_msgs if m["content"].startswith("[COMPRESSED]")]
         assert len(compressed) > 0
 
-    def test_does_not_compress_recent_20(self) -> None:
+    def test_does_not_compress_recent_8(self) -> None:
         loop = _make_loop()
-        # Add exactly 20 non-system messages (all tool)
-        for i in range(20):
+        # Add exactly 8 non-system messages (all tool)
+        for i in range(8):
             loop.state.conversation.append(
                 {
                     "role": "tool",
@@ -124,7 +153,7 @@ class TestCompressOldToolOutputs:
 
         loop._compress_old_tool_outputs()
 
-        # All 20 are within the keep-recent window → none compressed
+        # All 8 are within the keep-recent window → none compressed
         compressed = [
             m
             for m in loop.state.conversation

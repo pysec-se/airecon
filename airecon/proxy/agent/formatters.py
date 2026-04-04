@@ -212,9 +212,11 @@ class _FormatterMixin:
             error_msg = result.get("error", "") or ""
             stderr_msg = result.get("stderr", "") or ""
             stdout_msg = result.get("stdout", "") or ""
-            exit_code = result.get("exit_code", "")
+            exit_code = result.get("exit_code")
 
-            parts = [f"COMMAND FAILED (exit code: {exit_code})"]
+            # Format exit_code properly - show "unknown" if None or missing
+            exit_code_str = str(exit_code) if exit_code is not None else "unknown"
+            parts = [f"COMMAND FAILED (exit code: {exit_code_str})"]
             if error_msg.strip():
                 parts.append(f"ERROR: {error_msg.strip()}")
             if stderr_msg.strip() and stderr_msg.strip() != error_msg.strip():
@@ -448,10 +450,11 @@ class _FormatterMixin:
             error = result.get("error", "") or ""
             stderr = result.get("stderr", "") or ""
             stdout = result.get("stdout", "") or ""
-            exit_code = result.get("exit_code", "")
+            exit_code = result.get("exit_code")
             detail = error.strip() or stderr.strip() or stdout.strip()
             if not detail:
-                detail = f"Command failed (exit code: {exit_code})"
+                exit_code_str = str(exit_code) if exit_code is not None else "unknown"
+                detail = f"Command failed (exit code: {exit_code_str})"
             if len(detail) > max_len:
                 detail = detail[:max_len] + "... (truncated)"
             return f"ERROR: {detail}"

@@ -137,6 +137,35 @@ class TestDuplicateCommandDetection:
         is_dup, _ = loop._is_duplicate_command("browser_action", args)
         assert is_dup
 
+    def test_browser_url_exact_deduplication(self, loop):
+        """Browser goto should deduplicate exact URLs."""
+        # First visit to a URL
+        args1 = {"action": "goto", "url": "http://example.com"}
+        loop._is_duplicate_command("browser_action", args1)
+        is_dup1, msg1 = loop._is_duplicate_command("browser_action", args1)
+        # Same URL should be deduped after max visits
+        assert is_dup1, "Same URL should be deduped"
+
+    def test_browser_different_urls_not_deduped(self, loop):
+        """Browser goto should not deduplicate different URLs."""
+        # First visit to URL1
+        args1 = {"action": "goto", "url": "http://sub1.example.com"}
+        loop._is_duplicate_command("browser_action", args1)
+        is_dup1, msg1 = loop._is_duplicate_command("browser_action", args1)
+        assert is_dup1, "Same URL should be deduped"
+
+        # Different URL2 should not be deduped on first call
+        args2 = {"action": "goto", "url": "http://sub2.example.com"}
+        is_dup2, msg2 = loop._is_duplicate_command("browser_action", args2)
+        assert not is_dup2, "Different URL should not be deduped"
+
+    def test_browser_click_exempt_from_dedup(self, loop):
+        """Interactive browser actions (click, type) should not be deduped."""
+        args = {"action": "click", "coordinate": "100,200"}
+        loop._is_duplicate_command("browser_action", args)
+        is_dup, _ = loop._is_duplicate_command("browser_action", args)
+        assert not is_dup
+
 
 # ── Session initialisation ────────────────────────────────────────────────────
 
@@ -438,6 +467,73 @@ class TestLoopStreamingWithMockedOllama:
         tool_start = next(e for e in events if e.type == "tool_start")
         assert tool_start.data.get("tool") == "execute"
 
+    def test_rewrite_shell_binary_tool_call_prefixes_command(self, loop):
+        tool, args, rewritten = loop._rewrite_shell_binary_tool_call(
+            "ffuf",
+            {"command": "-w wordlist.txt -u https://test.com/FUZZ"},
+        )
+        assert rewritten is True
+        assert tool == "execute"
+        assert args["command"].startswith("ffuf ")
+
+    @pytest.mark.asyncio
+    async def test_ffuf_tool_call_rewritten_to_execute_no_unknown_tool_stop(
+        self, loop, mocker
+    ):
+        mocker.patch("airecon.proxy.agent.loop.get_system_prompt", return_value="SYS")
+        mocker.patch.object(loop, "_scan_workspace_state", return_value="")
+        await loop.initialize(target="test.com", user_message="start recon test.com")
+        loop.state.active_target = "test.com"
+        loop._execute_tool_and_record = AsyncMock(
+            return_value=(True, 0.01, {"success": True, "stdout": "ok"}, None)
+        )
+
+        stream_calls = 0
+
+        async def _stream(*args, **kwargs):
+            nonlocal stream_calls
+            stream_calls += 1
+            if stream_calls == 1:
+                yield {
+                    "message": {
+                        "tool_calls": [
+                            {
+                                "id": "call_ffuf_1",
+                                "type": "function",
+                                "function": {
+                                    "name": "ffuf",
+                                    "arguments": '{"command":"-w wl.txt -u https://test.com/FUZZ"}',
+                                },
+                            }
+                        ]
+                    },
+                    "done": True,
+                }
+            else:
+                yield {
+                    "message": {"content": "done"},
+                    "done": True,
+                }
+
+        loop.ollama.chat_stream = _stream
+
+        events = []
+        async for event in loop.process_message("fuzz test.com"):
+            events.append(event)
+            if event.type == "done":
+                break
+
+        tool_start = next(e for e in events if e.type == "tool_start")
+        assert tool_start.data.get("tool") == "execute"
+        assert tool_start.data.get("arguments", {}).get("command", "").startswith("ffuf ")
+
+        error_messages = [
+            str(e.data.get("message", ""))
+            for e in events
+            if e.type == "error"
+        ]
+        assert all("unknown tool" not in m.lower() for m in error_messages)
+
     @pytest.mark.asyncio
     async def test_watchdog_injects_nudge_then_aborts_after_text_only_retries(
         self, loop, mocker
@@ -547,6 +643,19 @@ class TestAdvancedStateOrchestration:
             ),
         )
         loop._stagnation_iterations = 2
+        loop._scope_lock_active = False
+        loop._recent_tool_names = []
+        # Mock pipeline for is_creative_phase check
+        loop.pipeline = mocker.MagicMock()
+        loop.pipeline.get_current_phase.return_value = PipelinePhase.RECON
+        # Mock helper methods
+        loop._cfg_bool = mocker.MagicMock(return_value=True)
+        loop._cfg_float = mocker.MagicMock(return_value=0.9)
+        loop._cfg_int = mocker.MagicMock(side_effect=lambda cfg, key, default: {
+            'agent_stagnation_threshold': 1,
+            'agent_max_same_tool_streak': 3,
+            'agent_tool_diversity_window': 8,
+        }.get(key, default))
         directive = loop._build_exploration_directive(PipelinePhase.RECON)
         assert "AGGRESSIVE EXPLORATION MODE" in directive
         assert "novel" in directive.lower()

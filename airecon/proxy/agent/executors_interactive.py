@@ -14,16 +14,31 @@ from .models import ToolExecution
 logger = logging.getLogger("airecon.agent")
 
 
-def _is_duplicate_vulnerability(vuln: dict[str, Any], existing: list[dict[str, Any]]) -> bool:
+def _is_duplicate_vulnerability(
+    vuln: dict[str, Any], existing: list[dict[str, Any]]
+) -> bool:
     finding = str(vuln.get("finding") or vuln.get("title") or "").strip().lower()
-    location = str(vuln.get("location") or vuln.get("endpoint") or vuln.get("url") or "").strip().lower()
+    location = (
+        str(vuln.get("location") or vuln.get("endpoint") or vuln.get("url") or "")
+        .strip()
+        .lower()
+    )
     severity = str(vuln.get("severity") or "").strip().lower()
 
     for item in existing or []:
         i_finding = str(item.get("finding") or item.get("title") or "").strip().lower()
-        i_location = str(item.get("location") or item.get("endpoint") or item.get("url") or "").strip().lower()
+        i_location = (
+            str(item.get("location") or item.get("endpoint") or item.get("url") or "")
+            .strip()
+            .lower()
+        )
         i_severity = str(item.get("severity") or "").strip().lower()
-        if finding and finding == i_finding and location == i_location and severity == i_severity:
+        if (
+            finding
+            and finding == i_finding
+            and location == i_location
+            and severity == i_severity
+        ):
             return True
     return False
 
@@ -56,10 +71,15 @@ class _InteractiveExecutorMixin:
             timeout_seconds = 300.0
 
         if not prompt:
-            return False, 0.0, {
-                "success": False,
-                "error": "'prompt' argument is required.",
-            }, None
+            return (
+                False,
+                0.0,
+                {
+                    "success": False,
+                    "error": "'prompt' argument is required.",
+                },
+                None,
+            )
 
         if event is None:
             import uuid as _uuid_mod
@@ -74,13 +94,14 @@ class _InteractiveExecutorMixin:
             self._user_input_prompt = prompt
             self._user_input_type = input_type
         else:
-
             if not request_id:
                 request_id = getattr(self, "_user_input_request_id", "") or ""
 
         logger.info(
             "request_user_input: waiting for user (type=%s, timeout=%.0fs, id=%s)",
-            input_type, timeout_seconds, request_id,
+            input_type,
+            timeout_seconds,
+            request_id,
         )
 
         try:
@@ -115,7 +136,6 @@ class _InteractiveExecutorMixin:
                 ),
             }
         finally:
-
             self._user_input_event = None
             self._user_input_value = ""
             self._user_input_cancelled = False
@@ -139,10 +159,20 @@ class _InteractiveExecutorMixin:
 
         _RAW_SPECIALIST = str(arguments.get("specialist", "exploit"))
         _VALID_SPECIALISTS = {
-            "sqli", "xss", "ssrf", "lfi", "recon", "exploit", "analyzer", "reporter"
+            "sqli",
+            "xss",
+            "ssrf",
+            "lfi",
+            "recon",
+            "exploit",
+            "analyzer",
+            "reporter",
         }
-        specialist = _RAW_SPECIALIST.lower().strip() if _RAW_SPECIALIST.lower(
-        ).strip() in _VALID_SPECIALISTS else "exploit"
+        specialist = (
+            _RAW_SPECIALIST.lower().strip()
+            if _RAW_SPECIALIST.lower().strip() in _VALID_SPECIALISTS
+            else "exploit"
+        )
 
         prompt = (
             f"[SUBAGENT — Specialist: {specialist.upper()}]\n"
@@ -160,7 +190,9 @@ class _InteractiveExecutorMixin:
             if parent_ollama is None:
                 from ..config import get_config
                 from ..ollama import OllamaClient
+
                 parent_ollama = OllamaClient(model=get_config().ollama_model)
+                await parent_ollama._async_init()
 
             agent = AgentLoop(ollama=parent_ollama, engine=self.engine)
 
@@ -175,15 +207,21 @@ class _InteractiveExecutorMixin:
                 _sub_iters += 1
 
             _raw_sub_usage = getattr(getattr(agent, "state", None), "token_usage", {})
-            sub_token_usage = dict(_raw_sub_usage) if isinstance(_raw_sub_usage, dict) else {}
+            sub_token_usage = (
+                dict(_raw_sub_usage) if isinstance(_raw_sub_usage, dict) else {}
+            )
             sub_total = _safe_non_negative_int(
                 sub_token_usage.get("cumulative", sub_token_usage.get("used", 0))
             )
             sub_prompt_total = _safe_non_negative_int(
-                sub_token_usage.get("cumulative_prompt", sub_token_usage.get("last_prompt", 0))
+                sub_token_usage.get(
+                    "cumulative_prompt", sub_token_usage.get("last_prompt", 0)
+                )
             )
             sub_completion_total = _safe_non_negative_int(
-                sub_token_usage.get("cumulative_completion", sub_token_usage.get("last_completion", 0))
+                sub_token_usage.get(
+                    "cumulative_completion", sub_token_usage.get("last_completion", 0)
+                )
             )
             if sub_total > 0:
                 state_token_usage = getattr(self.state, "token_usage", None)
@@ -191,17 +229,24 @@ class _InteractiveExecutorMixin:
                     state_token_usage = {}
                     try:
                         self.state.token_usage = state_token_usage
-                    except Exception:
-                        pass
-                state_token_usage["cumulative"] = _safe_non_negative_int(
-                    state_token_usage.get("cumulative", 0)
-                ) + sub_total
-                state_token_usage["cumulative_prompt"] = _safe_non_negative_int(
-                    state_token_usage.get("cumulative_prompt", 0)
-                ) + sub_prompt_total
-                state_token_usage["cumulative_completion"] = _safe_non_negative_int(
-                    state_token_usage.get("cumulative_completion", 0)
-                ) + sub_completion_total
+                    except Exception as e:
+                        logger.debug("Expected failure updating token usage: %s", e)
+                state_token_usage["cumulative"] = (
+                    _safe_non_negative_int(state_token_usage.get("cumulative", 0))
+                    + sub_total
+                )
+                state_token_usage["cumulative_prompt"] = (
+                    _safe_non_negative_int(
+                        state_token_usage.get("cumulative_prompt", 0)
+                    )
+                    + sub_prompt_total
+                )
+                state_token_usage["cumulative_completion"] = (
+                    _safe_non_negative_int(
+                        state_token_usage.get("cumulative_completion", 0)
+                    )
+                    + sub_completion_total
+                )
                 parent_session = getattr(self, "_session", None)
                 if parent_session is not None:
                     parent_session.token_total = _safe_non_negative_int(
@@ -228,7 +273,8 @@ class _InteractiveExecutorMixin:
                 if parent_session is not None:
                     for vuln in agent._session.vulnerabilities:
                         if not _is_duplicate_vulnerability(
-                                vuln, parent_session.vulnerabilities):
+                            vuln, parent_session.vulnerabilities
+                        ):
                             parent_session.vulnerabilities.append(vuln)
 
             res_dict = {
@@ -248,11 +294,16 @@ class _InteractiveExecutorMixin:
 
         duration = time.time() - start_time
         self.state.tool_history.append(
-            ToolExecution(tool_name=tool_name, arguments=arguments,
-                          result=res_dict, duration=duration,
-                          status="success" if success else "error")
+            ToolExecution(
+                tool_name=tool_name,
+                arguments=arguments,
+                result=res_dict,
+                duration=duration,
+                status="success" if success else "error",
+            )
         )
         self.state.tool_counts["total"] += 1
-        self.state.tool_counts["subagents"] = self.state.tool_counts.get(
-            "subagents", 0) + 1
+        self.state.tool_counts["subagents"] = (
+            self.state.tool_counts.get("subagents", 0) + 1
+        )
         return success, duration, res_dict, None

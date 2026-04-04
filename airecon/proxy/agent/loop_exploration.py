@@ -28,6 +28,38 @@ class _ExplorationMixin:
         if len(self._recent_tool_names) > window:
             self._recent_tool_names = self._recent_tool_names[-window:]
 
+    def _record_tool_to_memory(
+        self,
+        tool_name: str,
+        success: bool,
+        duration: float = 0.0,
+        output_size: int = 0,
+    ) -> None:
+        """Record tool usage to cross-session memory for learning.
+
+        This enables the agent to learn from experience across sessions:
+        - Which tools work best for which targets
+        - Historical success/failure rates
+        - Average execution times
+        """
+        try:
+            from ..memory import get_memory_manager
+            target = ""
+            if self._session:
+                target = self._session.target or ""
+
+            if target and tool_name not in ("create_file", "read_file", "list_files", "request_user_input"):
+                memory = get_memory_manager()
+                memory.record_tool_usage(
+                    tool_name=tool_name,
+                    target=target,
+                    success=success,
+                    duration_sec=duration,
+                    output_size=output_size,
+                )
+        except Exception as _e:
+            pass
+
     def _get_same_tool_streak(self) -> int:
         if not self._recent_tool_names:
             return 0

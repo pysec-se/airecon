@@ -125,6 +125,13 @@ class _InferenceMixin:
             or self._watchdog_forced_calls > 0
         )
 
+        _max_consecutive_thinking = self._cfg_int(cfg, "agent_max_consecutive_thinking", 5)
+        if getattr(self, "_consecutive_thinking_iterations", 0) >= _max_consecutive_thinking:
+            logger.debug(
+                f"Thinking DISABLED (mode={thinking_mode}): consecutive_thinking={self._consecutive_thinking_iterations} >= {_max_consecutive_thinking}"
+            )
+            return False
+
         if _is_struggling:
             logger.debug(
                 f"Thinking ENABLED (mode={thinking_mode}, phase={phase_name}, tool={last_tool}): struggling=True"

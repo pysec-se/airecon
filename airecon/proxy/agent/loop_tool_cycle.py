@@ -3,6 +3,8 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import shlex
+import time
 import warnings
 from pathlib import Path
 from typing import Any, AsyncIterator
@@ -14,6 +16,15 @@ from .loop_cycle_post import _CyclePostMixin
 from .session import save_session
 
 logger = logging.getLogger("airecon.agent")
+
+try:
+    from ..server import _trace_chat_event
+except (ImportError, ValueError):
+
+    def _trace_chat_event(*args, **kwargs):
+        pass
+
+
 _MAX_EMPTY_RETRIES = 4
 
 _tools_meta_path = Path(__file__).parent.parent / "data" / "tools_meta.json"
@@ -21,13 +32,113 @@ try:
     with open(_tools_meta_path, "r") as f:
         _TOOLS_META = json.load(f)
 except (OSError, json.JSONDecodeError) as _e:
-    warnings.warn(f"tools_meta.json unavailable ({_e}); tool catalog features disabled.")
+    warnings.warn(
+        f"tools_meta.json unavailable ({_e}); tool catalog features disabled."
+    )
     _TOOLS_META = {}
 
 
+def _collect_known_shell_binaries() -> frozenset[str]:
+    binaries: set[str] = set()
+    categories = _TOOLS_META.get("categories", {})
+    if isinstance(categories, dict):
+        for group in categories.values():
+            if not isinstance(group, dict):
+                continue
+            for tool_list in group.values():
+                if not isinstance(tool_list, list):
+                    continue
+                for tool_name in tool_list:
+                    if isinstance(tool_name, str) and tool_name.strip():
+                        binaries.add(tool_name.strip().lower())
+
+    parser_patterns = _TOOLS_META.get("output_parser_tool_patterns", {})
+    if isinstance(parser_patterns, dict):
+        for tool_name in parser_patterns.keys():
+            if isinstance(tool_name, str) and tool_name.strip():
+                binaries.add(tool_name.strip().lower())
+
+    binaries.discard("execute")
+    return frozenset(binaries)
+
+
+_KNOWN_SHELL_BINARIES = _collect_known_shell_binaries()
+
+
 class _ToolCycleMixin(_CyclePreludeMixin, _CycleLlmMixin, _CyclePostMixin):
+    def _rewrite_shell_binary_tool_call(
+        self,
+        tool_name: str,
+        arguments: dict[str, Any],
+    ) -> tuple[str, dict[str, Any], bool]:
+        normalized_name = str(tool_name or "").strip().lower()
+        if not normalized_name:
+            return tool_name, arguments, False
+
+        registered_tools = {
+            str(t.get("function", {}).get("name", "")).strip().lower()
+            for t in (self._tools_ollama or [])
+            if isinstance(t, dict)
+        }
+        if normalized_name in registered_tools:
+            return tool_name, arguments, False
+
+        if normalized_name not in _KNOWN_SHELL_BINARIES:
+            return tool_name, arguments, False
+
+        command_value = arguments.get("command")
+        command = ""
+        if isinstance(command_value, str) and command_value.strip():
+            command = command_value.strip()
+            first_token = command.split(maxsplit=1)[0].rsplit("/", 1)[-1].lower()
+            if first_token != normalized_name:
+                command = f"{normalized_name} {command}"
+        else:
+            tokens = [normalized_name]
+            for key, value in arguments.items():
+                if value is None or value == "" or key == "command":
+                    continue
+                flag = f"--{str(key).replace('_', '-')}"
+                if isinstance(value, bool):
+                    if value:
+                        tokens.append(flag)
+                    continue
+                if isinstance(value, (list, tuple)):
+                    for item in value:
+                        if item is None or item == "":
+                            continue
+                        tokens.append(flag)
+                        tokens.append(shlex.quote(str(item)))
+                    continue
+                tokens.append(flag)
+                tokens.append(shlex.quote(str(value)))
+            command = " ".join(tokens)
+
+        if not command.strip():
+            command = normalized_name
+
+        logger.warning(
+            "Rewriting direct shell-binary tool call '%s' into execute(command=...) to avoid unknown-tool stop",
+            tool_name,
+        )
+        return "execute", {"command": command}, True
+
     async def _run_iteration_loop(self, cfg: Any) -> AsyncIterator[AgentEvent]:
         while self.state.iteration < self.state.max_iterations:
+            fatal_ollama_error = str(
+                getattr(self, "_fatal_ollama_error", "") or ""
+            ).strip()
+            if fatal_ollama_error:
+                yield AgentEvent(
+                    type="error",
+                    data={
+                        "message": "Ollama runner failure detected. Stop run to avoid freeze.",
+                        "reason": "ollama_runner_fatal",
+                        "details": fatal_ollama_error,
+                    },
+                )
+                yield AgentEvent(type="done", data={})
+                return
             if self._stop_requested:
                 yield AgentEvent(
                     type="error", data={"message": "Agent stopped by user."}
@@ -35,10 +146,24 @@ class _ToolCycleMixin(_CyclePreludeMixin, _CycleLlmMixin, _CyclePostMixin):
                 yield AgentEvent(type="done", data={})
                 return
 
+            trace_id = getattr(self, "_current_trace_id", None)
+            if trace_id:
+                _trace_chat_event(
+                    trace_id, "iteration_start", iteration=self.state.iteration
+                )
+
             self.state.increment_iteration()
             current_phase = self._get_current_phase()
-            
+            _housekeeping_start = time.monotonic()
             await self._run_iteration_housekeeping(cfg, current_phase)
+            _housekeeping_elapsed = time.monotonic() - _housekeeping_start
+            if trace_id:
+                _trace_chat_event(
+                    trace_id,
+                    "housekeeping_complete",
+                    iteration=self.state.iteration,
+                    duration_ms=int(_housekeeping_elapsed * 1000),
+                )
 
             if self.state.is_approaching_limit() and not self.state.warnings_sent:
                 self.state.warnings_sent = True
@@ -56,6 +181,9 @@ class _ToolCycleMixin(_CyclePreludeMixin, _CycleLlmMixin, _CyclePostMixin):
             in_thinking_tag = False
             _carry = ""
 
+            # Track if this iteration used thinking (for consecutive thinking detection)
+            _this_iteration_thinking = False
+
             adaptive_num_ctx = (
                 self._adaptive_num_ctx
                 if self._adaptive_num_ctx > 0
@@ -63,22 +191,20 @@ class _ToolCycleMixin(_CyclePreludeMixin, _CycleLlmMixin, _CyclePostMixin):
             )
 
             if adaptive_num_ctx == -1:
-
                 self.state.token_usage["limit"] = -1
-                logger.debug("Context window: unlimited (-1) — using Ollama server default")
+                logger.debug(
+                    "Context window: unlimited (-1) — using Ollama server default"
+                )
             else:
-
                 min_recommended_ctx = 8192
                 if adaptive_num_ctx < min_recommended_ctx:
-                    logger.warning(f"Context size {adaptive_num_ctx} is below minimum recommended {min_recommended_ctx}, increasing")
+                    logger.warning(
+                        f"Context size {adaptive_num_ctx} is below minimum recommended {min_recommended_ctx}, increasing"
+                    )
                     adaptive_num_ctx = min_recommended_ctx
 
                 self.state.token_usage["limit"] = adaptive_num_ctx
 
-            # Hard token budget check BEFORE LLM call to prevent OOM crash.
-            # IMPORTANT: Use current-context usage (`used`), not session-lifetime
-            # cumulative totals (`cumulative`). Cumulative tracks accounting, not
-            # active prompt pressure.
             _ctx_used = self._recompute_used_tokens_from_conversation()
             _budget_hard_limit = int(adaptive_num_ctx * 0.85)  # 85% safety margin
 
@@ -91,59 +217,57 @@ class _ToolCycleMixin(_CyclePreludeMixin, _CycleLlmMixin, _CyclePostMixin):
                     (_ctx_used / adaptive_num_ctx) * 100,
                     _budget_hard_limit,
                 )
-                # Use the reset mechanism with summary injection
                 await self._reset_ollama_context()
-                # Truncate conversation to minimal safe state
                 self.state.conversation = self.state.conversation[-20:]
-                # Re-inject critical context
                 self.state.conversation.append(
-                    {"role": "system", "content": self._build_critical_findings_context()}
+                    {
+                        "role": "system",
+                        "content": self._build_critical_findings_context(),
+                    }
                 )
                 self.state.conversation.append(
                     {"role": "system", "content": self._build_handoff_summary()}
                 )
-                # Recompute live context pressure after recovery mutation.
                 self._recompute_used_tokens_from_conversation()
-                # Skip this iteration, resume after recovery
                 yield AgentEvent(
                     type="text",
-                    data={"content": "[SYSTEM: Context budget exceeded, recovery initiated]"},
+                    data={
+                        "content": "[SYSTEM: Context budget exceeded, recovery initiated]"
+                    },
                 )
-                continue  # Skip to next iteration
-            
-            # Normal context pressure checks
+                continue
+
             if _ctx_used > 0 and adaptive_num_ctx > 0:
                 _iter_num_predict = self._get_iteration_num_predict(
                     cfg, current_phase, adaptive_num_ctx
                 )
-                _effective_input_ctx = max(
-                    1024, adaptive_num_ctx - _iter_num_predict
-                )
+                _effective_input_ctx = max(1024, adaptive_num_ctx - _iter_num_predict)
                 _usage_ratio = _ctx_used / _effective_input_ctx
 
-                _trim_threshold = 0.55 if self._ctf_mode else 0.60
+                _trim_threshold = 0.45 if self._ctf_mode else 0.50
 
-                _hard_cap_ratio = 0.75
+                _hard_cap_ratio = 0.65
 
                 if _usage_ratio >= _hard_cap_ratio:
-
                     logger.error(
                         "EMERGENCY CONTEXT TRIM: %.0f%% used (%d/%d tokens) — "
                         "Ollama overload imminent, forcing aggressive trim",
-                        _usage_ratio * 100, _ctx_used, adaptive_num_ctx,
+                        _usage_ratio * 100,
+                        _ctx_used,
+                        adaptive_num_ctx,
                     )
 
                     _sys_msgs_e = [
-                        m for m in self.state.conversation
-                        if m.get("role") == "system"
+                        m for m in self.state.conversation if m.get("role") == "system"
                     ]
                     _non_sys_e = [
-                        m for m in self.state.conversation
-                        if m.get("role") != "system"
+                        m for m in self.state.conversation if m.get("role") != "system"
                     ]
                     _emergency_trim = max(int(len(_non_sys_e) * 0.40), 6)
                     _prev_total = len(self.state.conversation)
-                    self.state.conversation = _sys_msgs_e + _non_sys_e[-_emergency_trim:]
+                    self.state.conversation = (
+                        _sys_msgs_e + _non_sys_e[-_emergency_trim:]
+                    )
 
                     _msg_ratio = len(self.state.conversation) / _prev_total
                     self.state.token_usage["used"] = int(_ctx_used * _msg_ratio)
@@ -151,41 +275,68 @@ class _ToolCycleMixin(_CyclePreludeMixin, _CycleLlmMixin, _CyclePostMixin):
                     logger.warning(
                         "Emergency trim: %d → %d msgs (sys=%d kept, "
                         "non-sys %d → %d), est tokens %.0f%% → %.0f%%",
-                        _prev_total, len(self.state.conversation),
-                        len(_sys_msgs_e), len(_non_sys_e), _emergency_trim,
+                        _prev_total,
+                        len(self.state.conversation),
+                        len(_sys_msgs_e),
+                        len(_non_sys_e),
+                        _emergency_trim,
                         _usage_ratio * 100,
                         _usage_ratio * _msg_ratio * 100,
                     )
                 elif _usage_ratio >= _trim_threshold:
-
-                    if _usage_ratio >= 0.60:
+                    if _usage_ratio >= 0.55:
                         logger.warning(
                             "CONTEXT PRESSURE EARLY WARNING: %.0f%% used (%d/%d tokens) — "
                             "Agent should start consolidating findings",
-                            _usage_ratio * 100, _ctx_used, adaptive_num_ctx,
+                            _usage_ratio * 100,
+                            _ctx_used,
+                            adaptive_num_ctx,
                         )
 
                     logger.warning(
                         "Proactive context trim: %.0f%% used (%d/%d tokens)",
-                        _usage_ratio * 100, _ctx_used, adaptive_num_ctx,
+                        _usage_ratio * 100,
+                        _ctx_used,
+                        adaptive_num_ctx,
                     )
 
+                    _trim_build_start = time.monotonic()
                     _critical_ctx = self._build_critical_findings_context()
                     _handoff_ctx = self._build_handoff_summary()
+                    _trim_build_elapsed = time.monotonic() - _trim_build_start
+                    if _trim_build_elapsed >= 2.0:
+                        logger.warning(
+                            "Context trim summary build took %.2fs (iter=%d)",
+                            _trim_build_elapsed,
+                            self.state.iteration,
+                        )
+                        yield AgentEvent(
+                            type="progress",
+                            data={
+                                "message": f"Preparing context summary ({_trim_build_elapsed:.1f}s)",
+                                "stage": "context_trim",
+                            },
+                        )
                     if self._ctf_mode:
-
-                        _proactive_trim = 15 if _usage_ratio >= 0.80 else 20
+                        _proactive_trim = 12 if _usage_ratio >= 0.70 else 15
                     else:
-                        # More aggressive trimming for non-CTF mode
-                        if _usage_ratio >= 0.70:
-                            _proactive_trim = 40
-                        elif _usage_ratio >= 0.65:
-                            _proactive_trim = 60
+                        if _usage_ratio >= 0.60:
+                            _proactive_trim = 30
+                        elif _usage_ratio >= 0.55:
+                            _proactive_trim = 45
                         else:
-                            _proactive_trim = 80
+                            _proactive_trim = 60
 
-                    self.state.truncate_conversation(
-                        max_messages=_proactive_trim)
+                    _trim_apply_start = time.monotonic()
+                    self.state.truncate_conversation(max_messages=_proactive_trim)
+                    _trim_apply_elapsed = time.monotonic() - _trim_apply_start
+                    if _trim_apply_elapsed >= 2.0:
+                        logger.warning(
+                            "truncate_conversation took %.2fs (iter=%d, keep=%d)",
+                            _trim_apply_elapsed,
+                            self.state.iteration,
+                            _proactive_trim,
+                        )
 
                     if _handoff_ctx:
                         self.state.conversation.append(
@@ -203,13 +354,46 @@ class _ToolCycleMixin(_CyclePreludeMixin, _CycleLlmMixin, _CyclePostMixin):
                 cfg, current_phase, adaptive_num_ctx
             )
 
+            _budget_start = time.monotonic()
+            if trace_id:
+                _trace_chat_event(
+                    trace_id, "iteration_budget_start", iteration=self.state.iteration
+                )
             await self._enforce_char_budget(
                 num_ctx=adaptive_num_ctx,
                 num_predict=adaptive_num_predict,
             )
+            _budget_elapsed = time.monotonic() - _budget_start
+            if trace_id and _budget_elapsed >= 1.0:
+                _trace_chat_event(
+                    trace_id,
+                    "iteration_budget_complete",
+                    iteration=self.state.iteration,
+                    duration_ms=int(_budget_elapsed * 1000),
+                )
+            if _budget_elapsed >= 2.0:
+                logger.warning(
+                    "_enforce_char_budget took %.2fs (iter=%d, ctx=%d)",
+                    _budget_elapsed,
+                    self.state.iteration,
+                    adaptive_num_ctx,
+                )
+                yield AgentEvent(
+                    type="progress",
+                    data={
+                        "message": f"Compressing context ({_budget_elapsed:.1f}s)",
+                        "stage": "context_budget",
+                    },
+                )
 
             _last_chunk_data = {}
             _vram_retries_this_iter = 0
+
+            # Inject tool intelligence before LLM call
+            try:
+                self._inject_tool_intelligence()
+            except Exception as _inj_err:
+                logger.debug("Tool intelligence injection failed: %s", _inj_err)
 
             yield AgentEvent(
                 type="progress",
@@ -235,26 +419,79 @@ class _ToolCycleMixin(_CyclePreludeMixin, _CycleLlmMixin, _CyclePostMixin):
                             adaptive_num_ctx,
                             adaptive_num_predict,
                         )
-                    
-                    # FIX 2026-03-31: Check context BEFORE LLM call to prevent hang
+
+                    _ctx_check_start = time.monotonic()
+                    if trace_id:
+                        _trace_chat_event(
+                            trace_id,
+                            "context_reset_start",
+                            iteration=self.state.iteration,
+                        )
                     await self._check_and_reset_context()
-                    
-                    async for chunk in self.ollama.chat_stream(
+                    _ctx_check_elapsed = time.monotonic() - _ctx_check_start
+                    if _ctx_check_elapsed >= 2.0:
+                        logger.warning(
+                            "_check_and_reset_context took %.2fs (iter=%d)",
+                            _ctx_check_elapsed,
+                            self.state.iteration,
+                        )
+                    if trace_id:
+                        _trace_chat_event(
+                            trace_id,
+                            "context_reset_complete",
+                            iteration=self.state.iteration,
+                            duration_ms=int(_ctx_check_elapsed * 1000),
+                        )
+                        _trace_chat_event(
+                            trace_id,
+                            "ollama_stream_start",
+                            iteration=self.state.iteration,
+                        )
+                    logger.info(
+                        "OLLAMA STREAM START iter=%d attempt=%d ctx=%d predict=%d conv_msgs=%d",
+                        self.state.iteration,
+                        _stream_attempt + 1,
+                        adaptive_num_ctx,
+                        adaptive_num_predict,
+                        len(self.state.conversation),
+                    )
+                    _ollama_stream_start = time.monotonic()
+                    _first_chunk_logged = False
+                    _last_chunk_time = time.monotonic()
+                    _CHUNK_TIMEOUT = cfg.ollama_chunk_timeout
+
+                    _stream_gen = self.ollama.chat_stream(
                         messages=self._messages_for_ollama(),
                         tools=self._tools_ollama,
                         options={
                             "num_ctx": adaptive_num_ctx,
                             "temperature": adaptive_temperature,
                             "num_predict": adaptive_num_predict,
-
                             "num_keep": _safe_num_keep,
-
                             "repeat_penalty": self._cfg_float(
-                                cfg, "ollama_repeat_penalty", 1.05),
+                                cfg, "ollama_repeat_penalty", 1.05
+                            ),
                         },
                         think=self._should_use_thinking(cfg, current_phase),
                         stop_requested_fn=lambda: self._stop_requested,
-                    ):
+                    )
+
+                    async for chunk in _stream_gen:
+                        _now = time.monotonic()
+                        if _now - _last_chunk_time > _CHUNK_TIMEOUT:
+                            logger.error(
+                                "OLLAMA STREAM TIMEOUT: no chunk for %.0fs (iter=%d) — aborting",
+                                _CHUNK_TIMEOUT,
+                                self.state.iteration,
+                            )
+                            yield AgentEvent(
+                                type="text",
+                                data={
+                                    "content": f"[SYSTEM: Ollama stream timeout after {_CHUNK_TIMEOUT}s — retrying]"
+                                },
+                            )
+                            break
+                        _last_chunk_time = _now
                         if hasattr(chunk, "model_dump"):
                             chunk_data = chunk.model_dump()
                         elif isinstance(chunk, dict):
@@ -263,6 +500,14 @@ class _ToolCycleMixin(_CyclePreludeMixin, _CycleLlmMixin, _CyclePostMixin):
                             chunk_data = dict(chunk)
 
                         _last_chunk_data = chunk_data
+                        if not _first_chunk_logged:
+                            _first_chunk_logged = True
+                            logger.info(
+                                "OLLAMA FIRST CHUNK iter=%d attempt=%d after=%.2fs",
+                                self.state.iteration,
+                                _stream_attempt + 1,
+                                time.monotonic() - _ollama_stream_start,
+                            )
 
                         if self._stop_requested:
                             break
@@ -274,6 +519,7 @@ class _ToolCycleMixin(_CyclePreludeMixin, _CycleLlmMixin, _CyclePostMixin):
 
                         if chunk_thinking:
                             thinking_acc += chunk_thinking
+                            _this_iteration_thinking = True
                             yield AgentEvent(
                                 type="thinking", data={"content": chunk_thinking}
                             )
@@ -284,8 +530,7 @@ class _ToolCycleMixin(_CyclePreludeMixin, _CycleLlmMixin, _CyclePostMixin):
                             _OPEN_TAG = "<think>"
                             _CLOSE_TAG = "</think>"
 
-                            for partial_len in range(
-                                    min(len(text), 8), 0, -1):
+                            for partial_len in range(min(len(text), 8), 0, -1):
                                 suffix = text[-partial_len:]
                                 if _OPEN_TAG.startswith(
                                     suffix
@@ -299,7 +544,7 @@ class _ToolCycleMixin(_CyclePreludeMixin, _CycleLlmMixin, _CyclePostMixin):
                                     if _OPEN_TAG in text:
                                         idx = text.index(_OPEN_TAG)
                                         before = text[:idx]
-                                        text = text[idx + len(_OPEN_TAG):]
+                                        text = text[idx + len(_OPEN_TAG) :]
                                         if before:
                                             content_acc += before
                                             yield AgentEvent(
@@ -316,13 +561,12 @@ class _ToolCycleMixin(_CyclePreludeMixin, _CycleLlmMixin, _CyclePostMixin):
                                     if _CLOSE_TAG in text:
                                         idx = text.index(_CLOSE_TAG)
                                         think_frag = text[:idx]
-                                        text = text[idx + len(_CLOSE_TAG):]
+                                        text = text[idx + len(_CLOSE_TAG) :]
                                         if think_frag:
                                             thinking_acc += think_frag
                                             yield AgentEvent(
                                                 type="thinking",
-                                                data={
-                                                    "content": think_frag},
+                                                data={"content": think_frag},
                                             )
                                         in_thinking_tag = False
                                     else:
@@ -340,16 +584,18 @@ class _ToolCycleMixin(_CyclePreludeMixin, _CycleLlmMixin, _CyclePostMixin):
                         _carry = ""
 
                     if _last_chunk_data:
-
                         eval_count = _last_chunk_data.get("eval_count") or 0
-                        prompt_eval_count = _last_chunk_data.get("prompt_eval_count") or 0
+                        prompt_eval_count = (
+                            _last_chunk_data.get("prompt_eval_count") or 0
+                        )
                         self._record_token_usage(
                             prompt_tokens=prompt_eval_count,
                             completion_tokens=eval_count,
                         )
                         logger.debug(
                             "Token usage: prompt=%d, generated=%d, total=%d, cumulative=%d",
-                            prompt_eval_count, eval_count,
+                            prompt_eval_count,
+                            eval_count,
                             prompt_eval_count + eval_count,
                             self.state.token_usage.get("cumulative", 0),
                         )
@@ -371,12 +617,9 @@ class _ToolCycleMixin(_CyclePreludeMixin, _CycleLlmMixin, _CyclePostMixin):
                         or "signal: killed" in err_lower
                     )
                     _is_conn_refused = "connection refused" in err_lower
-                    _is_timeout = (
-                        "timeout" in err_lower or "timed out" in err_lower
-                    )
+                    _is_timeout = "timeout" in err_lower or "timed out" in err_lower
 
                     if _is_vram_crash and _vram_retries_this_iter < 4:
-
                         self._vram_crash_count += 1
                         _vram_retries_this_iter += 1
                         if self._vram_crash_count == 1:
@@ -392,7 +635,6 @@ class _ToolCycleMixin(_CyclePreludeMixin, _CycleLlmMixin, _CyclePostMixin):
                             _max_msgs = 30
                             _wait_s = 10
                         else:
-
                             _new_ctx = 4096
                             _max_msgs = 20
                             _wait_s = 30
@@ -408,7 +650,9 @@ class _ToolCycleMixin(_CyclePreludeMixin, _CycleLlmMixin, _CyclePostMixin):
                         self._sync_recovery_state_to_session()
                         logger.warning(
                             "VRAM crash #%d — ctx → %d tokens, msgs → %d",
-                            self._vram_crash_count, _new_ctx, _max_msgs,
+                            self._vram_crash_count,
+                            _new_ctx,
+                            _max_msgs,
                         )
                         yield AgentEvent(
                             type="text",
@@ -425,8 +669,7 @@ class _ToolCycleMixin(_CyclePreludeMixin, _CycleLlmMixin, _CyclePostMixin):
                         )
                         if _wait_s > 0:
                             await asyncio.sleep(_wait_s)
-                        self.state.truncate_conversation(
-                            max_messages=_max_msgs)
+                        self.state.truncate_conversation(max_messages=_max_msgs)
                         recovery_ctx = self._build_recovery_state_context()
                         if recovery_ctx:
                             self.state.conversation.append(
@@ -452,7 +695,10 @@ class _ToolCycleMixin(_CyclePreludeMixin, _CycleLlmMixin, _CyclePostMixin):
                             try:
                                 save_session(self._session)
                             except Exception as _se:
-                                logger.warning("Could not save session after VRAM recovery: %s", _se)
+                                logger.warning(
+                                    "Could not save session after VRAM recovery: %s",
+                                    _se,
+                                )
                         thinking_acc = ""
                         content_acc = ""
                         tool_calls_acc = []
@@ -461,7 +707,6 @@ class _ToolCycleMixin(_CyclePreludeMixin, _CycleLlmMixin, _CyclePostMixin):
                         continue
 
                     elif _is_conn_refused and _stream_attempt < 4:
-
                         _conn_waits = [10, 30, 60, 120]
                         wait_s = _conn_waits[min(_stream_attempt, len(_conn_waits) - 1)]
                         logger.warning(
@@ -491,11 +736,10 @@ class _ToolCycleMixin(_CyclePreludeMixin, _CycleLlmMixin, _CyclePostMixin):
                         )
                         continue
 
-                    elif _is_timeout and _stream_attempt < 1:
-
+                    elif _is_timeout and _stream_attempt < 3:
                         logger.warning(
-                            "Ollama stream stalled/timed out — retrying once "
-                            "(iteration=%d): %s",
+                            "Ollama stream stalled/timed out — retrying (attempt %d/3, iteration=%d): %s",
+                            _stream_attempt + 1,
                             self.state.iteration,
                             err_str[:120],
                         )
@@ -504,7 +748,8 @@ class _ToolCycleMixin(_CyclePreludeMixin, _CycleLlmMixin, _CyclePostMixin):
                             data={
                                 "content": (
                                     "\n[AUTO-RECOVERY] Ollama stream stalled "
-                                    "(no tokens received). Retrying...\n"
+                                    "(no tokens received). Retrying attempt %d/3...\n"
+                                    % (_stream_attempt + 1)
                                 )
                             },
                         )
@@ -554,10 +799,9 @@ class _ToolCycleMixin(_CyclePreludeMixin, _CycleLlmMixin, _CyclePostMixin):
                     return
 
             if not content_acc and not tool_calls_acc and not thinking_acc:
-
-                self._empty_response_retry_count = getattr(
-                    self, "_empty_response_retry_count", 0
-                ) + 1
+                self._empty_response_retry_count = (
+                    getattr(self, "_empty_response_retry_count", 0) + 1
+                )
                 if self._empty_response_retry_count <= _MAX_EMPTY_RETRIES:
                     _wait = min(5 * self._empty_response_retry_count, 20)
                     logger.warning(
@@ -571,21 +815,26 @@ class _ToolCycleMixin(_CyclePreludeMixin, _CycleLlmMixin, _CyclePostMixin):
 
                     if self._empty_response_retry_count == 3:
                         _sys_msgs = [
-                            m for m in self.state.conversation
+                            m
+                            for m in self.state.conversation
                             if m.get("role") == "system"
                         ][:5]
                         _recent_msgs = [
-                            m for m in self.state.conversation
+                            m
+                            for m in self.state.conversation
                             if m.get("role") != "system"
                         ][-20:]
                         _before = len(self.state.conversation)
 
-                        _repaired = AgentState._repair_tool_pairs(_sys_msgs + _recent_msgs)
+                        _repaired = AgentState._repair_tool_pairs(
+                            _sys_msgs + _recent_msgs
+                        )
                         self.state.conversation = _repaired
                         logger.warning(
                             "Empty response retry 3: compacted conversation "
                             "%d → %d messages (pair-repaired) to reduce context size",
-                            _before, len(self.state.conversation),
+                            _before,
+                            len(self.state.conversation),
                         )
                     yield AgentEvent(
                         type="text",
@@ -623,18 +872,30 @@ class _ToolCycleMixin(_CyclePreludeMixin, _CycleLlmMixin, _CyclePostMixin):
                 return
             self._empty_response_retry_count = 0
 
-            content_acc, thinking_acc, tool_calls_acc, _has_task_complete = self._analyze_llm_output(
-                current_phase=current_phase,
-                content_acc=content_acc,
-                thinking_acc=thinking_acc,
-                tool_calls_acc=tool_calls_acc,
+            content_acc, thinking_acc, tool_calls_acc, _has_task_complete = (
+                self._analyze_llm_output(
+                    current_phase=current_phase,
+                    content_acc=content_acc,
+                    thinking_acc=thinking_acc,
+                    tool_calls_acc=tool_calls_acc,
+                )
             )
 
             if not tool_calls_acc:
                 self._no_tool_iterations += 1
+                # Increment consecutive thinking counter if thinking was generated this iteration
+                if _this_iteration_thinking:
+                    self._consecutive_thinking_iterations = (
+                        getattr(self, "_consecutive_thinking_iterations", 0) + 1
+                    )
+                    logger.debug(
+                        "Consecutive thinking iteration #%d detected (target=%r, phase=%s)",
+                        self._consecutive_thinking_iterations,
+                        self.state.active_target,
+                        current_phase.value,
+                    )
                 if _has_task_complete:
-                    logger.info(
-                        "Agent emitted [TASK_COMPLETE] — stopping.")
+                    logger.info("Agent emitted [TASK_COMPLETE] — stopping.")
 
                     if self._has_scan_work():
                         save_session(self._session)
@@ -659,7 +920,8 @@ class _ToolCycleMixin(_CyclePreludeMixin, _CycleLlmMixin, _CyclePostMixin):
                         )
 
                         self.state.conversation = [
-                            m for m in self.state.conversation
+                            m
+                            for m in self.state.conversation
                             if not m.get("content", "").startswith("<reflector ")
                         ]
                         self.state.conversation.append(
@@ -678,7 +940,6 @@ class _ToolCycleMixin(_CyclePreludeMixin, _CycleLlmMixin, _CyclePostMixin):
                             phase=current_phase,
                         )
                         if self._watchdog_forced_calls >= 3:
-
                             msg = (
                                 "Model is stuck in text-only mode and watchdog recovery failed. "
                                 "Stopping to avoid infinite loop. "
@@ -696,7 +957,6 @@ class _ToolCycleMixin(_CyclePreludeMixin, _CycleLlmMixin, _CyclePostMixin):
                             yield AgentEvent(type="done", data={})
                             return
                         elif watchdog_call:
-
                             self._watchdog_forced_calls += 1
                             tool_calls_acc = [watchdog_call]
                             self._no_tool_iterations = 0
@@ -720,7 +980,6 @@ class _ToolCycleMixin(_CyclePreludeMixin, _CycleLlmMixin, _CyclePostMixin):
                                 watchdog_call.get("function", {}).get("name", ""),
                             )
                         else:
-
                             self._watchdog_forced_calls += 1
                             logger.warning(
                                 "Watchdog: no command found — injecting recovery nudge "
@@ -783,8 +1042,8 @@ class _ToolCycleMixin(_CyclePreludeMixin, _CycleLlmMixin, _CyclePostMixin):
             if tool_calls_acc:
                 self._no_tool_iterations = 0
                 self._recovery_force_tool_calls = 0
-
                 self._watchdog_forced_calls = 0
+                self._consecutive_thinking_iterations = 0
 
             if not content_acc.strip():
                 tool_names_str = ", ".join(
@@ -794,24 +1053,25 @@ class _ToolCycleMixin(_CyclePreludeMixin, _CycleLlmMixin, _CyclePostMixin):
                     type="text", data={"content": f"Executing: {tool_names_str}..."}
                 )
 
-            parallelizable_tools = _TOOLS_META.get(
-                "parallelizable_tools", [])
-
+            parallelizable_tools = _TOOLS_META.get("parallelizable_tools", [])
             tool_groups: dict[str, list[tuple[int, dict, dict]]] = {}
             sequential_only: list[tuple[int, dict, dict]] = []
 
             for idx, tc in enumerate(tool_calls_acc):
                 tn = tc["function"]["name"]
-                args = self._normalize_tool_args(
-                    tn, tc["function"]["arguments"], None
-                )
+                args = self._normalize_tool_args(tn, tc["function"]["arguments"], None)
+                tn, args, rewritten = self._rewrite_shell_binary_tool_call(tn, args)
+                if rewritten:
+                    tc = dict(tc)
+                    fn = dict(tc.get("function") or {})
+                    fn["name"] = tn
+                    fn["arguments"] = args
+                    tc["function"] = fn
+                    tool_calls_acc[idx] = tc
 
                 yield AgentEvent(
                     type="tool_start",
-                    data={
-                        "tool_id": str(idx),
-                        "tool": tn,
-                        "arguments": args},
+                    data={"tool_id": str(idx), "tool": tn, "arguments": args},
                 )
 
                 is_parallel = False
@@ -832,7 +1092,6 @@ class _ToolCycleMixin(_CyclePreludeMixin, _CycleLlmMixin, _CyclePostMixin):
                         cmd_bin = ""
                     cmd_bin = cmd_bin.rsplit("/", 1)[-1]
                     if cmd_bin in parallelizable_tools:
-
                         if "parallel" not in tool_groups:
                             tool_groups["parallel"] = []
                         tool_groups["parallel"].append((idx, tc, args))
@@ -841,19 +1100,36 @@ class _ToolCycleMixin(_CyclePreludeMixin, _CycleLlmMixin, _CyclePostMixin):
                 if not is_parallel:
                     sequential_only.append((idx, tc, args))
 
-            all_results: dict[
-                int, tuple
-            ] = {}
+            all_results: dict[int, tuple] = {}
 
-            async def execute_single_tool(
-                    idx: int, tc: dict, args: dict) -> tuple:
+            async def execute_single_tool(idx: int, tc: dict, args: dict) -> tuple:
                 tn = tc["function"]["name"]
+
+                # Hard phase constraint check — block inappropriate tools
+                _phase_blocked = self._check_phase_constraint(tn)
+                if _phase_blocked:
+                    logger.info("Phase constraint blocked tool '%s' in %s phase",
+                                tn, self._get_current_phase().value if self.pipeline else "unknown")
+                    return (
+                        idx,
+                        tc,
+                        tn,
+                        args,
+                        True,
+                        0.0,
+                        {"success": True, "result": _phase_blocked},
+                        None,
+                        True,
+                    )
 
                 is_dup, dup_msg = self._is_duplicate_command(tn, args)
                 if is_dup:
                     logger.info("Anti-repeat guard blocked duplicate: %s", tn)
                     return (
-                        idx, tc, tn, args,
+                        idx,
+                        tc,
+                        tn,
+                        args,
                         True,
                         0.0,
                         {"success": True, "result": dup_msg},
@@ -876,7 +1152,6 @@ class _ToolCycleMixin(_CyclePreludeMixin, _CycleLlmMixin, _CyclePostMixin):
                     )
 
                 if tn == "execute":
-
                     self._check_output_dedup(args)
 
                 if tn == "browser_action":
@@ -891,7 +1166,12 @@ class _ToolCycleMixin(_CyclePreludeMixin, _CycleLlmMixin, _CyclePostMixin):
                 elif tn == "web_search":
                     s, d, r, o = await self._execute_web_search_tool(args)
                     self.state.missing_tool_count = 0
-                elif any(tn == t["function"]["name"] for t in (self._tools_ollama or [])):
+                elif tn == "run_parallel_agents":
+                    s, d, r, o = await self._execute_tool_and_record(tn, args)
+                    self.state.missing_tool_count = 0
+                elif any(
+                    tn == t["function"]["name"] for t in (self._tools_ollama or [])
+                ):
                     s, d, r, o = await self._execute_tool_and_record(tn, args)
                     self.state.missing_tool_count = 0
                 else:
@@ -915,34 +1195,35 @@ class _ToolCycleMixin(_CyclePreludeMixin, _CycleLlmMixin, _CyclePostMixin):
 
             for _, group_tasks in tool_groups.items():
                 if len(group_tasks) > 1:
-
                     tasks = [
-                        asyncio.create_task(
-                            execute_single_tool(idx, tc, args))
+                        asyncio.create_task(execute_single_tool(idx, tc, args))
                         for idx, tc, args in group_tasks
                     ]
                     results = await asyncio.gather(*tasks, return_exceptions=True)
                     for (idx, tc, args), res in zip(group_tasks, results):
-
                         if isinstance(res, BaseException):
                             logger.error("Parallel tool error: %s", res)
 
                             tn = tc["function"]["name"]
                             all_results[idx] = (
-                                idx, tc, tn, args, False, 0.0,
+                                idx,
+                                tc,
+                                tn,
+                                args,
+                                False,
+                                0.0,
                                 {"success": False, "error": str(res)},
-                                None, False,
+                                None,
+                                False,
                             )
                         else:
                             all_results[res[0]] = res
                 else:
-
                     idx, tc, args = group_tasks[0]
                     res = await execute_single_tool(idx, tc, args)
                     all_results[idx] = res
 
             for idx, tc, args in sequential_only:
-
                 if idx in all_results:
                     continue
                 tn = tc["function"]["name"]
@@ -958,6 +1239,84 @@ class _ToolCycleMixin(_CyclePreludeMixin, _CycleLlmMixin, _CyclePostMixin):
                         {"success": False, "error": arg_err},
                         None,
                         False,
+                    )
+                    continue
+
+                if tn == "run_parallel_agents":
+                    _pa_out_queue: asyncio.Queue[str] = asyncio.Queue()
+
+                    def _on_pa_chunk(text: str) -> None:
+                        _pa_out_queue.put_nowait(text)
+
+                    _pa_task = asyncio.create_task(
+                        self._execute_tool_and_record(tn, args, on_output=_on_pa_chunk)
+                    )
+
+                    while not _pa_task.done():
+                        try:
+                            _pa_chunk = await asyncio.wait_for(
+                                _pa_out_queue.get(), timeout=0.5
+                            )
+                            try:
+                                import json as _json_mod
+                                _pa_event = _json_mod.loads(_pa_chunk)
+                                _pa_evt_type = _pa_event.get("event_type", "")
+                                _pa_target = _pa_event.get("target", "")
+                                logger.debug("SubAgent queue parse: event_type=%s target=%s", _pa_evt_type, _pa_target)
+                                
+                                event_type_map = {
+                                    "subagent_tool_start": "subagent_tool_start",
+                                    "subagent_tool_output": "subagent_tool_output",
+                                    "subagent_tool_end": "subagent_tool_end",
+                                    "subagent_text": "subagent_text",
+                                    "subagent_complete": "subagent_complete",
+                                }
+                                
+                                if _pa_evt_type in event_type_map:
+                                    tui_event_type = event_type_map[_pa_evt_type]
+                                    yield AgentEvent(
+                                        type=tui_event_type,
+                                        data=_pa_event,
+                                    )
+                            except (_json_mod.JSONDecodeError, KeyError):
+                                yield AgentEvent(
+                                    type="tool_output",
+                                    data={"tool_id": str(idx), "content": _pa_chunk},
+                                )
+                        except asyncio.TimeoutError:
+                            pass
+
+                    while not _pa_out_queue.empty():
+                        _pa_chunk = _pa_out_queue.get_nowait()
+                        try:
+                            import json as _json_mod2
+                            _pa_event = _json_mod2.loads(_pa_chunk)
+                            _pa_evt_type = _pa_event.get("event_type", "")
+                            
+                            event_type_map = {
+                                "subagent_tool_start": "subagent_tool_start",
+                                "subagent_tool_output": "subagent_tool_output",
+                                "subagent_tool_end": "subagent_tool_end",
+                                "subagent_text": "subagent_text",
+                                "subagent_complete": "subagent_complete",
+                            }
+                            
+                            if _pa_evt_type in event_type_map:
+                                tui_event_type = event_type_map[_pa_evt_type]
+                                yield AgentEvent(
+                                    type=tui_event_type,
+                                    data=_pa_event,
+                                )
+                        except (_json_mod2.JSONDecodeError, KeyError):
+                            yield AgentEvent(
+                                type="tool_output",
+                                data={"tool_id": str(idx), "content": _pa_chunk},
+                            )
+
+                    s, d, r, o = _pa_task.result()
+                    self.state.missing_tool_count = 0
+                    all_results[idx] = (
+                        idx, tc, tn, args, True, d, r, o, s,
                     )
                     continue
 
@@ -979,20 +1338,29 @@ class _ToolCycleMixin(_CyclePreludeMixin, _CycleLlmMixin, _CyclePostMixin):
                 elif tn == "request_user_input":
                     # Rate limiting: prevent spamming user with input requests
                     import time as _time_mod
+
                     _now = _time_mod.time()
                     if _now - self._last_user_input_time < self._user_input_cooldown:
-                        _remaining = self._user_input_cooldown - (_now - self._last_user_input_time)
+                        _remaining = self._user_input_cooldown - (
+                            _now - self._last_user_input_time
+                        )
                         logger.warning(
                             "request_user_input: rate limited. Please wait %.0fs before requesting user input again.",
-                            _remaining
+                            _remaining,
                         )
-                        s, d, r, o = False, 0.0, {
-                            "success": False,
-                            "error": f"Rate limited. Please wait {int(_remaining)} seconds before requesting user input again.",
-                            "retry_after": int(_remaining),
-                        }, None
+                        s, d, r, o = (
+                            False,
+                            0.0,
+                            {
+                                "success": False,
+                                "error": f"Rate limited. Please wait {int(_remaining)} seconds before requesting user input again.",
+                                "retry_after": int(_remaining),
+                            },
+                            None,
+                        )
                     else:
                         import uuid as _uuid_mod
+
                         _req_id = str(_uuid_mod.uuid4())
                         _pre_evt = asyncio.Event()
                         self._user_input_event = _pre_evt
@@ -1014,26 +1382,24 @@ class _ToolCycleMixin(_CyclePreludeMixin, _CycleLlmMixin, _CyclePostMixin):
                         )
                         self._last_user_input_time = _time_mod.time()
                     self.state.missing_tool_count = 0
-                elif any(tn == t["function"]["name"] for t in (self._tools_ollama or [])):
+                elif any(
+                    tn == t["function"]["name"] for t in (self._tools_ollama or [])
+                ):
                     out_queue: asyncio.Queue[str] = asyncio.Queue()
 
                     def _on_chunk(text: str) -> None:
                         out_queue.put_nowait(text)
 
                     t_task = asyncio.create_task(
-                        self._execute_tool_and_record(
-                            tn, args, on_output=_on_chunk)
+                        self._execute_tool_and_record(tn, args, on_output=_on_chunk)
                     )
 
                     while not t_task.done():
                         try:
-                            chunk = await asyncio.wait_for(
-                                out_queue.get(), timeout=0.1
-                            )
+                            chunk = await asyncio.wait_for(out_queue.get(), timeout=0.1)
                             yield AgentEvent(
                                 type="tool_output",
-                                data={
-                                    "tool_id": str(idx), "content": chunk},
+                                data={"tool_id": str(idx), "content": chunk},
                             )
                         except asyncio.TimeoutError:
                             pass
@@ -1083,17 +1449,29 @@ class _ToolCycleMixin(_CyclePreludeMixin, _CycleLlmMixin, _CyclePostMixin):
                     self._apply_output_merge(args, s)
                 all_results[idx] = (idx, tc, tn, args, True, d, r, o, s)
 
+            _finalize_start = time.monotonic()
             async for _evt in self._finalize_tool_results(
                 current_phase=current_phase,
                 all_results=all_results,
                 has_task_complete=_has_task_complete,
             ):
                 yield _evt
+            _finalize_elapsed = time.monotonic() - _finalize_start
+            if _finalize_elapsed >= 10.0:
+                logger.warning(
+                    "_finalize_tool_results took %.2fs (iter=%d)",
+                    _finalize_elapsed,
+                    self.state.iteration,
+                )
+            if trace_id:
+                _trace_chat_event(
+                    trace_id,
+                    "iteration_tool_results_done",
+                    iteration=self.state.iteration,
+                    duration_ms=int(_finalize_elapsed * 1000),
+                )
             if getattr(self, "_iteration_terminated", False):
                 return
 
-        yield AgentEvent(
-            type="error", data={"message": "Max tool iterations reached."}
-        )
+        yield AgentEvent(type="error", data={"message": "Max tool iterations reached."})
         yield AgentEvent(type="done", data={})
-

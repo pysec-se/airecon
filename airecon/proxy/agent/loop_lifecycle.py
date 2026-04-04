@@ -31,7 +31,8 @@ class _LifecycleMixin:
         rebuilt = list(unique.values())
         if self._blocked_tools:
             rebuilt = [
-                t for t in rebuilt
+                t
+                for t in rebuilt
                 if t.get("function", {}).get("name") not in self._blocked_tools
             ]
 
@@ -45,8 +46,12 @@ class _LifecycleMixin:
         from . import loop as _loop_module
 
         self.state.conversation = [
-            {"role": "system", "content": _loop_module.get_system_prompt(
-                target=target, user_message=user_message)}
+            {
+                "role": "system",
+                "content": _loop_module.get_system_prompt(
+                    target=target, user_message=user_message
+                ),
+            }
         ]
 
         if _is_ctf_target(target, user_message):
@@ -59,16 +64,22 @@ class _LifecycleMixin:
                 self._adaptive_num_ctx = _ctf_cfg.ollama_num_ctx_small
             logger.info(
                 "CTF mode activated for target=%r — ctx=%d, max_iterations=%d",
-                target, self._adaptive_num_ctx, self._CTF_MAX_ITERATIONS,
+                target,
+                self._adaptive_num_ctx,
+                self._CTF_MAX_ITERATIONS,
             )
         await self.refresh_tool_registry()
 
         if self.engine:
-            self.state.add_message(
-                "system", "[SYSTEM: EXECUTE_COMMAND_AVAILABLE=yes]")
+            self.state.add_message("system", "[SYSTEM: EXECUTE_COMMAND_AVAILABLE=yes]")
 
         from ..caido_client import CaidoClient
-        _caido_token = await CaidoClient._get_token()
+
+        try:
+            _caido_token = await asyncio.wait_for(CaidoClient._get_token(), timeout=5.0)
+        except (asyncio.TimeoutError, Exception) as _caido_err:
+            logger.debug("Caido token check failed: %s", _caido_err)
+            _caido_token = None
         self._caido_available: bool = bool(_caido_token)
         if _caido_token:
             self.state.add_message(
@@ -79,14 +90,14 @@ class _LifecycleMixin:
                 "requests — this reveals real app endpoints, auth flows, cookies, hidden "
                 "parameters, and injection points that active scanning cannot find. "
                 "After reviewing captured requests, use caido_set_scope to focus future "
-                "captures, then periodically call caido_list_requests to check for new traffic."
+                "captures, then periodically call caido_list_requests to check for new traffic.",
             )
         else:
             self.state.add_message(
                 "system",
                 "[SYSTEM: CAIDO_PROXY=unavailable] "
                 "Caido is not running/authenticated on host yet — do NOT call caido_* tools now and NEVER try 'caido-setup' via execute. "
-                "Ask user to start/login Caido externally, then verify with caido_intercept(action='status')."
+                "Ask user to start/login Caido externally, then verify with caido_intercept(action='status').",
             )
 
         logger.info("Agent initialized with %d tools", len(self._tools_ollama or []))
@@ -104,29 +115,35 @@ class _LifecycleMixin:
                 memory = get_memory_manager()
                 _memory_context = memory.get_context_for_small_model(
                     target=_target,
-                    current_phase=self._session.current_phase if self._session else "RECON",
+                    current_phase=self._session.current_phase
+                    if self._session
+                    else "RECON",
                     max_tokens=2000,
                 )
                 if _memory_context:
                     logger.info(
                         "Memory augmentation: loaded context for %s (%d bytes)",
-                        _target, len(_memory_context)
+                        _target,
+                        len(_memory_context),
                     )
                     self.state.add_message(
                         "system",
-                        f"## MEMORY AUGMENTATION (from past sessions)\n{_memory_context}"
+                        f"## MEMORY AUGMENTATION (from past sessions)\n{_memory_context}",
                     )
             except Exception as _mem_err:
                 logger.debug("Memory augmentation failed: %s", _mem_err)
 
-        _session_id = os.environ.get("AIRECON_SESSION_ID") if not self._is_subagent else None
+        _session_id = (
+            os.environ.get("AIRECON_SESSION_ID") if not self._is_subagent else None
+        )
         if _session_id:
-            # Compatibility: tests patch airecon.proxy.agent.loop.load_session
-            # and expect initialize() to use that symbol.
+            # _loop_module = get_loop_module()
             self._session = _loop_module.load_session(_session_id) or SessionData(
                 session_id=_session_id, target=""
             )
-            logger.info("Loaded session %s (target=%s)", _session_id, self._session.target)
+            logger.info(
+                "Loaded session %s (target=%s)", _session_id, self._session.target
+            )
         else:
             self._session = SessionData(target="")
             logger.info("Created new session %s", self._session.session_id)
@@ -138,6 +155,16 @@ class _LifecycleMixin:
             self.pipeline.set_ctf_mode(True)
 
     def reset(self) -> None:
+
+        old_target = ""
+        old_subdomains = []
+        old_live_hosts = []
+        old_vulns = []
+        if self._session:
+            old_target = self._session.target or ""
+            old_subdomains = list(self._session.subdomains or [])
+            old_live_hosts = list(self._session.live_hosts or [])
+            old_vulns = list(self._session.vulnerabilities or [])
 
         if self._token_snapshot_task and not self._token_snapshot_task.done():
             self._token_snapshot_task.cancel()
@@ -157,8 +184,16 @@ class _LifecycleMixin:
         self._adaptive_num_ctx = 0
         self._vram_crash_count = 0
         self._adaptive_num_predict_cap = 0
+        self._fatal_ollama_error = ""
+        self._context_check_task = None
 
-        self._session = SessionData(target="")
+        self._session = SessionData(target=old_target)
+        if old_subdomains:
+            self._session.subdomains = old_subdomains
+        if old_live_hosts:
+            self._session.live_hosts = old_live_hosts
+        if old_vulns:
+            self._session.vulnerabilities = old_vulns
         self.pipeline = PipelineEngine(self._session)
         if self._ctf_mode and self.pipeline:
             self.pipeline.set_ctf_mode(True)
@@ -167,7 +202,6 @@ class _LifecycleMixin:
         if not hasattr(self, "ollama") or not self.ollama:
             return False
 
-        # Build summary first, then reuse across retries.
         summary = self._build_recon_summary()
         system_prompt = self._build_system_prompt_for_reset()
         full_prompt = f"{system_prompt}\n\n{summary}"
@@ -191,8 +225,20 @@ class _LifecycleMixin:
 
         if last_error:
             logger.warning("Ollama context reset failed after retries: %s", last_error)
+            err_text = str(last_error).lower()
+            if (
+                "runner has unexpectedly stopped" in err_text
+                or "status code: 500" in err_text
+            ):
+                self._fatal_ollama_error = str(last_error)
+                logger.error(
+                    "Fatal Ollama runner failure detected during context reset"
+                )
+                return False
         else:
-            logger.warning("Ollama context reset failed after retries (no exception details)")
+            logger.warning(
+                "Ollama context reset failed after retries (no exception details)"
+            )
 
         self._apply_local_context_fallback(reason="ollama reset failed")
         return False
@@ -229,7 +275,7 @@ class _LifecycleMixin:
     def _build_recon_summary(self) -> str:
         if not self._session:
             return "[No recon progress yet]"
-        
+
         lines = [
             "=== RECON PROGRESS SUMMARY ===",
             f"Target: {self._session.target}",
@@ -248,19 +294,22 @@ class _LifecycleMixin:
             "",
             "--- RECENT FINDINGS ---",
         ]
-        
-        # Add last 5 evidence items
-        recent_evidence = self.state.evidence_log[-5:] if self.state.evidence_log else []
+
+        recent_evidence = (
+            self.state.evidence_log[-5:] if self.state.evidence_log else []
+        )
         for ev in recent_evidence:
             if isinstance(ev, dict):
-                lines.append(f"- {ev.get('summary', ev.get('finding', 'Unknown'))[:100]}")
-        
+                lines.append(
+                    f"- {ev.get('summary', ev.get('finding', 'Unknown'))[:100]}"
+                )
+
         if not recent_evidence:
             lines.append("- No recent findings yet")
-        
+
         lines.append("")
         lines.append("[END SUMMARY - Continue testing from this point]")
-        
+
         return "\n".join(lines)
 
     def _build_system_prompt_for_reset(self) -> str:
@@ -278,28 +327,45 @@ Rules:
 Current workflow: Follow phase transitions (RECON→ANALYSIS→EXPLOIT→REPORT)"""
 
     def _check_ollama_context_pressure(self):
-        if not hasattr(self, 'ollama') or not self.ollama:
+        if not hasattr(self, "ollama") or not self.ollama:
             return
-        asyncio.create_task(self._check_and_reset_context())
+        if (
+            not hasattr(self, "_context_check_task")
+            or self._context_check_task is None
+            or self._context_check_task.done()
+        ):
+            self._context_check_task = asyncio.create_task(
+                self._check_and_reset_context()
+            )
+            self._context_check_task.add_done_callback(
+                lambda t: (
+                    logger.debug("Context check finished: %s", t.exception())
+                    if t.exception()
+                    else None
+                )
+            )
 
     async def _check_and_reset_context(self):
-        from ..ollama import _CONTEXT_RESET_THRESHOLD
-
         import time
+
         now = time.time()
-        
-        # Rate limit: check max once per 60 seconds
-        if not hasattr(self, '_last_context_check'):
+
+        if not hasattr(self, "_last_context_check"):
             self._last_context_check = 0.0
-        
-        if now - self._last_context_check < 60:
+
+        if not hasattr(self, "_ctf_mode"):
+            self._ctf_mode = False
+
+        check_interval = 30 if self._ctf_mode else 60
+        if now - self._last_context_check < check_interval:
             return
-        
+
         self._last_context_check = now
-        
-        if not self.ollama:
+
+        if not hasattr(self, "ollama") or not self.ollama:
             return
-        
+
+        from ..ollama import _CONTEXT_RESET_THRESHOLD
         from . import loop as _loop_module
 
         try:
@@ -311,29 +377,50 @@ Current workflow: Follow phase transitions (RECON→ANALYSIS→EXPLOIT→REPORT)
                     if resp.status != 200:
                         return
                     ps = await resp.json()
-        except Exception:
+        except Exception as e:
+            logger.debug("Expected failure polling Ollama context state: %s", e)
             return
-        
-        for model in ps.get('models', []):
-            if model.get('name') == self.ollama.model or self.ollama.model.split(':')[0] in model.get('name', ''):
-                context_len = int(model.get('context_length', 0) or 0)
+
+        for model in ps.get("models", []):
+            if model.get("name") == self.ollama.model or self.ollama.model.split(":")[
+                0
+            ] in model.get("name", ""):
+                context_len = int(model.get("context_length", 0) or 0)
                 used_estimate = int(self.state.token_usage.get("used", 0) or 0)
 
-                # IMPORTANT: /api/ps context_length is model context capacity (often static,
-                # e.g. 131072), not guaranteed live occupancy. Guard with local usage estimate
-                # to avoid false-positive reset loops on large-context models.
-                if context_len <= _CONTEXT_RESET_THRESHOLD or used_estimate < _CONTEXT_RESET_THRESHOLD:
+                cfg = _loop_module.get_config()
+                ctf_mode = getattr(self, "_ctf_mode", False)
+
+                if ctf_mode:
+                    ctx_limit = getattr(cfg, "ollama_num_ctx_small", 65536)
+                    threshold = int(ctx_limit * 0.70)  # 45875 tokens
+                else:
+                    ctx_limit = _CONTEXT_RESET_THRESHOLD
+                    threshold = _CONTEXT_RESET_THRESHOLD
+
+                if context_len <= threshold or used_estimate < threshold:
                     return
 
-                now = time.time()
                 last_reset = float(getattr(self, "_last_context_reset_ts", 0.0) or 0.0)
-                cfg = _loop_module.get_config()
-                _RESET_COOLDOWN_SECONDS = float(
-                    max(0, int(getattr(cfg, "agent_context_reset_cooldown_seconds", 300) or 0))
+                _RESET_COOLDOWN_SECONDS = (
+                    60.0
+                    if ctf_mode
+                    else float(
+                        max(
+                            0,
+                            int(
+                                getattr(
+                                    cfg, "agent_context_reset_cooldown_seconds", 300
+                                )
+                                or 0
+                            ),
+                        )
+                    )
                 )
                 if now - last_reset < _RESET_COOLDOWN_SECONDS:
                     logger.warning(
-                        "Context reset cooldown active (used=%d, ps_ctx=%d, remaining=%.0fs)",
+                        "Context reset cooldown active (ctf=%s, used=%d, ps_ctx=%d, remaining=%.0fs)",
+                        ctf_mode,
                         used_estimate,
                         context_len,
                         max(0.0, _RESET_COOLDOWN_SECONDS - (now - last_reset)),
@@ -341,10 +428,11 @@ Current workflow: Follow phase transitions (RECON→ANALYSIS→EXPLOIT→REPORT)
                     return
 
                 logger.error(
-                    "OLLAMA CONTEXT CRITICAL: used=%d, ps_ctx=%d threshold=%d - resetting with summary injection",
+                    "OLLAMA CONTEXT CRITICAL: ctf=%s, used=%d, ps_ctx=%d, threshold=%d - resetting with summary injection",
+                    ctf_mode,
                     used_estimate,
                     context_len,
-                    _CONTEXT_RESET_THRESHOLD,
+                    threshold,
                 )
                 self._last_context_reset_ts = now
                 reset_ok = await self._reset_ollama_context()

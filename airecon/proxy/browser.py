@@ -49,9 +49,15 @@ _DEAD_HOST_MARKERS: tuple[str, ...] = (
     "failed to resolve",
 )
 
+
 def _classify_dead_reason(err: str) -> str:
     e = err.lower()
-    if "name_not_resolved" in e or "resolve" in e or "nodename" in e or "no such host" in e:
+    if (
+        "name_not_resolved" in e
+        or "resolve" in e
+        or "nodename" in e
+        or "no such host" in e
+    ):
         return "DNS_NXDOMAIN"
     if "connection_refused" in e or "refused" in e:
         return "CONNECTION_REFUSED"
@@ -61,18 +67,42 @@ def _classify_dead_reason(err: str) -> str:
         return "CONNECTION_RESET"
     return "UNREACHABLE"
 
+
 def _is_dead_host_error(err_lower: str) -> bool:
     return any(m in err_lower for m in _DEAD_HOST_MARKERS)
 
-BrowserAction = Literal[
-    "launch", "goto", "click", "type", "scroll_down", "scroll_up",
-    "back", "forward", "new_tab", "switch_tab", "close_tab",
-    "wait", "execute_js", "double_click", "hover", "press_key",
-    "save_pdf", "get_console_logs", "get_network_logs", "view_source", "close", "list_tabs",
-    "screenshot",
 
-    "login_form", "handle_totp", "save_auth_state", "inject_cookies", "oauth_authorize",
-    "check_auth_status", "wait_for_element",
+BrowserAction = Literal[
+    "launch",
+    "goto",
+    "click",
+    "type",
+    "scroll_down",
+    "scroll_up",
+    "back",
+    "forward",
+    "new_tab",
+    "switch_tab",
+    "close_tab",
+    "wait",
+    "execute_js",
+    "double_click",
+    "hover",
+    "press_key",
+    "save_pdf",
+    "get_console_logs",
+    "get_network_logs",
+    "view_source",
+    "close",
+    "list_tabs",
+    "screenshot",
+    "login_form",
+    "handle_totp",
+    "save_auth_state",
+    "inject_cookies",
+    "oauth_authorize",
+    "check_auth_status",
+    "wait_for_element",
 ]
 
 _DEFAULT_USERNAME_SEL: str = (
@@ -84,7 +114,7 @@ _DEFAULT_USERNAME_SEL: str = (
     'input[name="mail"],'
     'input[autocomplete="username"],'
     'input[autocomplete="email"],'
-    '#username,#email,#user,#login,#mail'
+    "#username,#email,#user,#login,#mail"
 )
 
 _DEFAULT_PASSWORD_SEL: str = 'input[type="password"]'
@@ -121,6 +151,7 @@ _DEFAULT_TOTP_FIELD_SEL: str = (
     'input[placeholder*="code" i]'
 )
 
+
 def _generate_totp(secret: str, period: int = 30, digits: int = 6) -> str:
     padded = secret.upper().replace(" ", "")
     padding = (8 - len(padded) % 8) % 8
@@ -130,17 +161,20 @@ def _generate_totp(secret: str, period: int = 30, digits: int = 6) -> str:
     msg = struct.pack(">Q", counter)
     h = hmac.new(key, msg, hashlib.sha1).digest()
     offset = h[-1] & 0x0F
-    code = struct.unpack(">I", h[offset:offset + 4])[0] & 0x7FFFFFFF
-    return str(code % (10 ** digits)).zfill(digits)
+    code = struct.unpack(">I", h[offset : offset + 4])[0] & 0x7FFFFFFF
+    return str(code % (10**digits)).zfill(digits)
+
 
 class DeadHostError(Exception):
     def __init__(self, url: str, original_error: str) -> None:
         from urllib.parse import urlparse
+
         parsed = urlparse(url)
         self.host = parsed.netloc or url
         self.url = url
         self.original_error = original_error
         super().__init__(f"Dead host: {self.host} — {original_error}")
+
 
 class _BrowserState:
     lock = threading.Lock()
@@ -149,9 +183,11 @@ class _BrowserState:
     playwright: Playwright | None = None
     browser: Browser | None = None
 
+
 _state = _BrowserState()
 
 _event_loop_ready = threading.Event()
+
 
 def _ensure_event_loop() -> None:
     if _state.event_loop is not None:
@@ -168,6 +204,7 @@ def _ensure_event_loop() -> None:
 
     if not _event_loop_ready.wait(timeout=5.0):
         raise RuntimeError("Timeout waiting for generic event loop to start")
+
 
 async def _start_docker_chromium() -> bool:
     _CONTAINER = "airecon-sandbox-active"
@@ -186,8 +223,12 @@ async def _start_docker_chromium() -> bool:
     )
     try:
         proc = await asyncio.create_subprocess_exec(
-            "docker", "exec", _CONTAINER,
-            "bash", "-c", _CHROMIUM_CMD,
+            "docker",
+            "exec",
+            _CONTAINER,
+            "bash",
+            "-c",
+            _CHROMIUM_CMD,
             stdout=asyncio.subprocess.DEVNULL,
             stderr=asyncio.subprocess.DEVNULL,
         )
@@ -208,6 +249,7 @@ async def _start_docker_chromium() -> bool:
     except Exception as exc:
         logger.debug("Could not start Docker Chromium: %s", exc)
         return False
+
 
 async def _create_browser() -> Browser:
     if _state.browser is not None and _state.browser.is_connected():
@@ -237,44 +279,41 @@ async def _create_browser() -> Browser:
             return _state.browser
         except Exception as _cdp_err:
             if attempt == 0 and not _docker_chromium_started:
-
                 logger.info(
                     "Chromium CDP not available (%s) — starting it in Docker sandbox...",
                     _cdp_err,
                 )
                 _docker_chromium_started = await _start_docker_chromium()
                 if not _docker_chromium_started:
-
                     break
                 continue
             elif attempt < 3:
-                await asyncio.sleep(0.5 * (2 ** attempt))
+                await asyncio.sleep(0.5 * (2**attempt))
                 continue
 
             logger.warning(
                 "Could not connect to Docker Chromium after %d attempts — "
                 "falling back to local browser. Last error: %s",
-                attempt + 1, _cdp_err,
+                attempt + 1,
+                _cdp_err,
             )
 
     try:
         _state.browser = await playwright.chromium.launch(
             headless=True,
             args=[
-                '--no-sandbox',
-                '--disable-setuid-sandbox',
-
-                '--ignore-certificate-errors',
-            ]
+                "--no-sandbox",
+                "--disable-setuid-sandbox",
+                "--ignore-certificate-errors",
+            ],
         )
         return _state.browser
     except Exception as e2:
         if _state.playwright:
             await _state.playwright.stop()
             _state.playwright = None
-        raise RuntimeError(
-            f"Failed to launch both Docker and fallback browsers: {e2}"
-        )
+        raise RuntimeError(f"Failed to launch both Docker and fallback browsers: {e2}")
+
 
 def _get_browser() -> Browser:
     with _state.lock:
@@ -284,12 +323,14 @@ def _get_browser() -> Browser:
 
         if _state.browser is None or not _state.browser.is_connected():
             future = asyncio.run_coroutine_threadsafe(
-                _create_browser(), _state.event_loop)
+                _create_browser(), _state.event_loop
+            )
             future.result(timeout=30)
 
         if _state.browser is None:
             raise RuntimeError("Browser failed to initialize")
         return _state.browser
+
 
 class BrowserInstance:
     def __init__(self) -> None:
@@ -320,13 +361,38 @@ class BrowserInstance:
             return tab_id
         if tab_id and tab_id not in self.pages:
             logger.warning(
-                f"Tab '{tab_id}' not found — falling back to current tab '{self.current_page_id}'")
+                f"Tab '{tab_id}' not found — falling back to current tab '{self.current_page_id}'"
+            )
         if self.current_page_id and self.current_page_id in self.pages:
             return self.current_page_id
         raise ValueError("No active browser tab available")
 
-    async def _navigate_with_fallback(self, page: Any, url: str, timeout_ms: int = 60000) -> None:
+    async def _navigate_with_fallback(
+        self, page: Any, url: str, timeout_ms: int = 15000
+    ) -> None:
+        """Navigate with redirect loop detection and shorter timeout."""
+        redirect_count = 0
+        last_url = url
+        redirect_handler_added = False
+
+        def check_redirect(request: Any) -> None:
+            nonlocal redirect_count, last_url
+            current_url = request.url
+            if current_url != last_url:
+                redirect_count += 1
+                last_url = current_url
+
+                if redirect_count > 3:
+                    logger.warning(
+                        f"Detected redirect loop ({redirect_count} redirects) for {url!r}"
+                    )
+                    raise RuntimeError(
+                        "Too many redirects (>3) - possible redirect loop"
+                    )
+
         try:
+            page.on("request", check_redirect)
+            redirect_handler_added = True
             await page.goto(url, wait_until="domcontentloaded", timeout=timeout_ms)
         except Exception as e:
             err_str = str(e)
@@ -335,7 +401,8 @@ class BrowserInstance:
                 raise DeadHostError(url, err_str) from e
             if "timeout" in err_lower:
                 logger.warning(
-                    f"domcontentloaded timed out for {url!r}, retrying with wait_until='commit'")
+                    f"domcontentloaded timed out for {url!r}, retrying with wait_until='commit'"
+                )
                 try:
                     await page.goto(url, wait_until="commit", timeout=timeout_ms)
                 except Exception as e2:
@@ -344,6 +411,15 @@ class BrowserInstance:
                     raise
             else:
                 raise
+        finally:
+            # Remove the redirect handler if it was added
+            if redirect_handler_added:
+                try:
+                    page.remove_event_listener("request", check_redirect)
+                except Exception as e:
+                    logger.debug(
+                        "Expected failure removing redirect event listener: %s", e
+                    )
 
     async def _setup_console_logging(self, page: Page, tab_id: str) -> None:
         self.console_logs[tab_id] = []
@@ -361,7 +437,10 @@ class BrowserInstance:
             }
             self.console_logs[tab_id].append(log_entry)
             if len(self.console_logs[tab_id]) > MAX_CONSOLE_LOGS_COUNT:
-                self.console_logs[tab_id] = self.console_logs[tab_id][-MAX_CONSOLE_LOGS_COUNT:]
+                self.console_logs[tab_id] = self.console_logs[tab_id][
+                    -MAX_CONSOLE_LOGS_COUNT:
+                ]
+
         page.on("console", handle_console)
 
         def handle_request(request: Any) -> None:
@@ -371,16 +450,19 @@ class BrowserInstance:
             post_data = None
             try:
                 post_data = request.post_data
-            except Exception:
-                pass
-            reqs.append({
-                "type": "request",
-                "url": request.url,
-                "method": request.method,
-                "resource_type": request.resource_type,
-                "headers": dict(request.headers),
-                "post_data": post_data,
-            })
+            except Exception as e:
+                logger.debug("Expected failure reading request post_data: %s", e)
+            reqs.append(
+                {
+                    "type": "request",
+                    "url": request.url,
+                    "method": request.method,
+                    "resource_type": request.resource_type,
+                    "headers": dict(request.headers),
+                    "post_data": post_data,
+                }
+            )
+
         page.on("request", handle_request)
 
         async def handle_response(response: Any) -> None:
@@ -390,26 +472,32 @@ class BrowserInstance:
             content_type = response.headers.get("content-type", "")
             body: str | None = None
 
-            if any(t in content_type for t in (
-                    "json", "text/plain", "javascript", "xml", "html")):
+            if any(
+                t in content_type
+                for t in ("json", "text/plain", "javascript", "xml", "html")
+            ):
                 try:
                     body = await response.text()
                     if body is not None and len(body) > MAX_RESPONSE_BODY_LENGTH:
-                        body = body[:MAX_RESPONSE_BODY_LENGTH] + \
-                            "... [TRUNCATED]"
+                        body = body[:MAX_RESPONSE_BODY_LENGTH] + "... [TRUNCATED]"
                 except Exception:
                     body = None
-            reqs.append({
-                "type": "response",
-                "url": response.url,
-                "status": response.status,
-                "content_type": content_type,
-                "headers": dict(response.headers),
-                "body": body,
-            })
+            reqs.append(
+                {
+                    "type": "response",
+                    "url": response.url,
+                    "status": response.status,
+                    "content_type": content_type,
+                    "headers": dict(response.headers),
+                    "body": body,
+                }
+            )
+
         page.on("response", handle_response)
 
-    async def _create_context(self, url: str | None = None, auth_cookies: list[dict] | None = None) -> dict[str, Any]:
+    async def _create_context(
+        self, url: str | None = None, auth_cookies: list[dict] | None = None
+    ) -> dict[str, Any]:
         if self._browser is None:
             raise RuntimeError("Browser not initialized")
         context = await self._browser.new_context(
@@ -422,8 +510,7 @@ class BrowserInstance:
         if auth_cookies:
             try:
                 await context.add_cookies(auth_cookies)  # type: ignore[arg-type]
-                logger.info(
-                    f"Restored {len(auth_cookies)} auth cookies from session")
+                logger.info(f"Restored {len(auth_cookies)} auth cookies from session")
             except Exception as e:
                 logger.warning(f"Failed to restore auth cookies: {e}")
 
@@ -439,47 +526,70 @@ class BrowserInstance:
             except DeadHostError as e:
                 logger.warning("Dead host in _create_context: %s", e.host)
                 state = await self._get_page_state(tab_id)
-                state.update({
-                    "success": False,
-                    "domain_dead": True,
-                    "host": e.host,
-                    "url": url,
-                    "reason": _classify_dead_reason(e.original_error),
-                    "error": f"Host unreachable: {e.host}",
-                    "next_action": (
-                        f"SKIP: {e.host} does not resolve or is unreachable "
-                        f"({_classify_dead_reason(e.original_error)}). "
-                        "Move on to the next target."
-                    ),
-                })
+                state.update(
+                    {
+                        "success": False,
+                        "domain_dead": True,
+                        "host": e.host,
+                        "url": url,
+                        "reason": _classify_dead_reason(e.original_error),
+                        "error": f"Host unreachable: {e.host}",
+                        "next_action": (
+                            f"SKIP: {e.host} does not resolve or is unreachable "
+                            f"({_classify_dead_reason(e.original_error)}). "
+                            "Move on to the next target."
+                        ),
+                    }
+                )
                 return state
         return await self._get_page_state(tab_id)
 
     async def _get_page_state(
-            self, tab_id: str | None = None) -> dict[str, Any]:
-        tab_id = self._resolve_tab_id(tab_id)
+        self, tab_id: str | None = None, include_screenshot: bool = False
+    ) -> dict[str, Any]:
+        try:
+            tab_id = self._resolve_tab_id(tab_id)
+        except Exception as e:
+            return {
+                "error": f"No active tab available: {e}",
+                "screenshot": "",
+                "url": "",
+                "title": "",
+                "text_content": "",
+                "viewport": None,
+                "tab_id": None,
+                "all_tabs": {},
+            }
+
         page = self.pages[tab_id]
         delay = get_config().browser_page_load_delay
         await asyncio.sleep(delay)
 
         screenshot_b64 = ""
         screenshot_failure = None
-        try:
-            screenshot_bytes = await page.screenshot(type="png", full_page=False, timeout=5000)
-            screenshot_b64 = base64.b64encode(screenshot_bytes).decode("utf-8")
-        except Exception as e:
-            screenshot_failure = f"Screenshot failed: {type(e).__name__}: {e}"
-            logger.warning(screenshot_failure)
+        if include_screenshot:
+            try:
+                screenshot_bytes = await page.screenshot(
+                    type="png", full_page=False, timeout=5000
+                )
+                screenshot_b64 = base64.b64encode(screenshot_bytes).decode("utf-8")
+            except Exception as e:
+                screenshot_failure = f"Screenshot failed: {type(e).__name__}: {e}"
+                logger.debug(screenshot_failure)
 
         url = page.url
         title = await page.title()
         viewport = page.viewport_size
 
         try:
-            text_content = await page.evaluate("() => document.body ? document.body.innerText : ''")
+            text_content = await page.evaluate(
+                "() => document.body ? document.body.innerText : ''"
+            )
             if len(text_content) > 3000:
-                text_content = text_content[:3000] + \
-                    "... [TRUNCATED, use execute_js or view_source for more]"
+                text_content = (
+                    text_content[:3000]
+                    + "... [TRUNCATED, use execute_js or view_source for more]"
+                )
         except Exception:
             text_content = "Failed to extract text content"
 
@@ -487,7 +597,9 @@ class BrowserInstance:
         for tid, tab_page in self.pages.items():
             all_tabs[tid] = {
                 "url": tab_page.url,
-                "title": await tab_page.title() if not tab_page.is_closed() else "Closed",
+                "title": await tab_page.title()
+                if not tab_page.is_closed()
+                else "Closed",
             }
 
         result = {
@@ -517,14 +629,15 @@ class BrowserInstance:
         with self._execution_lock:
             return self._run_async(self._goto(url, tab_id))
 
-    async def _goto(self, url: str, tab_id: str |
-                    None = None) -> dict[str, Any]:
+    async def _goto(self, url: str, tab_id: str | None = None) -> dict[str, Any]:
         tab_id = self._resolve_tab_id(tab_id)
         page = self.pages[tab_id]
         try:
             await self._navigate_with_fallback(page, url)
         except DeadHostError as e:
-            logger.warning("Dead host detected via goto: %s (%s)", e.host, e.original_error)
+            logger.warning(
+                "Dead host detected via goto: %s (%s)", e.host, e.original_error
+            )
             return {
                 "success": False,
                 "domain_dead": True,
@@ -540,19 +653,20 @@ class BrowserInstance:
             }
         return await self._get_page_state(tab_id)
 
-    def click(self, coordinate: str, tab_id: str |
-              None = None) -> dict[str, Any]:
+    def click(self, coordinate: str, tab_id: str | None = None) -> dict[str, Any]:
         with self._execution_lock:
             return self._run_async(self._click(coordinate, tab_id))
 
-    async def _click(self, coordinate: str, tab_id: str |
-                     None = None) -> dict[str, Any]:
+    async def _click(
+        self, coordinate: str, tab_id: str | None = None
+    ) -> dict[str, Any]:
         tab_id = self._resolve_tab_id(tab_id)
         try:
             x, y = map(int, coordinate.split(","))
         except ValueError as e:
             raise ValueError(
-                f"Invalid coordinate format: {coordinate}. Use 'x,y'") from e
+                f"Invalid coordinate format: {coordinate}. Use 'x,y'"
+            ) from e
 
         page = self.pages[tab_id]
         viewport = page.viewport_size or {"width": 1920, "height": 1080}
@@ -568,25 +682,23 @@ class BrowserInstance:
         await page.mouse.click(x, y)
         return await self._get_page_state(tab_id)
 
-    def type_text(self, text: str, tab_id: str |
-                  None = None) -> dict[str, Any]:
+    def type_text(self, text: str, tab_id: str | None = None) -> dict[str, Any]:
         with self._execution_lock:
             return self._run_async(self._type_text(text, tab_id))
 
-    async def _type_text(self, text: str, tab_id: str |
-                         None = None) -> dict[str, Any]:
+    async def _type_text(self, text: str, tab_id: str | None = None) -> dict[str, Any]:
         tab_id = self._resolve_tab_id(tab_id)
         page = self.pages[tab_id]
         await page.keyboard.type(text)
         return await self._get_page_state(tab_id)
 
-    def scroll(self, direction: str, tab_id: str |
-               None = None) -> dict[str, Any]:
+    def scroll(self, direction: str, tab_id: str | None = None) -> dict[str, Any]:
         with self._execution_lock:
             return self._run_async(self._scroll(direction, tab_id))
 
-    async def _scroll(self, direction: str, tab_id: str |
-                      None = None) -> dict[str, Any]:
+    async def _scroll(
+        self, direction: str, tab_id: str | None = None
+    ) -> dict[str, Any]:
         tab_id = self._resolve_tab_id(tab_id)
         page = self.pages[tab_id]
         if direction == "down":
@@ -608,7 +720,9 @@ class BrowserInstance:
             await page.go_back(wait_until="domcontentloaded", timeout=60000)
         except Exception as e:
             if "timeout" in str(e).lower():
-                logger.warning("go_back domcontentloaded timed out, falling back to 'commit'")
+                logger.warning(
+                    "go_back domcontentloaded timed out, falling back to 'commit'"
+                )
                 await page.go_back(wait_until="commit", timeout=60000)
             else:
                 raise
@@ -625,7 +739,9 @@ class BrowserInstance:
             await page.go_forward(wait_until="domcontentloaded", timeout=60000)
         except Exception as e:
             if "timeout" in str(e).lower():
-                logger.warning("go_forward domcontentloaded timed out, falling back to 'commit'")
+                logger.warning(
+                    "go_forward domcontentloaded timed out, falling back to 'commit'"
+                )
                 await page.go_forward(wait_until="commit", timeout=60000)
             else:
                 raise
@@ -650,17 +766,19 @@ class BrowserInstance:
             except DeadHostError as e:
                 logger.warning("Dead host in _new_tab: %s", e.host)
                 state = await self._get_page_state(tab_id)
-                state.update({
-                    "success": False,
-                    "domain_dead": True,
-                    "host": e.host,
-                    "url": url,
-                    "reason": _classify_dead_reason(e.original_error),
-                    "error": f"Host unreachable: {e.host}",
-                    "next_action": (
-                        f"SKIP: {e.host} is unreachable. Move on to the next target."
-                    ),
-                })
+                state.update(
+                    {
+                        "success": False,
+                        "domain_dead": True,
+                        "host": e.host,
+                        "url": url,
+                        "reason": _classify_dead_reason(e.original_error),
+                        "error": f"Host unreachable: {e.host}",
+                        "next_action": (
+                            f"SKIP: {e.host} is unreachable. Move on to the next target."
+                        ),
+                    }
+                )
                 return state
         return await self._get_page_state(tab_id)
 
@@ -693,13 +811,11 @@ class BrowserInstance:
             self.current_page_id = next(iter(self.pages.keys()))
         return await self._get_page_state(self.current_page_id)
 
-    def wait(self, duration: float, tab_id: str |
-             None = None) -> dict[str, Any]:
+    def wait(self, duration: float, tab_id: str | None = None) -> dict[str, Any]:
         with self._execution_lock:
             return self._run_async(self._wait(duration, tab_id))
 
-    async def _wait(self, duration: float, tab_id: str |
-                    None = None) -> dict[str, Any]:
+    async def _wait(self, duration: float, tab_id: str | None = None) -> dict[str, Any]:
         if duration is None or duration < 0:
             duration = 1.0
         await asyncio.sleep(duration)
@@ -714,8 +830,9 @@ class BrowserInstance:
         with self._execution_lock:
             return self._run_async(self._execute_js(js_code, tab_id, parallel=parallel))
 
-    async def _execute_js(self, js_code: str, tab_id: str | None = None,
-                          parallel: bool = False) -> dict[str, Any]:
+    async def _execute_js(
+        self, js_code: str, tab_id: str | None = None, parallel: bool = False
+    ) -> dict[str, Any]:
         if not js_code:
             raise ValueError("js_code is required for execute_js action")
 
@@ -728,9 +845,9 @@ class BrowserInstance:
                 result = {
                     "error": True,
                     "error_type": type(e).__name__,
-                    "error_message": str(e)}
+                    "error_message": str(e),
+                }
         else:
-
             tasks = []
             task_tab_ids: list[str] = []
             for tid, page in self.pages.items():
@@ -740,43 +857,42 @@ class BrowserInstance:
             results = await asyncio.gather(*tasks, return_exceptions=True)
             result = {
                 "parallel_results": {
-                    tid: res if not isinstance(res, BaseException) else {
-                        "error": str(res)}
+                    tid: res
+                    if not isinstance(res, BaseException)
+                    else {"error": str(res)}
                     for tid, res in zip(task_tab_ids, results)
                 }
             }
         result_str = str(result)
         if len(result_str) > MAX_JS_RESULT_LENGTH:
-            result = result_str[:MAX_JS_RESULT_LENGTH] + \
-                "... [JS result truncated]"
+            result = result_str[:MAX_JS_RESULT_LENGTH] + "... [JS result truncated]"
         state = await self._get_page_state(tab_id)
         state["js_result"] = result
         return state
 
-    async def _execute_js_single(self, page: Any, js_code: str,
-                                 tab_id: str) -> dict[str, Any]:
+    async def _execute_js_single(
+        self, page: Any, js_code: str, tab_id: str
+    ) -> dict[str, Any]:
         try:
             result = await page.evaluate(js_code)
             return {
                 "success": True,
                 "result": str(result)[:MAX_JS_RESULT_LENGTH],
                 "tab_id": tab_id,
-                "url": page.url
+                "url": page.url,
             }
         except Exception as e:
-            return {
-                "success": False,
-                "error": str(e),
-                "tab_id": tab_id
-            }
+            return {"success": False, "error": str(e), "tab_id": tab_id}
 
-    def get_console_logs(self, tab_id: str | None = None,
-                         clear: bool = False) -> dict[str, Any]:
+    def get_console_logs(
+        self, tab_id: str | None = None, clear: bool = False
+    ) -> dict[str, Any]:
         with self._execution_lock:
             return self._run_async(self._get_console_logs(tab_id, clear))
 
     async def _get_network_logs(
-            self, tab_id: str | None = None, clear: bool = False) -> dict[str, Any]:
+        self, tab_id: str | None = None, clear: bool = False
+    ) -> dict[str, Any]:
         tab_id = self._resolve_tab_id(tab_id)
         reqs = self.network_requests.get(tab_id, [])
         if clear:
@@ -787,17 +903,23 @@ class BrowserInstance:
             "total": len(reqs),
             "requests": sum(1 for r in reqs if r["type"] == "request"),
             "responses": sum(1 for r in reqs if r["type"] == "response"),
-            "api_calls": [r["url"] for r in reqs if r["type"] == "request" and r.get("resource_type") in ("xhr", "fetch")],
+            "api_calls": [
+                r["url"]
+                for r in reqs
+                if r["type"] == "request" and r.get("resource_type") in ("xhr", "fetch")
+            ],
         }
         return state
 
-    def get_network_logs(self, tab_id: str | None = None,
-                         clear: bool = False) -> dict[str, Any]:
+    def get_network_logs(
+        self, tab_id: str | None = None, clear: bool = False
+    ) -> dict[str, Any]:
         with self._execution_lock:
             return self._run_async(self._get_network_logs(tab_id, clear))
 
     async def _get_console_logs(
-            self, tab_id: str | None = None, clear: bool = False) -> dict[str, Any]:
+        self, tab_id: str | None = None, clear: bool = False
+    ) -> dict[str, Any]:
         tab_id = self._resolve_tab_id(tab_id)
         logs = self.console_logs.get(tab_id, [])
         if len(str(logs)) > MAX_CONSOLE_LOG_LENGTH:
@@ -818,9 +940,12 @@ class BrowserInstance:
         source = await page.content()
         full_source = source
         if len(source) > MAX_PAGE_SOURCE_LENGTH:
-            source = source[:10000] + \
-                "\n... [TRUNCATED — full source in output/source_*.txt] ...\n" + \
-                source[-10000:]
+            half_len = MAX_PAGE_SOURCE_LENGTH // 2
+            source = (
+                source[:half_len]
+                + "\n... [TRUNCATED — full source in output/source_*.txt] ...\n"
+                + source[-half_len:]
+            )
         state = await self._get_page_state(tab_id)
         state["page_source"] = source
 
@@ -832,9 +957,20 @@ class BrowserInstance:
             return self._run_async(self._screenshot(tab_id))
 
     async def _screenshot(self, tab_id: str | None = None) -> dict[str, Any]:
-        tab_id = self._resolve_tab_id(tab_id)
+        try:
+            tab_id = self._resolve_tab_id(tab_id)
+        except Exception as e:
+            return {"success": False, "error": f"No active tab: {e}"}
+
+        if tab_id not in self.pages:
+            return {"success": False, "error": f"Tab {tab_id} not found"}
+
         page = self.pages[tab_id]
-        workspace = get_workspace_root()
+        try:
+            workspace = get_workspace_root()
+        except Exception as e:
+            return {"success": False, "error": f"Cannot determine workspace: {e}"}
+
         screenshots_dir = workspace / "screenshots"
         screenshots_dir.mkdir(parents=True, exist_ok=True)
         ts = datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -846,36 +982,40 @@ class BrowserInstance:
         state["message"] = f"Screenshot saved to {filepath}"
         return state
 
-    def double_click(self, coordinate: str, tab_id: str |
-                     None = None) -> dict[str, Any]:
+    def double_click(
+        self, coordinate: str, tab_id: str | None = None
+    ) -> dict[str, Any]:
         with self._execution_lock:
             return self._run_async(self._double_click(coordinate, tab_id))
 
-    async def _double_click(self, coordinate: str,
-                            tab_id: str | None = None) -> dict[str, Any]:
+    async def _double_click(
+        self, coordinate: str, tab_id: str | None = None
+    ) -> dict[str, Any]:
         tab_id = self._resolve_tab_id(tab_id)
         try:
             x, y = map(int, coordinate.split(","))
         except ValueError as e:
             raise ValueError(
-                f"Invalid coordinate format: {coordinate}. Use 'x,y'") from e
+                f"Invalid coordinate format: {coordinate}. Use 'x,y'"
+            ) from e
         page = self.pages[tab_id]
         await page.mouse.dblclick(x, y)
         return await self._get_page_state(tab_id)
 
-    def hover(self, coordinate: str, tab_id: str |
-              None = None) -> dict[str, Any]:
+    def hover(self, coordinate: str, tab_id: str | None = None) -> dict[str, Any]:
         with self._execution_lock:
             return self._run_async(self._hover(coordinate, tab_id))
 
-    async def _hover(self, coordinate: str, tab_id: str |
-                     None = None) -> dict[str, Any]:
+    async def _hover(
+        self, coordinate: str, tab_id: str | None = None
+    ) -> dict[str, Any]:
         tab_id = self._resolve_tab_id(tab_id)
         try:
             x, y = map(int, coordinate.split(","))
         except ValueError as e:
             raise ValueError(
-                f"Invalid coordinate format: {coordinate}. Use 'x,y'") from e
+                f"Invalid coordinate format: {coordinate}. Use 'x,y'"
+            ) from e
 
         page = self.pages[tab_id]
         viewport = page.viewport_size or {"width": 1920, "height": 1080}
@@ -895,20 +1035,19 @@ class BrowserInstance:
         with self._execution_lock:
             return self._run_async(self._press_key(key, tab_id))
 
-    async def _press_key(self, key: str, tab_id: str |
-                         None = None) -> dict[str, Any]:
+    async def _press_key(self, key: str, tab_id: str | None = None) -> dict[str, Any]:
         tab_id = self._resolve_tab_id(tab_id)
         page = self.pages[tab_id]
         await page.keyboard.press(key)
         return await self._get_page_state(tab_id)
 
-    def save_pdf(self, file_path: str, tab_id: str |
-                 None = None) -> dict[str, Any]:
+    def save_pdf(self, file_path: str, tab_id: str | None = None) -> dict[str, Any]:
         with self._execution_lock:
             return self._run_async(self._save_pdf(file_path, tab_id))
 
-    async def _save_pdf(self, file_path: str, tab_id: str |
-                        None = None) -> dict[str, Any]:
+    async def _save_pdf(
+        self, file_path: str, tab_id: str | None = None
+    ) -> dict[str, Any]:
         if not file_path:
             raise ValueError("file_path is required for save_pdf action")
         tab_id = self._resolve_tab_id(tab_id)
@@ -1024,7 +1163,9 @@ class BrowserInstance:
         selectors: str | tuple[str, ...],
         timeout_ms: int = 3000,
     ) -> bool:
-        sel_list = selectors.split(",") if isinstance(selectors, str) else list(selectors)
+        sel_list = (
+            selectors.split(",") if isinstance(selectors, str) else list(selectors)
+        )
         for sel in sel_list:
             try:
                 await page.click(sel.strip(), timeout=timeout_ms)
@@ -1055,7 +1196,6 @@ class BrowserInstance:
         login_url = page.url
 
         if multi_step:
-
             if not await self._fill_selectors(page, username_selector, username):
                 logger.warning("login_form(multi_step): username selector not found")
             await asyncio.sleep(0.3)
@@ -1070,8 +1210,11 @@ class BrowserInstance:
 
             try:
                 await page.wait_for_load_state("networkidle", timeout=8000)
-            except Exception:
-                pass
+            except Exception as e:
+                logger.debug(
+                    "Expected failure waiting for networkidle in multi-step login: %s",
+                    e,
+                )
 
             try:
                 await page.wait_for_selector(
@@ -1081,17 +1224,22 @@ class BrowserInstance:
                 await asyncio.sleep(2)
 
             if not await self._fill_selectors(page, password_selector, password):
-                logger.warning("login_form(multi_step): password selector not found after step 1")
+                logger.warning(
+                    "login_form(multi_step): password selector not found after step 1"
+                )
             await asyncio.sleep(0.3)
             if not await self._click_selectors(page, submit_selector):
                 await page.keyboard.press("Enter")
         else:
-
             if not await self._fill_selectors(page, username_selector, username):
-                logger.warning("login_form: username selector not found (%s)", username_selector)
+                logger.warning(
+                    "login_form: username selector not found (%s)", username_selector
+                )
             await asyncio.sleep(0.3)
             if not await self._fill_selectors(page, password_selector, password):
-                logger.warning("login_form: password selector not found (%s)", password_selector)
+                logger.warning(
+                    "login_form: password selector not found (%s)", password_selector
+                )
             await asyncio.sleep(0.3)
             if not await self._click_selectors(page, submit_selector):
                 await page.keyboard.press("Enter")
@@ -1127,16 +1275,18 @@ class BrowserInstance:
             state["url_changed"] = url_changed
 
             if captcha_detected:
-
                 _captcha_screenshot: str | None = None
                 try:
                     _ss = await self._screenshot(tab_id)
                     _captcha_screenshot = _ss.get("screenshot_path")
-                    # Validate that screenshot file actually exists
                     if _captcha_screenshot:
                         from pathlib import Path as _Path
+
                         if not _Path(_captcha_screenshot).exists():
-                            logger.debug("CAPTCHA screenshot file not found: %s", _captcha_screenshot)
+                            logger.debug(
+                                "CAPTCHA screenshot file not found: %s",
+                                _captcha_screenshot,
+                            )
                             _captcha_screenshot = None
                     state["captcha_screenshot"] = _captcha_screenshot
                 except Exception as _ss_err:
@@ -1144,9 +1294,17 @@ class BrowserInstance:
 
                 _captcha_hint = (
                     f"CAPTCHA detected ({r.get('captchaType')})."
-                    + (f" Screenshot saved: {_captcha_screenshot}." if _captcha_screenshot else "")
+                    + (
+                        f" Screenshot saved: {_captcha_screenshot}."
+                        if _captcha_screenshot
+                        else ""
+                    )
                     + " Call request_user_input(input_type='captcha', prompt='Solve the CAPTCHA"
-                    + (f" shown in {_captcha_screenshot}" if _captcha_screenshot else "")
+                    + (
+                        f" shown in {_captcha_screenshot}"
+                        if _captcha_screenshot
+                        else ""
+                    )
                     + "') to ask the user."
                 )
                 state["next_action"] = _captcha_hint
@@ -1159,11 +1317,17 @@ class BrowserInstance:
             elif not login_success and error_text:
                 state["next_action"] = f"Login failed: {error_text}"
             elif login_success:
-                state["next_action"] = "Login succeeded. Call save_auth_state to capture session."
+                state["next_action"] = (
+                    "Login succeeded. Call save_auth_state to capture session."
+                )
 
             logger.info(
                 "login_form result: success=%s url_changed=%s captcha=%s mfa=%s error=%s",
-                login_success, url_changed, captcha_detected, mfa_detected, error_text,
+                login_success,
+                url_changed,
+                captcha_detected,
+                mfa_detected,
+                error_text,
             )
         except Exception as e:
             logger.debug("login_form result detection failed (non-fatal): %s", e)
@@ -1179,13 +1343,15 @@ class BrowserInstance:
         totp_period: int = 30,
     ) -> dict[str, Any]:
         with self._execution_lock:
-            return self._run_async(self._handle_totp(
-                totp_secret,
-                field_selector or _DEFAULT_TOTP_FIELD_SEL,
-                tab_id,
-                totp_digits,
-                totp_period,
-            ))
+            return self._run_async(
+                self._handle_totp(
+                    totp_secret,
+                    field_selector or _DEFAULT_TOTP_FIELD_SEL,
+                    tab_id,
+                    totp_digits,
+                    totp_period,
+                )
+            )
 
     async def _handle_totp(
         self,
@@ -1195,9 +1361,9 @@ class BrowserInstance:
         totp_digits: int = 6,
         totp_period: int = 30,
     ) -> dict[str, Any]:
-        # Validate Base32 format before generating code
         try:
             import base64
+
             padded = totp_secret.upper().replace(" ", "")
             padding = (8 - len(padded) % 8) % 8
             base64.b32decode(padded + "=" * padding)
@@ -1213,7 +1379,10 @@ class BrowserInstance:
 
         try:
             import pyotp
-            code = pyotp.TOTP(totp_secret, digits=totp_digits, interval=totp_period).now()
+
+            code = pyotp.TOTP(
+                totp_secret, digits=totp_digits, interval=totp_period
+            ).now()
         except ImportError:
             code = _generate_totp(totp_secret, period=totp_period, digits=totp_digits)
 
@@ -1292,10 +1461,15 @@ class BrowserInstance:
                     "or use request_user_input(input_type='totp') to ask the user."
                 )
             elif totp_success:
-                state["next_action"] = "TOTP verified. Call save_auth_state to capture session."
+                state["next_action"] = (
+                    "TOTP verified. Call save_auth_state to capture session."
+                )
             logger.info(
                 "handle_totp result: success=%s url_changed=%s field_gone=%s error=%s",
-                totp_success, url_changed, totp_field_gone, error_text,
+                totp_success,
+                url_changed,
+                totp_field_gone,
+                error_text,
             )
         except Exception as e:
             logger.debug("handle_totp result detection failed (non-fatal): %s", e)
@@ -1314,12 +1488,14 @@ class BrowserInstance:
         page = self.pages[tab_id]
         try:
             local_storage = await page.evaluate(
-                "() => Object.fromEntries(Object.entries(localStorage))")
+                "() => Object.fromEntries(Object.entries(localStorage))"
+            )
         except Exception:
             local_storage = {}
         try:
             session_storage = await page.evaluate(
-                "() => Object.fromEntries(Object.entries(sessionStorage))")
+                "() => Object.fromEntries(Object.entries(sessionStorage))"
+            )
         except Exception:
             session_storage = {}
         return {
@@ -1340,12 +1516,14 @@ class BrowserInstance:
         }
 
     def inject_cookies(
-            self, cookies: list[dict[str, Any]], tab_id: str | None = None) -> dict[str, Any]:
+        self, cookies: list[dict[str, Any]], tab_id: str | None = None
+    ) -> dict[str, Any]:
         with self._execution_lock:
             return self._run_async(self._inject_cookies(cookies, tab_id))
 
     async def _inject_cookies(
-            self, cookies: list[dict[str, Any]], tab_id: str | None) -> dict[str, Any]:
+        self, cookies: list[dict[str, Any]], tab_id: str | None
+    ) -> dict[str, Any]:
         if not self.context:
             raise ValueError("Browser not launched")
         await self.context.add_cookies(cookies)  # type: ignore[arg-type]
@@ -1361,11 +1539,13 @@ class BrowserInstance:
         tab_id: str | None = None,
     ) -> dict[str, Any]:
         with self._execution_lock:
-            return self._run_async(self._oauth_authorize(
-                oauth_url, callback_prefix, tab_id))
+            return self._run_async(
+                self._oauth_authorize(oauth_url, callback_prefix, tab_id)
+            )
 
     async def _oauth_authorize(
-            self, oauth_url: str, callback_prefix: str, tab_id: str | None) -> dict[str, Any]:
+        self, oauth_url: str, callback_prefix: str, tab_id: str | None
+    ) -> dict[str, Any]:
         if not self.pages:
             await self._create_context(oauth_url)
             tab_id = self.current_page_id
@@ -1383,6 +1563,7 @@ class BrowserInstance:
             current_url = page.url
             if callback_prefix and current_url.startswith(callback_prefix):
                 from urllib.parse import parse_qs, urlparse
+
                 parsed = urlparse(current_url)
                 params = parse_qs(parsed.query)
                 frag = parse_qs(parsed.fragment)
@@ -1487,14 +1668,14 @@ class BrowserInstance:
 
         normalized: dict[str, Any] = {
             "is_authenticated": r.get("isAuthenticated", False),
-            "confidence":       r.get("confidence", 0.0),
-            "score":            r.get("score", 0),
-            "has_logout":       r.get("hasLogout", False),
-            "has_profile":      r.get("hasProfile", False),
-            "has_login_form":   r.get("hasLoginForm", False),
-            "has_login_link":   r.get("hasLoginLink", False),
+            "confidence": r.get("confidence", 0.0),
+            "score": r.get("score", 0),
+            "has_logout": r.get("hasLogout", False),
+            "has_profile": r.get("hasProfile", False),
+            "has_login_form": r.get("hasLoginForm", False),
+            "has_login_link": r.get("hasLoginLink", False),
             "username_display": r.get("usernameDisplay"),
-            "cookie_count":     r.get("cookieCount", 0),
+            "cookie_count": r.get("cookieCount", 0),
         }
         state.update(normalized)
         if normalized["is_authenticated"]:
@@ -1572,7 +1753,8 @@ class BrowserInstance:
             self.is_running = False
             if self._loop and self.context:
                 future = asyncio.run_coroutine_threadsafe(
-                    self._close_context(), self._loop)
+                    self._close_context(), self._loop
+                )
                 with contextlib.suppress(Exception):
                     future.result(timeout=5)
             self.pages.clear()
@@ -1589,7 +1771,13 @@ class BrowserInstance:
             logger.warning(f"Error closing context: {e}")
 
     def is_alive(self) -> bool:
-        return self.is_running and self.context is not None and self._browser is not None and self._browser.is_connected()
+        return (
+            self.is_running
+            and self.context is not None
+            and self._browser is not None
+            and self._browser.is_connected()
+        )
+
 
 class BrowserTabManager:
     MAX_TABS = 3
@@ -1608,33 +1796,32 @@ class BrowserTabManager:
                     self._restart_count += 1
                     try:
                         self._browser.close()
-                    except Exception:
-                        pass
+                    except Exception as e:
+                        logger.debug(
+                            "Expected failure closing dead browser during restart: %s",
+                            e,
+                        )
                 self._browser = BrowserInstance()
             return self._browser
 
     def _ensure_launched(self) -> BrowserInstance:
         browser = self._get_browser()
         if browser.context is None:
-            logger.info(
-                "Browser not yet launched — auto-launching on first use")
+            logger.info("Browser not yet launched — auto-launching on first use")
             try:
                 browser.launch()
             except ValueError as e:
                 if "already launched" not in str(e):
-                    raise RuntimeError(
-                        f"Browser auto-launch failed: {e}") from e
+                    raise RuntimeError(f"Browser auto-launch failed: {e}") from e
         return browser
 
-    def _safe_action(self, action_name: str, fn, *
-                     args, **kwargs) -> dict[str, Any]:
+    def _safe_action(self, action_name: str, fn, *args, **kwargs) -> dict[str, Any]:
         try:
             result = fn(*args, **kwargs)
             if not isinstance(result, dict):
                 result = {"result": result}
             return result
         except DeadHostError as e:
-
             logger.warning("Dead host in _safe_action(%s): %s", action_name, e.host)
             return {
                 "success": False,
@@ -1650,13 +1837,20 @@ class BrowserTabManager:
             }
         except Exception as e:
             error_str = str(e).lower()
-            is_crash = any(k in error_str for k in (
-                "target closed", "browser has been closed", "connection refused",
-                "execution context was destroyed", "page crashed",
-                "navigation failed", "session closed",
-            ))
-            if is_crash:
-
+            is_crash = any(
+                k in error_str
+                for k in (
+                    "target closed",
+                    "browser has been closed",
+                    "connection refused",
+                    "execution context was destroyed",
+                    "page crashed",
+                    "navigation failed",
+                    "session closed",
+                )
+            )
+            is_redirect_loop = "too many redirects" in error_str
+            if is_crash or is_redirect_loop:
                 with self._lock:
                     _can_restart = self._restart_count < 5
                     if _can_restart:
@@ -1664,15 +1858,18 @@ class BrowserTabManager:
                     try:
                         if self._browser:
                             self._browser.close()
-                    except Exception:
-                        pass
+                    except Exception as e:
+                        logger.debug("Expected failure closing crashed browser: %s", e)
                     self._browser = None
                 if not _can_restart:
                     logger.error(
-                        f"Browser action '{action_name}' failed (max restarts reached): {e}")
+                        f"Browser action '{action_name}' failed (max restarts reached): {e}"
+                    )
                     return {"error": f"Browser action failed: {e}"}
+                restart_reason = "redirect loop" if is_redirect_loop else "crash"
                 logger.warning(
-                    f"Browser crashed during '{action_name}': {e}. Auto-restarting...")
+                    f"Browser {restart_reason} during '{action_name}': {e}. Auto-restarting..."
+                )
 
                 try:
                     fresh = self._ensure_launched()
@@ -1680,14 +1877,17 @@ class BrowserTabManager:
                     method = getattr(fresh, fn.__name__, None)
                     if method is None:
                         return {
-                            "error": f"Browser crashed and could not rebind method '{fn.__name__}' after restart"}
+                            "error": f"Browser {restart_reason} and could not rebind method '{fn.__name__}' after restart"
+                        }
                     result = method(*args, **kwargs)
                     if not isinstance(result, dict):
                         result = {"result": result}
-                    result["warning"] = "Browser was auto-restarted after crash"
+                    result["warning"] = (
+                        f"Browser was auto-restarted after {restart_reason}"
+                    )
                     return result
                 except Exception as e2:
-                    return {"error": f"Browser crashed and retry failed: {e2}"}
+                    return {"error": f"Browser {restart_reason} and retry failed: {e2}"}
             else:
                 logger.error(f"Browser action '{action_name}' failed (non-crash): {e}")
                 return {"error": f"Browser action failed: {e}"}
@@ -1706,47 +1906,38 @@ class BrowserTabManager:
             raise
 
     def goto_url(self, url: str, tab_id: str | None = None) -> dict[str, Any]:
-        result = self._safe_action(
-            "goto", self._ensure_launched().goto, url, tab_id)
+        result = self._safe_action("goto", self._ensure_launched().goto, url, tab_id)
         result.setdefault("message", f"Navigated to {url}")
         return result
 
-    def click(self, coordinate: str, tab_id: str |
-              None = None) -> dict[str, Any]:
+    def click(self, coordinate: str, tab_id: str | None = None) -> dict[str, Any]:
         result = self._safe_action(
-            "click",
-            self._ensure_launched().click,
-            coordinate,
-            tab_id)
+            "click", self._ensure_launched().click, coordinate, tab_id
+        )
         result.setdefault("message", f"Clicked at {coordinate}")
         return result
 
-    def type_text(self, text: str, tab_id: str |
-                  None = None) -> dict[str, Any]:
+    def type_text(self, text: str, tab_id: str | None = None) -> dict[str, Any]:
         result = self._safe_action(
-            "type", self._ensure_launched().type_text, text, tab_id)
+            "type", self._ensure_launched().type_text, text, tab_id
+        )
         result.setdefault("message", "Typed text")
         return result
 
-    def scroll(self, direction: str, tab_id: str |
-               None = None) -> dict[str, Any]:
+    def scroll(self, direction: str, tab_id: str | None = None) -> dict[str, Any]:
         result = self._safe_action(
-            "scroll",
-            self._ensure_launched().scroll,
-            direction,
-            tab_id)
+            "scroll", self._ensure_launched().scroll, direction, tab_id
+        )
         result.setdefault("message", f"Scrolled {direction}")
         return result
 
     def back(self, tab_id: str | None = None) -> dict[str, Any]:
-        result = self._safe_action(
-            "back", self._ensure_launched().back, tab_id)
+        result = self._safe_action("back", self._ensure_launched().back, tab_id)
         result.setdefault("message", "Navigated back")
         return result
 
     def forward(self, tab_id: str | None = None) -> dict[str, Any]:
-        result = self._safe_action(
-            "forward", self._ensure_launched().forward, tab_id)
+        result = self._safe_action("forward", self._ensure_launched().forward, tab_id)
         result.setdefault("message", "Navigated forward")
         return result
 
@@ -1761,30 +1952,29 @@ class BrowserTabManager:
                 "tabs": tabs.get("tabs", {}),
             }
         result = self._safe_action("new_tab", browser.new_tab, url)
-        result.setdefault(
-            "message",
-            f"Created new tab {result.get('tab_id', '')}"
-        )
+        result.setdefault("message", f"Created new tab {result.get('tab_id', '')}")
         return result
 
     def switch_tab(self, tab_id: str) -> dict[str, Any]:
         result = self._safe_action(
-            "switch_tab",
-            self._ensure_launched().switch_tab,
-            tab_id)
+            "switch_tab", self._ensure_launched().switch_tab, tab_id
+        )
         result.setdefault("message", f"Switched to tab {tab_id}")
         return result
 
     def close_tab(self, tab_id: str) -> dict[str, Any]:
         result = self._safe_action(
-            "close_tab", self._ensure_launched().close_tab, tab_id)
+            "close_tab", self._ensure_launched().close_tab, tab_id
+        )
         result.setdefault("message", f"Closed tab {tab_id}")
         return result
 
-    def wait_browser(self, duration: float, tab_id: str |
-                     None = None) -> dict[str, Any]:
+    def wait_browser(
+        self, duration: float, tab_id: str | None = None
+    ) -> dict[str, Any]:
         result = self._safe_action(
-            "wait", self._ensure_launched().wait, duration, tab_id)
+            "wait", self._ensure_launched().wait, duration, tab_id
+        )
         result.setdefault("message", f"Waited {duration}s")
         return result
 
@@ -1795,89 +1985,75 @@ class BrowserTabManager:
         parallel: bool = False,
     ) -> dict[str, Any]:
         result = self._safe_action(
-            "execute_js",
-            self._ensure_launched().execute_js,
-            js_code,
-            tab_id,
-            parallel)
+            "execute_js", self._ensure_launched().execute_js, js_code, tab_id, parallel
+        )
         if parallel:
-            result.setdefault("message", "JavaScript executed in parallel across all open tabs")
+            result.setdefault(
+                "message", "JavaScript executed in parallel across all open tabs"
+            )
         else:
             result.setdefault("message", "JavaScript executed successfully")
         return result
 
-    def double_click(self, coordinate: str, tab_id: str |
-                     None = None) -> dict[str, Any]:
+    def double_click(
+        self, coordinate: str, tab_id: str | None = None
+    ) -> dict[str, Any]:
         result = self._safe_action(
-            "double_click",
-            self._ensure_launched().double_click,
-            coordinate,
-            tab_id)
+            "double_click", self._ensure_launched().double_click, coordinate, tab_id
+        )
         result.setdefault("message", f"Double clicked at {coordinate}")
         return result
 
-    def hover(self, coordinate: str, tab_id: str |
-              None = None) -> dict[str, Any]:
+    def hover(self, coordinate: str, tab_id: str | None = None) -> dict[str, Any]:
         result = self._safe_action(
-            "hover",
-            self._ensure_launched().hover,
-            coordinate,
-            tab_id)
+            "hover", self._ensure_launched().hover, coordinate, tab_id
+        )
         result.setdefault("message", f"Hovered at {coordinate}")
         return result
 
     def press_key(self, key: str, tab_id: str | None = None) -> dict[str, Any]:
         result = self._safe_action(
-            "press_key",
-            self._ensure_launched().press_key,
-            key,
-            tab_id)
+            "press_key", self._ensure_launched().press_key, key, tab_id
+        )
         result.setdefault("message", f"Pressed key {key}")
         return result
 
-    def save_pdf(self, file_path: str, tab_id: str |
-                 None = None) -> dict[str, Any]:
+    def save_pdf(self, file_path: str, tab_id: str | None = None) -> dict[str, Any]:
         result = self._safe_action(
-            "save_pdf",
-            self._ensure_launched().save_pdf,
-            file_path,
-            tab_id)
+            "save_pdf", self._ensure_launched().save_pdf, file_path, tab_id
+        )
         result.setdefault("message", f"Page saved as PDF: {file_path}")
         return result
 
-    def get_console_logs(self, tab_id: str | None = None,
-                         clear: bool = False) -> dict[str, Any]:
+    def get_console_logs(
+        self, tab_id: str | None = None, clear: bool = False
+    ) -> dict[str, Any]:
         result = self._safe_action(
-            "get_console_logs",
-            self._ensure_launched().get_console_logs,
-            tab_id,
-            clear)
+            "get_console_logs", self._ensure_launched().get_console_logs, tab_id, clear
+        )
         result.setdefault("message", "Console logs retrieved")
         return result
 
-    def get_network_logs(self, tab_id: str | None = None,
-                         clear: bool = False) -> dict[str, Any]:
+    def get_network_logs(
+        self, tab_id: str | None = None, clear: bool = False
+    ) -> dict[str, Any]:
         result = self._safe_action(
-            "get_network_logs",
-            self._ensure_launched().get_network_logs,
-            tab_id,
-            clear)
+            "get_network_logs", self._ensure_launched().get_network_logs, tab_id, clear
+        )
         result.setdefault("message", "Network logs retrieved")
         return result
 
     def view_source(self, tab_id: str | None = None) -> dict[str, Any]:
         result = self._safe_action(
-            "view_source",
-            self._ensure_launched().view_source,
-            tab_id)
+            "view_source", self._ensure_launched().view_source, tab_id
+        )
         result.setdefault("message", "Page source retrieved")
         return result
 
     def screenshot(self, tab_id: str | None = None) -> dict[str, Any]:
         result = self._safe_action(
-            "screenshot",
-            self._ensure_launched().screenshot,
-            tab_id)
+            "screenshot", self._ensure_launched().screenshot, tab_id
+        )
         result.setdefault("message", "Screenshot taken")
         return result
 
@@ -1895,7 +2071,14 @@ class BrowserTabManager:
         result = self._safe_action(
             "login_form",
             self._ensure_launched().login_form,
-            url, username, password, username_selector, password_selector, submit_selector, tab_id, multi_step,
+            url,
+            username,
+            password,
+            username_selector,
+            password_selector,
+            submit_selector,
+            tab_id,
+            multi_step,
         )
         result.setdefault("message", f"Logged in via form at {url}")
         return result
@@ -1911,34 +2094,43 @@ class BrowserTabManager:
         result = self._safe_action(
             "handle_totp",
             self._ensure_launched().handle_totp,
-            totp_secret, field_selector, tab_id, totp_digits, totp_period,
+            totp_secret,
+            field_selector,
+            tab_id,
+            totp_digits,
+            totp_period,
         )
         result.setdefault("message", "TOTP code submitted")
         return result
 
     def save_auth_state(self) -> dict[str, Any]:
         result = self._safe_action(
-            "save_auth_state",
-            self._ensure_launched().save_auth_state)
+            "save_auth_state", self._ensure_launched().save_auth_state
+        )
         result.setdefault("message", "Auth state captured")
         return result
 
     def inject_cookies(
-            self, cookies: list[dict[str, Any]], tab_id: str | None = None) -> dict[str, Any]:
+        self, cookies: list[dict[str, Any]], tab_id: str | None = None
+    ) -> dict[str, Any]:
         result = self._safe_action(
             "inject_cookies",
             self._ensure_launched().inject_cookies,
-            cookies, tab_id,
+            cookies,
+            tab_id,
         )
         result.setdefault("message", f"Injected {len(cookies)} cookies")
         return result
 
-    def oauth_authorize(self, oauth_url: str, callback_prefix: str = "",
-                        tab_id: str | None = None) -> dict[str, Any]:
+    def oauth_authorize(
+        self, oauth_url: str, callback_prefix: str = "", tab_id: str | None = None
+    ) -> dict[str, Any]:
         result = self._safe_action(
             "oauth_authorize",
             self._ensure_launched().oauth_authorize,
-            oauth_url, callback_prefix, tab_id,
+            oauth_url,
+            callback_prefix,
+            tab_id,
         )
         result.setdefault("message", f"OAuth authorization at {oauth_url}")
         return result
@@ -1953,7 +2145,9 @@ class BrowserTabManager:
             self._browser.close()
             self._browser = None
 
+
 _manager = BrowserTabManager()
+
 
 def browser_action(
     action: BrowserAction,
@@ -1967,7 +2161,6 @@ def browser_action(
     key: str | None = None,
     file_path: str | None = None,
     clear: bool = False,
-
     username: str | None = None,
     password: str | None = None,
     username_selector: str | None = None,
@@ -1980,7 +2173,6 @@ def browser_action(
     multi_step: bool = False,
     totp_digits: int = 6,
     totp_period: int = 30,
-
     wait_selector: str | None = None,
     wait_timeout: float = 10.0,
     wait_state: str = "visible",
@@ -2038,7 +2230,9 @@ def browser_action(
             if not url or not username or not password:
                 return {"error": "login_form requires: url, username, password"}
             return _manager.login_form(
-                url, username, password,
+                url,
+                username,
+                password,
                 username_selector=username_selector or _DEFAULT_USERNAME_SEL,
                 password_selector=password_selector or _DEFAULT_PASSWORD_SEL,
                 submit_selector=submit_selector or _DEFAULT_SUBMIT_SEL,
@@ -2059,18 +2253,26 @@ def browser_action(
             return _manager.save_auth_state()
         elif action == "inject_cookies":
             if not cookies:
-                return {"error": "inject_cookies requires: cookies (list of cookie dicts)"}
+                return {
+                    "error": "inject_cookies requires: cookies (list of cookie dicts)"
+                }
             return _manager.inject_cookies(cookies, tab_id)
         elif action == "oauth_authorize":
             if not url:
-                return {"error": "oauth_authorize requires: url (OAuth authorization URL)"}
+                return {
+                    "error": "oauth_authorize requires: url (OAuth authorization URL)"
+                }
             return _manager.oauth_authorize(url, callback_prefix, tab_id)
         elif action == "check_auth_status":
             return _manager.check_auth_status(tab_id)
         elif action == "wait_for_element":
             if not wait_selector:
-                return {"error": "wait_for_element requires: wait_selector (CSS selector)"}
-            return _manager.wait_for_element(wait_selector, wait_timeout, wait_state, tab_id)
+                return {
+                    "error": "wait_for_element requires: wait_selector (CSS selector)"
+                }
+            return _manager.wait_for_element(
+                wait_selector, wait_timeout, wait_state, tab_id
+            )
         else:
             return {"error": f"Unknown action: {action}"}
     except Exception as e:

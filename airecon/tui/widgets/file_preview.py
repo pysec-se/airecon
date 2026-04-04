@@ -1,3 +1,4 @@
+import logging
 import re
 from pathlib import Path
 
@@ -10,20 +11,22 @@ from textual.widgets import Button, Input, Static, Label
 
 from airecon.proxy.config import get_workspace_root
 
-_ANSI_ESCAPE_RE = re.compile(r'\x1b(?:[@-Z\\-_]|\[[0-?]*[ -/]*[@-~])')
+logger = logging.getLogger(__name__)
+
+_ANSI_ESCAPE_RE = re.compile(r"\x1b(?:[@-Z\\-_]|\[[0-?]*[ -/]*[@-~])")
+
 
 class ConfirmDelete(ModalScreen[bool]):
-    
     def __init__(self, file_path: str) -> None:
         self.file_path = file_path
         super().__init__()
-    
+
     BINDINGS = [
         ("y", "confirm", "Yes (Y)"),
         ("n", "cancel", "No (N)"),
         ("escape", "cancel", "Cancel (Esc)"),
     ]
-    
+
     def compose(self) -> ComposeResult:
         with Vertical():
             yield Label(" Confirm Delete ", id="confirm-title")
@@ -31,16 +34,16 @@ class ConfirmDelete(ModalScreen[bool]):
             with Horizontal(id="confirm-buttons"):
                 yield Button("[Y] Yes, Delete", id="btn-yes", variant="error")
                 yield Button("[N] No, Keep", id="btn-no", variant="primary")
-    
+
     def on_button_pressed(self, event: Button.Pressed) -> None:
         if event.button.id == "btn-yes":
             self.dismiss(True)
         else:
             self.dismiss(False)
-    
+
     def action_confirm(self) -> None:
         self.dismiss(True)
-    
+
     def action_cancel(self) -> None:
         self.dismiss(False)
 
@@ -67,7 +70,6 @@ class FilePreviewScreen(ModalScreen):
 
     def compose(self) -> ComposeResult:
         with Vertical(id="preview-dialog"):
-
             display_path = self.file_path
             if len(display_path) > 60:
                 display_path = "…" + display_path[-57:]
@@ -88,7 +90,9 @@ class FilePreviewScreen(ModalScreen):
                     yield Button("Close [Esc]", id="close-preview", classes="btn-close")
                     yield Button("Copy", id="copy-content", classes="btn-copy")
                     yield Button("Delete", id="delete-file", classes="btn-delete")
-                    yield Button("Run with Context", id="run-context", classes="btn-run")
+                    yield Button(
+                        "Run with Context", id="run-context", classes="btn-run"
+                    )
 
     def on_mount(self) -> None:
         if self.content is None:
@@ -105,7 +109,7 @@ class FilePreviewScreen(ModalScreen):
             MAX_SIZE = 1 * 1024 * 1024
 
             if size > MAX_SIZE:
-                with open(p, 'r', errors='replace') as f:
+                with open(p, "r", errors="replace") as f:
                     head = f.read(5000)
                     f.seek(max(0, size - 500000))
                     tail = f.read()
@@ -113,11 +117,12 @@ class FilePreviewScreen(ModalScreen):
                     f"\n\n  ⋮ LARGE FILE TRUNCATED ({size / 1024 / 1024:.2f} MB)\n"
                     f"  ⋮ Showing first 5KB and last 500KB\n\n"
                 )
-                content = _ANSI_ESCAPE_RE.sub(
-                    '', head) + msg + _ANSI_ESCAPE_RE.sub('', tail)
+                content = (
+                    _ANSI_ESCAPE_RE.sub("", head) + msg + _ANSI_ESCAPE_RE.sub("", tail)
+                )
             else:
-                raw = p.read_text(errors='replace')
-                content = _ANSI_ESCAPE_RE.sub('', raw)
+                raw = p.read_text(errors="replace")
+                content = _ANSI_ESCAPE_RE.sub("", raw)
 
             self.content = content
             self._set_content(content)
@@ -128,8 +133,8 @@ class FilePreviewScreen(ModalScreen):
     def _set_content(self, text: str) -> None:
         try:
             self.query_one("#preview-content", Static).update(Text(text))
-        except Exception:
-            pass
+        except Exception as e:
+            logger.debug("Expected failure in _set_content update preview: %s", e)
 
     def on_button_pressed(self, event: Button.Pressed) -> None:
         if event.button.id == "close-preview":
@@ -151,7 +156,9 @@ class FilePreviewScreen(ModalScreen):
         project_root = Path(__file__).resolve().parents[2]
 
         def _inside_allowed_roots(path: Path) -> bool:
-            return path.is_relative_to(workspace_root) or path.is_relative_to(project_root)
+            return path.is_relative_to(workspace_root) or path.is_relative_to(
+                project_root
+            )
 
         if not _inside_allowed_roots(resolved):
             return False, "Access denied: file is outside workspace/project sandbox"
@@ -162,7 +169,10 @@ class FilePreviewScreen(ModalScreen):
             except Exception as e:
                 return False, f"Cannot resolve symlink target: {e}"
             if not _inside_allowed_roots(target):
-                return False, "Access denied: symlink target is outside workspace/project sandbox"
+                return (
+                    False,
+                    "Access denied: symlink target is outside workspace/project sandbox",
+                )
 
         return True, None
 
@@ -181,7 +191,6 @@ class FilePreviewScreen(ModalScreen):
             self.notify(err or "Delete blocked by sandbox policy.", severity="error")
             return
 
-        # Confirm deletion
         def on_delete_result(result: bool | None) -> None:
             if result:
                 self._perform_delete()
@@ -201,10 +210,15 @@ class FilePreviewScreen(ModalScreen):
                 active_path = getattr(self.app, "active_file_path", None)
                 if isinstance(active_path, Path):
                     try:
-                        if active_path.resolve() == p.resolve() and hasattr(self.app, "_clear_active_file_context"):
+                        if active_path.resolve() == p.resolve() and hasattr(
+                            self.app, "_clear_active_file_context"
+                        ):
                             self.app._clear_active_file_context()
-                    except Exception:
-                        pass
+                    except Exception as e:
+                        logger.debug(
+                            "Expected failure in _perform_delete clear active context: %s",
+                            e,
+                        )
 
                 self.notify(f"✓ Deleted: {self.file_path}", severity="information")
         except Exception as e:

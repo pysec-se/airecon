@@ -34,18 +34,22 @@ from .session import SessionData, load_session, record_tested_endpoint  # noqa: 
 from .validators import _ValidatorMixin
 from .workspace import _WorkspaceMixin
 
+
 def _estimate_tokens(text: str) -> int:
+
     if not text:
         return 0
+    return len(text) // 4
 
-    return len(text) // 3
 
 _tools_meta_path = Path(__file__).parent.parent / "data" / "tools_meta.json"
 try:
     with open(_tools_meta_path, "r") as f:
         _TOOLS_META = json.load(f)
 except (OSError, json.JSONDecodeError) as _e:
-    warnings.warn(f"tools_meta.json unavailable ({_e}); tool catalog features disabled.")
+    warnings.warn(
+        f"tools_meta.json unavailable ({_e}); tool catalog features disabled."
+    )
     _TOOLS_META = {}
 
 logger = logging.getLogger("airecon.agent")
@@ -53,6 +57,7 @@ logger = logging.getLogger("airecon.agent")
 __all__ = ["AgentLoop", "get_config", "get_system_prompt"]
 
 _MAX_EMPTY_RETRIES = 4
+
 
 class AgentLoop(
     _ValidatorMixin,
@@ -68,7 +73,6 @@ class AgentLoop(
     _LifecycleMixin,
     _ProcessMessageMixin,
 ):
-
     _TOOL_CALL_RE = re.compile(
         r"<tool_call>\s*(\{.*?\})\s*</tool_call>",
         re.DOTALL | re.IGNORECASE,
@@ -87,20 +91,34 @@ class AgentLoop(
         r")",
     )
 
-    _DEDUP_EXEMPT_TOOLS = frozenset({
-        "create_file",
-        "create_vulnerability_report",
-        "spawn_agent",
-    })
+    _DEDUP_EXEMPT_TOOLS = frozenset(
+        {
+            "create_file",
+            "create_vulnerability_report",
+            "spawn_agent",
+        }
+    )
 
-    _DEDUP_EXEMPT_BROWSER_ACTIONS = frozenset({
-        "click", "type", "press_key", "scroll_down", "scroll_up",
-        "wait", "get_console_logs", "get_network_logs",
-
-        "login_form", "handle_totp", "save_auth_state", "inject_cookies", "oauth_authorize",
-    })
+    _DEDUP_EXEMPT_BROWSER_ACTIONS = frozenset(
+        {
+            "click",
+            "type",
+            "press_key",
+            "scroll_down",
+            "scroll_up",
+            "wait",
+            "get_console_logs",
+            "get_network_logs",
+            "login_form",
+            "handle_totp",
+            "save_auth_state",
+            "inject_cookies",
+            "oauth_authorize",
+        }
+    )
 
     _CTF_MAX_ITERATIONS = 150
+
     def __init__(self, ollama: OllamaClient, engine: DockerEngine) -> None:
         self.ollama = ollama
         self.engine = engine
@@ -157,9 +175,8 @@ class AgentLoop(
 
         self._last_token_snapshot_time: float = 0.0
 
-        # Rate limiting for request_user_input to prevent spam
         self._last_user_input_time: float = 0.0
-        self._user_input_cooldown: float = 30.0  # seconds between requests
+        self._user_input_cooldown: float = 30.0
 
         self._last_conversation_save_iteration: int = 0
         self._conversation_save_interval: int = 10
@@ -182,6 +199,14 @@ class AgentLoop(
 
         self._scope_lock_active: bool = False
         self._scope_lock_brief: str = ""
+        self._scope_anchor_target: str = ""
+
+        self._memory_health_status: dict[str, Any] = {}
+        self._last_memory_health_check_iteration: int = -1
+        self._memory_health_interval: int = 10
+
+        self._visited_browser_urls: set[str] = set()
+        self._max_browser_visits_per_domain: int = 3
 
     def _is_simple_target_kickoff(
         self,
@@ -196,11 +221,15 @@ class AgentLoop(
 
         if self._session and self._session.target:
             try:
-                logger.info("Saving session data (subdomains: %d, live_hosts: %d, vulns: %d, conversation: %d msgs)...",
-                           len(self._session.subdomains),
-                           len(self._session.live_hosts),
-                           len(self._session.vulnerabilities),
-                           len(self._session.conversation) if hasattr(self._session, 'conversation') else 0)
+                logger.info(
+                    "Saving session data (subdomains: %d, live_hosts: %d, vulns: %d, conversation: %d msgs)...",
+                    len(self._session.subdomains),
+                    len(self._session.live_hosts),
+                    len(self._session.vulnerabilities),
+                    len(self._session.conversation)
+                    if hasattr(self._session, "conversation")
+                    else 0,
+                )
 
                 self._sync_token_usage_to_session()
                 self._sync_recovery_state_to_session()
@@ -208,31 +237,41 @@ class AgentLoop(
 
                 async with self._session_lock:
                     from .session import save_session
+
                     save_session(self._session)
-                logger.info("Session saved to ~/.airecon/sessions/%s.json",
-                           self._session.session_id)
+                logger.info(
+                    "Session saved to ~/.airecon/sessions/%s.json",
+                    self._session.session_id,
+                )
 
                 try:
                     from ..memory import get_memory_manager
+
                     memory = get_memory_manager()
 
-                    memory.save_session({
-                        "session_id": self._session.session_id,
-                        "target": self._session.target,
-                        "current_phase": self._session.current_phase,
-                        "subdomains": list(self._session.subdomains),
-                        "live_hosts": list(self._session.live_hosts),
-                        "vulnerabilities": self._session.vulnerabilities,
-                        "token_total": self._session.token_total,
-                        "model_used": self.ollama.model if hasattr(self, 'ollama') else None,
-                    })
+                    memory.save_session(
+                        {
+                            "session_id": self._session.session_id,
+                            "target": self._session.target,
+                            "current_phase": self._session.current_phase,
+                            "subdomains": list(self._session.subdomains),
+                            "live_hosts": list(self._session.live_hosts),
+                            "vulnerabilities": self._session.vulnerabilities,
+                            "token_total": self._session.token_total,
+                            "model_used": self.ollama.model
+                            if hasattr(self, "ollama")
+                            else None,
+                        }
+                    )
 
-                    memory.save_target_intel({
-                        "target": self._session.target,
-                        "subdomains": list(self._session.subdomains),
-                        "ports": self._session.open_ports,
-                        "technologies": self._session.technologies,
-                    })
+                    memory.save_target_intel(
+                        {
+                            "target": self._session.target,
+                            "subdomains": list(self._session.subdomains),
+                            "ports": self._session.open_ports,
+                            "technologies": self._session.technologies,
+                        }
+                    )
 
                     logger.debug("Session saved to memory database")
                 except Exception as _mem_err:
@@ -257,6 +296,29 @@ class AgentLoop(
                     pass
             except Exception:
                 logger.debug("Token snapshot flush skipped during stop.")
+
+    def _is_duplicate_browser_url(self, url: str, action: str) -> bool:
+        if action not in ("goto", "new_tab"):
+            return False
+
+        if not url:
+            return False
+
+        try:
+            normalized = url.strip().lower()
+            normalized = re.sub(r"^https?://", "", normalized)
+            normalized = re.sub(r"/+$", "", normalized)
+        except Exception:
+            return False
+
+        count = sum(
+            1 for visited in self._visited_browser_urls if visited == normalized
+        )
+        if count >= self._max_browser_visits_per_domain:
+            return True
+
+        return False
+
     def _is_duplicate_command(
         self, tool_name: str, args: dict[str, Any]
     ) -> tuple[bool, str]:
@@ -267,6 +329,16 @@ class AgentLoop(
             action = args.get("action", "")
             if action in self._DEDUP_EXEMPT_BROWSER_ACTIONS:
                 return False, ""
+
+            if action in ("goto", "new_tab"):
+                url = args.get("url", "")
+                if self._is_duplicate_browser_url(url, action):
+                    msg = (
+                        f"[BROWSER URL LIMIT] URL '{url[:50]}...' has been visited "
+                        f"too many times ({self._max_browser_visits_per_domain}). "
+                        "Proceed without browser testing for now and focus on other methods."
+                    )
+                    return True, msg
 
         def _normalise(v: Any) -> Any:
             if isinstance(v, str):
@@ -286,10 +358,8 @@ class AgentLoop(
             _phase_ctx = "unknown"
         raw = f"{_phase_ctx}:{tool_name}:{canonical}"
         cmd_hash = hashlib.md5(
-            raw.encode(
-                "utf-8",
-                errors="replace"),
-            usedforsecurity=False).hexdigest()
+            raw.encode("utf-8", errors="replace"), usedforsecurity=False
+        ).hexdigest()
 
         if cmd_hash in self._executed_cmd_hashes:
             msg = (
@@ -298,6 +368,25 @@ class AgentLoop(
                 "Do NOT repeat it — use the existing result and proceed to the next step."
             )
             return True, msg
+
+        if tool_name == "browser_action":
+            action = args.get("action", "")
+            if action in ("goto", "new_tab"):
+                url = args.get("url", "")
+                if url:
+                    try:
+                        normalized = url.strip().lower()
+                        normalized = re.sub(r"^https?://", "", normalized)
+                        normalized = re.sub(r"/+$", "", normalized)
+                        if len(self._visited_browser_urls) > 500:
+                            self._visited_browser_urls = set(
+                                list(self._visited_browser_urls)[-200:]
+                            )
+                        self._visited_browser_urls.add(normalized)
+                    except Exception as e:
+                        logger.debug(
+                            "Expected failure normalizing browser URL for dedup: %s", e
+                        )
 
         self._executed_cmd_hashes.add(cmd_hash)
         self._executed_cmd_order.append(cmd_hash)
@@ -313,10 +402,12 @@ class AgentLoop(
             if after != before:
                 logger.debug(
                     "_executed_cmd_hashes incrementally pruned: %d → %d entries (kept newest 2500)",
-                    before, after
+                    before,
+                    after,
                 )
 
         return False, ""
+
     _URL_RE = re.compile(r"https?://[^\s\"']+", re.IGNORECASE)
 
     def _record_tested_endpoint(
@@ -334,8 +425,7 @@ class AgentLoop(
             if m:
                 url = m.group(0).rstrip("'\"\\;,")
 
-            _method_m = re.search(
-                r"(?:-X|--request)\s+([A-Z]+)", cmd, re.IGNORECASE)
+            _method_m = re.search(r"(?:-X|--request)\s+([A-Z]+)", cmd, re.IGNORECASE)
             if _method_m:
                 method = _method_m.group(1).upper()
 
@@ -347,8 +437,12 @@ class AgentLoop(
             if action in ("goto", "new_tab"):
                 url = arguments.get("url", "")
 
-        elif tool_name in ("quick_fuzz", "advanced_fuzz", "deep_fuzz",
-                           "schemathesis_fuzz"):
+        elif tool_name in (
+            "quick_fuzz",
+            "advanced_fuzz",
+            "deep_fuzz",
+            "schemathesis_fuzz",
+        ):
             url = arguments.get("url", arguments.get("target", ""))
 
         if url:
@@ -356,6 +450,7 @@ class AgentLoop(
 
     def get_stats(self) -> dict[str, Any]:
         from .owasp import evidence_risk_summary
+
         _caido_sends = self.state.tool_counts.get("caido_send_request", 0)
         _caido_autos = self.state.tool_counts.get("caido_automate", 0)
         _caido_findings = _caido_sends + _caido_autos
@@ -395,11 +490,10 @@ class AgentLoop(
             elif ch == "}":
                 brace_depth -= 1
                 if brace_depth == 0 and start_idx is not None:
-                    candidate = text[start_idx: i + 1]
+                    candidate = text[start_idx : i + 1]
 
                     if '"name"' in candidate or "'name'" in candidate:
-                        tc = self._parse_tool_call_json(
-                            candidate, registered_tools)
+                        tc = self._parse_tool_call_json(candidate, registered_tools)
                         if tc:
                             tool_calls.append(tc)
                     start_idx = None
@@ -413,8 +507,7 @@ class AgentLoop(
         if parsed is None:
             return None
 
-        tc_name = parsed.get("name") or parsed.get(
-            "function", {}).get("name", "")
+        tc_name = parsed.get("name") or parsed.get("function", {}).get("name", "")
         tc_args = (
             parsed.get("arguments")
             or parsed.get("parameters")
@@ -472,10 +565,12 @@ class AgentLoop(
         return None
 
     _MERGEABLE_EXTENSIONS = frozenset(
-        {".txt", ".csv", ".list", ".hosts", ".log", ".out"})
+        {".txt", ".csv", ".list", ".hosts", ".log", ".out"}
+    )
 
     def _get_command_output_file(
-            self, arguments: dict[str, Any]) -> tuple[str | None, "Path | None"]:
+        self, arguments: dict[str, Any]
+    ) -> tuple[str | None, "Path | None"]:
         cmd = arguments.get("command", "")
         if not cmd or not self.state.active_target:
             return None, None
@@ -486,12 +581,22 @@ class AgentLoop(
 
         output_file: str | None = None
         for i, token in enumerate(tokens):
-            if token in ("-o", "--output", "-oX", "-oN", "-oG",
-                         "-oA", "-oJ") and i + 1 < len(tokens):
+            if token in (
+                "-o",
+                "--output",
+                "-oX",
+                "-oN",
+                "-oG",
+                "-oA",
+                "-oJ",
+            ) and i + 1 < len(tokens):
                 output_file = tokens[i + 1]
                 break
-            if token.startswith(
-                    "-o") and len(token) > 2 and not token.startswith("-oX"):
+            if (
+                token.startswith("-o")
+                and len(token) > 2
+                and not token.startswith("-oX")
+            ):
                 output_file = token[2:]
                 break
 
@@ -518,12 +623,17 @@ class AgentLoop(
         try:
             old_lines = full_path.read_text(errors="ignore").splitlines()
             self._pending_output_merges[str(full_path)] = old_lines
-            logger.info("Saved %d existing lines from '%s' for post-run merge", len(old_lines), output_file)
+            logger.info(
+                "Saved %d existing lines from '%s' for post-run merge",
+                len(old_lines),
+                output_file,
+            )
         except Exception as e:
-            logger.warning("Could not save old content of '%s' for merge: %s", output_file, e)
+            logger.warning(
+                "Could not save old content of '%s' for merge: %s", output_file, e
+            )
 
-    def _apply_output_merge(
-            self, arguments: dict[str, Any], success: bool) -> None:
+    def _apply_output_merge(self, arguments: dict[str, Any], success: bool) -> None:
         if not success:
             return
         output_file, full_path = self._get_command_output_file(arguments)
@@ -543,16 +653,16 @@ class AgentLoop(
             full_path.write_text("\n".join(merged) + "\n", encoding="utf-8")
             logger.info(
                 "Merged '%s': %d new entries added, %d total lines (sorted)",
-                output_file, len(added), len(merged),
+                output_file,
+                len(added),
+                len(merged),
             )
         except Exception as e:
             logger.warning("Failed to merge output file '%s': %s", output_file, e)
 
-    _TOOL_ALTERNATIVES: dict[str, str] = _TOOLS_META.get(
-        "tool_alternatives", {})
+    _TOOL_ALTERNATIVES: dict[str, str] = _TOOLS_META.get("tool_alternatives", {})
 
-    def _suggest_alternative_tool(
-            self, tool_name: str, command: str = "") -> str:
+    def _suggest_alternative_tool(self, tool_name: str, command: str = "") -> str:
 
         cmd = command or ""
         cmd_clean = re.sub(r"^cd\s+/workspace/[^\s]+\s*&&\s*", "", cmd).strip()
@@ -604,7 +714,10 @@ class AgentLoop(
     def _trim_conversation_to_limit(self) -> None:
         cfg = get_config()
         max_conversation_length = getattr(cfg, "agent_max_conversation_messages", 1000)
-        if not max_conversation_length or len(self.state.conversation) <= max_conversation_length:
+        if (
+            not max_conversation_length
+            or len(self.state.conversation) <= max_conversation_length
+        ):
             return
 
         before_count = len(self.state.conversation)
@@ -640,7 +753,10 @@ class AgentLoop(
             filtered_conversation = []
             for msg in self.state.conversation:
                 content = msg.get("content", "")
-                if "[SYSTEM: ACTIVE_TARGET=" in content and current_target not in content:
+                if (
+                    "[SYSTEM: ACTIVE_TARGET=" in content
+                    and current_target not in content
+                ):
                     continue
                 if "previous scan of" in content and current_target not in content:
                     continue

@@ -543,6 +543,22 @@ class _SupervisionMixin:
 
         current_phase = self._get_current_phase().value.upper()
         phase_dirs = _PHASE_SKILL_DIRECTORIES.get(current_phase, set())
+
+        recommended_skills = set()
+        try:
+            if self._memory_manager and self._session and self._session.target:
+                skill_recs = self._memory_manager.get_skill_recommendations(
+                    self._session.target, current_phase
+                )
+                for rec in skill_recs:
+                    skill_path = f"ctf/{rec['skill_name']}.py" if current_phase == "EXPLOIT" else f"reconnaissance/{rec['skill_name']}.py"
+                    recommended_skills.add(skill_path)
+                    for phase_dir in phase_dirs:
+                        alt_path = f"{phase_dir}/{rec['skill_name']}.py"
+                        recommended_skills.add(alt_path)
+        except Exception as e:
+            logger.debug("Skill recommendation lookup for pruning failed: %s", e)
+
         skills_to_remove = []
 
         for i, msg in enumerate(self.state.conversation):
@@ -571,15 +587,27 @@ class _SupervisionMixin:
                 for sp in skill_paths
             )
             if not is_phase_relevant:
-                skills_to_remove.append(i)
+                skills_to_remove.append((i, 0))
+                continue
 
-        for i in reversed(skills_to_remove):
+            is_recommended = any(sp in recommended_skills for sp in skill_paths)
+            if is_recommended:
+                if age < max_age_iterations * 2:
+                    continue
+                skills_to_remove.append((i, 1))
+            else:
+                skills_to_remove.append((i, 0))
+
+        skills_to_remove.sort(key=lambda x: (x[1], -x[0]))
+
+        for i_tuple in reversed(skills_to_remove):
+            i = i_tuple[0] if isinstance(i_tuple, tuple) else i_tuple
             self.state.conversation.pop(i)
 
         pruned_count = len(skills_to_remove)
         if pruned_count > 0:
             logger.debug(
-                "Pruned %d stale skill messages (age > %d iterations, not phase-relevant)",
+                "Pruned %d stale skill messages (age > %d iterations, not phase-relevant or not recommended)",
                 pruned_count, max_age_iterations,
             )
 

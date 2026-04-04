@@ -203,7 +203,9 @@ class TestRunTUI:
             session=None,
         )
 
-        with patch.dict("os.environ", {"AIRECON_SESSION_ID": "old_session"}, clear=True):
+        with patch.dict(
+            "os.environ", {"AIRECON_SESSION_ID": "old_session"}, clear=True
+        ):
             with patch("airecon.tui.app.AIReconApp"):
                 _run_tui(args)
                 import os
@@ -241,8 +243,11 @@ class TestRunTUI:
                 with pytest.raises(SystemExit) as exc_info:
                     _run_tui(args)
 
-                # Should write crash log
-                mock_open.assert_called_with("airecon_crash.log", "w")
+                # Should write crash log to temp directory
+                call_args = mock_open.call_args
+                assert call_args is not None
+                assert call_args[0][0].name == "airecon_crash.log"
+                assert call_args[0][1] == "w"
                 assert exc_info.value.code == 1
 
 

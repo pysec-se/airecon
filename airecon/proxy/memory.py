@@ -1,6 +1,7 @@
 import json
 import logging
 import sqlite3
+import threading
 from pathlib import Path
 from typing import Any
 
@@ -9,24 +10,42 @@ logger = logging.getLogger("airecon.memory")
 MEMORY_DIR = Path.home() / ".airecon" / "memory"
 MEMORY_DB = MEMORY_DIR / "airecon.db"
 
+
+_MEMORY_CONN: sqlite3.Connection | None = None
+_MEMORY_CONN_LOCK = threading.Lock()
+
+
 def get_memory_db() -> sqlite3.Connection:
-    if not MEMORY_DIR.exists():
-        MEMORY_DIR.mkdir(parents=True, exist_ok=True)
-        logger.info("Created memory directory: %s", MEMORY_DIR)
+    global _MEMORY_CONN
+    if _MEMORY_CONN is not None:
+        try:
+            _MEMORY_CONN.execute("SELECT 1")
+            return _MEMORY_CONN
+        except sqlite3.Error:
+            _MEMORY_CONN = None
 
-    db_exists = MEMORY_DB.exists()
+    with _MEMORY_CONN_LOCK:
+        if _MEMORY_CONN is not None:
+            return _MEMORY_CONN
 
-    conn = sqlite3.connect(str(MEMORY_DB))
-    conn.row_factory = sqlite3.Row
+        if not MEMORY_DIR.exists():
+            MEMORY_DIR.mkdir(parents=True, exist_ok=True)
+            logger.info("Created memory directory: %s", MEMORY_DIR)
 
-    if not db_exists:
-        logger.info("Created new memory database: %s", MEMORY_DB)
-        _init_schema(conn)
+        db_exists = MEMORY_DB.exists()
 
-    else:
-        _init_schema(conn)
+        conn = sqlite3.connect(str(MEMORY_DB), check_same_thread=False)
+        conn.row_factory = sqlite3.Row
 
-    return conn
+        if not db_exists:
+            logger.info("Created new memory database: %s", MEMORY_DB)
+            _init_schema(conn)
+        else:
+            _init_schema(conn)
+
+        _MEMORY_CONN = conn
+        return conn
+
 
 def _init_schema(conn: sqlite3.Connection) -> None:
     cursor = conn.cursor()
@@ -90,8 +109,12 @@ def _init_schema(conn: sqlite3.Connection) -> None:
         )
     """)
 
-    cursor.execute("CREATE INDEX IF NOT EXISTS idx_patterns_success_rate ON patterns(success_rate DESC)")
-    cursor.execute("CREATE INDEX IF NOT EXISTS idx_patterns_effectiveness ON patterns(effectiveness_score DESC)")
+    cursor.execute(
+        "CREATE INDEX IF NOT EXISTS idx_patterns_success_rate ON patterns(success_rate DESC)"
+    )
+    cursor.execute(
+        "CREATE INDEX IF NOT EXISTS idx_patterns_effectiveness ON patterns(effectiveness_score DESC)"
+    )
 
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS targets (
@@ -123,10 +146,18 @@ def _init_schema(conn: sqlite3.Connection) -> None:
     """)
 
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_findings_target ON findings(target)")
-    cursor.execute("CREATE INDEX IF NOT EXISTS idx_findings_type ON findings(finding_type)")
-    cursor.execute("CREATE INDEX IF NOT EXISTS idx_patterns_type ON patterns(pattern_type)")
-    cursor.execute("CREATE INDEX IF NOT EXISTS idx_targets_domain ON targets(target_domain)")
-    cursor.execute("CREATE INDEX IF NOT EXISTS idx_knowledge_category ON knowledge(category)")
+    cursor.execute(
+        "CREATE INDEX IF NOT EXISTS idx_findings_type ON findings(finding_type)"
+    )
+    cursor.execute(
+        "CREATE INDEX IF NOT EXISTS idx_patterns_type ON patterns(pattern_type)"
+    )
+    cursor.execute(
+        "CREATE INDEX IF NOT EXISTS idx_targets_domain ON targets(target_domain)"
+    )
+    cursor.execute(
+        "CREATE INDEX IF NOT EXISTS idx_knowledge_category ON knowledge(category)"
+    )
 
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS tool_usage (
@@ -154,11 +185,38 @@ def _init_schema(conn: sqlite3.Connection) -> None:
         )
     """)
 
-    cursor.execute("CREATE INDEX IF NOT EXISTS idx_tool_usage_name ON tool_usage(tool_name)")
-    cursor.execute("CREATE INDEX IF NOT EXISTS idx_model_performance_name ON model_performance(model_name)")
+    cursor.execute(
+        "CREATE INDEX IF NOT EXISTS idx_tool_usage_name ON tool_usage(tool_name)"
+    )
+    cursor.execute(
+        "CREATE INDEX IF NOT EXISTS idx_model_performance_name ON model_performance(model_name)"
+    )
+
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS skill_usage (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            skill_name TEXT NOT NULL,
+            target TEXT NOT NULL,
+            phase TEXT NOT NULL,
+            success INTEGER DEFAULT 0,
+            effectiveness_score REAL DEFAULT 0.0,
+            tokens_saved INTEGER DEFAULT 0,
+            timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+    """)
+    cursor.execute(
+        "CREATE INDEX IF NOT EXISTS idx_skill_usage_skill ON skill_usage(skill_name)"
+    )
+    cursor.execute(
+        "CREATE INDEX IF NOT EXISTS idx_skill_usage_target ON skill_usage(target)"
+    )
+    cursor.execute(
+        "CREATE INDEX IF NOT EXISTS idx_skill_usage_timestamp ON skill_usage(timestamp)"
+    )
 
     conn.commit()
     logger.info("Memory database initialized at %s", MEMORY_DB)
+
 
 class MemoryManager:
     def __init__(self):
@@ -178,43 +236,54 @@ class MemoryManager:
             return
 
         cursor = self.conn.cursor()
-        cursor.execute("""
+        cursor.execute(
+            """
             INSERT OR REPLACE INTO sessions
             (session_id, target, updated_at, phase, subdomains_count,
              live_hosts_count, vulnerabilities_count, attack_chains_count,
              token_total, model_used)
             VALUES (?, ?, CURRENT_TIMESTAMP, ?, ?, ?, ?, ?, ?, ?)
-        """, (
-            session_data.get("session_id"),
-            session_data.get("target"),
-            session_data.get("current_phase", "RECON"),
-            len(session_data.get("subdomains", [])),
-            len(session_data.get("live_hosts", [])),
-            len(session_data.get("vulnerabilities", [])),
-            len(session_data.get("attack_chains", [])),
-            session_data.get("token_total", 0),
-            session_data.get("model_used"),
-        ))
+        """,
+            (
+                session_data.get("session_id"),
+                session_data.get("target"),
+                session_data.get("current_phase", "RECON"),
+                len(session_data.get("subdomains", [])),
+                len(session_data.get("live_hosts", [])),
+                len(session_data.get("vulnerabilities", [])),
+                len(session_data.get("attack_chains", [])),
+                session_data.get("token_total", 0),
+                session_data.get("model_used"),
+            ),
+        )
         self.conn.commit()
 
-    def get_past_sessions(self, target: str | None = None, limit: int = 10) -> list[dict]:
+    def get_past_sessions(
+        self, target: str | None = None, limit: int = 10
+    ) -> list[dict]:
         if not self.conn:
             return []
 
         cursor = self.conn.cursor()
         if target:
-            cursor.execute("""
+            cursor.execute(
+                """
                 SELECT * FROM sessions
                 WHERE target LIKE ?
                 ORDER BY updated_at DESC
                 LIMIT ?
-            """, (f"%{target}%", limit))
+            """,
+                (f"%{target}%", limit),
+            )
         else:
-            cursor.execute("""
+            cursor.execute(
+                """
                 SELECT * FROM sessions
                 ORDER BY updated_at DESC
                 LIMIT ?
-            """, (limit,))
+            """,
+                (limit,),
+            )
 
         return [dict(row) for row in cursor.fetchall()]
 
@@ -223,45 +292,56 @@ class MemoryManager:
             return
 
         cursor = self.conn.cursor()
-        cursor.execute("""
+        cursor.execute(
+            """
             INSERT INTO findings
             (session_id, target, finding_type, severity, url, parameter,
              description, evidence, cwe_id, cvss_score, remediation)
             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-        """, (
-            finding.get("session_id"),
-            finding.get("target"),
-            finding.get("type", "vulnerability"),
-            finding.get("severity", "Medium"),
-            finding.get("url"),
-            finding.get("parameter"),
-            finding.get("description", ""),
-            json.dumps(finding.get("evidence", [])),
-            finding.get("cwe_id"),
-            finding.get("cvss_score"),
-            finding.get("remediation", ""),
-        ))
+        """,
+            (
+                finding.get("session_id"),
+                finding.get("target"),
+                finding.get("type", "vulnerability"),
+                finding.get("severity", "Medium"),
+                finding.get("url"),
+                finding.get("parameter"),
+                finding.get("description", ""),
+                json.dumps(finding.get("evidence", [])),
+                finding.get("cwe_id"),
+                finding.get("cvss_score"),
+                finding.get("remediation", ""),
+            ),
+        )
         self.conn.commit()
 
-    def get_similar_findings(self, target: str, finding_type: str | None = None, limit: int = 20) -> list[dict]:
+    def get_similar_findings(
+        self, target: str, finding_type: str | None = None, limit: int = 20
+    ) -> list[dict]:
         if not self.conn:
             return []
 
         cursor = self.conn.cursor()
         if finding_type:
-            cursor.execute("""
+            cursor.execute(
+                """
                 SELECT * FROM findings
                 WHERE (target = ? OR target LIKE ?) AND finding_type = ?
                 ORDER BY created_at DESC
                 LIMIT ?
-            """, (target, f"%.{target}", finding_type, limit))
+            """,
+                (target, f"%.{target}", finding_type, limit),
+            )
         else:
-            cursor.execute("""
+            cursor.execute(
+                """
                 SELECT * FROM findings
                 WHERE target = ? OR target LIKE ?
                 ORDER BY created_at DESC
                 LIMIT ?
-            """, (target, f"%.{target}", limit))
+            """,
+                (target, f"%.{target}", limit),
+            )
 
         findings = []
         for row in cursor.fetchall():
@@ -270,8 +350,8 @@ class MemoryManager:
             if finding.get("evidence"):
                 try:
                     finding["evidence"] = json.loads(finding["evidence"])
-                except Exception:
-                    pass
+                except Exception as e:
+                    logger.debug("Expected failure parsing evidence JSON: %s", e)
             findings.append(finding)
 
         return findings
@@ -280,74 +360,66 @@ class MemoryManager:
         if not self.conn:
             return
 
-        success_rate = float(pattern.get('success_rate', 0.0))
-        if success_rate < 0.70:
+        success_rate = float(pattern.get("success_rate", 0.0))
+        if success_rate < 0.50:
             logger.debug(
-                "Pattern rejected: success_rate %.2f < 0.70 threshold | %s",
-                success_rate, pattern.get('technique_name', 'unknown')
+                "Pattern rejected: success_rate %.2f < 0.50 threshold | %s",
+                success_rate,
+                pattern.get("technique_name", "unknown"),
             )
             return
 
-        times_used = int(pattern.get('times_used', 0))
-        if times_used < 3:
+        times_used = int(pattern.get("times_used", 0))
+        if times_used < 2:
             logger.debug(
-                "Pattern rejected: times_used %d < 3 minimum | %s",
-                times_used, pattern.get('technique_name', 'unknown')
+                "Pattern rejected: times_used %d < 2 minimum | %s",
+                times_used,
+                pattern.get("technique_name", "unknown"),
             )
             return
 
-        technique_name = pattern.get('technique_name', '').strip()
-        if not technique_name or len(technique_name) < 5:
+        technique_name = pattern.get("technique_name", "").strip()
+        if not technique_name or len(technique_name) < 3:
             logger.debug("Pattern rejected: technique_name too short/generic")
             return
 
-        BASIC_PATTERNS = [
-            'nmap -sV', 'nmap -sC', 'nmap -p-', 'nmap -F',
-            'gobuster dir', 'gobuster dns', 'dirb', 'dirsearch',
-            'sqlmap -u', 'nikto', 'whatweb', 'wafw00f',
-            'subfinder', 'amass', 'assetfinder', 'httpx',
-            'ffuf -w', 'nuclei -t',
-        ]
-        commands = pattern.get('commands_used', [])
+        #if not pattern.get("tech"):
+        #    logger.debug("Pattern rejected: missing target tech")
+        #    return
+
+        description = pattern.get("description", "").strip()
+        payload = pattern.get("payload_template", "").strip()
+        commands = pattern.get("commands_used", [])
         if isinstance(commands, str):
             try:
                 commands = json.loads(commands)
             except Exception:
-                commands = [commands]
+                commands = [commands] if commands else []
 
-        is_basic = any(
-            basic.lower() in str(cmd).lower()
-            for cmd in commands
-            for basic in BASIC_PATTERNS
-        )
-        if is_basic and not pattern.get('advanced_technique', False):
-            logger.debug(
-                "Pattern rejected: basic tool usage (not advanced technique) | %s",
-                technique_name
-            )
-            return
-
-        description = pattern.get('description', '').strip()
-        payload = pattern.get('payload_template', '').strip()
         if not description and not payload and not commands:
             logger.debug("Pattern rejected: no actionable content")
             return
 
         cursor = self.conn.cursor()
 
-        cursor.execute("""
+        cursor.execute(
+            """
             SELECT id, times_used, times_successful FROM patterns
             WHERE technique_name = ? AND (target_tech = ? OR target_tech IS ?)
-        """, (technique_name, pattern.get('tech'), pattern.get('tech')))
+        """,
+            (technique_name, pattern.get("tech"), pattern.get("tech")),
+        )
 
         existing = cursor.fetchone()
         if existing:
-
             new_times_used = existing["times_used"] + times_used
-            new_times_successful = existing["times_successful"] + int(times_used * success_rate)
+            new_times_successful = existing["times_successful"] + int(
+                times_used * success_rate
+            )
             new_success_rate = new_times_successful / max(new_times_used, 1)
 
-            cursor.execute("""
+            cursor.execute(
+                """
                 UPDATE patterns SET
                     success_rate = ?, times_used = ?, times_successful = ?,
                     last_used = CURRENT_TIMESTAMP,
@@ -355,69 +427,86 @@ class MemoryManager:
                     notes = COALESCE(?, notes),
                     source_session = ?
                 WHERE id = ?
-            """, (
-                new_success_rate,
-                new_times_used,
-                new_times_successful,
-                pattern.get('effectiveness_score', new_success_rate * 100),
-                pattern.get('notes'),
-                pattern.get('source_session'),
-                existing["id"]
-            ))
+            """,
+                (
+                    new_success_rate,
+                    new_times_used,
+                    new_times_successful,
+                    pattern.get("effectiveness_score", new_success_rate * 100),
+                    pattern.get("notes"),
+                    pattern.get("source_session"),
+                    existing["id"],
+                ),
+            )
         else:
-
-            cursor.execute("""
+            cursor.execute(
+                """
                 INSERT INTO patterns (
                     pattern_type, target_tech, technique_name, description,
                     success_rate, times_used, times_successful,
                     payload_template, commands_used, prerequisites,
                     detection_evasion, effectiveness_score, notes, source_session
                 ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            """, (
-                pattern.get('type', 'recon'),
-                pattern.get('tech'),
-                technique_name,
-                description,
-                success_rate,
-                times_used,
-                int(times_used * success_rate),
-                payload,
-                json.dumps(commands) if commands else None,
-                json.dumps(pattern.get('prerequisites', [])),
-                pattern.get('detection_evasion'),
-                pattern.get('effectiveness_score', success_rate * 100),
-                pattern.get('notes'),
-                pattern.get('source_session'),
-            ))
+            """,
+                (
+                    pattern.get("type", "recon"),
+                    pattern.get("tech"),
+                    technique_name,
+                    description,
+                    success_rate,
+                    times_used,
+                    int(times_used * success_rate),
+                    payload,
+                    json.dumps(commands) if commands else None,
+                    json.dumps(pattern.get("prerequisites", [])),
+                    pattern.get("detection_evasion"),
+                    pattern.get("effectiveness_score", success_rate * 100),
+                    pattern.get("notes"),
+                    pattern.get("source_session"),
+                ),
+            )
 
         self.conn.commit()
         logger.info(
             "✓ High-quality pattern saved: %s (success=%.0f%%, used=%dx)",
-            technique_name, success_rate * 100, times_used
+            technique_name,
+            success_rate * 100,
+            times_used,
         )
 
-    def get_patterns(self, target_tech: str | None = None, limit: int = 10, min_success_rate: float = 0.70) -> list[dict]:
+    def get_patterns(
+        self,
+        target_tech: str | None = None,
+        limit: int = 20,
+        min_success_rate: float = 0.50,
+    ) -> list[dict]:
         if not self.conn:
             return []
 
         cursor = self.conn.cursor()
         if target_tech:
-            cursor.execute("""
+            cursor.execute(
+                """
                 SELECT * FROM patterns
                 WHERE (target_tech = ? OR target_tech IS NULL)
                   AND success_rate >= ?
-                  AND times_used >= 3
+                  AND times_used >= 2
                 ORDER BY effectiveness_score DESC, success_rate DESC
                 LIMIT ?
-            """, (target_tech, min_success_rate, limit))
+            """,
+                (target_tech, min_success_rate, limit),
+            )
         else:
-            cursor.execute("""
+            cursor.execute(
+                """
                 SELECT * FROM patterns
                 WHERE success_rate >= ?
-                  AND times_used >= 3
+                  AND times_used >= 2
                 ORDER BY effectiveness_score DESC, success_rate DESC
                 LIMIT ?
-            """, (min_success_rate, limit))
+            """,
+                (min_success_rate, limit),
+            )
 
         patterns = []
         for row in cursor.fetchall():
@@ -436,8 +525,10 @@ class MemoryManager:
             patterns.append(pattern)
 
         logger.debug(
-            "Retrieved %d high-quality patterns (min_success=%.0f%%)",
-            len(patterns), min_success_rate * 100
+            "Retrieved %d patterns (min_success=%.0f%%, min_used=%dx)",
+            len(patterns),
+            min_success_rate * 100,
+            2,
         )
         return patterns
 
@@ -446,22 +537,25 @@ class MemoryManager:
             return
 
         cursor = self.conn.cursor()
-        cursor.execute("""
+        cursor.execute(
+            """
             INSERT OR REPLACE INTO targets
             (target_domain, subdomains, open_ports, technologies, waf_detected,
              auth_methods, interesting_endpoints, last_seen, scan_count)
             VALUES (?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP,
                     COALESCE((SELECT scan_count FROM targets WHERE target_domain = ?), 0) + 1)
-        """, (
-            intel.get("target"),
-            json.dumps(intel.get("subdomains", [])),
-            json.dumps(intel.get("ports", {})),
-            json.dumps(intel.get("technologies", {})),
-            intel.get("waf"),
-            json.dumps(intel.get("auth_methods", [])),
-            json.dumps(intel.get("interesting_endpoints", [])),
-            intel.get("target"),
-        ))
+        """,
+            (
+                intel.get("target"),
+                json.dumps(intel.get("subdomains", [])),
+                json.dumps(intel.get("ports", {})),
+                json.dumps(intel.get("technologies", {})),
+                intel.get("waf"),
+                json.dumps(intel.get("auth_methods", [])),
+                json.dumps(intel.get("interesting_endpoints", [])),
+                intel.get("target"),
+            ),
+        )
         self.conn.commit()
 
     def get_target_intel(self, target: str) -> dict | None:
@@ -469,9 +563,12 @@ class MemoryManager:
             return None
 
         cursor = self.conn.cursor()
-        cursor.execute("""
+        cursor.execute(
+            """
             SELECT * FROM targets WHERE target_domain = ?
-        """, (target,))
+        """,
+            (target,),
+        )
 
         row = cursor.fetchone()
         if not row:
@@ -479,7 +576,13 @@ class MemoryManager:
 
         intel = dict(row)
 
-        for field in ["subdomains", "open_ports", "technologies", "auth_methods", "interesting_endpoints"]:
+        for field in [
+            "subdomains",
+            "open_ports",
+            "technologies",
+            "auth_methods",
+            "interesting_endpoints",
+        ]:
             if intel.get(field):
                 try:
                     intel[field] = json.loads(intel[field])
@@ -493,18 +596,21 @@ class MemoryManager:
             return
 
         cursor = self.conn.cursor()
-        cursor.execute("""
+        cursor.execute(
+            """
             INSERT INTO knowledge
             (category, title, content, confidence, source_session, tags)
             VALUES (?, ?, ?, ?, ?, ?)
-        """, (
-            knowledge.get("category"),
-            knowledge.get("title"),
-            knowledge.get("content"),
-            knowledge.get("confidence", 1.0),
-            knowledge.get("source_session"),
-            json.dumps(knowledge.get("tags", [])),
-        ))
+        """,
+            (
+                knowledge.get("category"),
+                knowledge.get("title"),
+                knowledge.get("content"),
+                knowledge.get("confidence", 1.0),
+                knowledge.get("source_session"),
+                json.dumps(knowledge.get("tags", [])),
+            ),
+        )
         self.conn.commit()
 
     def get_knowledge(self, category: str | None = None, limit: int = 50) -> list[dict]:
@@ -513,18 +619,24 @@ class MemoryManager:
 
         cursor = self.conn.cursor()
         if category:
-            cursor.execute("""
+            cursor.execute(
+                """
                 SELECT * FROM knowledge
                 WHERE category = ?
                 ORDER BY confidence DESC, created_at DESC
                 LIMIT ?
-            """, (category, limit))
+            """,
+                (category, limit),
+            )
         else:
-            cursor.execute("""
+            cursor.execute(
+                """
                 SELECT * FROM knowledge
                 ORDER BY confidence DESC, created_at DESC
                 LIMIT ?
-            """, (limit,))
+            """,
+                (limit,),
+            )
 
         knowledge_entries = []
         for row in cursor.fetchall():
@@ -542,8 +654,9 @@ class MemoryManager:
         self,
         target: str,
         current_phase: str,
-        max_tokens: int = 2000,
+        max_tokens: int = 4096,
     ) -> str:
+        """Build comprehensive context including memory, patterns, and tool insights."""
         context_parts = []
         tokens_used = 0
 
@@ -551,50 +664,75 @@ class MemoryManager:
         if intel:
             context_parts.append("## TARGET INTELLIGENCE")
             if intel.get("subdomains"):
-                subs = ', '.join(intel['subdomains'][:20])
-                context_parts.append(f"Subdomains: {subs}")
+                subs = ", ".join(intel["subdomains"][:30])  # Increased from 20
+                context_parts.append(
+                    f"Subdomains ({len(intel['subdomains'])} total): {subs}"
+                )
                 tokens_used += len(subs) // 4
             if intel.get("open_ports"):
                 ports = intel["open_ports"]
-                ports_str = ', '.join(f'{p}:{s}' for p, s in list(ports.items())[:10])
-                context_parts.append(f"Open Ports: {ports_str}")
+                ports_str = ", ".join(
+                    f"{p}:{s}" for p, s in list(ports.items())[:15]
+                ) 
+                context_parts.append(f"Open Ports ({len(ports)} total): {ports_str}")
                 tokens_used += len(ports_str) // 4
             if intel.get("technologies"):
                 tech = intel["technologies"]
-                tech_str = ', '.join(f'{t}:{v}' for t, v in list(tech.items())[:10])
-                context_parts.append(f"Technologies: {tech_str}")
+                tech_str = ", ".join(
+                    f"{t}:{v}" for t, v in list(tech.items())[:15]
+                ) 
+                context_parts.append(f"Technologies ({len(tech)} total): {tech_str}")
                 tokens_used += len(tech_str) // 4
 
-        findings = self.get_similar_findings(target, limit=10)
+        findings = self.get_similar_findings(target, limit=15)  
         if findings and tokens_used < max_tokens * 0.7:
             context_parts.append("\n## PAST FINDINGS")
-            for f in findings[:5]:
-                line = f"- [{f['severity']}] {f['finding_type']}: {f['description'][:100]}"
+            for f in findings[:7]: 
+                line = (
+                    f"- [{f['severity']}] {f['finding_type']}: {f['description'][:120]}"
+                )
                 context_parts.append(line)
                 tokens_used += len(line) // 4
 
-        patterns = self.get_patterns(limit=5)
+        patterns = self.get_patterns(limit=10) 
         if patterns and tokens_used < max_tokens * 0.8:
-            context_parts.append("\n## ATTACK PATTERNS (Ranked by Success Rate)")
-            for p in patterns[:3]:
-                line = f"- {p['description'][:100]} (success: {p['success_rate']:.0%}, used: {p['times_used']}x)"
+            context_parts.append("\n## LEARNED PATTERNS (Success Rate & Effectiveness)")
+            for p in patterns[:5]:  
+                effectiveness = p.get(
+                    "effectiveness_score", p.get("success_rate", 0) * 100
+                )
+                line = f"- {p['description'][:120]} (success: {p['success_rate']:.0%}, effectiveness: {effectiveness:.0f})"
                 context_parts.append(line)
                 tokens_used += len(line) // 4
 
-        if current_phase == "EXPLOIT" and tokens_used < max_tokens * 0.9:
-            knowledge = self.get_knowledge("exploitation", limit=5)
+        if tokens_used < max_tokens * 0.6:
+            tool_stats = self.get_tool_statistics()
+            if isinstance(tool_stats, list) and tool_stats:
+                context_parts.append("\n## TOOL USAGE INSIGHTS")
+                for t in tool_stats[:6]:
+                    sr = t.get("success_rate", 0) * 100
+                    total = t.get(
+                        "total_calls",
+                        t.get("success_count", 0) + t.get("failure_count", 0),
+                    )
+                    line = f"- {t.get('tool_name', 'unknown')}: {sr:.0f}% success ({total} runs)"
+                    context_parts.append(line)
+                    tokens_used += len(line) // 4
+
+        if current_phase == "EXPLOIT" and tokens_used < max_tokens * 0.85:
+            knowledge = self.get_knowledge("exploitation", limit=10)  # Increased from 5
             if knowledge:
-                context_parts.append("\n## EXPLOITATION TIPS")
-                for k in knowledge[:3]:
+                context_parts.append("\n## EXPLOITATION TIPS (From Past Successes)")
+                for k in knowledge[:5]: 
                     line = f"- {k['content'][:150]}"
                     context_parts.append(line)
                     tokens_used += len(line) // 4
 
         if tokens_used < max_tokens * 0.5:
-            baseline = self.get_knowledge(limit=10)
+            baseline = self.get_knowledge(limit=15) 
             if baseline:
                 context_parts.append("\n## SECURITY KNOWLEDGE BASE")
-                for k in baseline[:5]:
+                for k in baseline[:8]:
                     line = f"- [{k['category']}] {k['title']}: {k['content'][:100]}"
                     context_parts.append(line)
                     tokens_used += len(line) // 4
@@ -622,7 +760,9 @@ class MemoryManager:
                 if overlap:
                     target_data = dict(row)
                     target_data["tech_overlap"] = list(overlap)
-                    target_data["similarity_score"] = len(overlap) / max(len(current_techs), 1)
+                    target_data["similarity_score"] = len(overlap) / max(
+                        len(current_techs), 1
+                    )
                     similar.append(target_data)
             except Exception:
                 continue
@@ -630,23 +770,235 @@ class MemoryManager:
         similar.sort(key=lambda x: x.get("similarity_score", 0), reverse=True)
         return similar[:limit]
 
-    def get_tool_statistics(self, tool_name: str | None = None) -> dict[str, Any] | list[dict[str, Any]]:
+    def get_tool_statistics(
+        self, tool_name: str | None = None
+    ) -> dict[str, Any] | list[dict[str, Any]]:
         if not self.conn:
             return {}
 
         cursor = self.conn.cursor()
         if tool_name:
-            cursor.execute("""
+            cursor.execute(
+                """
                 SELECT * FROM tool_usage WHERE tool_name = ?
-            """, (tool_name,))
+            """,
+                (tool_name,),
+            )
             row = cursor.fetchone()
             return dict(row) if row else {}
         else:
             cursor.execute("""
-                SELECT tool_name, success_count, failure_count, avg_duration_sec
+                SELECT tool_name, success_count, failure_count, avg_duration_sec, typical_output_size
                 FROM tool_usage ORDER BY last_used DESC LIMIT 20
             """)
-            return [dict(row) for row in cursor.fetchall()]
+            results = [dict(row) for row in cursor.fetchall()]
+            total_success = sum(r.get("success_count", 0) for r in results)
+            total_calls = total_success + sum(
+                r.get("failure_count", 0) for r in results
+            )
+            if total_calls > 0:
+                for r in results:
+                    tool_total = r.get("success_count", 0) + r.get("failure_count", 0)
+                    r["total_calls"] = tool_total
+                    r["success_rate"] = round(
+                        r.get("success_count", 0) / max(tool_total, 1), 2
+                    )
+            return results
+
+    def get_tool_insights(self) -> dict[str, Any]:
+
+        if not self.conn:
+            return {}
+
+        cursor = self.conn.cursor()
+
+        cursor.execute("""
+            SELECT tool_name,
+                   success_count,
+                   failure_count,
+                   avg_duration_sec,
+                   typical_output_size,
+                   (success_count * 100.0 / MAX(success_count + failure_count, 1)) as success_rate
+            FROM tool_usage
+            WHERE success_count + failure_count >= 2
+            ORDER BY success_rate DESC, total_calls DESC
+            LIMIT 15
+        """)
+
+        top_tools = []
+        for row in cursor.fetchall():
+            tool = dict(row)
+            tool["success_rate"] = round(tool.get("success_rate", 0), 1)
+            top_tools.append(tool)
+
+        cursor.execute("""
+            SELECT tool_name, avg_duration_sec, typical_output_size
+            FROM tool_usage
+            ORDER BY avg_duration_sec DESC
+            LIMIT 5
+        """)
+        slow_tools = [dict(row) for row in cursor.fetchall()]
+
+        cursor.execute("""
+            SELECT tool_name, success_count, failure_count
+            FROM tool_usage
+            WHERE success_count + failure_count >= 3
+            ORDER BY (success_count * 1.0 / (success_count + failure_count)) DESC
+            LIMIT 10
+        """)
+        reliable_tools = [dict(row) for row in cursor.fetchall()]
+
+        return {
+            "top_performing_tools": top_tools,
+            "tools_by_speed": slow_tools,
+            "most_reliable_tools": reliable_tools,
+            "total_tools_tracked": len(top_tools),
+        }
+
+    def get_model_performance_insights(self) -> dict[str, Any]:
+        """
+        Get model performance insights to help the agent choose the right model.
+        """
+        if not self.conn:
+            return {}
+
+        cursor = self.conn.cursor()
+        cursor.execute("""
+            SELECT model_name, task_type, success_rate, avg_response_time_sec, total_requests
+            FROM model_performance
+            ORDER BY success_rate DESC, avg_response_time_sec ASC
+        """)
+
+        results = [dict(row) for row in cursor.fetchall()]
+
+        by_task = {}
+        for r in results:
+            task = r.get("task_type") or "unknown"
+            if task not in by_task:
+                by_task[task] = []
+            by_task[task].append(r)
+
+        return {
+            "all_models": results,
+            "models_by_task": by_task,
+            "total_records": len(results),
+        }
+
+    def health_snapshot(self, target: str | None = None) -> dict[str, Any]:
+        if not self.conn:
+            return {"ok": False, "error": "memory_db_not_connected"}
+
+        cursor = self.conn.cursor()
+        try:
+            cursor.execute("SELECT COUNT(*) AS c FROM sessions")
+            sessions_total = int(cursor.fetchone()["c"])
+
+            cursor.execute("SELECT COUNT(*) AS c FROM findings")
+            findings_total = int(cursor.fetchone()["c"])
+
+            cursor.execute("SELECT COUNT(*) AS c FROM patterns")
+            patterns_total = int(cursor.fetchone()["c"])
+
+            cursor.execute(
+                "SELECT COUNT(*) AS c FROM patterns WHERE success_rate >= 0.60 AND times_used >= 2"
+            )
+            high_quality_patterns = int(cursor.fetchone()["c"])
+
+            target_sessions = 0
+            target_findings = 0
+            if target:
+                cursor.execute(
+                    "SELECT COUNT(*) AS c FROM sessions WHERE target = ? OR target LIKE ?",
+                    (target, f"%.{target}"),
+                )
+                target_sessions = int(cursor.fetchone()["c"])
+
+                cursor.execute(
+                    "SELECT COUNT(*) AS c FROM findings WHERE target = ? OR target LIKE ?",
+                    (target, f"%.{target}"),
+                )
+                target_findings = int(cursor.fetchone()["c"])
+
+            return {
+                "ok": True,
+                "target": target or "",
+                "sessions_total": sessions_total,
+                "findings_total": findings_total,
+                "patterns_total": patterns_total,
+                "high_quality_patterns": high_quality_patterns,
+                "target_sessions": target_sessions,
+                "target_findings": target_findings,
+            }
+        except Exception as exc:
+            return {"ok": False, "error": str(exc)}
+
+    def get_skill_recommendations(
+        self, target: str, current_phase: str
+    ) -> list[dict[str, Any]]:
+        """
+        Get skill recommendations based on past performance.
+        Returns skills that were effective for similar targets/phases.
+        """
+        if not self.conn:
+            return []
+
+        cursor = self.conn.cursor()
+
+        cursor.execute("""
+            SELECT technique_name, target_tech, success_rate, times_used, source_session
+            FROM patterns
+            WHERE success_rate >= 0.60 AND times_used >= 2
+            ORDER BY effectiveness_score DESC
+            LIMIT 15
+        """)
+
+        skill_data = []
+        for row in cursor.fetchall():
+            skill_data.append(
+                {
+                    "skill_name": row["technique_name"],
+                    "tech": row["target_tech"],
+                    "success_rate": row["success_rate"],
+                    "times_used": row["times_used"],
+                    "source_session": row["source_session"],
+                }
+            )
+
+        return skill_data
+
+    def save_skill_usage(
+        self,
+        skill_name: str,
+        target: str,
+        phase: str,
+        success: bool,
+        effectiveness_score: float,
+        tokens_saved: int,
+    ) -> None:
+        """
+        Record skill usage outcome for learning.
+        """
+        if not self.conn:
+            return
+
+        cursor = self.conn.cursor()
+        cursor.execute(
+            """
+            INSERT INTO skill_usage (
+                skill_name, target, phase, success, effectiveness_score,
+                tokens_saved, timestamp
+            ) VALUES (?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+        """,
+            (
+                skill_name,
+                target,
+                phase,
+                1 if success else 0,
+                effectiveness_score,
+                tokens_saved,
+            ),
+        )
+        self.conn.commit()
 
     def record_tool_usage(
         self,
@@ -661,31 +1013,48 @@ class MemoryManager:
 
         cursor = self.conn.cursor()
 
-        cursor.execute("""
+        cursor.execute(
+            """
             SELECT id, success_count, failure_count, avg_duration_sec FROM tool_usage
             WHERE tool_name = ? AND (target = ? OR target IS NULL)
-        """, (tool_name, target))
+        """,
+            (tool_name, target),
+        )
 
         existing = cursor.fetchone()
         if existing:
-
             new_success = existing["success_count"] + (1 if success else 0)
             new_failure = existing["failure_count"] + (0 if success else 1)
             total = new_success + new_failure
-            new_avg = ((existing["avg_duration_sec"] * (total - 1)) + duration_sec) / total
+            new_avg = (
+                (existing["avg_duration_sec"] * (total - 1)) + duration_sec
+            ) / total
 
-            cursor.execute("""
+            cursor.execute(
+                """
                 UPDATE tool_usage SET
                     success_count = ?, failure_count = ?, avg_duration_sec = ?,
                     typical_output_size = ?, last_used = CURRENT_TIMESTAMP
                 WHERE id = ?
-            """, (new_success, new_failure, new_avg, output_size, existing["id"]))
+            """,
+                (new_success, new_failure, new_avg, output_size, existing["id"]),
+            )
         else:
-            cursor.execute("""
+            cursor.execute(
+                """
                 INSERT INTO tool_usage
                 (tool_name, target, success_count, failure_count, avg_duration_sec, typical_output_size)
                 VALUES (?, ?, ?, ?, ?, ?)
-            """, (tool_name, target, 1 if success else 0, 0 if success else 1, duration_sec, output_size))
+            """,
+                (
+                    tool_name,
+                    target,
+                    1 if success else 0,
+                    0 if success else 1,
+                    duration_sec,
+                    output_size,
+                ),
+            )
 
         self.conn.commit()
 
@@ -694,6 +1063,7 @@ class MemoryManager:
         def _config_default_model() -> str:
             try:
                 from airecon.proxy.config import get_config
+
                 cfg = get_config()
                 model = (cfg.ollama_model if cfg else "") or ""
                 logger.debug("Config loaded: ollama_model=%s", model or None)
@@ -713,13 +1083,16 @@ class MemoryManager:
             return ""
 
         cursor = self.conn.cursor()
-        cursor.execute("""
+        cursor.execute(
+            """
             SELECT model_name, success_rate, avg_response_time_sec, total_requests
             FROM model_performance
             WHERE task_type = ? OR task_type IS NULL
             ORDER BY success_rate DESC, avg_response_time_sec ASC
             LIMIT 1
-        """, (task_type,))
+        """,
+            (task_type,),
+        )
 
         row = cursor.fetchone()
         if row and row["total_requests"] >= 5:
@@ -733,11 +1106,16 @@ class MemoryManager:
         logger.warning("No model configured — check ~/.airecon/config.yaml")
         return ""
 
+
 _memory_manager: MemoryManager | None = None
+_memory_manager_lock = threading.Lock()
+
 
 def get_memory_manager() -> MemoryManager:
     global _memory_manager
     if _memory_manager is None:
-        _memory_manager = MemoryManager()
-        _memory_manager.connect()
+        with _memory_manager_lock:
+            if _memory_manager is None:
+                _memory_manager = MemoryManager()
+                _memory_manager.connect()
     return _memory_manager

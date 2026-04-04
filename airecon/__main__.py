@@ -6,6 +6,7 @@ import sys
 
 from airecon._version import __version__
 
+
 def main() -> None:
 
     version = __version__
@@ -15,79 +16,73 @@ def main() -> None:
         description="AIRecon — AI-powered security reconnaissance",
     )
     parser.add_argument(
-        "--version",
-        "-v",
-        action="version",
-        version=f"%(prog)s {version}")
+        "--version", "-v", action="version", version=f"%(prog)s {version}"
+    )
     parser.add_argument(
         "--config",
         default=None,
-        help="Path to custom configuration file (default: ~/.airecon/config.yaml)")
+        help="Path to custom configuration file (default: ~/.airecon/config.yaml)",
+    )
     parser.add_argument(
-        "--list",
-        action="store_true",
-        help="List all saved sessions and exit")
+        "--list", action="store_true", help="List all saved sessions and exit"
+    )
     subparsers = parser.add_subparsers(dest="command", help="Command to run")
-    proxy_parser = subparsers.add_parser(
-        "proxy", help="Start proxy server only")
+    proxy_parser = subparsers.add_parser("proxy", help="Start proxy server only")
     proxy_parser.add_argument("--host", default=None, help="Host to bind to")
+    proxy_parser.add_argument("--port", type=int, default=None, help="Port to bind to")
     proxy_parser.add_argument(
-        "--port",
-        type=int,
-        default=None,
-        help="Port to bind to")
-    proxy_parser.add_argument(
-        "--config",
-        default=None,
-        help="Path to custom configuration file")
+        "--config", default=None, help="Path to custom configuration file"
+    )
     proxy_parser.add_argument(
         "--debug",
         action="store_true",
-        help="Enable debug logging to /tmp/airecon/debug.log")
+        help="Enable debug logging to /tmp/airecon/debug.log",
+    )
     tui_parser = subparsers.add_parser(
-        "start", help="Start TUI client (also starts proxy)")
+        "start", help="Start TUI client (also starts proxy)"
+    )
     tui_parser.add_argument(
-        "--no-proxy",
-        action="store_true",
-        help="Don't auto-start proxy")
+        "--no-proxy", action="store_true", help="Don't auto-start proxy"
+    )
     tui_parser.add_argument(
-        "--proxy-url",
-        default="http://127.0.0.1:3000",
-        help="Proxy URL")
+        "--proxy-url", default="http://127.0.0.1:3000", help="Proxy URL"
+    )
     tui_parser.add_argument(
-        "--config",
+        "--config", default=None, help="Path to custom configuration file"
+    )
+    tui_parser.add_argument(
+        "--session",
         default=None,
-        help="Path to custom configuration file")
-    tui_parser.add_argument(
-        "--session", default=None,
         metavar="SESSION_ID",
         help="Resume a previous session by ID (e.g. airecon start --session 1740842400_a3b4c5d6)",
     )
     tui_parser.add_argument(
         "--debug",
         action="store_true",
-        help="Enable debug logging to /tmp/airecon/debug.log")
-    status_parser = subparsers.add_parser(
-        "status", help="Check status of services")
+        help="Enable debug logging to /tmp/airecon/debug.log",
+    )
+    status_parser = subparsers.add_parser("status", help="Check status of services")
     status_parser.add_argument(
-        "--config",
-        default=None,
-        help="Path to custom configuration file")
+        "--config", default=None, help="Path to custom configuration file"
+    )
     clean_parser = subparsers.add_parser(
-        "clean",
-        help="Clean Docker build cache, orphan containers, and unused volumes"
+        "clean", help="Clean Docker build cache, orphan containers, and unused volumes"
     )
     clean_parser.add_argument(
-        "--all", "-a", action="store_true",
-        help="Full clean: also remove the airecon-sandbox image (requires full rebuild next time)"
+        "--all",
+        "-a",
+        action="store_true",
+        help="Full clean: also remove the airecon-sandbox image (requires full rebuild next time)",
     )
     clean_parser.add_argument(
-        "--keep-storage", default="3gb",
-        help="Minimum build cache to keep for fast rebuilds (default: 3gb). Use 0 to remove all."
+        "--keep-storage",
+        default="3gb",
+        help="Minimum build cache to keep for fast rebuilds (default: 3gb). Use 0 to remove all.",
     )
 
     args = parser.parse_args()
     from airecon.proxy.config import get_config
+
     get_config(args.config)
 
     if getattr(args, "list", False):
@@ -106,12 +101,15 @@ def main() -> None:
         parser.print_help()
         sys.exit(1)
 
+
 def _run_proxy(args) -> None:
     if getattr(args, "debug", False):
         from airecon.logger import setup_logging
+
         setup_logging(is_tui=False)
 
     import atexit
+
     atexit.register(_unload_model_safely)
     import os
 
@@ -127,25 +125,29 @@ def _run_proxy(args) -> None:
         _cfg_module.get_config(getattr(args, "config", None))
 
     from airecon.proxy.server import run_server
+
     run_server()
+
 
 def _run_tui(args) -> None:
     if getattr(args, "debug", False):
         import os
+
         os.environ["AIRECON_DEBUG"] = "1"
-        os.putenv("AIRECON_DEBUG", "1")
         from airecon.logger import setup_logging
+
         setup_logging(is_tui=True)
 
     import atexit
     import os
+
     atexit.register(_unload_model_safely)
     from airecon.proxy.config import get_config
+
     cfg = get_config()
     if getattr(args, "session", None):
         os.environ["AIRECON_SESSION_ID"] = args.session
     else:
-        # IMPORTANT: explicit new session mode must not inherit stale shell env.
         os.environ.pop("AIRECON_SESSION_ID", None)
 
     final_proxy_url = args.proxy_url
@@ -160,6 +162,7 @@ def _run_tui(args) -> None:
     if not getattr(args, "debug", False):
         logging.getLogger("uvicorn.access").setLevel(logging.CRITICAL)
     from airecon.tui.app import AIReconApp
+
     app = AIReconApp(
         proxy_url=final_proxy_url,
         no_proxy=args.no_proxy,
@@ -168,12 +171,16 @@ def _run_tui(args) -> None:
     try:
         app.run()
     except Exception as e:
-        with open("airecon_crash.log", "w") as f:
-            import traceback
+        import tempfile
+        import traceback
+        from pathlib import Path
+
+        crash_log = Path(tempfile.gettempdir()) / "airecon_crash.log"
+        with open(crash_log, "w") as f:
             traceback.print_exc(file=f)
-        print(
-            f"AIRecon TUI crashed! Check airecon_crash.log for details.\nError: {e}")
+        print(f"AIRecon TUI crashed! Check {crash_log} for details.\nError: {e}")
         sys.exit(1)
+
 
 def _run_status(args) -> None:
     import asyncio
@@ -183,6 +190,7 @@ def _run_status(args) -> None:
     async def check():
         from airecon._version import __version__ as version
         from airecon.proxy.config import get_config
+
         cfg = get_config()
 
         G = "\033[32m"
@@ -192,14 +200,14 @@ def _run_status(args) -> None:
         B = "\033[1m"
         D = "\033[2m"
         X = "\033[0m"
-        ON  = f"{G}● online{X}"
+        ON = f"{G}● online{X}"
         OFF = f"{R}● offline{X}"
 
         W = 74
-        _ANSI = _re.compile(r'\033\[[0-9;]*m')
+        _ANSI = _re.compile(r"\033\[[0-9;]*m")
 
         def _vlen(s: str) -> int:
-            return len(_ANSI.sub('', s))
+            return len(_ANSI.sub("", s))
 
         def _row(content: str = "") -> str:
             pad = max(0, W - _vlen(content))
@@ -255,11 +263,20 @@ def _run_status(args) -> None:
         try:
             import shutil
             import subprocess as sp
+
             _docker = shutil.which("docker") or "docker"
             result = sp.run(
-                [_docker, "ps", "--filter", "name=airecon-sandbox-active",
-                 "--format", "{{.Status}}"],
-                capture_output=True, text=True, timeout=3,
+                [
+                    _docker,
+                    "ps",
+                    "--filter",
+                    "name=airecon-sandbox-active",
+                    "--format",
+                    "{{.Status}}",
+                ],
+                capture_output=True,
+                text=True,
+                timeout=3,
             )
             if result.stdout.strip():
                 docker_status = f"{G}● running{X}"
@@ -281,17 +298,33 @@ def _run_status(args) -> None:
         try:
             import shutil
             import subprocess as sp
+
             _docker = shutil.which("docker") or "docker"
             result = sp.run(
-                [_docker, "ps", "--filter", "name=airecon-searxng",
-                 "--filter", "status=running", "--format", "{{.Status}}"],
-                capture_output=True, text=True, timeout=3,
+                [
+                    _docker,
+                    "ps",
+                    "--filter",
+                    "name=airecon-searxng",
+                    "--filter",
+                    "status=running",
+                    "--format",
+                    "{{.Status}}",
+                ],
+                capture_output=True,
+                text=True,
+                timeout=3,
             )
             if result.stdout.strip():
                 searxng_configured = bool(cfg.searxng_url)
-                searxng_status = (f"{G}● running{X}" if searxng_configured
-                                  else f"{Y}● running (unconfigured){X}")
-                searxng_detail = cfg.searxng_url or "http://localhost:8080 (auto-managed)"
+                searxng_status = (
+                    f"{G}● running{X}"
+                    if searxng_configured
+                    else f"{Y}● running (unconfigured){X}"
+                )
+                searxng_detail = (
+                    cfg.searxng_url or "http://localhost:8080 (auto-managed)"
+                )
             else:
                 searxng_status = f"{Y}● stopped{X}"
                 searxng_detail = "Starts automatically with 'airecon start'"
@@ -323,6 +356,7 @@ def _run_status(args) -> None:
 
     asyncio.run(check())
 
+
 def _set_config_value(key: str, value: str) -> None:
     import json
     from pathlib import Path
@@ -337,9 +371,11 @@ def _set_config_value(key: str, value: str) -> None:
         with open(config_file, "w") as f:
             json.dump(current, f, indent=4)
         from airecon.proxy.config import reload_config
+
         reload_config()
     except Exception as e:
         print(f"[!] Could not update config {key}: {e}")
+
 
 def _unload_model_safely():
     import json
@@ -399,6 +435,7 @@ def _unload_model_safely():
 
     try:
         from airecon.proxy.config import get_config
+
         cfg = get_config()
     except BaseException:
         return
@@ -409,17 +446,16 @@ def _unload_model_safely():
     session_info: dict = {}
     agent_stats: dict = {}
     import time as _time
+
     _time.sleep(0.3)
     try:
-        resp = urllib.request.urlopen(
-            f"{proxy_url}/api/status", timeout=3)  # nosec B310
+        resp = urllib.request.urlopen(f"{proxy_url}/api/status", timeout=3)  # nosec B310
         data = json.loads(resp.read())
         agent_stats = data.get("agent", {})
     except Exception:
         pass
     try:
-        resp2 = urllib.request.urlopen(
-            f"{proxy_url}/api/session/current", timeout=3)  # nosec B310
+        resp2 = urllib.request.urlopen(f"{proxy_url}/api/session/current", timeout=3)  # nosec B310
         session_info = json.loads(resp2.read()).get("session") or {}
     except Exception:
         pass
@@ -427,6 +463,7 @@ def _unload_model_safely():
     if not session_info:
         try:
             from pathlib import Path as _Path
+
             _sessions_dir = _Path.home() / ".airecon" / "sessions"
             if _sessions_dir.exists():
                 _files = sorted(
@@ -438,6 +475,7 @@ def _unload_model_safely():
                     with open(_files[0]) as _sf:
                         _sd = json.load(_sf)
                     import time as _t
+
                     _age = _t.time() - _files[0].stat().st_mtime
                     if _age < 86400 and _sd.get("target"):
                         session_info = {
@@ -488,7 +526,11 @@ def _unload_model_safely():
     _divider()
     print(_row())
 
-    tok_color = G if cumulative_tokens < 1_000_000 else (Y if cumulative_tokens < 5_000_000 else R)
+    tok_color = (
+        G
+        if cumulative_tokens < 1_000_000
+        else (Y if cumulative_tokens < 5_000_000 else R)
+    )
     print(_kv("Tokens used", f"{tok_color}{_fmt_tokens(cumulative_tokens)}{X}"))
     print(_kv("Tool calls", f"{Y}{total_tools}{X}  {D}(call: {exec_count}){X}"))
 
@@ -500,17 +542,28 @@ def _unload_model_safely():
     try:
         subprocess.run(
             [_docker, "rm", "-f", "airecon-sandbox-active"],
-            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=5)
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            timeout=5,
+        )
         print(_svc(f"{G}✓{X}", "Docker Sandbox", "stopped"))
     except Exception:
         print(_svc(f"{Y}!{X}", "Docker Sandbox", "unavailable"))
 
     try:
-        if not cfg.searxng_url or "localhost" in cfg.searxng_url or "127.0.0.1" in cfg.searxng_url:
+        if (
+            not cfg.searxng_url
+            or "localhost" in cfg.searxng_url
+            or "127.0.0.1" in cfg.searxng_url
+        ):
             from airecon.proxy.searxng import CONTAINER_NAME as _SX_NAME
+
             subprocess.run(
                 [_docker, "rm", "-f", _SX_NAME],
-                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=10)
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                timeout=10,
+            )
             print(_svc(f"{G}✓{X}", "SearXNG", "stopped"))
     except Exception:
         pass
@@ -519,17 +572,24 @@ def _unload_model_safely():
     try:
         ollama_url = cfg.ollama_url.rstrip("/")
         cmd = [
-            "curl", "-s", "-X", "POST", f"{ollama_url}/api/generate",
-            "-d", json.dumps({"model": model, "keep_alive": 0}),
+            "curl",
+            "-s",
+            "-X",
+            "POST",
+            f"{ollama_url}/api/generate",
+            "-d",
+            json.dumps({"model": model, "keep_alive": 0}),
         ]
         subprocess.run(
-            cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=2)
+            cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=2
+        )
     except Exception:
         try:
             data = json.dumps({"model": model, "keep_alive": 0}).encode()
             req = urllib.request.Request(
-                f"{cfg.ollama_url.rstrip('/')}/api/generate", data=data, method="POST")
-            urllib.request.urlopen(req, timeout=2)  # nosec B310 - ollama_url is from config, not user-controlled
+                f"{cfg.ollama_url.rstrip('/')}/api/generate", data=data, method="POST"
+            )
+            urllib.request.urlopen(req, timeout=2)  # nosec B310
         except Exception:
             pass
     print(_svc(f"{G}✓{X}", "Ollama model", "VRAM released"))
@@ -537,6 +597,7 @@ def _unload_model_safely():
     print(_row())
     print(f"  {C}╚{'═' * (W + 2)}╝{X}")
     print()
+
 
 def _run_list_sessions() -> None:
     from airecon.proxy.agent.session import list_sessions
@@ -557,7 +618,9 @@ def _run_list_sessions() -> None:
         print()
         return
 
-    print(f"  {B}{'SESSION ID':<28} {'TARGET':<24} {'SCANS':>5}  {'SUBS':>4}  {'VULNS':>5}  CREATED{X}")
+    print(
+        f"  {B}{'SESSION ID':<28} {'TARGET':<24} {'SCANS':>5}  {'SUBS':>4}  {'VULNS':>5}  CREATED{X}"
+    )
     print(f"  {'─' * 28} {'─' * 24} {'─' * 5}  {'─' * 4}  {'─' * 5}  {'─' * 10}")
 
     for s in sessions:
@@ -577,6 +640,7 @@ def _run_list_sessions() -> None:
     print(f"  Resume: {C}airecon start --session <id>{X}")
     print()
 
+
 def _run_clean(args) -> None:
     import shutil
     import subprocess
@@ -595,8 +659,7 @@ def _run_clean(args) -> None:
         print(f"{RED}[!] Docker is not installed or not in PATH.{RESET}")
         sys.exit(1)
 
-    def run(cmd: list[str],
-            capture: bool = False) -> subprocess.CompletedProcess:
+    def run(cmd: list[str], capture: bool = False) -> subprocess.CompletedProcess:
         return subprocess.run(
             cmd,
             stdout=subprocess.PIPE if capture else subprocess.DEVNULL,
@@ -605,15 +668,11 @@ def _run_clean(args) -> None:
         )
 
     def get_docker_df() -> dict:
-        r = run(["docker", "system", "df", "--format",
-                "{{json .}}"], capture=True)
-        totals = {
-            "images": "?",
-            "containers": "?",
-            "volumes": "?",
-            "cache": "?"}
+        r = run(["docker", "system", "df", "--format", "{{json .}}"], capture=True)
+        totals = {"images": "?", "containers": "?", "volumes": "?", "cache": "?"}
         if r.returncode == 0:
             import json
+
             for line in r.stdout.decode(errors="replace").splitlines():
                 line = line.strip()
                 if not line:
@@ -645,12 +704,14 @@ def _run_clean(args) -> None:
     print(
         f"\n{YELLOW}[1/4] Removing orphan airecon containers...{RESET}",
         end=" ",
-        flush=True)
-    containers = run(
-        ["docker", "ps", "-a", "-q", "--filter", "name=airecon"],
-        capture=True
+        flush=True,
     )
-    ids = containers.stdout.decode().strip().split() if containers.returncode == 0 else []
+    containers = run(
+        ["docker", "ps", "-a", "-q", "--filter", "name=airecon"], capture=True
+    )
+    ids = (
+        containers.stdout.decode().strip().split() if containers.returncode == 0 else []
+    )
     if ids:
         for cid in ids:
             run(["docker", "rm", "-f", cid])
@@ -664,34 +725,38 @@ def _run_clean(args) -> None:
         cache_cmd = ["docker", "builder", "prune", "-af"]
         label = "all build cache"
     else:
-        cache_cmd = [
-            "docker",
-            "builder",
-            "prune",
-            "-f",
-            f"--keep-storage={keep}"]
+        cache_cmd = ["docker", "builder", "prune", "-f", f"--keep-storage={keep}"]
         label = f"build cache (keeping {keep} for fast rebuilds)"
 
     print(f"{YELLOW}[2/4] Pruning {label}...{RESET}", end=" ", flush=True)
     result = run(cache_cmd, capture=True)
     if result.returncode == 0:
         output = result.stdout.decode(errors="replace")
-        freed_line = next((line for line in output.splitlines()
-                          if "freed" in line.lower() or "Total" in line), "")
+        freed_line = next(
+            (
+                line
+                for line in output.splitlines()
+                if "freed" in line.lower() or "Total" in line
+            ),
+            "",
+        )
         print(f"{CHECK} {freed_line.strip() or 'Done'}")
         freed_items.append("build cache layers")
     else:
         print(f"{WARN} Failed (non-critical)")
 
-    print(
-        f"{YELLOW}[3/4] Pruning unused Docker volumes...{RESET}",
-        end=" ",
-        flush=True)
+    print(f"{YELLOW}[3/4] Pruning unused Docker volumes...{RESET}", end=" ", flush=True)
     vol_result = run(["docker", "volume", "prune", "-f"], capture=True)
     if vol_result.returncode == 0:
         vol_out = vol_result.stdout.decode(errors="replace")
-        freed_vol = next((line for line in vol_out.splitlines()
-                         if "freed" in line.lower() or "Total" in line), "")
+        freed_vol = next(
+            (
+                line
+                for line in vol_out.splitlines()
+                if "freed" in line.lower() or "Total" in line
+            ),
+            "",
+        )
         print(f"{CHECK} {freed_vol.strip() or 'Done'}")
         freed_items.append("unused volumes")
     else:
@@ -702,18 +767,16 @@ def _run_clean(args) -> None:
         print(
             f"{YELLOW}[4/4] Removing airecon-sandbox image (--all flag)...{RESET}",
             end=" ",
-            flush=True)
-        img_result = run(
-            ["docker", "rmi", "-f", "airecon-sandbox"], capture=True)
+            flush=True,
+        )
+        img_result = run(["docker", "rmi", "-f", "airecon-sandbox"], capture=True)
         if img_result.returncode == 0:
-            print(
-                f"{CHECK} Removed. Next `airecon start` will rebuild (~10-20 min).")
+            print(f"{CHECK} Removed. Next `airecon start` will rebuild (~10-20 min).")
             freed_items.append("airecon-sandbox image (12.5GB)")
         else:
             print("Not found or already removed.")
     else:
-        print(
-            f"{YELLOW}[4/4] Sandbox image kept{RESET} (use --all to remove it too)")
+        print(f"{YELLOW}[4/4] Sandbox image kept{RESET} (use --all to remove it too)")
 
     print(f"\n{CYAN}[After Cleanup]{RESET}")
     run(["docker", "system", "df"])
@@ -723,6 +786,7 @@ def _run_clean(args) -> None:
         for item in freed_items:
             print(f"   • Freed: {item}")
     print()
+
 
 if __name__ == "__main__":
     try:

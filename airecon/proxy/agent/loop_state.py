@@ -4,15 +4,17 @@ import asyncio
 import logging
 import time
 
+from .loop_policy import should_preserve_active_target_for_subdomain
 from .session import SessionData, save_session
 
 logger = logging.getLogger("airecon.agent")
 
 
 def _estimate_tokens(text: str) -> int:
+
     if not text:
         return 0
-    return len(text) // 3
+    return len(text) // 4
 
 
 class _StateMixin:
@@ -27,8 +29,7 @@ class _StateMixin:
         usage["cumulative_completion"] = int(
             getattr(self._session, "token_completion_total", 0) or 0
         )
-        # FIX: Preserve budget usage instead of resetting to 0
-        # This ensures context pressure tracking persists across restarts
+
         session_budget_used = getattr(self._session, "token_last_used", 0) or 0
         usage["used"] = session_budget_used
         usage["last_prompt"] = 0
@@ -62,6 +63,12 @@ class _StateMixin:
     def _save_to_memory_realtime(self) -> None:
         if not self._session or not self._session.target:
             return
+
+        logger.debug(
+            "[DEBUG-MEMORY] Starting memory save: session_id=%s, target=%s, phase=%s",
+            self._session.session_id, self._session.target,
+            getattr(self._session, 'current_phase', 'unknown')
+        )
 
         has_valid_subdomains = (
             len(self._session.subdomains) >= 1 and
@@ -153,7 +160,7 @@ class _StateMixin:
                 })
 
             logger.info(
-                "✓ Real-time memory save: %d subdomains, %d live hosts, %d vulns, %d ports, %d techs",
+                "[DEBUG-MEMORY] Real-time memory save: %d subdomains, %d live hosts, %d vulns, %d ports, %d techs",
                 len(valid_subdomains),
                 len(valid_live_hosts),
                 len(valid_vulnerabilities),
@@ -161,7 +168,7 @@ class _StateMixin:
                 len(valid_techs) if 'valid_techs' in locals() else 0
             )
         except Exception as e:
-            logger.debug("Real-time memory save failed: %s", e)
+            logger.debug("[DEBUG-MEMORY] Real-time memory save failed: %s", e)
 
     def _save_recon_exploit_pattern(
         self,
@@ -198,7 +205,7 @@ class _StateMixin:
 
         success_rate = stats['times_successful'] / max(stats['times_used'], 1)
 
-        if success_rate >= 0.70 and stats['times_used'] >= 3:
+        if success_rate >= 0.50 and stats['times_used'] >= 2:
             if effectiveness_score is None:
                 effectiveness_score = success_rate * 100
 
@@ -251,6 +258,103 @@ class _StateMixin:
         if not self._session:
             return False
         return self._session.scan_count > 0 or bool(self.state.evidence_log)
+
+    def _enforce_scope_target_integrity(self) -> None:
+        active = str(self.state.active_target or "").strip()
+        session_target = str(getattr(self._session, "target", "") or "").strip()
+        anchor = str(getattr(self, "_scope_anchor_target", "") or "").strip()
+
+        if not anchor:
+            anchor = active or session_target
+            if anchor:
+                self._scope_anchor_target = anchor
+
+        if not active and anchor:
+            self.state.active_target = anchor
+            logger.warning(
+                "Scope guard restored missing active_target -> %s",
+                anchor,
+            )
+            return
+
+        if not active or not anchor or active == anchor:
+            return
+
+        if should_preserve_active_target_for_subdomain(active, anchor) or should_preserve_active_target_for_subdomain(anchor, active):
+            logger.warning(
+                "Scope guard prevented subdomain drift (%s vs %s) — restoring anchor",
+                anchor,
+                active,
+            )
+            self.state.active_target = anchor
+            return
+
+        if getattr(self, "_scope_lock_active", False):
+            logger.warning(
+                "Scope lock prevented cross-domain drift (%s -> %s) — restoring anchor",
+                anchor,
+                active,
+            )
+            self.state.active_target = anchor
+
+    def _check_memory_brain_health(self) -> None:
+        if not self._session or not self._session.target:
+            return
+
+        if self._memory_manager is None:
+            try:
+                from ..memory import get_memory_manager
+                self._memory_manager = get_memory_manager()
+            except Exception as exc:
+                logger.debug("Memory health check skipped (init failed): %s", exc)
+                return
+
+        if not self._memory_manager:
+            return
+
+        previous = dict(getattr(self, "_memory_health_status", {}) or {})
+        try:
+            snapshot = self._memory_manager.health_snapshot(self._session.target)
+        except Exception as exc:
+            snapshot = {"ok": False, "error": str(exc)}
+
+        self._memory_health_status = snapshot
+        if not snapshot.get("ok", False):
+            logger.warning(
+                "Memory brain health check failed for target=%s: %s",
+                self._session.target,
+                snapshot.get("error", "unknown"),
+            )
+            if previous.get("ok", True):
+                self.state.conversation.append(
+                    {
+                        "role": "system",
+                        "content": (
+                            "[SYSTEM: MEMORY BRAIN DEGRADED] "
+                            "Long-term memory backend is unhealthy. Keep critical findings in session context and continue safely."
+                        ),
+                    }
+                )
+            return
+
+        logger.info(
+            "Memory brain healthy (target=%s): sessions=%d findings=%d patterns=%d high_quality_patterns=%d",
+            self._session.target,
+            int(snapshot.get("target_sessions", 0)),
+            int(snapshot.get("target_findings", 0)),
+            int(snapshot.get("patterns_total", 0)),
+            int(snapshot.get("high_quality_patterns", 0)),
+        )
+        if previous and not previous.get("ok", True):
+            self.state.conversation.append(
+                {
+                    "role": "system",
+                    "content": (
+                        "[SYSTEM: MEMORY BRAIN RECOVERED] "
+                        "Long-term memory backend is healthy again. You can continue using historical patterns and target intel."
+                    ),
+                }
+            )
 
     def _schedule_token_usage_snapshot_save(self) -> None:
         session = self._session
@@ -326,15 +430,13 @@ class _StateMixin:
         cumulative = usage.get("cumulative", 0)
         limit = usage.get("limit", 0)
 
-        # Early warning: Save progress every 500 tokens (was 1000)
         if cumulative - self._last_saved_cumulative >= 500:
             self._last_saved_cumulative = cumulative
             self._schedule_token_usage_snapshot_save()
 
-        # Log token budget status for long operations (every 10 iterations)
         if limit > 0 and self.state.iteration > 10 and self.state.iteration % 10 == 0:
             _budget_ratio = cumulative / limit
-            if _budget_ratio >= 0.30:  # 30% threshold for logging
+            if _budget_ratio >= 0.30:  
                 logger.info(
                     "TOKEN BUDGET STATUS: cumulative=%d/%d (%.0f%%) — "
                     "prompt=%d, completion=%d, remaining_capacity=%.0f%%",

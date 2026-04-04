@@ -11,10 +11,11 @@ from .file_reference import (
 )
 from .loop_policy import (
     build_full_recon_kickoff_message,
+    extract_wildcard_scope_target,
     is_simple_target_kickoff,
     normalize_recon_mode,
     should_autostart_full_recon,
-    should_preserve_active_target_for_subdomain,
+    should_switch_active_target,
 )
 from .models import MAX_TOOL_ITERATIONS
 from .pipeline import PipelineEngine, PipelinePhase
@@ -42,6 +43,13 @@ class _MessageEntryMixin:
         all_targets = self._extract_targets_from_text(user_message)
         extracted_target = all_targets[0] if all_targets else None
 
+        wildcard_scope_target = extract_wildcard_scope_target(user_message)
+        if wildcard_scope_target:
+            extracted_target = wildcard_scope_target
+            all_targets = [wildcard_scope_target] + [
+                t for t in all_targets if t != wildcard_scope_target
+            ]
+
         if not self._tools_ollama:
 
             await self.initialize(
@@ -65,27 +73,46 @@ class _MessageEntryMixin:
                         extracted_target, self._adaptive_num_ctx,
                     )
 
+        cfg = get_config()
+
+        _recon_mode = normalize_recon_mode(
+            getattr(cfg, "agent_recon_mode", "standard")
+        )
+        _simple_kickoff = is_simple_target_kickoff(user_message, extracted_target)
+        _requested_scope_lock = bool(_recon_mode == "standard" and not _simple_kickoff)
+
         if extracted_target:
             _current = self.state.active_target
-            if not should_preserve_active_target_for_subdomain(
+            _switch_target = should_switch_active_target(
                 extracted_target=extracted_target,
                 current_active_target=_current,
-            ):
+                user_message=user_message,
+                scope_lock_active=_requested_scope_lock,
+            )
+            if _switch_target:
+                logger.info(
+                    "Scope target switch: %r -> %r",
+                    _current,
+                    extracted_target,
+                )
                 self.state.active_target = extracted_target
-
-        cfg = get_config()
+                self._scope_anchor_target = extracted_target
+            elif not _current:
+                self.state.active_target = extracted_target
+                self._scope_anchor_target = extracted_target
+            elif _current != extracted_target:
+                logger.info(
+                    "Scope guard kept active target=%r (extracted=%r)",
+                    _current,
+                    extracted_target,
+                )
 
         if _file_refs and not self.state.active_target:
             self.state.active_target = workspace_name_for_ref(
                 _file_refs[0]
             )
+            self._scope_anchor_target = self.state.active_target
 
-        # Config-driven agent recon mode: standard vs full
-        # - standard: Do NOT auto-expand simple target to full recon (user intent must be explicit)
-        # - full: Auto-expand simple target to comprehensive recon (legacy autostart)
-        _recon_mode = normalize_recon_mode(
-            getattr(cfg, "agent_recon_mode", "standard")
-        )
         if (
             isinstance(extracted_target, str)
             and should_autostart_full_recon(
@@ -100,12 +127,10 @@ class _MessageEntryMixin:
                 extracted_target,
             )
             user_message = build_full_recon_kickoff_message(extracted_target)
+            _simple_kickoff = True
+            _requested_scope_lock = False
 
-        # In STANDARD mode, non-target-only requests are treated as strict scope.
-        # This prevents autonomous expansion into full recon when user asks for
-        # a focused task (e.g. only one recon slice).
-        _simple_kickoff = is_simple_target_kickoff(user_message, extracted_target)
-        self._scope_lock_active = bool(_recon_mode == "standard" and not _simple_kickoff)
+        self._scope_lock_active = _requested_scope_lock
         self._scope_lock_brief = user_message.strip()[:500] if self._scope_lock_active else ""
         if self._scope_lock_active:
             self.state.conversation.append(
@@ -144,7 +169,6 @@ class _MessageEntryMixin:
             )
         ]
         
-        # FIX 2026-03-31: Check Ollama context and reset with summary if needed
         if self.state.iteration % 10 == 0:
             self._check_ollama_context_pressure()
 
@@ -163,6 +187,8 @@ class _MessageEntryMixin:
             )
 
         if self.state.active_target:
+            if not self._scope_anchor_target:
+                self._scope_anchor_target = self.state.active_target
             workspace_context = await asyncio.to_thread(
                 self._scan_workspace_state, self.state.active_target
             )
@@ -256,6 +282,13 @@ class _MessageEntryMixin:
                 "[SYSTEM: PINNED CONTEXT]",
                 f"TARGET: {self.state.active_target}",
             ]
+            if self._scope_anchor_target:
+                pin_lines.append(f"SCOPE_ANCHOR: {self._scope_anchor_target}")
+            pin_lines.append(
+                f"SCOPE_LOCK: {'ACTIVE' if self._scope_lock_active else 'INACTIVE'}"
+            )
+            if self._scope_lock_active and self._scope_lock_brief:
+                pin_lines.append(f"SCOPE_BRIEF: {self._scope_lock_brief[:180]}")
             if phase_hint:
                 pin_lines.append(f"PHASE: {phase_hint}")
             pin_lines.append("Do not change target unless the user explicitly asks.")
@@ -289,53 +322,67 @@ class _MessageEntryMixin:
         self.state.conversation.append(
             {"role": "user", "content": user_message})
 
-        _cumulative = self.state.token_usage.get("cumulative", 0)
-        _CUMULATIVE_SOFT_CAP = 80000
-        _CUMULATIVE_HARD_CAP = 100000
+        _ctx_limit = (
+            self._adaptive_num_ctx
+            if self._adaptive_num_ctx > 0
+            else int(getattr(cfg, "ollama_num_ctx", 0) or 0)
+        )
+        _ctx_used = int(self.state.token_usage.get("used", 0) or 0)
+        if _ctx_used <= 0:
+            _ctx_used = self._recompute_used_tokens_from_conversation()
 
-        if _cumulative > _CUMULATIVE_HARD_CAP:
-            logger.error(
-                "Cumulative tokens (%d) exceeded hard cap (%d) — forcing emergency truncation",
-                _cumulative, _CUMULATIVE_HARD_CAP,
-            )
+        if _ctx_limit != -1 and _ctx_limit > 0:
+            _SOFT_CTX_RATIO = 0.65
+            _HARD_CTX_RATIO = 0.80
+            _ctx_soft_cap = int(_ctx_limit * _SOFT_CTX_RATIO)
+            _ctx_hard_cap = int(_ctx_limit * _HARD_CTX_RATIO)
 
-            _system_msgs = [
-                m for m in self.state.conversation
-                if m.get("role") == "system"
-            ]
-            _non_system = [
-                m for m in self.state.conversation
-                if m.get("role") != "system"
-            ]
-            _keep_recent = max(int(len(_non_system) * 0.20), 6)
-            _recent_msgs = _non_system[-_keep_recent:]
-            _prev_total = len(self.state.conversation)
-            self.state.conversation = _system_msgs + _recent_msgs
+            if _ctx_used > _ctx_hard_cap:
+                logger.error(
+                    "Context tokens (%d) exceeded hard cap (%d, num_ctx=%d) — forcing emergency truncation",
+                    _ctx_used, _ctx_hard_cap, _ctx_limit,
+                )
 
-            self.state.token_usage["cumulative"] = int(_cumulative * 0.30)
+                _system_msgs = [
+                    m for m in self.state.conversation
+                    if m.get("role") == "system"
+                ]
+                _non_system = [
+                    m for m in self.state.conversation
+                    if m.get("role") != "system"
+                ]
+                _keep_recent = max(int(len(_non_system) * 0.20), 6)
+                _recent_msgs = _non_system[-_keep_recent:]
+                _prev_total = len(self.state.conversation)
+                self.state.conversation = _system_msgs + _recent_msgs
 
-            logger.warning(
-                "Emergency truncation complete: %d messages → %d "
-                "(sys=%d kept, non-sys %d → %d), cumulative %d → %d tokens",
-                _prev_total, len(self.state.conversation),
-                len(_system_msgs), len(_non_system), len(_recent_msgs),
-                _cumulative, self.state.token_usage["cumulative"],
-            )
-        elif _cumulative > _CUMULATIVE_SOFT_CAP:
-            logger.warning(
-                "Cumulative tokens (%d) approaching soft cap (%d) — will truncate soon",
-                _cumulative, _CUMULATIVE_SOFT_CAP,
-            )
+                _new_used = self._recompute_used_tokens_from_conversation()
+
+                logger.warning(
+                    "Emergency truncation complete: %d messages → %d "
+                    "(sys=%d kept, non-sys %d → %d), context-used %d → %d tokens",
+                    _prev_total, len(self.state.conversation),
+                    len(_system_msgs), len(_non_system), len(_recent_msgs),
+                    _ctx_used, _new_used,
+                )
+            elif _ctx_used > _ctx_soft_cap:
+                logger.warning(
+                    "Context tokens (%d) approaching soft cap (%d, num_ctx=%d) — will truncate soon",
+                    _ctx_used, _ctx_soft_cap, _ctx_limit,
+                )
 
         _skill_phase = self._skill_phase_for_message_start()
 
         _session_skills = None
         if self._session:
             _session_skills = set(self._session.loaded_skills)
+        _current_target = self.state.active_target if self.state.active_target else (self._session.target if self._session else "")
         skill_context, loaded_skills = auto_load_skills_for_message(
             user_message,
             phase=_skill_phase,
             session_loaded_skills=_session_skills,
+            memory_manager=getattr(self, '_memory_manager', None),
+            current_target=_current_target,
         )
         if loaded_skills:
             for s in loaded_skills:
@@ -374,6 +421,9 @@ class _MessageEntryMixin:
         self._watchdog_forced_calls = 0
         self._empty_response_retry_count = 0
         self._prev_phase = None
+
+        import uuid
+        self._current_trace_id = uuid.uuid4().hex[:12]
 
         if (
             self._session
