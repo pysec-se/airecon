@@ -51,17 +51,25 @@ Each phase has specific objectives, recommended tools, and automatic transition 
 
 ## Model Requirements
 
-AIRecon requires a model with **extended thinking** (`<think>` blocks) and **reliable tool-calling**. Capabilities are auto-detected via `ollama show` metadata.
+AIRecon requires a model with **extended thinking** (`<think>` blocks) and **reliable tool-calling** capabilities. Capabilities are auto-detected via `ollama show` metadata.
 
-> **Minimum: 30B parameters.** Smaller models hallucinate tool output, invent CVEs, and skip scope rules.
+> **⚠️ Tool calling support is REQUIRED.** The model must support native function/tool calling. Models without this capability will be unable to execute any tools (http_observe, execute, browser actions, etc.), making AIRecon completely non-functional.
+> 
+> **Recommended minimum: 8B-9B parameters.** Models below 8B are technically usable but strongly discouraged — they frequently hallucinate tool output, invent CVEs, skip scope rules, and produce unreliable tool calls.
 
 | Model | Pull | VRAM | Notes |
 |-------|------|------|-------|
-| **Qwen3.5 122B** | `ollama pull qwen3.5:122b` | 48+ GB | Best quality |
-| **Qwen3 32B** | `ollama pull qwen3:32b` | 20 GB | **Recommended minimum** |
-| **Qwen3 30B-A3B** | `ollama pull qwen3:30b-a3b` | 16 GB | MoE — lower VRAM |
+| **Qwen3.5 122B** | `ollama pull qwen3.5:122b` | 48+ GB | Best quality, most reliable |
+| **Qwen3.5 35B** | `ollama pull qwen3.5:35b` | 20 GB | **Recommended for most users** |
+| **Qwen3.5 35b** | `ollama pull qwen3.5:35b-a3b` | 16 GB | MoE — lower VRAM |
+| **Qwen3.5 9B** | `ollama pull qwen3.5:9b` | 6 GB | **Minimum viable** — expect frequent errors |
 
-**Known issues:** DeepSeek R1 produces incomplete function calls. Models < 30B are unreliable for full recon.
+**Model size guidance:**
+- **≥32B:** Reliable for full recon pipelines, good tool calling accuracy
+- **8B-14B:** Usable for simple tasks, expect 20-40% tool call errors and hallucinations
+- **<8B:** Technically works but produces unreliable results — not recommended for serious testing
+
+**Known issues:** DeepSeek R1 produces incomplete function calls. Models < 8B lack reliable tool calling support.
 
 ---
 
@@ -212,7 +220,6 @@ sudo systemctl restart ollama
 ```
 
 ```json
-// Reduce context for 16–20 GB VRAM setups
 { "ollama_num_ctx": 32768, "ollama_num_ctx_small": 16384, "ollama_num_predict": 8192 }
 ```
 
