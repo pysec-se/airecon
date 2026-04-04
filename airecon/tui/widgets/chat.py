@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 import re
 
 from rich.text import Text
@@ -10,41 +11,65 @@ from textual.message import Message
 from textual.reactive import reactive
 from textual.widgets import LoadingIndicator, RichLog, Static
 
-_ANSI_RE = re.compile(r'\x1B(?:[@-Z\\-_]|\[[0-?]*[ -/]*[@-~])')
+from ..buddy import AVAILABLE_SPECIES, get_frame
 
-_PORT_RE = re.compile(r'\b\d{1,5}/(tcp|udp)\b', re.IGNORECASE)
+logger = logging.getLogger(__name__)
 
-_CVE_RE = re.compile(r'\bCVE-\d{4}-\d{4,}\b', re.IGNORECASE)
+_ANSI_RE = re.compile(r"\x1B(?:[@-Z\\-_]|\[[0-?]*[ -/]*[@-~])")
+
+_PORT_RE = re.compile(r"\b\d{1,5}/(tcp|udp)\b", re.IGNORECASE)
+
+_CVE_RE = re.compile(r"\bCVE-\d{4}-\d{4,}\b", re.IGNORECASE)
+
 
 def _strip_ansi(text: str) -> str:
-    return _ANSI_RE.sub('', text)
+    return _ANSI_RE.sub("", text)
+
 
 def _colorize_line(line: str) -> Text:
     stripped = line.strip()
     t = Text(no_wrap=False, overflow="fold")
 
-    if re.match(r'^(\[?\+\]?|\[OK\]|\[SUCCESS\]|✓|✔)\s', stripped, re.IGNORECASE) or \
-       stripped.lower().startswith(("found:", "discovered:", "resolved:")):
+    if re.match(
+        r"^(\[?\+\]?|\[OK\]|\[SUCCESS\]|✓|✔)\s", stripped, re.IGNORECASE
+    ) or stripped.lower().startswith(("found:", "discovered:", "resolved:")):
         t.append(line, style="#00d4aa")
 
-    elif any(kw in stripped.lower() for kw in (
-        "[vuln]", "[critical]", "[high]", "critical:", "vulnerability", "injection found",
-        "xss found", "sqli", "bypass", "exposed", "disclosure", "[crit",
-    )):
+    elif any(
+        kw in stripped.lower()
+        for kw in (
+            "[vuln]",
+            "[critical]",
+            "[high]",
+            "critical:",
+            "vulnerability",
+            "injection found",
+            "xss found",
+            "sqli",
+            "bypass",
+            "exposed",
+            "disclosure",
+            "[crit",
+        )
+    ):
         t.append(line, style="bold #f97316")
 
     elif any(kw in stripped.lower() for kw in ("[medium]", "medium:", "potential")):
         t.append(line, style="#f59e0b")
 
-    elif re.match(r'^(\[?\-\]?|\[ERR\]|\[ERROR\]|✗|✘|ERROR|FAILED|FATAL)\s', stripped, re.IGNORECASE) or \
-            stripped.lower().startswith(("error:", "failed:", "exception:", "fatal:")):
+    elif re.match(
+        r"^(\[?\-\]?|\[ERR\]|\[ERROR\]|✗|✘|ERROR|FAILED|FATAL)\s",
+        stripped,
+        re.IGNORECASE,
+    ) or stripped.lower().startswith(("error:", "failed:", "exception:", "fatal:")):
         t.append(line, style="#ef4444")
 
-    elif re.match(r'^(\[!?\]|\[WARN\]|\[WARNING\]|WARNING|WARN)\s', stripped, re.IGNORECASE):
+    elif re.match(
+        r"^(\[!?\]|\[WARN\]|\[WARNING\]|WARNING|WARN)\s", stripped, re.IGNORECASE
+    ):
         t.append(line, style="#f59e0b")
 
     elif _PORT_RE.search(stripped):
-
         if "open" in stripped.lower():
             t.append(line, style="#58a6ff")
         else:
@@ -53,11 +78,12 @@ def _colorize_line(line: str) -> Text:
     elif _CVE_RE.search(stripped):
         t.append(line, style="bold #f97316")
 
-    elif re.match(r'^(\[?\*\]?|\[INFO\]|INFO|>|→)\s', stripped, re.IGNORECASE):
+    elif re.match(r"^(\[?\*\]?|\[INFO\]|INFO|>|→)\s", stripped, re.IGNORECASE):
         t.append(line, style="#8b949e")
 
-    elif re.match(r'^[a-zA-Z0-9\-]+\.[a-zA-Z]{2,}(/|$)', stripped) or \
-            stripped.startswith(("http://", "https://")):
+    elif re.match(
+        r"^[a-zA-Z0-9\-]+\.[a-zA-Z]{2,}(/|$)", stripped
+    ) or stripped.startswith(("http://", "https://")):
         t.append(line, style="#58a6ff")
 
     elif not stripped:
@@ -101,7 +127,9 @@ class AutoCopyStatic(Static):
             selected_text = selected_text.strip()
             if not selected_text:
                 return
-            self._copy_debounce_task = asyncio.create_task(self._debounced_copy(selected_text))
+            self._copy_debounce_task = asyncio.create_task(
+                self._debounced_copy(selected_text)
+            )
         except Exception:
             return
 
@@ -152,16 +180,20 @@ class ChatMessage(Static):
         name = role_names.get(self.role, self.role.title())
         yield Static(f"{icon} {name}", classes=f"role-label {css_class}")
 
-        yield AutoCopyStatic(self.message_content, classes="msg-body", markup=self._markup)
+        yield AutoCopyStatic(
+            self.message_content, classes="msg-body", markup=self._markup
+        )
 
     def action_copy(self) -> None:
         self.app.copy_to_clipboard(self.message_content)
+
 
 class ToolMessageSelected(Message):
     def __init__(self, output_file: str, tool_name: str) -> None:
         self.output_file = output_file
         self.tool_name = tool_name
         super().__init__()
+
 
 class ToolMessage(Vertical):
     DEFAULT_CSS = ""
@@ -196,12 +228,10 @@ class ToolMessage(Vertical):
             if isinstance(self.args, str):
                 args_str = self.args
             elif isinstance(self.args, dict):
-
                 if "command" in self.args:
                     args_str = self.args["command"]
                 else:
-                    args_str = " ".join(
-                        f"{k}={v}" for k, v in self.args.items())
+                    args_str = " ".join(f"{k}={v}" for k, v in self.args.items())
             else:
                 args_str = f"[{type(self.args).__name__}]"
         except Exception:
@@ -218,7 +248,8 @@ class ToolMessage(Vertical):
                 markup=False,
                 highlight=False,
                 auto_scroll=True,
-                classes="tool-live-output")
+                classes="tool-live-output",
+            )
 
             live_output.styles.scrollbar_size_vertical = 0
             live_output.styles.scrollbar_size_horizontal = 0
@@ -229,23 +260,23 @@ class ToolMessage(Vertical):
         self._live_output_buffer += text
 
         if self._live_output:
-
             while True:
-                match = re.search(r'[\n\r]', self._live_output_buffer)
+                match = re.search(r"[\n\r]", self._live_output_buffer)
                 if not match:
                     break
                 idx = match.start()
                 char = match.group(0)
 
                 line = self._live_output_buffer[:idx]
-                self._live_output_buffer = self._live_output_buffer[idx + 1:]
+                self._live_output_buffer = self._live_output_buffer[idx + 1 :]
 
                 clean_line = _strip_ansi(line)
-                if clean_line.strip() or char == '\n':
+                if clean_line.strip() or char == "\n":
                     self._live_output.write(_colorize_line(clean_line))
 
-    def update_result(self, success: bool, duration: float,
-                      output: str, output_file: str = ""):
+    def update_result(
+        self, success: bool, duration: float, output: str, output_file: str = ""
+    ):
         self.status = "done" if success else "error"
         self.duration = duration
         self.output = output
@@ -255,7 +286,6 @@ class ToolMessage(Vertical):
         self.add_class(self.status)
 
         if self.status == "done":
-
             summary = Text()
             summary.append("✓ ", style="bold #00d4aa")
             summary.append(self.tool_name, style="bold #8b949e")
@@ -264,21 +294,21 @@ class ToolMessage(Vertical):
                 display_path = self.output_file
                 if len(display_path) > 45:
                     display_path = "…" + display_path[-42:]
-                summary.append(
-                    f"  → {display_path}",
-                    style="underline #3b82f6")
+                summary.append(f"  → {display_path}", style="underline #3b82f6")
             self._summary_text = summary
             self.call_after_refresh(self._collapse_to_summary)
         else:
-
             self.call_after_refresh(self._show_error_details)
 
     def _collapse_to_summary(self) -> None:
         try:
             for child in list(self.children):
                 child.remove()
-        except Exception:
-            pass
+        except Exception as e:
+            logger.debug(
+                "Expected failure in ToolMessage._collapse_to_summary remove children: %s",
+                e,
+            )
         self.mount(Static(self._summary_text, classes="tool-summary"))
 
     def _show_error_details(self) -> None:
@@ -286,8 +316,11 @@ class ToolMessage(Vertical):
             for child in list(self.children):
                 if isinstance(child, LoadingIndicator):
                     child.remove()
-        except Exception:
-            pass
+        except Exception as e:
+            logger.debug(
+                "Expected failure in ToolMessage._show_error_details remove loading indicator: %s",
+                e,
+            )
 
         if self.output:
             clean = _strip_ansi(self.output)
@@ -317,12 +350,10 @@ class ToolMessage(Vertical):
 
     def on_click(self) -> None:
         if self.output_file:
-            self.post_message(
-                ToolMessageSelected(
-                    self.output_file,
-                    self.tool_name))
+            self.post_message(ToolMessageSelected(self.output_file, self.tool_name))
         else:
             self.app.notify("No output file.", severity="warning")
+
 
 class StreamingMessage(Static):
     DEFAULT_CSS = ""
@@ -341,38 +372,107 @@ class StreamingMessage(Static):
             yield Static("◆ AIRecon", classes="role-label role-label-assistant")
             self._initial_label_yielded = True
 
-        self._text_widget = Static(
-            "", classes="streaming-content", markup=False)
+        self._text_widget = Static("", classes="streaming-content", markup=False)
         yield self._text_widget
         yield Static("●", classes="streaming-indicator")
 
     def append_text(self, text: str) -> None:
         self.content_text += text
-        if self._text_widget and (
-                len(self.content_text) - self._last_flush_len >= 50):
+        if self._text_widget and (len(self.content_text) - self._last_flush_len >= 50):
             try:
                 self._text_widget.update(self.content_text)
                 self._last_flush_len = len(self.content_text)
-            except Exception:
-                pass
+            except Exception as e:
+                logger.debug(
+                    "Expected failure in StreamingMessage.append_text update: %s", e
+                )
 
     def finalize(self) -> None:
         if self._text_widget and len(self.content_text) > self._last_flush_len:
             try:
                 self._text_widget.update(self.content_text)
-            except Exception:
-                pass
+            except Exception as e:
+                logger.debug(
+                    "Expected failure in StreamingMessage.finalize update: %s", e
+                )
         try:
             self.query_one(".streaming-indicator", Static).remove()
-        except Exception:
-            pass
+        except Exception as e:
+            logger.debug(
+                "Expected failure in StreamingMessage.finalize remove indicator: %s", e
+            )
 
-class ThinkingSpinner(Horizontal):
-    DEFAULT_CSS = ""
+
+class ThinkingSpinner(Vertical):
+    DEFAULT_CSS = """
+    ThinkingSpinner {
+        height: auto;
+    }
+
+    .buddy-part {
+        color: #8b949e;
+        text-style: dim;
+    }
+
+    .thinking-label {
+        color: #00d4aa;
+        text-style: italic;
+    }
+    """
+
+    def __init__(self) -> None:
+        super().__init__()
+        self._current_frame = 0
+        self._species_index = 0
+        self._buddy_row_count = 5
+        self._buddy_rows: list[Horizontal] = []
+        self._buddy_parts: list[Static] = []
+        self._anim_timer = None
 
     def compose(self) -> ComposeResult:
-        yield LoadingIndicator(id="thinking-spinner")
-        yield Static("  Thinking…", classes="thinking-label")
+        for i in range(self._buddy_row_count):
+            row = Horizontal(id=f"thinking-row-{i}", classes="thinking-row")
+            part = Static(" ", classes="buddy-part")
+            self._buddy_rows.append(row)
+            self._buddy_parts.append(part)
+            yield row
+
+        yield Static("Thinking…", classes="thinking-label")
+
+    def on_mount(self) -> None:
+        for row, part in zip(self._buddy_rows, self._buddy_parts, strict=False):
+            if not row.children:
+                row.mount(part)
+        self._update_buddy()
+        self._anim_timer = self.set_interval(0.3, self._update_buddy)
+
+    def on_unmount(self) -> None:
+        if self._anim_timer is not None:
+            self._anim_timer.stop()
+            self._anim_timer = None
+
+    def _update_buddy(self) -> None:
+        if not self.is_attached or not self._buddy_parts:
+            return
+
+        species = AVAILABLE_SPECIES[self._species_index % len(AVAILABLE_SPECIES)]
+        frame = get_frame(species, self._current_frame)
+
+        if len(frame) < self._buddy_row_count:
+            frame = ([""] * (self._buddy_row_count - len(frame))) + frame
+        elif len(frame) > self._buddy_row_count:
+            frame = frame[: self._buddy_row_count]
+
+        for i in range(self._buddy_row_count):
+            buddy_part = frame[i] if i < len(frame) else ""
+            padded = buddy_part.ljust(12) if buddy_part.strip() else " " * 12
+            escaped = padded.replace("[", "\\[").replace("]", "\\]")
+            self._buddy_parts[i].update(f" {escaped}")
+
+        self._current_frame += 1
+        if self._current_frame % 12 == 0:
+            self._species_index += 1
+
 
 class SubAgentBlock(Vertical):
     DEFAULT_CSS = ""
@@ -406,13 +506,33 @@ class SubAgentBlock(Vertical):
 
     def _header_text(self, note: str = "") -> Text:
         t = Text()
-        t.append("◈ ", style="bold #a78bfa")
-        t.append("Sub-Agent", style="bold #c9d1d9")
+        is_orchestrator = "orchestrator" in self.task_label.lower()
+        if is_orchestrator:
+            t.append("◆ ", style="bold #60a5fa")
+            t.append("Orchestrator", style="bold #c9d1d9")
+        else:
+            t.append("◇ ", style="bold #a78bfa")
+            t.append("Sub-Agent", style="bold #c9d1d9")
         t.append("  ", style="")
-        label = (self.task_label[:72] + "…") if len(self.task_label) > 72 else self.task_label
+        label = (
+            (self.task_label[:72] + "…")
+            if len(self.task_label) > 72
+            else self.task_label
+        )
         t.append(label, style="#8b949e")
-        if note:
-            t.append(note, style="dim #484f58")
+
+        if not self._done:
+            t.append("  ", style="")
+            if is_orchestrator:
+                t.append("●", style="#60a5fa")
+                t.append(" dispatching", style="italic #60a5fa")
+            else:
+                t.append("●", style="#a78bfa")
+                t.append(" running", style="italic #a78bfa")
+        elif note:
+            t.append("  ", style="")
+            t.append(note.strip(), style="#8b949e")
+
         return t
 
     def append_text(self, text: str) -> None:
@@ -424,11 +544,12 @@ class SubAgentBlock(Vertical):
             try:
                 self._text_static.update(self._text_str)
                 self._last_flush_len = len(self._text_str)
-            except Exception:
-                pass
+            except Exception as e:
+                logger.debug(
+                    "Expected failure in SubAgentBlock.append_text update: %s", e
+                )
 
-    def add_tool_start(self, tool_id: str, tool_name: str,
-                       args: dict | str) -> None:
+    def add_tool_start(self, tool_id: str, tool_name: str, args: dict | str) -> None:
         msg = ToolMessage(tool_name, args)
         self._active_tools[tool_id] = msg
         self._tool_count += 1
@@ -440,8 +561,14 @@ class SubAgentBlock(Vertical):
         if msg:
             msg.append_output(text)
 
-    def update_tool_end(self, tool_id: str, success: bool, duration: float,
-                        output: str, output_file: str = "") -> None:
+    def update_tool_end(
+        self,
+        tool_id: str,
+        success: bool,
+        duration: float,
+        output: str,
+        output_file: str = "",
+    ) -> None:
         self._total_duration += duration
         msg = self._active_tools.pop(tool_id, None)
         if msg:
@@ -452,14 +579,44 @@ class SubAgentBlock(Vertical):
         self._success = success
         self.remove_class("running")
         self.add_class("done" if success else "error")
-        self.call_after_refresh(self._collapse_to_summary)
+        try:
+            self.query_one(".subagent-spinner", LoadingIndicator).remove()
+        except Exception:
+            pass
+        if self._text_static is not None:
+            try:
+                self._text_static.update("")
+            except Exception:
+                pass
+        self.call_after_refresh(self._update_header)
+    
+    def _update_header(self) -> None:
+        """Update header to reflect completed state."""
+        try:
+            header = self.query_one(".subagent-header", Static)
+            # Build completion note
+            note_parts = []
+            if self._done:
+                icon = "✓" if self._success else "✗"
+                note_parts.append(icon)
+            if self._total_duration > 0:
+                note_parts.append(f"{self._total_duration:.0f}s")
+            if self._tool_count:
+                plural = "s" if self._tool_count > 1 else ""
+                note_parts.append(f"{self._tool_count} tool{plural}")
+            header.update(self._header_text("  ".join(note_parts)))
+        except Exception:
+            pass
 
     def _collapse_to_summary(self) -> None:
         for child in list(self.children):
             try:
                 child.remove()
-            except Exception:
-                pass
+            except Exception as e:
+                logger.debug(
+                    "Expected failure in SubAgentBlock._collapse_to_summary remove children: %s",
+                    e,
+                )
 
         icon = "✓" if self._success else "✗"
         icon_style = "#00d4aa" if self._success else "#ef4444"
@@ -467,7 +624,11 @@ class SubAgentBlock(Vertical):
         summary.append("◈ ", style="bold #a78bfa")
         summary.append(f"{icon} Sub-Agent", style=f"bold {icon_style}")
         summary.append("  ", style="")
-        label = (self.task_label[:52] + "…") if len(self.task_label) > 52 else self.task_label
+        label = (
+            (self.task_label[:52] + "…")
+            if len(self.task_label) > 52
+            else self.task_label
+        )
         summary.append(label, style="#484f58")
         if self._total_duration > 0:
             summary.append(f"  {self._total_duration:.1f}s", style="#8b949e")
@@ -483,8 +644,10 @@ class SubAgentBlock(Vertical):
     def _expand_full(self) -> None:
         try:
             self.query_one(".subagent-summary", Static).remove()
-        except Exception:
-            pass
+        except Exception as e:
+            logger.debug(
+                "Expected failure in SubAgentBlock._expand_full remove summary: %s", e
+            )
 
         self.mount(Static(self._header_text("  [↕]"), classes="subagent-header"))
         body = Vertical(classes="subagent-body")
@@ -504,6 +667,7 @@ class SubAgentBlock(Vertical):
             self._collapse_to_summary()
         else:
             self._expand_full()
+
 
 class ChatPanel(VerticalScroll):
     DEFAULT_CSS = ""
@@ -552,8 +716,7 @@ class ChatPanel(VerticalScroll):
         self._safe_mount(ChatMessage(content, role="tool"))
         self.scroll_end(animate=False)
 
-    def add_tool_start(self, tool_id: str, tool_name: str,
-                       args: dict | str) -> None:
+    def add_tool_start(self, tool_id: str, tool_name: str, args: dict | str) -> None:
         self.end_streaming()
         self.end_thinking()
         msg = ToolMessage(tool_name, args)
@@ -561,8 +724,14 @@ class ChatPanel(VerticalScroll):
         self._active_tools[tool_id] = msg
         self.scroll_end(animate=False)
 
-    def update_tool_end(self, tool_id: str, success: bool,
-                        duration: float, output: str, output_file: str = "") -> None:
+    def update_tool_end(
+        self,
+        tool_id: str,
+        success: bool,
+        duration: float,
+        output: str,
+        output_file: str = "",
+    ) -> None:
         msg = self._active_tools.pop(tool_id, None)
         if msg:
             msg.update_result(success, duration, output, output_file)
@@ -609,7 +778,12 @@ class ChatPanel(VerticalScroll):
 
     def end_streaming(self) -> None:
         if self._streaming_msg:
-            self._streaming_msg.finalize()
+            try:
+                self._streaming_msg.finalize()
+            except Exception as e:
+                logger.debug(
+                    "Expected failure in ChatPanel.end_streaming finalize: %s", e
+                )
             self._streaming_msg = None
 
     def start_thinking(self) -> None:
@@ -625,7 +799,11 @@ class ChatPanel(VerticalScroll):
 
     def end_thinking(self) -> None:
         if self._thinking_msg:
-            self._thinking_msg.remove()
+            try:
+                if self._thinking_msg.is_attached:
+                    self._thinking_msg.remove()
+            except Exception as e:
+                logger.debug("Expected failure in ChatPanel.end_thinking remove: %s", e)
             self._thinking_msg = None
 
     def clear_messages(self) -> None:
@@ -650,22 +828,30 @@ class ChatPanel(VerticalScroll):
         if block:
             block.append_text(text)
 
-    def subagent_add_tool(self, agent_id: str, tool_id: str,
-                          tool_name: str, args: dict | str) -> None:
+    def subagent_add_tool(
+        self, agent_id: str, tool_id: str, tool_name: str, args: dict | str
+    ) -> None:
         block = self._active_subagents.get(agent_id)
         if block:
             block.add_tool_start(tool_id, tool_name, args)
             self.scroll_end(animate=False)
 
-    def subagent_append_tool_output(self, agent_id: str,
-                                    tool_id: str, text: str) -> None:
+    def subagent_append_tool_output(
+        self, agent_id: str, tool_id: str, text: str
+    ) -> None:
         block = self._active_subagents.get(agent_id)
         if block:
             block.append_tool_output(tool_id, text)
 
-    def subagent_update_tool_end(self, agent_id: str, tool_id: str,
-                                 success: bool, duration: float,
-                                 output: str, output_file: str = "") -> None:
+    def subagent_update_tool_end(
+        self,
+        agent_id: str,
+        tool_id: str,
+        success: bool,
+        duration: float,
+        output: str,
+        output_file: str = "",
+    ) -> None:
         block = self._active_subagents.get(agent_id)
         if block:
             block.update_tool_end(tool_id, success, duration, output, output_file)

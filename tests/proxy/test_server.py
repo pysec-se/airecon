@@ -23,6 +23,42 @@ def test_is_local_or_unspecified_host():
     assert srv._is_local_or_unspecified_host("example.com") is False
 
 
+def test_should_emit_stuck_warning_first_hit_and_rate_limited():
+    assert srv._should_emit_stuck_warning(
+        now=360.0,
+        last_event_at=0.0,
+        last_warn_at=0.0,
+        threshold_seconds=300.0,
+        warn_interval_seconds=60.0,
+    ) is True
+
+    assert srv._should_emit_stuck_warning(
+        now=390.0,
+        last_event_at=0.0,
+        last_warn_at=360.0,
+        threshold_seconds=300.0,
+        warn_interval_seconds=60.0,
+    ) is False
+
+    assert srv._should_emit_stuck_warning(
+        now=421.0,
+        last_event_at=0.0,
+        last_warn_at=360.0,
+        threshold_seconds=300.0,
+        warn_interval_seconds=60.0,
+    ) is True
+
+
+def test_should_emit_stuck_warning_false_before_threshold():
+    assert srv._should_emit_stuck_warning(
+        now=250.0,
+        last_event_at=0.0,
+        last_warn_at=0.0,
+        threshold_seconds=300.0,
+        warn_interval_seconds=60.0,
+    ) is False
+
+
 # ── Fixture: inject mocked globals before each test ──────────────────────────
 
 
@@ -299,6 +335,34 @@ class TestMCP:
         assert r.json().get("count") == 1
 
 
+class TestShell:
+    def test_shell_executes_via_docker_engine(self, _patch_server_globals):
+        _patch_server_globals["engine"].execute_tool = AsyncMock(return_value={
+            "success": True,
+            "stdout": "hello\n",
+            "stderr": "",
+            "exit_code": 0,
+        })
+        r = _client().post("/api/shell", json={"command": "echo hello"})
+        assert r.status_code == 200
+        data = r.json()
+        assert data["success"] is True
+        assert data["blocked"] is False
+        _patch_server_globals["engine"].execute_tool.assert_awaited_once_with("execute", {"command": "echo hello"})
+
+    def test_shell_rejects_blocked_tmux_like_command(self):
+        r = _client().post("/api/shell", json={"command": "tmux new -s test"})
+        assert r.status_code == 400
+        data = r.json()
+        assert data["blocked"] is True
+        assert "disabled" in data["error"]
+
+    def test_shell_returns_503_when_engine_missing(self):
+        with patch.object(srv, "engine", None):
+            r = _client().post("/api/shell", json={"command": "echo hi"})
+        assert r.status_code == 503
+
+
 class TestListSkills:
     def test_empty_skills_dir(self):
         """When skills dir doesn't exist, returns count=0."""
@@ -331,6 +395,17 @@ class TestChat:
         data = r.json()
         assert "events" in data
         assert len(data["events"]) >= 1
+
+    def test_non_streaming_propagates_request_id(self):
+        r = _client().post(
+            "/api/chat",
+            json={"message": "scan example.com", "stream": False, "request_id": "req-123"},
+        )
+        assert r.status_code == 200
+        data = r.json()
+        assert data.get("request_id") == "req-123"
+        assert data["events"]
+        assert all(evt.get("request_id") == "req-123" for evt in data["events"])
 
     def test_non_streaming_without_agent_returns_503(self):
         with patch.object(srv, "agent", None):
@@ -390,7 +465,7 @@ class TestChat:
 
         events: list[dict] = []
         with patch.dict("os.environ", env, clear=False):
-            async for item in srv._stream_agent_events("scan target"):
+            async for item in srv._stream_agent_events("scan target", "t-stream"):
                 events.append(item)
                 if item.get("event") == "done":
                     break
@@ -420,12 +495,50 @@ class TestChat:
 
         error_data = ""
         with patch.dict("os.environ", env, clear=False):
-            async for item in srv._stream_agent_events("scan target"):
+            async for item in srv._stream_agent_events("scan target", "t-stream"):
                 if item.get("event") == "error":
                     error_data = item.get("data", "")
                     break
 
         assert "hard-timeout" in error_data
+
+    @pytest.mark.asyncio
+    async def test_stream_tool_idle_uses_extended_hard_timeout(self, _patch_server_globals):
+        async def _slow_tool_then_done(_msg: str):
+            from airecon.proxy.agent.models import AgentEvent
+
+            yield AgentEvent(type="tool_start", data={"tool": "nuclei", "tool_id": "t-1"})
+            await asyncio.sleep(1.4)
+            yield AgentEvent(type="tool_end", data={"tool": "nuclei", "tool_id": "t-1", "success": True})
+            yield AgentEvent(type="done", data={})
+
+        agent = _patch_server_globals["agent"]
+        agent.process_message = _slow_tool_then_done
+
+        env = {
+            "AIRECON_AGENT_IDLE_SOFT_TIMEOUT": "0.5",
+            "AIRECON_AGENT_IDLE_HARD_TIMEOUT": "1.0",
+            "AIRECON_AGENT_IDLE_HARD_TIMEOUT_TOOL": "2.0",
+            "AIRECON_AGENT_IDLE_POLL": "0.2",
+            "AIRECON_AGENT_IDLE_WARN_INTERVAL": "0.4",
+            "AIRECON_SSE_MAX_STREAM_TIME": "10",
+        }
+
+        seen_events: list[str] = []
+        error_data = ""
+        with patch.dict("os.environ", env, clear=False):
+            async for item in srv._stream_agent_events("scan target", "t-tool"):
+                event_name = item.get("event", "")
+                seen_events.append(event_name)
+                if event_name == "error":
+                    error_data = item.get("data", "")
+                    break
+                if event_name == "done":
+                    break
+
+        assert "error" not in seen_events
+        assert "done" in seen_events
+        assert "hard-timeout" not in error_data
 
     @pytest.mark.asyncio
     async def test_stream_resets_busy_flag_after_completion(self, _patch_server_globals):
@@ -438,7 +551,7 @@ class TestChat:
         agent.process_message = _done
 
         with patch.object(srv, "_agent_busy", False):
-            events = [item async for item in srv._stream_agent_events("scan target")]
+            events = [item async for item in srv._stream_agent_events("scan target", "t-cancel")]
 
         assert any(e.get("event") == "done" for e in events)
         assert srv._agent_busy is False
@@ -478,7 +591,7 @@ class TestChat:
 
         async def _consume_stream() -> None:
             with patch.object(srv, "_agent_busy", False):
-                async for item in srv._stream_agent_events("start"):
+                async for item in srv._stream_agent_events("start", "t-max"):
                     payload = item.get("data", "")
                     if not payload:
                         continue

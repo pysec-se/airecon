@@ -11,21 +11,75 @@ from ..config import get_workspace_root
 
 logger = logging.getLogger("airecon.agent")
 
+
 class _WorkspaceMixin:
+    _FILE_EXTENSIONS = frozenset(
+        {
+            "json",
+            "txt",
+            "xml",
+            "html",
+            "htm",
+            "csv",
+            "yaml",
+            "yml",
+            "md",
+            "rst",
+            "py",
+            "js",
+            "ts",
+            "sh",
+            "rb",
+            "go",
+            "php",
+            "java",
+            "c",
+            "cpp",
+            "h",
+            "log",
+            "conf",
+            "cfg",
+            "ini",
+            "toml",
+            "lock",
+            "env",
+            "pdf",
+            "png",
+            "jpg",
+            "jpeg",
+            "gif",
+            "svg",
+            "ico",
+            "zip",
+            "tar",
+            "gz",
+            "bz2",
+            "xz",
+            "whl",
+            "deb",
+            "rpm",
+            "out",
+            "bin",
+            "exe",
+            "so",
+            "dylib",
+        }
+    )
 
-    _FILE_EXTENSIONS = frozenset({
-        "json", "txt", "xml", "html", "htm", "csv", "yaml", "yml", "md", "rst",
-        "py", "js", "ts", "sh", "rb", "go", "php", "java", "c", "cpp", "h",
-        "log", "conf", "cfg", "ini", "toml", "lock", "env",
-        "pdf", "png", "jpg", "jpeg", "gif", "svg", "ico",
-        "zip", "tar", "gz", "bz2", "xz", "whl", "deb", "rpm",
-        "out", "bin", "exe", "so", "dylib",
-    })
-
-    _WORKSPACE_SCAN_EXTENSIONS = frozenset({
-        ".txt", ".json", ".html", ".htm", ".csv", ".xml",
-        ".out", ".md", ".log", ".nmap",
-    })
+    _WORKSPACE_SCAN_EXTENSIONS = frozenset(
+        {
+            ".txt",
+            ".json",
+            ".html",
+            ".htm",
+            ".csv",
+            ".xml",
+            ".out",
+            ".md",
+            ".log",
+            ".nmap",
+        }
+    )
 
     def _scan_workspace_state(self, target: str) -> str:
         try:
@@ -49,12 +103,19 @@ class _WorkspaceMixin:
                     lines = 0
 
                     if size < 1_000_000 and ext in {
-                            ".txt", ".csv", ".out", ".log", ".nmap"}:
+                        ".txt",
+                        ".csv",
+                        ".out",
+                        ".log",
+                        ".nmap",
+                    }:
                         try:
                             with open(path, "r", errors="ignore") as fh:
                                 lines = sum(1 for _ in fh)
-                        except Exception:
-                            pass
+                        except Exception as e:
+                            logger.debug(
+                                "Expected failure counting lines in %s: %s", path, e
+                            )
                     info = f"- /workspace/{target}/output/{f} ({size} bytes"
                     if lines:
                         info += f", {lines} lines"
@@ -63,22 +124,19 @@ class _WorkspaceMixin:
 
             if os.path.exists(tools_dir):
                 for f in sorted(os.listdir(tools_dir)):
-                    files_info.append(
-                        f"- [SCRIPT] /workspace/{target}/tools/{f}")
+                    files_info.append(f"- [SCRIPT] /workspace/{target}/tools/{f}")
 
             if os.path.exists(vuln_dir):
                 for f in sorted(os.listdir(vuln_dir)):
                     if f.endswith(".md"):
                         files_info.append(
-                            f"- [REPORTED] /workspace/{target}/vulnerabilities/{f}")
+                            f"- [REPORTED] /workspace/{target}/vulnerabilities/{f}"
+                        )
 
             if not files_info:
                 return ""
 
-            return (
-                f"[SYSTEM: WORKSPACE for {target}]\n"
-                + "\n".join(files_info)
-            )
+            return f"[SYSTEM: WORKSPACE for {target}]\n" + "\n".join(files_info)
         except Exception as e:
             logger.error(f"Error scanning workspace: {e}")
             return ""
@@ -89,8 +147,7 @@ class _WorkspaceMixin:
         seen: set[str] = set()
         targets: list[str] = []
 
-        for m in re.finditer(
-                r"\b((?:\d{1,3}\.){3}\d{1,3}(?::\d{1,5})?)\b", text):
+        for m in re.finditer(r"\b((?:\d{1,3}\.){3}\d{1,3}(?::\d{1,5})?)\b", text):
             candidate = m.group(1)
             octets = candidate.split(":")[0].split(".")
             if all(o.isdigit() and int(o) <= 255 for o in octets):
@@ -98,15 +155,13 @@ class _WorkspaceMixin:
                     seen.add(candidate)
                     targets.append(candidate)
 
-        for m in re.finditer(
-                r"\b(localhost(?::\d{1,5})?)\b", text, re.IGNORECASE):
+        for m in re.finditer(r"\b(localhost(?::\d{1,5})?)\b", text, re.IGNORECASE):
             candidate = m.group(1).lower()
             if candidate not in seen:
                 seen.add(candidate)
                 targets.append(candidate)
 
-        for m in re.finditer(
-                r"\b[a-z0-9.-]+\.[a-z]{2,}\b", text, re.IGNORECASE):
+        for m in re.finditer(r"\b[a-z0-9.-]+\.[a-z]{2,}\b", text, re.IGNORECASE):
             candidate = m.group(0).lower()
             ext = candidate.rsplit(".", 1)[-1]
             if ext in self._FILE_EXTENSIONS:
@@ -122,21 +177,18 @@ class _WorkspaceMixin:
         if not value:
             return False
         val = value.lower()
-        return val in {"example.com",
-                       "test.com"} or val.endswith(".example.com")
+        return val in {"example.com", "test.com"} or val.endswith(".example.com")
 
     def _replace_placeholder_targets(self, data: Any) -> Any:
         if not self.state.active_target:
             return data
         target = self.state.active_target
         if isinstance(data, str):
-            return data.replace("example.com", target).replace(
-                "test.com", target)
+            return data.replace("example.com", target).replace("test.com", target)
         if isinstance(data, list):
             return [self._replace_placeholder_targets(v) for v in data]
         if isinstance(data, dict):
-            return {k: self._replace_placeholder_targets(
-                v) for k, v in data.items()}
+            return {k: self._replace_placeholder_targets(v) for k, v in data.items()}
         return data
 
     def _normalize_tool_args(
@@ -161,7 +213,6 @@ class _WorkspaceMixin:
         self, tool_name: str, args: dict[str, Any], result: dict[str, Any]
     ) -> str | None:
         try:
-
             target = self.state.active_target or "unknown"
             base_dir = str(get_workspace_root() / target)
 
@@ -170,22 +221,23 @@ class _WorkspaceMixin:
             os.makedirs(command_dir, exist_ok=True)
             os.makedirs(output_dir, exist_ok=True)
             os.makedirs(os.path.join(base_dir, "tools"), exist_ok=True)
-            os.makedirs(
-                os.path.join(
-                    base_dir,
-                    "vulnerabilities"),
-                exist_ok=True)
+            os.makedirs(os.path.join(base_dir, "vulnerabilities"), exist_ok=True)
 
             timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
             succeeded = result.get("success", False)
 
-            json_filepath = os.path.join(
-                command_dir, f"{tool_name}_{timestamp}.json")
+            json_filepath = os.path.join(command_dir, f"{tool_name}_{timestamp}.json")
             with open(json_filepath, "w") as f:
                 json.dump(
-                    {"tool": tool_name, "args": args, "result": result,
-                     "timestamp": timestamp, "success": succeeded},
-                    f, indent=2,
+                    {
+                        "tool": tool_name,
+                        "args": args,
+                        "result": result,
+                        "timestamp": timestamp,
+                        "success": succeeded,
+                    },
+                    f,
+                    indent=2,
                 )
 
             if not succeeded:

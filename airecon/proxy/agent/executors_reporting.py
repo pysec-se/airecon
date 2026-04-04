@@ -41,13 +41,20 @@ class _ReportingExecutorMixin:
 
                 def _token_set(text: str) -> set[str]:
                     return {
-                        tok for tok in re.findall(r"[a-z0-9]{4,}", text.lower())
+                        tok
+                        for tok in re.findall(r"[a-z0-9]{4,}", text.lower())
                         if tok not in {"vulnerability", "report", "issue", "finding"}
                     }
 
                 def _scope_hints(data: dict[str, Any]) -> set[str]:
                     hints: set[str] = set()
-                    for key in ("url", "endpoint", "affected_endpoint", "target", "parameter"):
+                    for key in (
+                        "url",
+                        "endpoint",
+                        "affected_endpoint",
+                        "target",
+                        "parameter",
+                    ):
                         raw = str(data.get(key, "") or "").strip().lower()
                         if not raw:
                             continue
@@ -58,24 +65,26 @@ class _ReportingExecutorMixin:
                                 hints.add(parsed.netloc.lower())
                             if parsed.path:
                                 hints.add(parsed.path.lower())
-                        except Exception:
-                            pass
+                        except Exception as e:
+                            logging.getLogger(__name__).debug(
+                                "Expected failure parsing URL in report scope hints: %s",
+                                e,
+                            )
                     return hints
 
                 report_scope = _scope_hints(arguments)
                 report_tokens = _token_set(report_title)
                 matched = False
                 for vuln in self._session.vulnerabilities:
-                    v_title = str(vuln.get("title") or vuln.get("finding") or "").strip()
+                    v_title = str(
+                        vuln.get("title") or vuln.get("finding") or ""
+                    ).strip()
                     if not report_title or not v_title:
                         continue
 
                     v_lower = v_title.lower()
                     r_lower = report_title.lower()
-                    strict_title_hit = (
-                        v_lower in r_lower
-                        or r_lower in v_lower
-                    )
+                    strict_title_hit = v_lower in r_lower or r_lower in v_lower
                     v_tokens = _token_set(v_title)
                     overlap_ratio = (
                         (len(report_tokens & v_tokens) / max(1, len(report_tokens)))
@@ -93,7 +102,9 @@ class _ReportingExecutorMixin:
                         )
 
                     title_confident = strict_title_hit or overlap_ratio >= 0.75
-                    if title_confident and (scope_hit or strict_title_hit or overlap_ratio >= 0.90):
+                    if title_confident and (
+                        scope_hit or strict_title_hit or overlap_ratio >= 0.90
+                    ):
                         vuln["report_generated"] = True
                         if flag:
                             vuln["flag"] = flag
@@ -112,8 +123,10 @@ class _ReportingExecutorMixin:
         duration = time.time() - start_time
         self.state.tool_history.append(
             ToolExecution(
-                tool_name=tool_name, arguments=arguments,
-                result=result, duration=duration,
+                tool_name=tool_name,
+                arguments=arguments,
+                result=result,
+                duration=duration,
                 status="success" if success else "error",
             )
         )

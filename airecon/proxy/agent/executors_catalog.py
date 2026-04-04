@@ -7,6 +7,8 @@ from typing import Any
 
 logger = logging.getLogger("airecon.agent")
 
+_TOOLS_META_CACHE: dict[str, dict[str, Any]] = {}
+
 
 def _load_specialist_prefixes() -> dict[str, str]:
     try:
@@ -99,21 +101,29 @@ _AIRECON_TOOL_NAMES: frozenset[str] = (
 
 
 def _load_tool_flag_conflicts() -> dict[str, tuple[list[str], str]]:
+
+    cache_key = "tool_flag_conflicts"
+    if cache_key in _TOOLS_META_CACHE:
+        return _TOOLS_META_CACHE[cache_key]
+
     try:
         path = Path(__file__).resolve().parent.parent / "data" / "tools_meta.json"
         data = json.loads(path.read_text(encoding="utf-8"))
         raw = data.get("tool_flag_conflicts", {})
-        return {
+        result = {
             tool: (entry["flags"], entry["correct_tool"])
             for tool, entry in raw.items()
             if isinstance(entry.get("flags"), list) and entry.get("correct_tool")
         }
+        _TOOLS_META_CACHE[cache_key] = result
+        return result
     except Exception as exc:
         logger.warning(
             "Could not load tool_flag_conflicts from tools_meta.json: %s — "
             "flag conflict detection disabled. Check that data/tools_meta.json exists.",
             exc,
         )
+        _TOOLS_META_CACHE[cache_key] = {}
         return {}
 
 

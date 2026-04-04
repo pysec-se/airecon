@@ -14,10 +14,12 @@ CONTAINER_NAME = "airecon-searxng"
 INTERNAL_PORT = 8080
 HEALTH_TIMEOUT = 30
 
+
 def _config_dir() -> Path:
     d = Path.home() / ".airecon" / "searxng"
     d.mkdir(parents=True, exist_ok=True)
     return d
+
 
 def _write_settings(config_dir: Path) -> None:
     settings_path = config_dir / "settings.yml"
@@ -40,9 +42,11 @@ def _write_settings(config_dir: Path) -> None:
     settings_path.write_text(content)
     logger.info(f"SearXNG settings.yml copied to {settings_path}")
 
+
 _shared_manager: SearXNGManager | None = None
 
 _recovery_lock: asyncio.Lock | None = None
+
 
 def _get_recovery_lock() -> asyncio.Lock:
     global _recovery_lock
@@ -50,17 +54,18 @@ def _get_recovery_lock() -> asyncio.Lock:
         _recovery_lock = asyncio.Lock()
     return _recovery_lock
 
+
 def get_shared_manager(host_port: int = INTERNAL_PORT) -> SearXNGManager:
     global _shared_manager
     if _shared_manager is None:
         _shared_manager = SearXNGManager(host_port)
     return _shared_manager
 
+
 async def ensure_searxng_running() -> bool:
     mgr = get_shared_manager()
     lock = _get_recovery_lock()
     if lock.locked():
-
         async with lock:
             return await mgr._is_running()
     async with lock:
@@ -71,13 +76,12 @@ async def ensure_searxng_running() -> bool:
         try:
             await mgr.stop_container()
         except Exception as _stop_err:
-            logger.debug("Failed to stop old SearXNG container (may not exist): %s", _stop_err)
+            logger.debug(
+                "Failed to stop old SearXNG container (may not exist): %s", _stop_err
+            )
 
         try:
-            url = await asyncio.wait_for(
-                mgr.ensure_running(),
-                timeout=60.0
-            )
+            url = await asyncio.wait_for(mgr.ensure_running(), timeout=60.0)
             if url:
                 logger.info("SearXNG recovered successfully at %s", url)
                 return True
@@ -88,6 +92,7 @@ async def ensure_searxng_running() -> bool:
 
         logger.error("SearXNG recovery failed — web_search will use DDG fallback")
         return False
+
 
 class SearXNGManager:
     def __init__(self, host_port: int = INTERNAL_PORT) -> None:
@@ -115,10 +120,7 @@ class SearXNGManager:
             logger.info(f"Pulling SearXNG image ({SEARXNG_IMAGE})...")
 
             try:
-                pull_result = await asyncio.wait_for(
-                    self._pull_image(),
-                    timeout=300.0
-                )
+                pull_result = await asyncio.wait_for(self._pull_image(), timeout=300.0)
                 if not pull_result:
                     return None
             except asyncio.TimeoutError:
@@ -143,7 +145,10 @@ class SearXNGManager:
         if not shutil.which("docker"):
             return
         proc = await asyncio.create_subprocess_exec(
-            "docker", "rm", "-f", CONTAINER_NAME,
+            "docker",
+            "rm",
+            "-f",
+            CONTAINER_NAME,
             stdout=asyncio.subprocess.DEVNULL,
             stderr=asyncio.subprocess.DEVNULL,
         )
@@ -155,29 +160,35 @@ class SearXNGManager:
 
     async def _is_running(self) -> bool:
         proc_exist = await asyncio.create_subprocess_exec(
-            "docker", "ps", "-a",
-            "--filter", f"name={CONTAINER_NAME}",
-            "--format", "{{.Names}}",
+            "docker",
+            "ps",
+            "-a",
+            "--filter",
+            f"name={CONTAINER_NAME}",
+            "--format",
+            "{{.Names}}",
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.DEVNULL,
         )
         stdout_exist, _ = await proc_exist.communicate()
         if CONTAINER_NAME not in stdout_exist.decode():
-
             logger.debug("SearXNG container does not exist — will auto-start")
             return False
 
         proc = await asyncio.create_subprocess_exec(
-            "docker", "ps",
-            "--filter", f"name={CONTAINER_NAME}",
-            "--filter", "status=running",
-            "--format", "{{.Names}}",
+            "docker",
+            "ps",
+            "--filter",
+            f"name={CONTAINER_NAME}",
+            "--filter",
+            "status=running",
+            "--format",
+            "{{.Names}}",
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.DEVNULL,
         )
         stdout, _ = await proc.communicate()
         if CONTAINER_NAME not in stdout.decode():
-
             logger.debug("SearXNG container exists but not running — will restart")
             return False
 
@@ -185,7 +196,10 @@ class SearXNGManager:
 
     async def _image_exists(self) -> bool:
         proc = await asyncio.create_subprocess_exec(
-            "docker", "images", "-q", SEARXNG_IMAGE,
+            "docker",
+            "images",
+            "-q",
+            SEARXNG_IMAGE,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.DEVNULL,
         )
@@ -194,7 +208,9 @@ class SearXNGManager:
 
     async def _pull_image(self) -> bool:
         proc = await asyncio.create_subprocess_exec(
-            "docker", "pull", SEARXNG_IMAGE,
+            "docker",
+            "pull",
+            SEARXNG_IMAGE,
             stdout=asyncio.subprocess.DEVNULL,
             stderr=asyncio.subprocess.DEVNULL,
         )
@@ -207,7 +223,10 @@ class SearXNGManager:
     async def _start_container(self) -> bool:
         logger.info("Removing any existing SearXNG container...")
         stop_proc = await asyncio.create_subprocess_exec(
-            "docker", "rm", "-f", CONTAINER_NAME,
+            "docker",
+            "rm",
+            "-f",
+            CONTAINER_NAME,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
         )
@@ -215,18 +234,29 @@ class SearXNGManager:
         if stop_proc.returncode == 0:
             logger.debug("Existing container removed")
         else:
-            logger.debug("No existing container to remove (or rm failed): %s",
-                        stop_stderr.decode()[:200] if stop_stderr else "unknown")
+            logger.debug(
+                "No existing container to remove (or rm failed): %s",
+                stop_stderr.decode()[:200] if stop_stderr else "unknown",
+            )
 
         cmd = [
-            "docker", "run", "-d",
-            "--name", CONTAINER_NAME,
-            "--restart", "unless-stopped",
-            "-p", f"{self.host_port}:{INTERNAL_PORT}",
-            "-v", f"{self._config_dir}:/etc/searxng",
-            "-v", f"{self._data_dir}:/var/cache/searxng",
-            "-e", f"SEARXNG_BASE_URL=http://localhost:{self.host_port}/",
-            "--network", "bridge",
+            "docker",
+            "run",
+            "-d",
+            "--name",
+            CONTAINER_NAME,
+            "--restart",
+            "unless-stopped",
+            "-p",
+            f"{self.host_port}:{INTERNAL_PORT}",
+            "-v",
+            f"{self._config_dir}:/etc/searxng",
+            "-v",
+            f"{self._data_dir}:/var/cache/searxng",
+            "-e",
+            f"SEARXNG_BASE_URL=http://localhost:{self.host_port}/",
+            "--network",
+            "bridge",
         ]
 
         cmd.append(SEARXNG_IMAGE)
@@ -243,32 +273,48 @@ class SearXNGManager:
             stderr_text = stderr.decode() if stderr else "no stderr"
             logger.error(
                 "Failed to start SearXNG (returncode=%d): %s",
-                proc.returncode, stderr_text[:500]
+                proc.returncode,
+                stderr_text[:500],
             )
 
-            if "address already in use" in stderr_text.lower() or "bind: address already in use" in stderr_text.lower():
+            if (
+                "address already in use" in stderr_text.lower()
+                or "bind: address already in use" in stderr_text.lower()
+            ):
                 logger.error(
                     "Port %d is already in use! Check: sudo lsof -i:%d or ss -tlnp | grep :%d",
-                    self.host_port, self.host_port, self.host_port
+                    self.host_port,
+                    self.host_port,
+                    self.host_port,
                 )
             elif "permission denied" in stderr_text.lower():
-                logger.error("Docker permission denied - try: sudo usermod -aG docker $USER && newgrp docker")
+                logger.error(
+                    "Docker permission denied - try: sudo usermod -aG docker $USER && newgrp docker"
+                )
             return False
 
         container_id = stdout.decode().strip()[:12]
         if not container_id or len(container_id) < 5:
-            logger.error("SearXNG container started but got invalid ID: %s", stdout.decode()[:200])
+            logger.error(
+                "SearXNG container started but got invalid ID: %s",
+                stdout.decode()[:200],
+            )
             return False
 
         logger.info(
             "✓ SearXNG container started: %s (ID: %s, port: %d)",
-            CONTAINER_NAME, container_id, self.host_port
+            CONTAINER_NAME,
+            container_id,
+            self.host_port,
         )
-        
-        # Capture initial container logs for debugging
-        await asyncio.sleep(2)  # Wait for container to initialize
+
+        await asyncio.sleep(2)
         log_proc = await asyncio.create_subprocess_exec(
-            "docker", "logs", "--tail", "20", CONTAINER_NAME,
+            "docker",
+            "logs",
+            "--tail",
+            "20",
+            CONTAINER_NAME,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
         )
@@ -277,7 +323,7 @@ class SearXNGManager:
             logger.debug("SearXNG initial logs: %s", log_stdout.decode()[:1000])
         if log_stderr:
             logger.debug("SearXNG initial stderr: %s", log_stderr.decode()[:1000])
-        
+
         return True
 
     async def _health_check(self) -> bool:
@@ -298,7 +344,6 @@ class SearXNGManager:
                         return False
 
                     if resp.status in (404, 405):
-                        # Older builds may not expose /healthz.
                         fallback_allowed = True
                     else:
                         logger.debug("SearXNG healthz returned status=%d", resp.status)
@@ -316,7 +361,6 @@ class SearXNGManager:
         if not fallback_allowed:
             return False
 
-        # Fallback probe only when /healthz is unavailable.
         try:
             async with aiohttp.ClientSession() as session:
                 async with session.get(
@@ -332,28 +376,42 @@ class SearXNGManager:
         consecutive_successes = 0
         required_successes = 2
 
-        logger.info("Waiting for SearXNG to be healthy (timeout=%ds, need %d consecutive successes)...",
-                   timeout, required_successes)
+        logger.info(
+            "Waiting for SearXNG to be healthy (timeout=%ds, need %d consecutive successes)...",
+            timeout,
+            required_successes,
+        )
 
         while time.monotonic() < deadline:
-            # Check if container is still running before health check
             container_running = await self._container_exists_and_running()
             if not container_running:
-                logger.error("SearXNG container crashed during startup - check logs with: docker logs %s", CONTAINER_NAME)
+                logger.error(
+                    "SearXNG container crashed during startup - check logs with: docker logs %s",
+                    CONTAINER_NAME,
+                )
                 return False
-            
+
             try:
                 if await self._health_check():
                     consecutive_successes += 1
-                    logger.debug("SearXNG health check #%d passed (%d/%d consecutive)",
-                               consecutive_successes, consecutive_successes, required_successes)
+                    logger.debug(
+                        "SearXNG health check #%d passed (%d/%d consecutive)",
+                        consecutive_successes,
+                        consecutive_successes,
+                        required_successes,
+                    )
 
                     if consecutive_successes >= required_successes:
-                        logger.info("✓ SearXNG is healthy (%d consecutive successes)", consecutive_successes)
+                        logger.info(
+                            "✓ SearXNG is healthy (%d consecutive successes)",
+                            consecutive_successes,
+                        )
                         return True
                 else:
                     if consecutive_successes > 0:
-                        logger.debug("SearXNG health check failed — resetting consecutive counter")
+                        logger.debug(
+                            "SearXNG health check failed — resetting consecutive counter"
+                        )
                     consecutive_successes = 0
 
             except Exception as e:
@@ -362,14 +420,22 @@ class SearXNGManager:
 
             await asyncio.sleep(2)
 
-        logger.error("SearXNG did not become healthy in %ds (max consecutive successes: %d/%d)",
-                    timeout, consecutive_successes, required_successes)
+        logger.error(
+            "SearXNG did not become healthy in %ds (max consecutive successes: %d/%d)",
+            timeout,
+            consecutive_successes,
+            required_successes,
+        )
         return False
 
     async def _container_exists_and_running(self) -> bool:
         try:
             proc = await asyncio.create_subprocess_exec(
-                "docker", "inspect", "-f", "{{.State.Running}}", CONTAINER_NAME,
+                "docker",
+                "inspect",
+                "-f",
+                "{{.State.Running}}",
+                CONTAINER_NAME,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
             )
@@ -377,6 +443,6 @@ class SearXNGManager:
             if proc.returncode == 0:
                 status = stdout.decode().strip().lower()
                 return status == "true"
-        except Exception:
-            pass
+        except Exception as e:
+            logger.debug("Expected failure inspecting container state: %s", e)
         return False

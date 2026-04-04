@@ -173,15 +173,16 @@ def owasp_label(owasp_id: str) -> str:
 def severity_label(severity: int) -> str:
     return {5: "Critical", 4: "High", 3: "Medium", 2: "Low", 1: "Info"}.get(severity, "Info")
 
-def evidence_risk_summary(evidence: list[dict[str, Any]]) -> dict[str, Any]:
+def _evidence_risk_summary_hash(evidence: tuple) -> dict[str, Any]:
+
     sev_counts: dict[str, int] = {"Critical": 0, "High": 0, "Medium": 0, "Low": 0, "Info": 0}
     owasp_counts: dict[str, int] = {}
 
     for ev in evidence:
-        sev = int(ev.get("severity", 1))
+        sev = int(ev[0])
         label = severity_label(sev)
         sev_counts[label] = sev_counts.get(label, 0) + 1
-        for tag in ev.get("tags", []):
+        for tag in ev[1]:
             if tag.startswith("owasp:"):
                 owasp_counts[tag] = owasp_counts.get(tag, 0) + 1
 
@@ -192,3 +193,15 @@ def evidence_risk_summary(evidence: list[dict[str, Any]]) -> dict[str, Any]:
         "total_evidence": len(evidence),
         "high_or_critical": sev_counts["Critical"] + sev_counts["High"],
     }
+
+
+def evidence_risk_summary(evidence: list[dict[str, Any]]) -> dict[str, Any]:
+
+    if not evidence:
+        return _evidence_risk_summary_hash(())
+
+    evidence_tuple = tuple(
+        (item.get("severity", 1), tuple(item.get("tags", [])))
+        for item in evidence
+    )
+    return _evidence_risk_summary_hash(evidence_tuple)

@@ -1,5 +1,5 @@
 import pytest
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, MagicMock
 from airecon.proxy.browser import BrowserInstance, _generate_totp, browser_action
 
 
@@ -25,10 +25,33 @@ def browser():
     return b
 
 
+class SyncMock:
+    """Mock that returns sync results (not async) for Playwright Page."""
+
+    def __init__(self):
+        # Use MagicMock for sync operations
+        self._mock = MagicMock()
+
+    def __getattr__(self, name):
+        # Return MagicMock for all attributes (sync)
+        attr = getattr(self._mock, name)
+        if name in ("on", "remove_event_listener"):
+            # These should be sync and return None
+            return lambda *args, **kwargs: None
+        return attr
+
+    def __setattr__(self, name, value):
+        if name.startswith("_mock"):
+            super().__setattr__(name, value)
+        else:
+            setattr(self._mock, name, value)
+
+
 @pytest.mark.asyncio
 async def test_view_source_truncation(browser, mocker):
     # Setup mock page
-    mock_page = AsyncMock()
+    mock_page = MagicMock()
+    mock_page.content = AsyncMock(return_value="<html>test</html>")
 
     # Create very long source code
     long_source = "<html>" + ("A" * 30000) + "</html>"
@@ -62,6 +85,18 @@ async def test_tab_management(browser, mocker):
     # new_tab execution mock setup
     mock_context.new_page = AsyncMock(side_effect=[mock_page_1, mock_page_2])
 
+    # Make on(), remove_event_listener() return None (sync)
+    # and goto return None (sync)
+    mock_page_1.on = lambda *args, **kwargs: None
+    mock_page_1.remove_event_listener = lambda *args, **kwargs: None
+    mock_page_1.goto = AsyncMock(return_value=None)
+    mock_page_1.content = AsyncMock(return_value="<html>test</html>")
+
+    mock_page_2.on = lambda *args, **kwargs: None
+    mock_page_2.remove_event_listener = lambda *args, **kwargs: None
+    mock_page_2.goto = AsyncMock(return_value=None)
+    mock_page_2.content = AsyncMock(return_value="<html>test</html>")
+
     async def mock_state(tab_id):
         return {"tab_id": tab_id}
 
@@ -93,11 +128,11 @@ async def test_tab_management(browser, mocker):
 
 @pytest.mark.asyncio
 async def test_execute_js_parallel(browser, mocker):
-    mock_page_1 = AsyncMock()
+    mock_page_1 = MagicMock()
     mock_page_1.evaluate = AsyncMock(return_value="Result 1")
     mock_page_1.is_closed = mocker.MagicMock(return_value=False)
 
-    mock_page_2 = AsyncMock()
+    mock_page_2 = MagicMock()
     mock_page_2.evaluate = AsyncMock(side_effect=Exception("JS Error"))
     mock_page_2.is_closed = mocker.MagicMock(return_value=False)
 
@@ -119,10 +154,10 @@ async def test_execute_js_parallel(browser, mocker):
 async def test_execute_js_parallel_skips_closed_tab_ids_in_result_mapping(
     browser, mocker
 ):
-    mock_closed_page = AsyncMock()
+    mock_closed_page = MagicMock()
     mock_closed_page.is_closed = mocker.MagicMock(return_value=True)
 
-    mock_open_page = AsyncMock()
+    mock_open_page = MagicMock()
     mock_open_page.evaluate = AsyncMock(return_value="Open Result")
     mock_open_page.is_closed = mocker.MagicMock(return_value=False)
     mock_open_page.url = "https://open.example"

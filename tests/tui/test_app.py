@@ -1,6 +1,6 @@
 import asyncio
 import pytest
-from unittest.mock import patch, MagicMock
+from unittest.mock import patch, MagicMock, AsyncMock
 from airecon.tui.app import AIReconApp, QuitConfirmScreen, UserInputModal
 from airecon.tui.startup import StartupScreen, _write_config_value
 from textual.app import App, ComposeResult
@@ -53,6 +53,47 @@ async def test_app_send_message_triggers_worker():
         mock_run_worker.assert_called()
         chat.add_user_message.assert_called_once_with("scan server")
         chat.start_thinking.assert_called_once()
+
+
+@pytest.mark.asyncio
+async def test_handle_shell_command_calls_api_shell_and_renders_output():
+    app = AIReconApp(show_startup_screen=False, auto_poll_services=False)
+    chat = MagicMock()
+    app.query_one = MagicMock(return_value=chat)  # type: ignore[method-assign]
+
+    mock_resp = MagicMock()
+    mock_resp.status_code = 200
+    mock_resp.content = b"x"
+    mock_resp.json.return_value = {
+        "success": True,
+        "stdout": "installed",
+        "stderr": "",
+        "exit_code": 0,
+    }
+    app._http = MagicMock()
+    app._http.post = AsyncMock(return_value=mock_resp)
+
+    await app._handle_slash_command("/shell apt update")
+
+    app._http.post.assert_awaited_once_with(
+        "/api/shell",
+        json={"command": "apt update"},
+        timeout=180.0,
+    )
+    chat.add_system_message.assert_called_once()
+    chat.add_assistant_message.assert_called()
+
+
+@pytest.mark.asyncio
+async def test_handle_shell_command_without_args_shows_usage():
+    app = AIReconApp(show_startup_screen=False, auto_poll_services=False)
+    chat = MagicMock()
+    app.query_one = MagicMock(return_value=chat)  # type: ignore[method-assign]
+
+    await app._handle_slash_command("/shell")
+
+    chat.add_assistant_message.assert_called_once()
+    assert "Usage: /shell <command>" in chat.add_assistant_message.call_args.args[0]
 
 
 @pytest.mark.asyncio
@@ -110,8 +151,13 @@ def test_app_init_proxy_url_stripped():
 
 
 def test_ollama_recovery_marker_detection():
-    assert AIReconApp._is_ollama_recovery_marker("[AUTO-RECOVERY #1] VRAM crash") is True
-    assert AIReconApp._is_ollama_recovery_marker("CUDA out of memory while generating") is True
+    assert (
+        AIReconApp._is_ollama_recovery_marker("[AUTO-RECOVERY #1] VRAM crash") is True
+    )
+    assert (
+        AIReconApp._is_ollama_recovery_marker("CUDA out of memory while generating")
+        is True
+    )
     assert AIReconApp._is_ollama_recovery_marker("normal assistant response") is False
 
 
@@ -425,8 +471,8 @@ def test_startup_screen_proxy_timeout_resume_mode():
 
 
 def test_write_config_value_creates_file(tmp_path):
-    """_write_config_value should write key into ~/.airecon/config.json."""
-    import json as _json
+    """_write_config_value should write key into ~/.airecon/config.yaml."""
+    import yaml
 
     airecon_dir = tmp_path / ".airecon"
     airecon_dir.mkdir()
@@ -437,19 +483,19 @@ def test_write_config_value_creates_file(tmp_path):
     ):
         _write_config_value("searxng_url", "http://localhost:4000")
 
-    config_file = airecon_dir / "config.json"
+    config_file = airecon_dir / "config.yaml"
     assert config_file.exists()
-    result = _json.loads(config_file.read_text())
+    result = yaml.safe_load(config_file.read_text())
     assert result.get("searxng_url") == "http://localhost:4000"
 
 
 def test_write_config_value_preserves_existing_keys(tmp_path):
     """_write_config_value should not overwrite other existing keys."""
-    import json as _json
+    import yaml
 
     airecon_dir = tmp_path / ".airecon"
     airecon_dir.mkdir()
-    (airecon_dir / "config.json").write_text(_json.dumps({"ollama_model": "llama3"}))
+    (airecon_dir / "config.yaml").write_text(yaml.dump({"ollama_model": "llama3"}))
 
     with (
         patch("pathlib.Path.home", return_value=tmp_path),
@@ -457,6 +503,6 @@ def test_write_config_value_preserves_existing_keys(tmp_path):
     ):
         _write_config_value("searxng_url", "http://localhost:4000")
 
-    result = _json.loads((airecon_dir / "config.json").read_text())
+    result = yaml.safe_load((airecon_dir / "config.yaml").read_text())
     assert result["ollama_model"] == "llama3"
     assert result["searxng_url"] == "http://localhost:4000"

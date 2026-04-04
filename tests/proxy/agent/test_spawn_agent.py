@@ -11,7 +11,7 @@ Verifies that _execute_spawn_agent_tool:
 from __future__ import annotations
 
 import pytest
-from unittest.mock import MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 from airecon.proxy.agent.executors import _ExecutorMixin
 from airecon.proxy.agent.session import SessionData
@@ -51,20 +51,26 @@ class DummyAgent(_ExecutorMixin):
 
 def _make_sub_agent_mock(vulnerabilities: list[dict]) -> MagicMock:
     """Build a mock AgentLoop whose _session has the given vulnerabilities."""
-    mock_agent = MagicMock()
     mock_session = MagicMock(spec=SessionData)
     mock_session.vulnerabilities = vulnerabilities
 
-    # process_message is an async generator — drain it without yielding
-    async def _noop_gen(*args, **kwargs):
-        return
-        yield  # make it an async generator
+    # Create a new class with the mock behavior
+    class MockAgent:
+        def __init__(self):
+            # process_message must return an async generator
+            async def _noop_gen(*args, **kwargs):
+                # Just return without yielding - the for loop won't iterate
+                return
+                yield
 
-    mock_agent.process_message = _noop_gen
-    mock_agent._session = mock_session
-    mock_agent._override_max_iterations = None
-    mock_agent._blocked_tools = set()
-    return mock_agent
+            self.process_message = _noop_gen
+            self._session = mock_session
+            self._override_max_iterations = None
+            self._blocked_tools = set()
+            self.state = MagicMock()
+            self.state.token_usage = {}
+
+    return MockAgent()
 
 
 # ---------------------------------------------------------------------------
@@ -86,9 +92,13 @@ class TestSpawnAgentOutput:
 
         sub_agent = _make_sub_agent_mock(sub_vulns)
 
+        # Create a proper mock OllamaClient with async _async_init
+        mock_ollama = MagicMock()
+        mock_ollama._async_init = AsyncMock()
+
         with (
             patch("airecon.proxy.agent.loop.AgentLoop", return_value=sub_agent),
-            patch("airecon.proxy.ollama.OllamaClient", return_value=MagicMock()),
+            patch("airecon.proxy.ollama.OllamaClient", return_value=mock_ollama),
             patch(
                 "airecon.proxy.agent.executors.get_config",
                 return_value=MagicMock(ollama_model="llama3"),
@@ -119,10 +129,12 @@ class TestSpawnAgentOutput:
         """'total' field must equal len(findings)."""
         sub_vulns = [{"finding": f"Vuln {i}", "severity": "MEDIUM"} for i in range(5)]
         sub_agent = _make_sub_agent_mock(sub_vulns)
+        mock_ollama = MagicMock()
+        mock_ollama._async_init = AsyncMock()
 
         with (
             patch("airecon.proxy.agent.loop.AgentLoop", return_value=sub_agent),
-            patch("airecon.proxy.ollama.OllamaClient", return_value=MagicMock()),
+            patch("airecon.proxy.ollama.OllamaClient", return_value=mock_ollama),
             patch(
                 "airecon.proxy.agent.executors.get_config",
                 return_value=MagicMock(ollama_model="llama3"),
@@ -141,10 +153,12 @@ class TestSpawnAgentOutput:
         """findings list must not exceed 10 items (session[:10] slice)."""
         sub_vulns = [{"finding": f"Vuln {i}"} for i in range(15)]
         sub_agent = _make_sub_agent_mock(sub_vulns)
+        mock_ollama = MagicMock()
+        mock_ollama._async_init = AsyncMock()
 
         with (
             patch("airecon.proxy.agent.loop.AgentLoop", return_value=sub_agent),
-            patch("airecon.proxy.ollama.OllamaClient", return_value=MagicMock()),
+            patch("airecon.proxy.ollama.OllamaClient", return_value=mock_ollama),
             patch(
                 "airecon.proxy.agent.executors.get_config",
                 return_value=MagicMock(ollama_model="llama3"),
@@ -162,10 +176,12 @@ class TestSpawnAgentOutput:
     async def test_empty_session_findings_is_empty_list(self):
         """If sub-agent found nothing, findings must be [] not None."""
         sub_agent = _make_sub_agent_mock([])
+        mock_ollama = MagicMock()
+        mock_ollama._async_init = AsyncMock()
 
         with (
             patch("airecon.proxy.agent.loop.AgentLoop", return_value=sub_agent),
-            patch("airecon.proxy.ollama.OllamaClient", return_value=MagicMock()),
+            patch("airecon.proxy.ollama.OllamaClient", return_value=mock_ollama),
             patch(
                 "airecon.proxy.agent.executors.get_config",
                 return_value=MagicMock(ollama_model="llama3"),
@@ -185,10 +201,12 @@ class TestSpawnAgentOutput:
     async def test_output_dict_has_required_keys(self):
         """Result dict must have: success, specialist, target, findings, total."""
         sub_agent = _make_sub_agent_mock([{"finding": "SSRF via webhook param"}])
+        mock_ollama = MagicMock()
+        mock_ollama._async_init = AsyncMock()
 
         with (
             patch("airecon.proxy.agent.loop.AgentLoop", return_value=sub_agent),
-            patch("airecon.proxy.ollama.OllamaClient", return_value=MagicMock()),
+            patch("airecon.proxy.ollama.OllamaClient", return_value=mock_ollama),
             patch(
                 "airecon.proxy.agent.executors.get_config",
                 return_value=MagicMock(ollama_model="llama3"),
@@ -219,6 +237,8 @@ class TestSpawnAgentSpecialist:
     @pytest.mark.asyncio
     async def test_valid_specialist_preserved(self):
         """Known specialist names must pass through unchanged."""
+        mock_ollama = MagicMock()
+        mock_ollama._async_init = AsyncMock()
         for specialist in (
             "sqli",
             "xss",
@@ -232,7 +252,7 @@ class TestSpawnAgentSpecialist:
             sub_agent = _make_sub_agent_mock([])
             with (
                 patch("airecon.proxy.agent.loop.AgentLoop", return_value=sub_agent),
-                patch("airecon.proxy.ollama.OllamaClient", return_value=MagicMock()),
+                patch("airecon.proxy.ollama.OllamaClient", return_value=mock_ollama),
                 patch(
                     "airecon.proxy.agent.executors.get_config",
                     return_value=MagicMock(ollama_model="llama3"),
@@ -250,10 +270,12 @@ class TestSpawnAgentSpecialist:
     async def test_invalid_specialist_falls_back_to_exploit(self):
         """Unknown specialist must be sanitised to 'exploit'."""
         sub_agent = _make_sub_agent_mock([])
+        mock_ollama = MagicMock()
+        mock_ollama._async_init = AsyncMock()
 
         with (
             patch("airecon.proxy.agent.loop.AgentLoop", return_value=sub_agent),
-            patch("airecon.proxy.ollama.OllamaClient", return_value=MagicMock()),
+            patch("airecon.proxy.ollama.OllamaClient", return_value=mock_ollama),
             patch(
                 "airecon.proxy.agent.executors.get_config",
                 return_value=MagicMock(ollama_model="llama3"),
@@ -271,10 +293,12 @@ class TestSpawnAgentSpecialist:
     async def test_uppercase_specialist_normalised(self):
         """Uppercase specialist name must be lowercased and accepted."""
         sub_agent = _make_sub_agent_mock([])
+        mock_ollama = MagicMock()
+        mock_ollama._async_init = AsyncMock()
 
         with (
             patch("airecon.proxy.agent.loop.AgentLoop", return_value=sub_agent),
-            patch("airecon.proxy.ollama.OllamaClient", return_value=MagicMock()),
+            patch("airecon.proxy.ollama.OllamaClient", return_value=mock_ollama),
             patch(
                 "airecon.proxy.agent.executors.get_config",
                 return_value=MagicMock(ollama_model="llama3"),
@@ -305,10 +329,12 @@ class TestSpawnAgentParentMerge:
             {"finding": "Path Traversal in /download?file=", "severity": "HIGH"}
         ]
         sub_agent = _make_sub_agent_mock(sub_vulns)
+        mock_ollama = MagicMock()
+        mock_ollama._async_init = AsyncMock()
 
         with (
             patch("airecon.proxy.agent.loop.AgentLoop", return_value=sub_agent),
-            patch("airecon.proxy.ollama.OllamaClient", return_value=MagicMock()),
+            patch("airecon.proxy.ollama.OllamaClient", return_value=mock_ollama),
             patch(
                 "airecon.proxy.agent.executors.get_config",
                 return_value=MagicMock(ollama_model="llama3"),
@@ -337,12 +363,14 @@ class TestSpawnAgentParentMerge:
 
         # Sub-agent returns exact same finding
         sub_agent = _make_sub_agent_mock([existing_vuln])
+        mock_ollama = MagicMock()
+        mock_ollama._async_init = AsyncMock()
 
         agent = DummyAgent(parent_session=parent_session)
 
         with (
             patch("airecon.proxy.agent.loop.AgentLoop", return_value=sub_agent),
-            patch("airecon.proxy.ollama.OllamaClient", return_value=MagicMock()),
+            patch("airecon.proxy.ollama.OllamaClient", return_value=mock_ollama),
             patch(
                 "airecon.proxy.agent.executors.get_config",
                 return_value=MagicMock(ollama_model="llama3"),
@@ -366,12 +394,14 @@ class TestSpawnAgentErrors:
     @pytest.mark.asyncio
     async def test_exception_returns_failure_dict(self):
         """If AgentLoop raises, result must be {success: False, error: ...}."""
+        mock_ollama = MagicMock()
+        mock_ollama._async_init = AsyncMock()
         with (
             patch(
                 "airecon.proxy.agent.loop.AgentLoop",
                 side_effect=RuntimeError("ollama connection refused"),
             ),
-            patch("airecon.proxy.ollama.OllamaClient", return_value=MagicMock()),
+            patch("airecon.proxy.ollama.OllamaClient", return_value=mock_ollama),
             patch(
                 "airecon.proxy.agent.executors.get_config",
                 return_value=MagicMock(ollama_model="llama3"),
@@ -390,12 +420,14 @@ class TestSpawnAgentErrors:
     @pytest.mark.asyncio
     async def test_tool_history_recorded_on_failure(self):
         """Tool execution must be recorded in state.tool_history even on failure."""
+        mock_ollama = MagicMock()
+        mock_ollama._async_init = AsyncMock()
         with (
             patch(
                 "airecon.proxy.agent.loop.AgentLoop",
                 side_effect=RuntimeError("timeout"),
             ),
-            patch("airecon.proxy.ollama.OllamaClient", return_value=MagicMock()),
+            patch("airecon.proxy.ollama.OllamaClient", return_value=mock_ollama),
             patch(
                 "airecon.proxy.agent.executors.get_config",
                 return_value=MagicMock(ollama_model="llama3"),

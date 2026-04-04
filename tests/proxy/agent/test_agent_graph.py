@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import pytest
-from unittest.mock import MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 from airecon.proxy.agent.agent_graph import (
     AgentEdge,
@@ -191,7 +191,6 @@ class TestCreateDefaultGraph:
             "recon_node",
             "analyzer_node",
             "exploiter_node",
-            "specialist_sqli",
             "reporter_node",
         }
         assert set(g.nodes.keys()) == expected
@@ -202,12 +201,10 @@ class TestCreateDefaultGraph:
         order = [n.id for n in g.execution_order()]
         # recon must come before analyzer
         assert order.index("recon_node") < order.index("analyzer_node")
-        # analyzer must come before exploiter and specialist
+        # analyzer must come before exploiter
         assert order.index("analyzer_node") < order.index("exploiter_node")
-        assert order.index("analyzer_node") < order.index("specialist_sqli")
-        # exploiter and specialist must come before reporter
+        # exploiter must come before reporter
         assert order.index("exploiter_node") < order.index("reporter_node")
-        assert order.index("specialist_sqli") < order.index("reporter_node")
 
     def test_target_stored(self):
         g = create_default_graph("target.io")
@@ -233,6 +230,7 @@ class TestAgentGraphExecute:
 
         mock_loop = MagicMock()
         mock_loop.process_message = _gen
+        mock_loop.initialize = AsyncMock()
         return mock_loop
 
     @pytest.mark.asyncio

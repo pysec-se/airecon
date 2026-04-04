@@ -41,6 +41,7 @@ _MAX_COMPLETED_PHASES = 10
 
 T = TypeVar("T")
 
+
 class BoundedList(list[T]):
     __slots__ = ("maxlen",)
 
@@ -74,9 +75,9 @@ class BoundedList(list[T]):
         super().__setitem__(key, value)
         self._trim()
 
-_DEQUE_SERIALIZED_RE = re.compile(
-    r"""^deque\((\[[\s\S]*\])(?:,\s*maxlen=\d+)?\)$"""
-)
+
+_DEQUE_SERIALIZED_RE = re.compile(r"""^deque\((\[[\s\S]*\])(?:,\s*maxlen=\d+)?\)$""")
+
 
 def _coerce_sequence_field(
     value: Any,
@@ -119,6 +120,7 @@ def _coerce_sequence_field(
         )
         return BoundedList(maxlen=maxlen)
 
+
 def _coerce_non_negative_int(value: Any, default: int = 0) -> int:
     try:
         parsed = int(value)
@@ -126,29 +128,64 @@ def _coerce_non_negative_int(value: Any, default: int = 0) -> int:
         return default
     return parsed if parsed >= 0 else default
 
+
 _UUID_RE = re.compile(
     r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$",
     re.IGNORECASE,
 )
 
-_TRACKING_PARAMS: frozenset[str] = frozenset({
-    "utm_source", "utm_medium", "utm_campaign", "utm_term", "utm_content",
-    "utm_id", "utm_reader", "utm_name",
-    "fbclid", "gclid", "gclsrc", "dclid", "msclkid", "twclid",
-    "mc_cid", "mc_eid",
-    "_ga", "_gl", "_hsenc", "_hsmi",
-    "ref", "referrer", "source", "medium", "campaign",
-})
+_TRACKING_PARAMS: frozenset[str] = frozenset(
+    {
+        "utm_source",
+        "utm_medium",
+        "utm_campaign",
+        "utm_term",
+        "utm_content",
+        "utm_id",
+        "utm_reader",
+        "utm_name",
+        "fbclid",
+        "gclid",
+        "gclsrc",
+        "dclid",
+        "msclkid",
+        "twclid",
+        "mc_cid",
+        "mc_eid",
+        "_ga",
+        "_gl",
+        "_hsenc",
+        "_hsmi",
+        "ref",
+        "referrer",
+        "source",
+        "medium",
+        "campaign",
+    }
+)
 
-_NUMERIC_FP_VALUES: frozenset[str] = frozenset({
+_NUMERIC_FP_VALUES: frozenset[str] = frozenset(
+    {
+        "80",
+        "443",
+        "8080",
+        "8443",
+        "8000",
+        "8888",
+        "3000",
+        "4000",
+        "5000",
+        "9000",
+        "9090",
+        "3306",
+        "5432",
+        "6379",
+        "27017",
+        *[str(s) for s in range(100, 600)],
+        *[str(y) for y in range(1990, 2035)],
+    }
+)
 
-    "80", "443", "8080", "8443", "8000", "8888", "3000", "4000", "5000",
-    "9000", "9090", "3306", "5432", "6379", "27017",
-
-    *[str(s) for s in range(100, 600)],
-
-    *[str(y) for y in range(1990, 2035)],
-})
 
 def _load_param_type_map() -> dict[str, str]:
     try:
@@ -163,19 +200,27 @@ def _load_param_type_map() -> dict[str, str]:
         logger.debug("Could not load PARAM_TYPE_MAP from fuzzer_data.json: %s", e)
         return {}
 
+
 _PARAM_TYPE_MAP: dict[str, str] = _load_param_type_map()
+
 
 def _load_redirect_path_indicators() -> frozenset[str]:
     try:
         data_file = Path(__file__).parent.parent / "data" / "patterns.json"
         data = json.loads(data_file.read_text(encoding="utf-8"))
-        indicators: list[str] = data.get("open_redirect_url_param", {}).get("indicators", [])
+        indicators: list[str] = data.get("open_redirect_url_param", {}).get(
+            "indicators", []
+        )
         return frozenset(ind.lower() for ind in indicators if ind)
     except Exception as e:
-        logger.debug("Could not load redirect path indicators from patterns.json: %s", e)
+        logger.debug(
+            "Could not load redirect path indicators from patterns.json: %s", e
+        )
         return frozenset()
 
+
 _REDIRECT_PATH_INDICATORS: frozenset[str] = _load_redirect_path_indicators()
+
 
 def _guess_injection_type(param: str, value: str) -> str:
     p = param.lower().rstrip("[]")
@@ -193,6 +238,7 @@ def _guess_injection_type(param: str, value: str) -> str:
         return "IDOR"
     return "INJECT"
 
+
 def _extract_injection_points(url: str) -> list[dict[str, Any]]:
     points: list[dict[str, Any]] = []
     try:
@@ -201,12 +247,16 @@ def _extract_injection_points(url: str) -> list[dict[str, Any]]:
         if p.scheme not in ("http", "https"):
             return points
 
-        base = urlunparse((
-            p.scheme.lower(),
-            p.netloc.lower(),
-            p.path.rstrip("/") or "/",
-            "", "", "",
-        ))
+        base = urlunparse(
+            (
+                p.scheme.lower(),
+                p.netloc.lower(),
+                p.path.rstrip("/") or "/",
+                "",
+                "",
+                "",
+            )
+        )
 
         _path_lower = p.path.lower()
         _path_is_redirect = any(ind in _path_lower for ind in _REDIRECT_PATH_INDICATORS)
@@ -218,80 +268,93 @@ def _extract_injection_points(url: str) -> list[dict[str, Any]]:
 
             if type_hint == "SSRF" and _path_is_redirect:
                 type_hint = "OPEN_REDIRECT"
-            points.append({
-                "url": base,
-                "parameter": param,
-                "method": "GET",
-                "value_sample": value[:30] if value else "",
-                "type_hint": type_hint,
-            })
+            points.append(
+                {
+                    "url": base,
+                    "parameter": param,
+                    "method": "GET",
+                    "value_sample": value[:30] if value else "",
+                    "type_hint": type_hint,
+                }
+            )
 
         path_parts = [x for x in p.path.strip("/").split("/") if x]
         for i, seg in enumerate(path_parts):
             if re.match(r"^\d{1,10}$", seg) or _UUID_RE.match(seg):
-
                 parent = path_parts[i - 1] if i > 0 else ""
                 param_label = f"path/{parent}/{seg}" if parent else f"path/{seg}"
-                points.append({
-                    "url": base,
-                    "parameter": param_label,
-                    "method": "GET",
-                    "value_sample": seg,
-                    "type_hint": "IDOR",
-                })
+                points.append(
+                    {
+                        "url": base,
+                        "parameter": param_label,
+                        "method": "GET",
+                        "value_sample": seg,
+                        "type_hint": "IDOR",
+                    }
+                )
     except Exception as _e:
         logger.debug("_extract_injection_points path traversal error: %s", _e)
     return points
+
 
 def injection_point_key(url: str, parameter: str, method: str = "GET") -> str:
     normalized = _normalize_url(url) if url else url
     return f"{normalized}||{parameter}||{method.upper()}"
 
-def mark_injection_point_tested(session: "SessionData", url: str, parameter: str, method: str = "GET") -> None:
+
+def mark_injection_point_tested(
+    session: "SessionData", url: str, parameter: str, method: str = "GET"
+) -> None:
     key = injection_point_key(url, parameter, method)
     if key not in session.tested_injection_points:
         session.tested_injection_points.append(key)
 
+
 def get_untested_injection_points(session: "SessionData") -> list[dict[str, Any]]:
     tested_set = set(session.tested_injection_points)
     return [
-        pt for pt in session.injection_points
+        pt
+        for pt in session.injection_points
         if injection_point_key(
             pt.get("url", ""), pt.get("parameter", ""), pt.get("method", "GET")
-        ) not in tested_set
+        )
+        not in tested_set
     ]
+
 
 def _merge_injection_points(
     session_points: list[dict[str, Any]],
     new_points: list[dict[str, Any]],
 ) -> None:
-    existing = {
-        (p["url"], p["parameter"], p["method"])
-        for p in session_points
-    }
+    existing = {(p["url"], p["parameter"], p["method"]) for p in session_points}
     for pt in new_points:
         key = (pt["url"], pt["parameter"], pt["method"])
         if key not in existing:
             session_points.append(pt)
             existing.add(key)
 
+
 def generate_session_id() -> str:
     return f"{int(time.time())}_{uuid.uuid4().hex[:8]}"
+
 
 def _normalize_url(url: str) -> str:
     try:
         p = urlparse(url)
         query = urlencode(sorted(parse_qsl(p.query, keep_blank_values=True)))
-        return urlunparse((
-            p.scheme.lower(),
-            p.netloc.lower(),
-            p.path.rstrip("/"),
-            p.params,
-            query,
-            "",
-        ))
+        return urlunparse(
+            (
+                p.scheme.lower(),
+                p.netloc.lower(),
+                p.path.rstrip("/"),
+                p.params,
+                query,
+                "",
+            )
+        )
     except Exception:
         return url
+
 
 def _calculate_similarity(v1: str, v2: str) -> float:
     v1_lower = v1.lower()
@@ -304,7 +367,8 @@ def _calculate_similarity(v1: str, v2: str) -> float:
         return 1.0
 
     param_re = re.compile(
-        r"(?:[?&]([a-z0-9_\[\]\-]+)=|parameter\s+['\"]?([a-z0-9_\[\]\-]+)['\"]?)")
+        r"(?:[?&]([a-z0-9_\[\]\-]+)=|parameter\s+['\"]?([a-z0-9_\[\]\-]+)['\"]?)"
+    )
     m1 = param_re.search(v1_lower)
     m2 = param_re.search(v2_lower)
 
@@ -316,13 +380,15 @@ def _calculate_similarity(v1: str, v2: str) -> float:
 
     return jaccard_similarity(v1_lower, v2_lower)
 
-def _is_duplicate_vulnerability(
-        new_vuln: dict, existing_vulns: list[dict]) -> bool:
+
+def _is_duplicate_vulnerability(new_vuln: dict, existing_vulns: list[dict]) -> bool:
     try:
         from ..config import get_config
+
         threshold = get_config().vuln_similarity_threshold
     except Exception:
         from ..config import DEFAULT_CONFIG
+
         threshold = DEFAULT_CONFIG["vuln_similarity_threshold"]
 
     new_finding = new_vuln.get("finding", "")
@@ -331,7 +397,7 @@ def _is_duplicate_vulnerability(
     if not new_finding or not str(new_finding).strip():
         logger.warning(
             "Skipping vulnerability with empty finding field: %s",
-            new_vuln.get("source", "unknown")
+            new_vuln.get("source", "unknown"),
         )
         return True
 
@@ -352,6 +418,7 @@ def _is_duplicate_vulnerability(
             return True
 
     return False
+
 
 @dataclass
 class ApplicationModel:
@@ -376,20 +443,25 @@ class ApplicationModel:
         except Exception:
             endpoint = url
 
-        entry = self.resources.setdefault(endpoint, {
-            "methods": [],
-            "param_names": [],
-            "auth_required": False,
-            "content_types": [],
-        })
+        entry = self.resources.setdefault(
+            endpoint,
+            {
+                "methods": [],
+                "param_names": [],
+                "auth_required": False,
+                "content_types": [],
+            },
+        )
         if method.upper() not in entry["methods"]:
             entry["methods"].append(method.upper())
 
-        for p in (param_names or []):
+        for p in param_names or []:
             if p and p not in entry["param_names"]:
                 entry["param_names"].append(p)
 
-        auth_header = headers.get("www-authenticate", headers.get("WWW-Authenticate", ""))
+        auth_header = headers.get(
+            "www-authenticate", headers.get("WWW-Authenticate", "")
+        )
         set_cookie = headers.get("set-cookie", headers.get("Set-Cookie", ""))
         auth_header_val = headers.get("authorization", headers.get("Authorization", ""))
 
@@ -422,8 +494,8 @@ class ApplicationModel:
                 if isinstance(obj, dict):
                     schema = self.api_schema.setdefault(endpoint, {})
                     schema.update({k: type(v).__name__ for k, v in obj.items()})
-            except Exception:
-                pass
+            except Exception as e:
+                logger.debug("Expected failure parsing JSON in app model update: %s", e)
 
         if len(self.resources) > 500:
             excess = list(self.resources.keys())[:-500]
@@ -434,9 +506,8 @@ class ApplicationModel:
         if not self.resources and not self.roles_detected:
             return ""
 
-        lines = ['<application_model>']
+        lines = ["<application_model>"]
         if self.resources:
-
             interesting = sorted(
                 self.resources.items(),
                 key=lambda kv: (
@@ -454,7 +525,7 @@ class ApplicationModel:
                 auth_type_str = f"({auth_type})" if auth_type else ""
                 lines.append(
                     f'    <endpoint path="{ep}" methods="{methods_str}"'
-                    f'{auth}{auth_type_str}{params_str}/>'
+                    f"{auth}{auth_type_str}{params_str}/>"
                 )
             lines.append("  </endpoints>")
 
@@ -466,8 +537,9 @@ class ApplicationModel:
                 keys_str = ", ".join(list(schema.keys())[:10])
                 lines.append(f'  <api_schema endpoint="{ep}" keys="{keys_str}"/>')
 
-        lines.append('</application_model>')
+        lines.append("</application_model>")
         return "\n".join(lines)
+
 
 def _serialize_app_model(model: ApplicationModel) -> dict[str, Any]:
     return {
@@ -476,6 +548,7 @@ def _serialize_app_model(model: ApplicationModel) -> dict[str, Any]:
         "roles_detected": list(model.roles_detected),
         "api_schema": dict(model.api_schema),
     }
+
 
 def _deserialize_app_model(raw: Any) -> ApplicationModel:
     model = ApplicationModel()
@@ -495,13 +568,18 @@ def _deserialize_app_model(raw: Any) -> ApplicationModel:
         model.api_schema = api_schema
     return model
 
+
 def _serialize_causal_state(state: CausalState) -> dict[str, Any]:
-    return state.to_dict() if isinstance(state, CausalState) else CausalState().to_dict()
+    return (
+        state.to_dict() if isinstance(state, CausalState) else CausalState().to_dict()
+    )
+
 
 def _deserialize_causal_state(raw: Any) -> CausalState:
     if isinstance(raw, dict):
         return CausalState.from_dict(raw)
     return CausalState()
+
 
 def _coerce_unit_float(value: Any, default: float = 0.0) -> float:
     try:
@@ -509,9 +587,11 @@ def _coerce_unit_float(value: Any, default: float = 0.0) -> float:
     except (TypeError, ValueError):
         return default
 
+
 class _SafeFormatDict(dict[str, str]):
     def __missing__(self, key: str) -> str:
         return ""
+
 
 _DEFAULT_CAUSAL_HYPOTHESIS_RULES: list[dict[str, Any]] = [
     {
@@ -548,6 +628,7 @@ _DEFAULT_CAUSAL_HYPOTHESIS_RULES: list[dict[str, Any]] = [
     },
 ]
 
+
 def _load_causal_hypothesis_rules() -> list[dict[str, Any]]:
     raw_rules = get_tuning(
         "causal_reasoning.hypothesis_rules",
@@ -579,6 +660,7 @@ def _load_causal_hypothesis_rules() -> list[dict[str, Any]]:
         )
     return rules or list(_DEFAULT_CAUSAL_HYPOTHESIS_RULES)
 
+
 _CAUSAL_HYPOTHESIS_RULES = _load_causal_hypothesis_rules()
 _CAUSAL_SUPPORT_THRESHOLD = _coerce_unit_float(
     get_tuning("causal_reasoning.support_threshold", 0.72),
@@ -589,12 +671,14 @@ _CAUSAL_REFUTE_THRESHOLD = _coerce_unit_float(
     0.20,
 )
 
+
 def _stable_causal_hypothesis_id(id_prefix: str, entity: str, attribute: str) -> str:
     seed = f"{id_prefix}|{entity.strip().lower()}|{attribute.strip().lower()}"
     digest = hashlib.sha1(
         seed.encode("utf-8", errors="replace"), usedforsecurity=False
     ).hexdigest()[:12]
     return f"{id_prefix}_{digest}"
+
 
 def _build_causal_context_block(
     state: CausalState,
@@ -610,9 +694,9 @@ def _build_causal_context_block(
 
     lines = [
         (
-            f"<causal_reasoning observations=\"{len(state.observations)}\" "
-            f"hypotheses=\"{len(state.hypotheses)}\" "
-            f"interventions=\"{len(state.interventions)}\">"
+            f'<causal_reasoning observations="{len(state.observations)}" '
+            f'hypotheses="{len(state.hypotheses)}" '
+            f'interventions="{len(state.interventions)}">'
         )
     ]
 
@@ -643,7 +727,13 @@ def _build_causal_context_block(
     if state.interventions:
         lines.append("  <recent_interventions>")
         for iv in state.interventions[-max_interventions:]:
-            status = "success" if iv.success else "unknown" if iv.success is None else "failed"
+            status = (
+                "success"
+                if iv.success
+                else "unknown"
+                if iv.success is None
+                else "failed"
+            )
             lines.append(
                 f"    - [{status}] {iv.action[:120]} => {iv.observed_effect[:120]}"
             )
@@ -654,6 +744,7 @@ def _build_causal_context_block(
     )
     lines.append("</causal_reasoning>")
     return "\n".join(lines)
+
 
 def _update_causal_hypotheses_from_observation(
     session: "SessionData",
@@ -688,7 +779,10 @@ def _update_causal_hypotheses_from_observation(
         new_post = max(0.0, min(old_post + ((confidence - old_post) * blend), 1.0))
 
         status = current.status if current else "pending"
-        if bool(rule.get("allow_support", True)) and new_post >= _CAUSAL_SUPPORT_THRESHOLD:
+        if (
+            bool(rule.get("allow_support", True))
+            and new_post >= _CAUSAL_SUPPORT_THRESHOLD
+        ):
             status = "supported"
         elif new_post <= _CAUSAL_REFUTE_THRESHOLD:
             status = "refuted"
@@ -736,6 +830,7 @@ def _update_causal_hypotheses_from_observation(
             }
         )
 
+
 def _record_causal_intervention_from_parse(
     session: "SessionData",
     command: str,
@@ -750,7 +845,8 @@ def _record_causal_intervention_from_parse(
     meaningful = [
         obs
         for obs in observations
-        if str(obs.get("observation_type", "")).strip().lower() != "tool_output_observed"
+        if str(obs.get("observation_type", "")).strip().lower()
+        != "tool_output_observed"
     ]
     if not meaningful:
         return
@@ -791,21 +887,34 @@ def _record_causal_intervention_from_parse(
             }
         )
 
+
 @dataclass
 class SessionData:
     session_id: str = ""
     target: str = ""
 
-    subdomains: list[str] = field(default_factory=lambda: BoundedList(maxlen=_MAX_SUBDOMAINS))
-    live_hosts: list[str] = field(default_factory=lambda: BoundedList(maxlen=_MAX_LIVE_HOSTS))
+    subdomains: list[str] = field(
+        default_factory=lambda: BoundedList(maxlen=_MAX_SUBDOMAINS)
+    )
+    live_hosts: list[str] = field(
+        default_factory=lambda: BoundedList(maxlen=_MAX_LIVE_HOSTS)
+    )
     open_ports: dict[str, list[int]] = field(default_factory=dict)
     urls: list[str] = field(default_factory=lambda: BoundedList(maxlen=_MAX_URLS))
     technologies: dict[str, str] = field(default_factory=dict)
-    vulnerabilities: list[dict[str, Any]] = field(default_factory=lambda: BoundedList(maxlen=_MAX_VULNERABILITIES))
-    attack_chains: list[dict[str, Any]] = field(default_factory=lambda: BoundedList(maxlen=_MAX_ATTACK_CHAINS))
-    completed_phases: list[str] = field(default_factory=lambda: BoundedList(maxlen=_MAX_COMPLETED_PHASES))
+    vulnerabilities: list[dict[str, Any]] = field(
+        default_factory=lambda: BoundedList(maxlen=_MAX_VULNERABILITIES)
+    )
+    attack_chains: list[dict[str, Any]] = field(
+        default_factory=lambda: BoundedList(maxlen=_MAX_ATTACK_CHAINS)
+    )
+    completed_phases: list[str] = field(
+        default_factory=lambda: BoundedList(maxlen=_MAX_COMPLETED_PHASES)
+    )
     current_phase: str = "RECON"
-    tools_run: list[str] = field(default_factory=lambda: BoundedList(maxlen=_MAX_TOOLS_RUN))
+    tools_run: list[str] = field(
+        default_factory=lambda: BoundedList(maxlen=_MAX_TOOLS_RUN)
+    )
     scan_count: int = 0
     created_at: str = ""
     updated_at: str = ""
@@ -815,21 +924,33 @@ class SessionData:
     token_completion_total: int = 0
     token_last_used: int = 0
 
-    conversation: list[dict[str, Any]] = field(default_factory=lambda: BoundedList(maxlen=1000))
+    conversation: list[dict[str, Any]] = field(
+        default_factory=lambda: BoundedList(maxlen=1000)
+    )
 
-    injection_points: list[dict[str, Any]] = field(default_factory=lambda: BoundedList(maxlen=_MAX_INJECTION_POINTS))
+    injection_points: list[dict[str, Any]] = field(
+        default_factory=lambda: BoundedList(maxlen=_MAX_INJECTION_POINTS)
+    )
 
-    auth_cookies: list[dict[str, Any]] = field(default_factory=lambda: BoundedList(maxlen=_MAX_AUTH_COOKIES))
+    auth_cookies: list[dict[str, Any]] = field(
+        default_factory=lambda: BoundedList(maxlen=_MAX_AUTH_COOKIES)
+    )
     auth_tokens: dict[str, str] = field(default_factory=dict)
     auth_type: str = ""
 
-    tested_injection_points: list[str] = field(default_factory=lambda: BoundedList(maxlen=_MAX_TESTED_ENDPOINTS * 2))
+    tested_injection_points: list[str] = field(
+        default_factory=lambda: BoundedList(maxlen=_MAX_TESTED_ENDPOINTS * 2)
+    )
 
     _prior_merged: bool = field(default=False)
 
-    suggested_correlations: list[str] = field(default_factory=lambda: BoundedList(maxlen=_MAX_CORRELATION_SUGGESTIONS))
+    suggested_correlations: list[str] = field(
+        default_factory=lambda: BoundedList(maxlen=_MAX_CORRELATION_SUGGESTIONS)
+    )
 
-    tested_endpoints: list[str] = field(default_factory=lambda: BoundedList(maxlen=_MAX_TESTED_ENDPOINTS))
+    tested_endpoints: list[str] = field(
+        default_factory=lambda: BoundedList(maxlen=_MAX_TESTED_ENDPOINTS)
+    )
 
     loaded_skills: list[str] = field(default_factory=lambda: BoundedList(maxlen=200))
 
@@ -852,48 +973,78 @@ class SessionData:
 
     def prune_old_data(self) -> None:
         self.subdomains = _coerce_sequence_field(
-            self.subdomains, field_name="subdomains", maxlen=_MAX_SUBDOMAINS)
+            self.subdomains, field_name="subdomains", maxlen=_MAX_SUBDOMAINS
+        )
         self.live_hosts = _coerce_sequence_field(
-            self.live_hosts, field_name="live_hosts", maxlen=_MAX_LIVE_HOSTS)
+            self.live_hosts, field_name="live_hosts", maxlen=_MAX_LIVE_HOSTS
+        )
         self.urls = _coerce_sequence_field(
-            self.urls, field_name="urls", maxlen=_MAX_URLS)
+            self.urls, field_name="urls", maxlen=_MAX_URLS
+        )
         self.vulnerabilities = _coerce_sequence_field(
-            self.vulnerabilities, field_name="vulnerabilities", maxlen=_MAX_VULNERABILITIES)
+            self.vulnerabilities,
+            field_name="vulnerabilities",
+            maxlen=_MAX_VULNERABILITIES,
+        )
         self.attack_chains = _coerce_sequence_field(
-            self.attack_chains, field_name="attack_chains", maxlen=_MAX_ATTACK_CHAINS)
+            self.attack_chains, field_name="attack_chains", maxlen=_MAX_ATTACK_CHAINS
+        )
         self.completed_phases = _coerce_sequence_field(
-            self.completed_phases, field_name="completed_phases", maxlen=_MAX_COMPLETED_PHASES)
+            self.completed_phases,
+            field_name="completed_phases",
+            maxlen=_MAX_COMPLETED_PHASES,
+        )
         self.tools_run = _coerce_sequence_field(
-            self.tools_run, field_name="tools_run", maxlen=_MAX_TOOLS_RUN)
+            self.tools_run, field_name="tools_run", maxlen=_MAX_TOOLS_RUN
+        )
         self.injection_points = _coerce_sequence_field(
-            self.injection_points, field_name="injection_points", maxlen=_MAX_INJECTION_POINTS)
+            self.injection_points,
+            field_name="injection_points",
+            maxlen=_MAX_INJECTION_POINTS,
+        )
         self.auth_cookies = _coerce_sequence_field(
-            self.auth_cookies, field_name="auth_cookies", maxlen=_MAX_AUTH_COOKIES)
+            self.auth_cookies, field_name="auth_cookies", maxlen=_MAX_AUTH_COOKIES
+        )
         self.tested_injection_points = _coerce_sequence_field(
-            self.tested_injection_points, field_name="tested_injection_points",
-            maxlen=_MAX_TESTED_ENDPOINTS * 2)
+            self.tested_injection_points,
+            field_name="tested_injection_points",
+            maxlen=_MAX_TESTED_ENDPOINTS * 2,
+        )
         self.suggested_correlations = _coerce_sequence_field(
-            self.suggested_correlations, field_name="suggested_correlations",
-            maxlen=_MAX_CORRELATION_SUGGESTIONS)
+            self.suggested_correlations,
+            field_name="suggested_correlations",
+            maxlen=_MAX_CORRELATION_SUGGESTIONS,
+        )
         self.tested_endpoints = _coerce_sequence_field(
-            self.tested_endpoints, field_name="tested_endpoints", maxlen=_MAX_TESTED_ENDPOINTS)
+            self.tested_endpoints,
+            field_name="tested_endpoints",
+            maxlen=_MAX_TESTED_ENDPOINTS,
+        )
         if not isinstance(self.causal_state, CausalState):
             self.causal_state = _deserialize_causal_state(self.causal_state)
         if not isinstance(self.waf_profiles, dict):
             self.waf_profiles = {}
 
-        if isinstance(self.auth_tokens, dict) and len(self.auth_tokens) > _MAX_AUTH_TOKENS:
+        if (
+            isinstance(self.auth_tokens, dict)
+            and len(self.auth_tokens) > _MAX_AUTH_TOKENS
+        ):
             keys = list(self.auth_tokens.keys())
             for k in keys[:-_MAX_AUTH_TOKENS]:
                 del self.auth_tokens[k]
 
         self.token_total = _coerce_non_negative_int(self.token_total)
         self.token_prompt_total = _coerce_non_negative_int(self.token_prompt_total)
-        self.token_completion_total = _coerce_non_negative_int(self.token_completion_total)
+        self.token_completion_total = _coerce_non_negative_int(
+            self.token_completion_total
+        )
         self.token_last_used = _coerce_non_negative_int(self.token_last_used)
         self.adaptive_num_ctx = _coerce_non_negative_int(self.adaptive_num_ctx)
-        self.adaptive_num_predict_cap = _coerce_non_negative_int(self.adaptive_num_predict_cap)
+        self.adaptive_num_predict_cap = _coerce_non_negative_int(
+            self.adaptive_num_predict_cap
+        )
         self.vram_crash_count = _coerce_non_negative_int(self.vram_crash_count)
+
 
 def record_tested_endpoint(session: SessionData, url: str, method: str = "GET") -> None:
     if not url or not url.strip():
@@ -902,85 +1053,123 @@ def record_tested_endpoint(session: SessionData, url: str, method: str = "GET") 
     if key not in session.tested_endpoints:
         session.tested_endpoints.append(key)
 
+
 def load_session(session_id: str) -> SessionData | None:
     filepath = SESSIONS_DIR / f"{session_id}.json"
     if not filepath.exists():
         return None
 
     try:
-        with open(filepath, "r", encoding='utf-8') as f:
+        with open(filepath, "r", encoding="utf-8") as f:
             content = f.read()
             if not content.strip():
-                logger.warning("Session file %s is empty, creating default session", session_id)
+                logger.warning(
+                    "Session file %s is empty, creating default session", session_id
+                )
                 return SessionData(session_id=session_id, target="")
             data = json.loads(content)
 
         if not isinstance(data, dict):
-            logger.error("Session file %s contains invalid JSON (not an object)", filepath)
+            logger.error(
+                "Session file %s contains invalid JSON (not an object)", filepath
+            )
             return None
 
         stored_session_id = data.get("session_id", session_id)
         if stored_session_id != session_id:
-            logger.warning("Session ID mismatch in file %s: expected %s, got %s",
-                          filepath, session_id, stored_session_id)
+            logger.warning(
+                "Session ID mismatch in file %s: expected %s, got %s",
+                filepath,
+                session_id,
+                stored_session_id,
+            )
 
         session = SessionData(
             session_id=stored_session_id,
             target=data.get("target", ""),
             subdomains=_coerce_sequence_field(
-                data.get("subdomains", []), field_name="subdomains", maxlen=_MAX_SUBDOMAINS),
+                data.get("subdomains", []),
+                field_name="subdomains",
+                maxlen=_MAX_SUBDOMAINS,
+            ),
             live_hosts=_coerce_sequence_field(
-                data.get("live_hosts", []), field_name="live_hosts", maxlen=_MAX_LIVE_HOSTS),
+                data.get("live_hosts", []),
+                field_name="live_hosts",
+                maxlen=_MAX_LIVE_HOSTS,
+            ),
             open_ports=data.get("open_ports", {}),
             urls=_coerce_sequence_field(
-                data.get("urls", []), field_name="urls", maxlen=_MAX_URLS),
+                data.get("urls", []), field_name="urls", maxlen=_MAX_URLS
+            ),
             technologies=data.get("technologies", {}),
             vulnerabilities=_coerce_sequence_field(
-                data.get("vulnerabilities", []), field_name="vulnerabilities",
-                maxlen=_MAX_VULNERABILITIES),
+                data.get("vulnerabilities", []),
+                field_name="vulnerabilities",
+                maxlen=_MAX_VULNERABILITIES,
+            ),
             attack_chains=_coerce_sequence_field(
-                data.get("attack_chains", []), field_name="attack_chains",
-                maxlen=_MAX_ATTACK_CHAINS),
+                data.get("attack_chains", []),
+                field_name="attack_chains",
+                maxlen=_MAX_ATTACK_CHAINS,
+            ),
             completed_phases=_coerce_sequence_field(
-                data.get("completed_phases", []), field_name="completed_phases",
-                maxlen=_MAX_COMPLETED_PHASES),
+                data.get("completed_phases", []),
+                field_name="completed_phases",
+                maxlen=_MAX_COMPLETED_PHASES,
+            ),
             current_phase=data.get("current_phase", "RECON"),
             tools_run=_coerce_sequence_field(
-                data.get("tools_run", []), field_name="tools_run", maxlen=_MAX_TOOLS_RUN),
+                data.get("tools_run", []), field_name="tools_run", maxlen=_MAX_TOOLS_RUN
+            ),
             scan_count=data.get("scan_count", 0),
             created_at=data.get("created_at", ""),
             updated_at=data.get("updated_at", ""),
             token_total=_coerce_non_negative_int(data.get("token_total", 0)),
-            token_prompt_total=_coerce_non_negative_int(data.get("token_prompt_total", 0)),
+            token_prompt_total=_coerce_non_negative_int(
+                data.get("token_prompt_total", 0)
+            ),
             token_completion_total=_coerce_non_negative_int(
-                data.get("token_completion_total", 0)),
+                data.get("token_completion_total", 0)
+            ),
             token_last_used=_coerce_non_negative_int(data.get("token_last_used", 0)),
             conversation=_coerce_sequence_field(
-                data.get("conversation", []), field_name="conversation", maxlen=1000),
+                data.get("conversation", []), field_name="conversation", maxlen=1000
+            ),
             injection_points=_coerce_sequence_field(
-                data.get("injection_points", []), field_name="injection_points",
-                maxlen=_MAX_INJECTION_POINTS),
+                data.get("injection_points", []),
+                field_name="injection_points",
+                maxlen=_MAX_INJECTION_POINTS,
+            ),
             auth_cookies=_coerce_sequence_field(
-                data.get("auth_cookies", []), field_name="auth_cookies",
-                maxlen=_MAX_AUTH_COOKIES),
+                data.get("auth_cookies", []),
+                field_name="auth_cookies",
+                maxlen=_MAX_AUTH_COOKIES,
+            ),
             auth_tokens=data.get("auth_tokens", {}),
             auth_type=data.get("auth_type", ""),
             tested_injection_points=_coerce_sequence_field(
                 data.get("tested_injection_points", []),
                 field_name="tested_injection_points",
-                maxlen=_MAX_TESTED_ENDPOINTS * 2),
+                maxlen=_MAX_TESTED_ENDPOINTS * 2,
+            ),
             suggested_correlations=_coerce_sequence_field(
                 data.get("suggested_correlations", []),
                 field_name="suggested_correlations",
-                maxlen=_MAX_CORRELATION_SUGGESTIONS),
+                maxlen=_MAX_CORRELATION_SUGGESTIONS,
+            ),
             tested_endpoints=_coerce_sequence_field(
-                data.get("tested_endpoints", []), field_name="tested_endpoints",
-                maxlen=_MAX_TESTED_ENDPOINTS),
+                data.get("tested_endpoints", []),
+                field_name="tested_endpoints",
+                maxlen=_MAX_TESTED_ENDPOINTS,
+            ),
             loaded_skills=_coerce_sequence_field(
-                data.get("loaded_skills", []), field_name="loaded_skills", maxlen=200),
+                data.get("loaded_skills", []), field_name="loaded_skills", maxlen=200
+            ),
             app_model=_deserialize_app_model(data.get("app_model", {})),
             causal_state=_deserialize_causal_state(data.get("causal_state", {})),
-            waf_profiles=data.get("waf_profiles", {}) if isinstance(data.get("waf_profiles", {}), dict) else {},
+            waf_profiles=data.get("waf_profiles", {})
+            if isinstance(data.get("waf_profiles", {}), dict)
+            else {},
             adaptive_num_ctx=_coerce_non_negative_int(data.get("adaptive_num_ctx", 0)),
             adaptive_num_predict_cap=_coerce_non_negative_int(
                 data.get("adaptive_num_predict_cap", 0)
@@ -991,24 +1180,25 @@ def load_session(session_id: str) -> SessionData | None:
         session.prune_old_data()
         logger.info(
             "Loaded session %s (target=%s): %d subs, %d live, %d vulns",
-            session_id, session.target,
-            len(session.subdomains), len(session.live_hosts), len(session.vulnerabilities),
+            session_id,
+            session.target,
+            len(session.subdomains),
+            len(session.live_hosts),
+            len(session.vulnerabilities),
         )
         return session
     except Exception as e:
         logger.warning("Failed to load session %s: %s", session_id, e)
         return None
 
-_last_save_times = {}
+
 def save_session(session: SessionData) -> None:
     if not session.target:
-        logger.debug(
-            "Skipping save for session %s — no target set", session.session_id
-        )
+        logger.debug("Skipping save for session %s — no target set", session.session_id)
         return
+    SESSIONS_DIR.mkdir(parents=True, exist_ok=True)
     try:
         session.prune_old_data()
-        SESSIONS_DIR.mkdir(parents=True, exist_ok=True)
         session.updated_at = datetime.now().isoformat()
         filepath = SESSIONS_DIR / f"{session.session_id}.json"
 
@@ -1030,53 +1220,81 @@ def save_session(session: SessionData) -> None:
             payload["waf_profiles"] = {}
 
         _bounded_fields = (
-            "subdomains", "live_hosts", "urls", "vulnerabilities",
-            "attack_chains", "completed_phases", "tools_run",
-            "injection_points", "auth_cookies", "tested_injection_points",
-            "suggested_correlations", "tested_endpoints", "loaded_skills",
+            "subdomains",
+            "live_hosts",
+            "urls",
+            "vulnerabilities",
+            "attack_chains",
+            "completed_phases",
+            "tools_run",
+            "injection_points",
+            "auth_cookies",
+            "tested_injection_points",
+            "suggested_correlations",
+            "tested_endpoints",
+            "loaded_skills",
             "conversation",
         )
         for key in _bounded_fields:
             try:
                 value = payload.get(key, [])
-                if hasattr(value, '__iter__') and not isinstance(value, (str, bytes)):
+                if hasattr(value, "__iter__") and not isinstance(value, (str, bytes)):
                     payload[key] = list(value)
                 else:
                     payload[key] = []
             except Exception as e:
-                logger.warning("Failed to convert field %s to list: %s, using empty list", key, e)
+                logger.warning(
+                    "Failed to convert field %s to list: %s, using empty list", key, e
+                )
                 payload[key] = []
 
-        temp_filepath = filepath.with_suffix('.tmp')
-        with open(temp_filepath, "w", encoding='utf-8') as f:
+        temp_filepath = filepath.with_suffix(".tmp")
+        with open(temp_filepath, "w", encoding="utf-8") as f:
             json.dump(payload, f, indent=2, default=str, ensure_ascii=False)
 
         temp_filepath.replace(filepath)
 
-        logger.info("Saved session %s (target=%s)", session.session_id, session.target)
+        logger.info(
+            "[DEBUG-MEMORY] Saved session %s (target=%s, subdomains=%d, vulns=%d)",
+            session.session_id,
+            session.target,
+            len(getattr(session, "subdomains", [])),
+            len(getattr(session, "vulnerabilities", [])),
+        )
     except Exception as e:
         logger.error("Failed to save session %s: %s", session.session_id, e)
 
         try:
+            SESSIONS_DIR.mkdir(parents=True, exist_ok=True)
+            minimal_filepath = SESSIONS_DIR / f"{session.session_id}.json"
             minimal_payload = {
-                'session_id': session.session_id,
-                'target': session.target,
-                'created_at': getattr(session, 'created_at', datetime.now().isoformat()),
-                'updated_at': datetime.now().isoformat(),
-                'scan_count': getattr(session, 'scan_count', 0),
-                'completed_phases': list(getattr(session, 'completed_phases', [])[:10]),
-                'subdomains': list(getattr(session, 'subdomains', set()) or [])[:1000],
-                'live_hosts': list(getattr(session, 'live_hosts', set()) or [])[:500],
-                'urls': list(getattr(session, 'urls', []) or [])[:5000],
-                'vulnerabilities': list(getattr(session, 'vulnerabilities', []) or [])[:100]
+                "session_id": session.session_id,
+                "target": session.target,
+                "created_at": getattr(
+                    session, "created_at", datetime.now().isoformat()
+                ),
+                "updated_at": datetime.now().isoformat(),
+                "scan_count": getattr(session, "scan_count", 0),
+                "completed_phases": list(getattr(session, "completed_phases", [])[:10]),
+                "subdomains": list(getattr(session, "subdomains", set()) or [])[:1000],
+                "live_hosts": list(getattr(session, "live_hosts", set()) or [])[:500],
+                "urls": list(getattr(session, "urls", []) or [])[:5000],
+                "vulnerabilities": list(getattr(session, "vulnerabilities", []) or [])[
+                    :100
+                ],
             }
-            temp_filepath = filepath.with_suffix('.tmp')
-            with open(temp_filepath, "w", encoding='utf-8') as f:
+            temp_filepath = minimal_filepath.with_suffix(".tmp")
+            with open(temp_filepath, "w", encoding="utf-8") as f:
                 json.dump(minimal_payload, f, indent=2, default=str, ensure_ascii=False)
-            temp_filepath.replace(filepath)
-            logger.warning("Saved minimal session data for %s after error", session.session_id)
+            temp_filepath.replace(minimal_filepath)
+            logger.warning(
+                "[DEBUG-MEMORY] Saved minimal session data for %s after error (vulns=%d)",
+                session.session_id,
+                len(minimal_payload.get("vulnerabilities", [])),
+            )
         except Exception as fallback_error:
             logger.error("Failed to save even minimal session data: %s", fallback_error)
+
 
 def list_sessions() -> list[dict]:
     sessions: list[dict] = []
@@ -1091,16 +1309,18 @@ def list_sessions() -> list[dict]:
 
             if not target:
                 continue
-            sessions.append({
-                "session_id": data.get("session_id", path.stem),
-                "target": target,
-                "created_at": data.get("created_at", ""),
-                "updated_at": data.get("updated_at", ""),
-                "scan_count": data.get("scan_count", 0),
-                "subdomains": len(data.get("subdomains", [])),
-                "live_hosts": len(data.get("live_hosts", [])),
-                "vulnerabilities": len(data.get("vulnerabilities", [])),
-            })
+            sessions.append(
+                {
+                    "session_id": data.get("session_id", path.stem),
+                    "target": target,
+                    "created_at": data.get("created_at", ""),
+                    "updated_at": data.get("updated_at", ""),
+                    "scan_count": data.get("scan_count", 0),
+                    "subdomains": len(data.get("subdomains", [])),
+                    "live_hosts": len(data.get("live_hosts", [])),
+                    "vulnerabilities": len(data.get("vulnerabilities", [])),
+                }
+            )
         except Exception as _e:
             logger.debug("Could not load session metadata: %s", _e)
 
@@ -1109,6 +1329,7 @@ def list_sessions() -> list[dict]:
         reverse=True,
     )
     return sessions
+
 
 def cleanup_empty_sessions() -> int:
     if not SESSIONS_DIR.exists():
@@ -1123,8 +1344,11 @@ def cleanup_empty_sessions() -> int:
                 logger.info("Cleaned up empty session: %s", path.name)
                 deleted += 1
         except Exception as _e:
-            logger.debug("cleanup_empty_sessions: could not process %s: %s", path.name, _e)
+            logger.debug(
+                "cleanup_empty_sessions: could not process %s: %s", path.name, _e
+            )
     return deleted
+
 
 def find_prior_session(target: str) -> SessionData | None:
     if not SESSIONS_DIR.exists():
@@ -1140,9 +1364,8 @@ def find_prior_session(target: str) -> SessionData | None:
             if data.get("target", "").strip().lower() != target_norm:
                 continue
 
-            has_progress = (
-                data.get("scan_count", 0) >= 3
-                or bool(data.get("completed_phases"))
+            has_progress = data.get("scan_count", 0) >= 3 or bool(
+                data.get("completed_phases")
             )
             if not has_progress:
                 continue
@@ -1158,11 +1381,13 @@ def find_prior_session(target: str) -> SessionData | None:
     _, best_id = candidates[0]
     return load_session(best_id)
 
+
 def merge_prior_findings(new_session: SessionData, prior: SessionData) -> None:
     if prior.target.strip().lower() != new_session.target.strip().lower():
         logger.warning(
             "merge_prior_findings: target mismatch (%r vs %r) — skipping",
-            prior.target, new_session.target,
+            prior.target,
+            new_session.target,
         )
         return
 
@@ -1190,7 +1415,7 @@ def merge_prior_findings(new_session: SessionData, prior: SessionData) -> None:
 
     existing_urls = set(new_session.urls)
     for url in prior.urls:
-        if url not in existing_urls and len(new_session.urls) < 500:
+        if url not in existing_urls and len(new_session.urls) < _MAX_URLS:
             new_session.urls.append(url)
             existing_urls.add(url)
             merged_count += 1
@@ -1218,11 +1443,14 @@ def merge_prior_findings(new_session: SessionData, prior: SessionData) -> None:
     logger.info(
         "Merged prior session %s into new session %s "
         "(%d items: %d subs, %d urls, %d injection_points)",
-        prior.session_id, new_session.session_id,
+        prior.session_id,
+        new_session.session_id,
         merged_count,
-        len(new_session.subdomains), len(new_session.urls),
+        len(new_session.subdomains),
+        len(new_session.urls),
         len(new_session.injection_points),
     )
+
 
 def update_from_parsed_output(
     session: SessionData,
@@ -1240,7 +1468,6 @@ def update_from_parsed_output(
             if name and name not in session.technologies:
                 session.technologies[name] = version
             elif name and version and not session.technologies.get(name):
-
                 session.technologies[name] = version
 
     if parsed.causal_observations and session.causal_state:
@@ -1278,9 +1505,7 @@ def update_from_parsed_output(
     )
 
     _CMD_URL_RE = re.compile(r"https?://\S+")
-    _SEVERITY_RE = re.compile(
-        r"^\[(CRITICAL|HIGH|MEDIUM|LOW|INFO)\]",
-        re.IGNORECASE)
+    _SEVERITY_RE = re.compile(r"^\[(CRITICAL|HIGH|MEDIUM|LOW|INFO)\]", re.IGNORECASE)
 
     _NEGATIVE_VULN_PHRASE_RE = re.compile(
         r"\b(?:"
@@ -1305,7 +1530,8 @@ def update_from_parsed_output(
         r"access granted|credentials? found|credential found)|"
         r"CVE-\d{4}-\d{4,7}.{0,80}(vulnerab|exploit|found|\baffected\b|\bimpacted\b)|"
         r"^(VULN|VULNERABLE|EXPLOIT|PWNED)\s*[:!]",
-        re.IGNORECASE)
+        re.IGNORECASE,
+    )
     _ACTIONABLE_VULN_SIGNAL_RE = re.compile(
         r"\b("
         r"vulnerab\w*|exploit\w*|sqli|sql injection|xss|ssrf|idor|csrf|rce|lfi|xxe|"
@@ -1344,7 +1570,6 @@ def update_from_parsed_output(
         has_signal = bool(_ACTIONABLE_VULN_SIGNAL_RE.search(candidate))
         has_context = bool(_VULN_CONTEXT_RE.search(candidate))
         if severity_tagged:
-
             return has_signal and (has_context or len(candidate) >= 35)
         return has_signal and (has_context or len(candidate) >= 30)
 
@@ -1366,14 +1591,12 @@ def update_from_parsed_output(
                 "timestamp": datetime.now().isoformat(),
             }
 
-            if not _is_duplicate_vulnerability(
-                    new_vuln, session.vulnerabilities):
+            if not _is_duplicate_vulnerability(new_vuln, session.vulnerabilities):
                 session.vulnerabilities.append(new_vuln)
             continue
 
-        if (
-            _VULN_PATTERN_RE.search(item_stripped)
-            and _is_actionable_vuln_line(item_stripped, severity_tagged=False)
+        if _VULN_PATTERN_RE.search(item_stripped) and _is_actionable_vuln_line(
+            item_stripped, severity_tagged=False
         ):
             new_vuln = {
                 "finding": item_stripped,
@@ -1443,20 +1666,34 @@ def update_from_parsed_output(
                 try:
                     _raw_url = _cmd_url_m.group(0).rstrip(".,;:)]}>\"'")
                     _pu = urlparse(_raw_url)
-                    _cookie_url = urlunparse((
-                        _pu.scheme.lower(), _pu.netloc.lower(),
-                        _pu.path.rstrip("/") or "/", "", "", "",
-                    ))
-                except Exception:
-                    pass
+                    _cookie_url = urlunparse(
+                        (
+                            _pu.scheme.lower(),
+                            _pu.netloc.lower(),
+                            _pu.path.rstrip("/") or "/",
+                            "",
+                            "",
+                            "",
+                        )
+                    )
+                except Exception as e:
+                    logger.debug(
+                        "Expected failure normalizing cookie URL for injection points: %s",
+                        e,
+                    )
             if _cookie_url and cookie_name:
-                _merge_injection_points(session.injection_points, [{
-                    "url": _cookie_url,
-                    "parameter": f"cookie/{cookie_name}",
-                    "method": "GET",
-                    "value_sample": cookie_value,
-                    "type_hint": "COOKIE_PARAM",
-                }])
+                _merge_injection_points(
+                    session.injection_points,
+                    [
+                        {
+                            "url": _cookie_url,
+                            "parameter": f"cookie/{cookie_name}",
+                            "method": "GET",
+                            "value_sample": cookie_value,
+                            "type_hint": "COOKIE_PARAM",
+                        }
+                    ],
+                )
             continue
 
         clean = item_stripped.split()[0]
@@ -1469,6 +1706,7 @@ def update_from_parsed_output(
             if clean not in session.subdomains:
                 session.subdomains.append(clean)
             continue
+
 
 def session_to_context(session: SessionData) -> str:
     target_label = session.target or "unknown target"
@@ -1490,7 +1728,9 @@ def session_to_context(session: SessionData) -> str:
         total_ports = sum(len(p) for p in session.open_ports.values())
         skip_items.append(f"Port scanning — {total_ports} open ports already recorded")
     if session.urls:
-        skip_items.append(f"URL/route discovery — {len(session.urls)} already collected")
+        skip_items.append(
+            f"URL/route discovery — {len(session.urls)} already collected"
+        )
 
     if skip_items:
         parts.append(
@@ -1511,12 +1751,12 @@ def session_to_context(session: SessionData) -> str:
         count = len(session.subdomains)
 
         subdomains_with_ports = [
-            sd for sd in session.subdomains
+            sd
+            for sd in session.subdomains
             if any(sd in host for host in session.open_ports.keys())
         ]
         subdomains_without_ports = [
-            sd for sd in session.subdomains
-            if sd not in subdomains_with_ports
+            sd for sd in session.subdomains if sd not in subdomains_with_ports
         ]
 
         preview_items = (subdomains_with_ports[:5] + subdomains_without_ports[:5])[:10]
@@ -1526,17 +1766,21 @@ def session_to_context(session: SessionData) -> str:
             + (f" ... +{count - 10} more" if count > 10 else "")
         )
         if subdomains_with_ports and count > 10:
-            parts.append(f"  [!]{len(subdomains_with_ports)} subdomains have open ports (prioritized above)")
+            parts.append(
+                f"  [!]{len(subdomains_with_ports)} subdomains have open ports (prioritized above)"
+            )
 
     if session.live_hosts:
         count = len(session.live_hosts)
 
         hosts_with_ports = [
-            h for h in session.live_hosts
+            h
+            for h in session.live_hosts
             if any(h in host for host in session.open_ports.keys())
         ]
         hosts_with_injections = [
-            h for h in session.live_hosts
+            h
+            for h in session.live_hosts
             if any(h in pt.get("url", "") for pt in session.injection_points)
         ]
 
@@ -1555,7 +1799,9 @@ def session_to_context(session: SessionData) -> str:
             + (f" ... +{count - 10} more" if count > 10 else "")
         )
         if priority_hosts and count > 10:
-            parts.append(f"  [!]{len(priority_hosts)} hosts have ports/injections (prioritized above)")
+            parts.append(
+                f"  [!]{len(priority_hosts)} hosts have ports/injections (prioritized above)"
+            )
 
     if session.open_ports:
         total_ports = sum(len(p) for p in session.open_ports.values())
@@ -1564,9 +1810,7 @@ def session_to_context(session: SessionData) -> str:
             port_preview.append(
                 f"{host}: {','.join(str(p) for p in sorted(ports)[:10])}"
             )
-        parts.append(
-            f"Open ports: {total_ports} total — " +
-            "; ".join(port_preview))
+        parts.append(f"Open ports: {total_ports} total — " + "; ".join(port_preview))
 
     if session.urls:
         parts.append(f"URLs collected: {len(session.urls)}")
@@ -1578,14 +1822,23 @@ def session_to_context(session: SessionData) -> str:
 
         show_list = untested if untested else session.injection_points
 
-        type_priority = {"IDOR": 0, "SSRF": 1, "PATH_TRAVERSAL": 2, "OPEN_REDIRECT": 3, "SQLi_XSS": 4, "AUTH": 5, "INJECT": 6}
+        type_priority = {
+            "IDOR": 0,
+            "SSRF": 1,
+            "PATH_TRAVERSAL": 2,
+            "OPEN_REDIRECT": 3,
+            "SQLi_XSS": 4,
+            "AUTH": 5,
+            "INJECT": 6,
+        }
+
         def get_type_priority(pt: dict) -> int:
             t = pt.get("type_hint", "INJECT").upper()
             return type_priority.get(t, 6)
 
         sorted_points = sorted(
             show_list,
-            key=lambda pt: (get_type_priority(pt), pt.get("type_hint", "INJECT"))
+            key=lambda pt: (get_type_priority(pt), pt.get("type_hint", "INJECT")),
         )
 
         by_type: dict[str, list[dict[str, Any]]] = {}
@@ -1597,7 +1850,6 @@ def session_to_context(session: SessionData) -> str:
         shown = 0
 
         for type_hint, pts in by_type.items():
-
             critical_high = [pt for pt in pts if get_type_priority(pt) <= 3]
             others = [pt for pt in pts if get_type_priority(pt) > 3]
             for pt in critical_high[:5]:
@@ -1623,14 +1875,18 @@ def session_to_context(session: SessionData) -> str:
                 if shown >= 25:
                     break
 
-        suffix = f" ... +{len(show_list) - shown} more" if len(show_list) > shown else ""
+        suffix = (
+            f" ... +{len(show_list) - shown} more" if len(show_list) > shown else ""
+        )
         untested_note = (
-            f"[!]{len(untested)} UNTESTED — prioritize these!" if untested
+            f"[!]{len(untested)} UNTESTED — prioritize these!"
+            if untested
             else f"✓ all {tested_count} tested"
         )
         parts.append(
             f"Injection points: {count} total ({untested_note}):\n"
-            + "\n".join(preview_lines) + suffix
+            + "\n".join(preview_lines)
+            + suffix
         )
 
     if session.technologies:
@@ -1669,9 +1925,7 @@ def session_to_context(session: SessionData) -> str:
             auth_info += f"{len(session.auth_cookies)} cookies captured"
         if session.auth_tokens:
             auth_info += f", tokens: {', '.join(session.auth_tokens.keys())}"
-        parts.append(
-            auth_info +
-            " (use inject_cookies action to restore session)")
+        parts.append(auth_info + " (use inject_cookies action to restore session)")
 
     if session.waf_profiles:
         waf_preview = []
@@ -1682,7 +1936,11 @@ def session_to_context(session: SessionData) -> str:
         parts.append(
             f"WAF profiles: {len(session.waf_profiles)} — "
             + ", ".join(waf_preview)
-            + (f" ... +{len(session.waf_profiles) - 4} more" if len(session.waf_profiles) > 4 else "")
+            + (
+                f" ... +{len(session.waf_profiles) - 4} more"
+                if len(session.waf_profiles) > 4
+                else ""
+            )
         )
 
     parts.append(

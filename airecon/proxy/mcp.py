@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import json
+import logging
 import os
 import re
 from pathlib import Path
@@ -10,6 +11,8 @@ from typing import Any
 from urllib.parse import urlparse
 
 import aiohttp
+
+logger = logging.getLogger("airecon.proxy.mcp")
 
 _MCP_CONFIG_PATH = Path.home() / ".airecon" / "mcp.json"
 
@@ -29,7 +32,8 @@ def load_mcp_config() -> dict[str, Any]:
         return {"mcpServers": {}}
     try:
         data = json.loads(_MCP_CONFIG_PATH.read_text(encoding="utf-8"))
-    except Exception:
+    except Exception as e:
+        logger.debug("Expected failure loading MCP config: %s", e)
         return {"mcpServers": {}}
     if not isinstance(data, dict):
         return {"mcpServers": {}}
@@ -81,7 +85,10 @@ def _build_auth_headers(auth: str | None) -> dict[str, str]:
     token = base64.b64encode(f"{user}:{password}".encode("utf-8")).decode("utf-8")
     return {"Authorization": f"Basic {token}"}
 
-def add_mcp_sse_server(url: str, name: str | None = None, auth: str | None = None) -> dict[str, Any]:
+
+def add_mcp_sse_server(
+    url: str, name: str | None = None, auth: str | None = None
+) -> dict[str, Any]:
     parsed = urlparse((url or "").strip())
     if parsed.scheme not in {"http", "https"} or not parsed.netloc:
         raise ValueError("Invalid MCP URL. Use http:// or https://")
@@ -109,24 +116,32 @@ def add_mcp_sse_server(url: str, name: str | None = None, auth: str | None = Non
     save_mcp_config(cfg)
     return {"name": server_name, "config": entry}
 
+
 def set_mcp_enabled(name: str, enabled: bool) -> bool:
     cfg = load_mcp_config()
     servers = cfg.get("mcpServers", {})
-    if not isinstance(servers, dict) or name not in servers or not isinstance(servers[name], dict):
+    if (
+        not isinstance(servers, dict)
+        or name not in servers
+        or not isinstance(servers[name], dict)
+    ):
         return False
     servers[name]["enabled"] = bool(enabled)
     save_mcp_config(cfg)
     return True
 
+
 def mcp_ollama_tools(max_servers: int = 10) -> list[dict[str, Any]]:
-    """Return MCP tool definitions for Ollama tool calling. Limits to max_servers to avoid context bloat."""
     servers = list_mcp_servers()
-    # Sort servers by name and limit count
     enabled_servers = sorted(
-        [(name, cfg) for name, cfg in servers.items() if bool(cfg.get("enabled", True))],
-        key=lambda x: x[0]
+        [
+            (name, cfg)
+            for name, cfg in servers.items()
+            if bool(cfg.get("enabled", True))
+        ],
+        key=lambda x: x[0],
     )[:max_servers]
-    
+
     tools: list[dict[str, Any]] = []
     for name, server_cfg in enabled_servers:
         tool_name = f"mcp_{_normalize_name(name)}"
@@ -173,7 +188,10 @@ def mcp_ollama_tools(max_servers: int = 10) -> list[dict[str, Any]]:
         )
     return tools
 
-def mcp_search_tools_payload(payload: dict[str, Any], query: str, limit: int = 10) -> dict[str, Any]:
+
+def mcp_search_tools_payload(
+    payload: dict[str, Any], query: str, limit: int = 10
+) -> dict[str, Any]:
     raw_tools = payload.get("tools", []) if isinstance(payload, dict) else []
     if not isinstance(raw_tools, list):
         raw_tools = []
@@ -220,13 +238,15 @@ def mcp_search_tools_payload(payload: dict[str, Any], query: str, limit: int = 1
         "total_matches": len(scored),
     }
 
-async def _mcp_http_request(server_cfg: dict[str, Any], method: str, params: dict[str, Any]) -> tuple[bool, dict[str, Any]]:
+
+async def _mcp_http_request(
+    server_cfg: dict[str, Any], method: str, params: dict[str, Any]
+) -> tuple[bool, dict[str, Any]]:
     url = str(server_cfg.get("url") or "").strip()
     if not url:
         return False, {"error": "MCP server URL is missing"}
 
     headers = dict(server_cfg.get("headers") or {})
-    # MCP protocol requires Accept: application/json, text/event-stream for SSE streams
     if "Accept" not in headers:
         headers["Accept"] = "application/json, text/event-stream"
     payload = {"jsonrpc": "2.0", "id": 1, "method": method, "params": params}
@@ -240,7 +260,10 @@ async def _mcp_http_request(server_cfg: dict[str, Any], method: str, params: dic
                     return False, {"error": f"HTTP {resp.status}: {body_text[:400]}"}
                 try:
                     data = json.loads(body_text) if body_text else {}
-                except Exception:
+                except Exception as e:
+                    logger.debug(
+                        "Expected failure parsing MCP HTTP JSON response: %s", e
+                    )
                     return False, {"error": "Invalid MCP HTTP JSON response"}
     except Exception as e:
         return False, {"error": f"MCP HTTP request failed: {e}"}
@@ -253,7 +276,10 @@ async def _mcp_http_request(server_cfg: dict[str, Any], method: str, params: dic
         return True, data
     return False, {"error": "Unexpected MCP HTTP response format"}
 
-async def _mcp_stdio_request(server_cfg: dict[str, Any], method: str, params: dict[str, Any]) -> tuple[bool, dict[str, Any]]:
+
+async def _mcp_stdio_request(
+    server_cfg: dict[str, Any], method: str, params: dict[str, Any]
+) -> tuple[bool, dict[str, Any]]:
     command = str(server_cfg.get("command") or "").strip()
     args = [str(x) for x in (server_cfg.get("args") or [])]
     if not command:
@@ -277,15 +303,19 @@ async def _mcp_stdio_request(server_cfg: dict[str, Any], method: str, params: di
         return False, {"error": f"Failed to start MCP command: {e}"}
 
     async def _write_message(msg: dict[str, Any]) -> None:
-        assert proc.stdin is not None
+        if proc.stdin is None:
+            raise RuntimeError("MCP process stdin not available")
         proc.stdin.write((json.dumps(msg) + "\n").encode("utf-8"))
         await proc.stdin.drain()
 
     async def _read_response_for(req_id: int, timeout: float = 30.0) -> dict[str, Any]:
-        assert proc.stdout is not None
+        if proc.stdout is None:
+            raise RuntimeError("MCP process stdout not available")
         deadline = asyncio.get_running_loop().time() + timeout
         buf = bytearray()
-        max_line_bytes = 10 * 1024 * 1024  # 10MB safety cap for huge tools/list payloads (e.g., HexStrike)
+        max_line_bytes = (
+            10 * 1024 * 1024
+        )
 
         while True:
             remaining = deadline - asyncio.get_running_loop().time()
@@ -294,7 +324,9 @@ async def _mcp_stdio_request(server_cfg: dict[str, Any], method: str, params: di
 
             chunk = await asyncio.wait_for(proc.stdout.read(4096), timeout=remaining)
             if not chunk:
-                raise TimeoutError(f"MCP server closed stdout while waiting response id={req_id}")
+                raise TimeoutError(
+                    f"MCP server closed stdout while waiting response id={req_id}"
+                )
             buf.extend(chunk)
 
             if len(buf) > max_line_bytes:
@@ -314,7 +346,10 @@ async def _mcp_stdio_request(server_cfg: dict[str, Any], method: str, params: di
                     continue
                 try:
                     payload = json.loads(raw)
-                except Exception:
+                except Exception as e:
+                    logger.debug(
+                        "Expected failure parsing MCP stdio response line: %s", e
+                    )
                     continue
 
                 if not isinstance(payload, dict):
@@ -325,7 +360,6 @@ async def _mcp_stdio_request(server_cfg: dict[str, Any], method: str, params: di
                 return payload
 
     try:
-        # 1) initialize
         init_req_id = 1
         await _write_message(
             {
@@ -343,7 +377,6 @@ async def _mcp_stdio_request(server_cfg: dict[str, Any], method: str, params: di
         if init_resp.get("error"):
             return False, {"error": str(init_resp.get("error"))}
 
-        # 2) notifications/initialized
         await _write_message(
             {
                 "jsonrpc": "2.0",
@@ -352,7 +385,6 @@ async def _mcp_stdio_request(server_cfg: dict[str, Any], method: str, params: di
             }
         )
 
-        # 3) actual request
         req_id = 2
         await _write_message(
             {
@@ -365,11 +397,9 @@ async def _mcp_stdio_request(server_cfg: dict[str, Any], method: str, params: di
         resp = await _read_response_for(req_id, timeout=30.0)
     except Exception as e:
         err_msg = str(e)
-        # Provide more helpful error for known issues
         if (
-            ("Separator is found" in err_msg and "chunk is longer" in err_msg)
-            or "response exceeds max chunk size" in err_msg.lower()
-        ):
+            "Separator is found" in err_msg and "chunk is longer" in err_msg
+        ) or "response exceeds max chunk size" in err_msg.lower():
             err_msg = (
                 "MCP server response exceeds max chunk size. "
                 "The tools/list payload is too large. "
@@ -436,7 +466,9 @@ async def mcp_list_tools(server_name: str) -> tuple[bool, dict[str, Any]]:
     return True, {"tools": tools, "total_tools": total_tools}
 
 
-async def mcp_call_tool(server_name: str, tool: str, arguments: dict[str, Any] | None = None) -> tuple[bool, dict[str, Any]]:
+async def mcp_call_tool(
+    server_name: str, tool: str, arguments: dict[str, Any] | None = None
+) -> tuple[bool, dict[str, Any]]:
     server_cfg = list_mcp_servers().get(server_name)
     if not server_cfg:
         return False, {"error": f"MCP server '{server_name}' not found"}

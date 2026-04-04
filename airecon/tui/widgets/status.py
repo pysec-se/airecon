@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import logging
+
 from rich.markup import escape as markup_escape
 from textual import events
 from textual.app import ComposeResult
@@ -8,6 +10,8 @@ from textual.message import Message
 from textual.reactive import reactive
 from textual.screen import ModalScreen
 from textual.widgets import Button, Label, Markdown
+
+logger = logging.getLogger(__name__)
 
 
 class StatusBar(Horizontal):
@@ -92,11 +96,11 @@ class StatusBar(Horizontal):
             _ollama_online = self.ollama_status == "online"
             ollama_dot = "●" if _ollama_online else "○"
             ollama_color = "#00d4aa" if _ollama_online else "#ef4444"
-            ollama_label = "🤖 Ollama"
+            ollama_label = "Ollama"
             if self.ollama_degraded and _ollama_online:
                 ollama_dot = "●"
                 ollama_color = "#ef4444"
-                ollama_label = "🤖 Ollama (degraded)"
+                ollama_label = "Ollama (degraded)"
 
             docker_dot = "●" if self.docker_status == "online" else "○"
             docker_color = "#00d4aa" if self.docker_status == "online" else "#ef4444"
@@ -108,42 +112,45 @@ class StatusBar(Horizontal):
 
             metrics_text = (
                 f" [{ollama_color}]{ollama_dot}[/] {ollama_label}  "
-                f"[{docker_color}]{docker_dot}[/] 🐳 Docker  "
-                f"│ [#8b949e]🧠 Model:[/] [#00d4aa]{markup_escape(self.model_name)}[/]"
-                f"  │ [#8b949e]🧮 Token:[/] [{token_color}]{token_label}[/]"
+                f"[{docker_color}]{docker_dot}[/] Docker  "
+                f"│ [#8b949e]Model:[/] [#00d4aa]{markup_escape(self.model_name)}[/]"
+                f"  │ [#8b949e]Tokens:[/] [{token_color}]{token_label}[/]"
             )
             self.query_one("#status-metrics", Label).update(metrics_text)
 
             skills_text = ""
             if self.skills_used:
                 latest_skill = self.skills_used[-1]
-                skills_text = f"│ [#8b949e]🧰 Skills:[/] [#818cf8]{markup_escape(latest_skill)}[/] [#8b949e](view)[/]"
+                skills_text = f"│ [#8b949e]Skills:[/] [#818cf8]{markup_escape(latest_skill)}[/] [#8b949e](view)[/]"
             self.query_one("#status-skills", Label).update(skills_text)
 
             caido_state = "ON" if self.caido_active else "OFF"
             caido_color = "#22c55e" if self.caido_active else "#6b7280"
-            findings_color = "#f87171" if self.caido_active and self.caido_findings > 0 else "#8b949e"
-            caido_part = (
-                f"│ [#8b949e]🛡 Caido:[/] [{caido_color}]{caido_state}[/] "
-                f"[#8b949e]Findings:[/] [{findings_color}]{self.caido_findings}[/]  "
+            caido_part = f"│ [#8b949e]Caido:[/] [{caido_color}]{caido_state}[/] "
+
+            findings_part = (
+                f"│ [#8b949e]Findings:[/] [#a78bfa]{self.caido_findings}[/] "
+                if self.caido_active and self.caido_findings > 0
+                else ""
             )
 
             subagent_part = (
-                f"│ [#8b949e]👨🏻‍💻 Agents:[/] [#a78bfa]{self.subagents_spawned}[/]  "
+                f"│ [#8b949e]Agents:[/] [#a78bfa]{self.subagents_spawned}[/]  "
                 if self.subagents_spawned > 0
                 else ""
             )
 
             caido_exec_text = (
                 f"{caido_part}"
-                f"│ [#8b949e]💀 Call:[/] [#f59e0b]{self.exec_used}[/]  "
+                f"{findings_part}"
+                f"│ [#8b949e]Call:[/] [#f59e0b]{self.exec_used}[/]  "
                 f"{subagent_part}"
                 f"│ [#484f58]Ctrl+C quit · Ctrl+L clear[/]"
             )
             self.query_one("#status-caido-exec", Label).update(caido_exec_text)
 
-        except Exception:
-            pass
+        except Exception as e:
+            logger.debug("Expected failure in _update_display: %s", e)
 
     def watch_ollama_status(self, _) -> None:
         self._update_display()
@@ -267,11 +274,13 @@ class SkillsModal(ModalScreen):
 
     def compose(self) -> ComposeResult:
         with Container(id="skills-dialog"):
-            yield Label(f"🧰 Loaded Skills ({len(self.skills)})", id="skills-title")
+            yield Label(f" Loaded Skills ({len(self.skills)})", id="skills-title")
 
-            skills_md = "\n".join(
-                f"- `{skill}`" for skill in self.skills
-            ) if self.skills else "_No skills loaded yet_"
+            skills_md = (
+                "\n".join(f"- `{skill}`" for skill in self.skills)
+                if self.skills
+                else "_No skills loaded yet_"
+            )
 
             with Vertical(id="skills-content"):
                 yield Markdown(skills_md)

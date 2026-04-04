@@ -74,38 +74,73 @@ def test_browser_execute_js_parallel_smoke_contract(mocker) -> None:
 
 @pytest.mark.asyncio
 async def test_ollama_complete_contract_accepts_dict_message_content() -> None:
+    """Test OllamaClient complete() accepts dict message content."""
     client = OllamaClient.__new__(OllamaClient)
     client.model = "test-model"
-    client._client = SimpleNamespace(
-        chat=AsyncMock(return_value={"message": {"content": "ok"}})
-    )
-    client._get_request_gate = AsyncMock(return_value=asyncio.Semaphore(1))
+    client._host = "http://127.0.0.1:11434"
+    # Mock the HTTP response directly
+    mock_response = MagicMock()
+    mock_response.json.return_value = {"message": {"content": "ok"}}
+    # Mock the httpx AsyncClient and request
+    mock_httpx_client = AsyncMock()
+    mock_httpx_client.request = AsyncMock(return_value=mock_response)
+    # Set httpx client as class-level
+    OllamaClient._httpx_client = mock_httpx_client
+    OllamaClient._initialized = True
+    OllamaClient._global_semaphore = asyncio.Semaphore(1)
+    client._request_semaphore = asyncio.Semaphore(1)
 
     with patch(
         "airecon.proxy.ollama.get_config",
-        return_value=SimpleNamespace(ollama_keep_alive="5m"),
+        return_value=SimpleNamespace(
+            ollama_keep_alive="5m",
+            ollama_timeout=120.0,
+            ollama_chunk_timeout=30.0,
+            ollama_num_ctx=65536,
+        ),
     ):
         result = await client.complete(
             messages=[{"role": "user", "content": "ping"}], max_retries=0
         )
 
     assert result == "ok"
+    # Clean up
+    OllamaClient._httpx_client = None
+    OllamaClient._initialized = False
 
 
 @pytest.mark.asyncio
 async def test_ollama_complete_contract_rejects_invalid_response_format() -> None:
+    """Test OllamaClient complete() rejects invalid response format."""
     client = OllamaClient.__new__(OllamaClient)
     client.model = "test-model"
-    client._client = SimpleNamespace(
-        chat=AsyncMock(return_value={"unexpected": "shape"})
-    )
-    client._get_request_gate = AsyncMock(return_value=asyncio.Semaphore(1))
+    client._host = "http://127.0.0.1:11434"
+    # Mock the HTTP response with invalid format
+    mock_response = MagicMock()
+    mock_response.json.return_value = {"unexpected": "shape"}
+    # Mock the httpx AsyncClient and request
+    mock_httpx_client = AsyncMock()
+    mock_httpx_client.request = AsyncMock(return_value=mock_response)
+    # Set httpx client as class-level
+    OllamaClient._httpx_client = mock_httpx_client
+    OllamaClient._initialized = True
+    OllamaClient._global_semaphore = asyncio.Semaphore(1)
+    client._request_semaphore = asyncio.Semaphore(1)
 
     with patch(
         "airecon.proxy.ollama.get_config",
-        return_value=SimpleNamespace(ollama_keep_alive="5m"),
+        return_value=SimpleNamespace(
+            ollama_keep_alive="5m",
+            ollama_timeout=120.0,
+            ollama_chunk_timeout=30.0,
+            ollama_num_ctx=65536,
+        ),
     ):
         with pytest.raises(RuntimeError, match="Invalid Ollama response format"):
             await client.complete(
                 messages=[{"role": "user", "content": "ping"}], max_retries=0
             )
+
+    # Clean up
+    OllamaClient._httpx_client = None
+    OllamaClient._initialized = False

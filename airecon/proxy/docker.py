@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import re
 import shutil
 import traceback
 import uuid
@@ -40,6 +41,26 @@ EXECUTE_TOOL_DEF = {
     },
 }
 
+
+def _validate_target_name(target: str) -> bool:
+
+    if not target:
+        return False
+    if len(target) > 255:
+        logger.error("Target name too long: %d chars (max 255)", len(target))
+        return False
+    if ".." in target:
+        logger.error("Target name contains '..': %s", target)
+        return False
+    if "/" in target or "\\" in target:
+        logger.error("Target name contains path separators: %s", target)
+        return False
+    if not re.match(r"^[a-zA-Z0-9._\-]+$", target):
+        logger.error("Target name contains invalid characters: %s", target)
+        return False
+    return True
+
+
 class DockerEngine:
     IMAGE_NAME = "airecon-sandbox"
     CONTAINER_PREFIX = "airecon-sandbox"
@@ -51,9 +72,7 @@ class DockerEngine:
         self._container_id: str | None = None
         self._container_name: str | None = None
         self._connected = False
-        self._current_proc: asyncio.subprocess.Process | None = (
-            None
-        )
+        self._current_proc: asyncio.subprocess.Process | None = None
         self._proc_lock = asyncio.Lock()
         self._active_procs: set[asyncio.subprocess.Process] = set()
         self._background_tasks: set[asyncio.Task] = set()
@@ -92,7 +111,10 @@ class DockerEngine:
             logger.info("Docker image '%s' found", self.IMAGE_NAME)
             return True
 
-        logger.info("Building Docker image '%s' — this may take 10-20 minutes...", self.IMAGE_NAME)
+        logger.info(
+            "Building Docker image '%s' — this may take 10-20 minutes...",
+            self.IMAGE_NAME,
+        )
         dockerfile_dir = self.DOCKERFILE_DIR
 
         if not dockerfile_dir.exists() or not (dockerfile_dir / "Dockerfile").exists():
@@ -140,7 +162,6 @@ class DockerEngine:
             f"{workspace_host}:/workspace",
             "--cap-add=NET_RAW",
             "--cap-add=NET_ADMIN",
-
             f"--memory={self.cfg.docker_memory_limit}",
             f"--memory-swap={self.cfg.docker_memory_limit}",
             self.IMAGE_NAME,
@@ -171,7 +192,10 @@ class DockerEngine:
                     err_msg.strip()[:200],
                 )
                 rm_proc = await asyncio.create_subprocess_exec(
-                    "docker", "rm", "-f", self._container_name,
+                    "docker",
+                    "rm",
+                    "-f",
+                    self._container_name,
                     stdout=asyncio.subprocess.DEVNULL,
                     stderr=asyncio.subprocess.DEVNULL,
                 )
@@ -186,13 +210,18 @@ class DockerEngine:
                     stderr=asyncio.subprocess.PIPE,
                 )
                 try:
-                    stdout, stderr = await asyncio.wait_for(retry_proc.communicate(), timeout=60.0)
+                    stdout, stderr = await asyncio.wait_for(
+                        retry_proc.communicate(), timeout=60.0
+                    )
                 except asyncio.TimeoutError:
                     retry_proc.kill()
                     logger.error("Container start retry timed out after 60s")
                     return False
                 if retry_proc.returncode != 0:
-                    logger.error("Failed to start container (retry after conflict): %s", stderr.decode())
+                    logger.error(
+                        "Failed to start container (retry after conflict): %s",
+                        stderr.decode(),
+                    )
                     return False
             else:
                 logger.error("Failed to start container: %s", err_msg)
@@ -201,13 +230,19 @@ class DockerEngine:
         self._container_id = stdout.decode().strip()[:12]
         self._connected = True
         self._postmortem_fired = False
-        logger.info("Container started: %s (%s)", self._container_name, self._container_id)
+        logger.info(
+            "Container started: %s (%s)", self._container_name, self._container_id
+        )
 
         _consecutive_successes = 0
         _required_consecutive = 3
         for _attempt in range(self._HEALTH_CHECK_ATTEMPTS):
             probe = await asyncio.create_subprocess_exec(
-                "docker", "exec", self._container_name, "echo", "ready",
+                "docker",
+                "exec",
+                self._container_name,
+                "echo",
+                "ready",
                 stdout=asyncio.subprocess.DEVNULL,
                 stderr=asyncio.subprocess.DEVNULL,
             )
@@ -219,7 +254,8 @@ class DockerEngine:
                 _consecutive_successes = 0
                 logger.debug(
                     "Container health check attempt %d/%d TIMEOUT — waiting…",
-                    _attempt + 1, self._HEALTH_CHECK_ATTEMPTS,
+                    _attempt + 1,
+                    self._HEALTH_CHECK_ATTEMPTS,
                 )
                 await asyncio.sleep(0.5)
                 continue
@@ -228,26 +264,29 @@ class DockerEngine:
                 _consecutive_successes += 1
                 logger.debug(
                     "Container health check attempt %d/%d OK (success %d/%d) — waiting…",
-                    _attempt + 1, self._HEALTH_CHECK_ATTEMPTS,
-                    _consecutive_successes, _required_consecutive,
+                    _attempt + 1,
+                    self._HEALTH_CHECK_ATTEMPTS,
+                    _consecutive_successes,
+                    _required_consecutive,
                 )
                 if _consecutive_successes >= _required_consecutive:
                     logger.info(
                         "Container health check passed (%d/%d consecutive successes)",
-                        _consecutive_successes, _required_consecutive,
+                        _consecutive_successes,
+                        _required_consecutive,
                     )
                     break
             else:
                 _consecutive_successes = 0
                 logger.debug(
                     "Container health check attempt %d/%d FAILED (rc=%s) — waiting…",
-                    _attempt + 1, self._HEALTH_CHECK_ATTEMPTS, probe.returncode,
+                    _attempt + 1,
+                    self._HEALTH_CHECK_ATTEMPTS,
+                    probe.returncode,
                 )
             await asyncio.sleep(0.5)
         else:
-
             if _consecutive_successes == 0:
-
                 self._consecutive_recovery_failures += 1
                 _backoff = min(5.0 * self._consecutive_recovery_failures, 30.0)
                 logger.error(
@@ -264,16 +303,23 @@ class DockerEngine:
                 self._connected = False
                 return False
             else:
-
                 self._consecutive_recovery_failures = 0
                 logger.warning(
                     "Container health check unstable (%d/%d consecutive successes) — proceeding",
-                    _consecutive_successes, _required_consecutive,
+                    _consecutive_successes,
+                    _required_consecutive,
                 )
 
         self._consecutive_recovery_failures = 0
 
         if target:
+            if not _validate_target_name(target):
+                logger.error(
+                    "Invalid target name '%s' — only alphanumeric, dots, hyphens, underscores allowed",
+                    target
+                )
+                return False
+            
             await self.execute(
                 f"mkdir -p /workspace/{target}/command /workspace/{target}/output "
                 f"/workspace/{target}/tools /workspace/{target}/vulnerabilities",
@@ -281,13 +327,15 @@ class DockerEngine:
             )
 
         if not _recovery:
+
             async def _bg_apt_update() -> None:
                 try:
                     await self.execute("sudo apt-get update -y -qq", _retry=True)
                 except Exception as exc:
-                    logger.debug("Background apt-get update failed (non-fatal): %s", exc)
+                    logger.debug(
+                        "Background apt-get update failed (non-fatal): %s", exc
+                    )
                 finally:
-
                     current_task = asyncio.current_task()
                     if current_task:
                         self._background_tasks.discard(current_task)
@@ -298,8 +346,13 @@ class DockerEngine:
         return True
 
     async def stop_container(self) -> None:
-        logger.info("stop_container() called. Recent commands: %s", list(self._recent_commands)[-5:])
-        logger.debug("stop_container() caller:\n%s", "".join(traceback.format_stack()[:-1]))
+        logger.info(
+            "stop_container() called. Recent commands: %s",
+            list(self._recent_commands)[-5:],
+        )
+        logger.debug(
+            "stop_container() caller:\n%s", "".join(traceback.format_stack()[:-1])
+        )
 
         for task in self._background_tasks:
             task.cancel()
@@ -309,7 +362,10 @@ class DockerEngine:
 
         if self._container_name:
             proc = await asyncio.create_subprocess_exec(
-                "docker", "rm", "-f", self._container_name,
+                "docker",
+                "rm",
+                "-f",
+                self._container_name,
                 stdout=asyncio.subprocess.DEVNULL,
                 stderr=asyncio.subprocess.DEVNULL,
             )
@@ -317,7 +373,9 @@ class DockerEngine:
                 await asyncio.wait_for(proc.wait(), timeout=15.0)
             except asyncio.TimeoutError:
                 proc.kill()
-                logger.warning("docker rm -f timed out after 15s — Docker daemon may be hung")
+                logger.warning(
+                    "docker rm -f timed out after 15s — Docker daemon may be hung"
+                )
             self._connected = False
             self._container_id = None
             logger.info("Container stopped and removed: %s", self._container_name)
@@ -331,7 +389,10 @@ class DockerEngine:
 
         if self._container_name:
             proc = await asyncio.create_subprocess_exec(
-                "docker", "rm", "-f", self._container_name,
+                "docker",
+                "rm",
+                "-f",
+                self._container_name,
                 stdout=asyncio.subprocess.DEVNULL,
                 stderr=asyncio.subprocess.DEVNULL,
             )
@@ -339,12 +400,17 @@ class DockerEngine:
                 await asyncio.wait_for(proc.wait(), timeout=15.0)
             except asyncio.TimeoutError:
                 proc.kill()
-                logger.warning("docker rm -f timed out after 15s in _stop_existing — Docker daemon may be hung")
+                logger.warning(
+                    "docker rm -f timed out after 15s in _stop_existing — Docker daemon may be hung"
+                )
 
             for _i in range(20):
                 check = await asyncio.create_subprocess_exec(
-                    "docker", "ps", "-aq",
-                    "--filter", f"name=^/{self._container_name}$",
+                    "docker",
+                    "ps",
+                    "-aq",
+                    "--filter",
+                    f"name=^/{self._container_name}$",
                     stdout=asyncio.subprocess.PIPE,
                     stderr=asyncio.subprocess.DEVNULL,
                 )
@@ -356,9 +422,7 @@ class DockerEngine:
                     break
                 await asyncio.sleep(0.1)
 
-    async def _register_proc(
-        self, proc: asyncio.subprocess.Process
-    ) -> None:
+    async def _register_proc(self, proc: asyncio.subprocess.Process) -> None:
         async with self._proc_lock:
             self._active_procs.add(proc)
             self._current_proc = proc
@@ -368,9 +432,7 @@ class DockerEngine:
                     len(self._active_procs),
                 )
 
-    async def _unregister_proc(
-        self, proc: asyncio.subprocess.Process
-    ) -> None:
+    async def _unregister_proc(self, proc: asyncio.subprocess.Process) -> None:
         async with self._proc_lock:
             self._active_procs.discard(proc)
             if self._current_proc is proc:
@@ -381,7 +443,6 @@ class DockerEngine:
         "error response from daemon",
         "cannot exec in a stopped container",
         "is not running",
-
         "connection reset by peer",
         "broken pipe",
         "unexpected EOF",
@@ -395,7 +456,8 @@ class DockerEngine:
             if marker in lower:
                 logger.warning(
                     "Container-gone marker detected: %r | stderr snippet: %s",
-                    marker, stderr.strip()[:300],
+                    marker,
+                    stderr.strip()[:300],
                 )
                 return True
         return False
@@ -404,15 +466,20 @@ class DockerEngine:
         if not self._container_name:
             return
         try:
-
             check_proc = await asyncio.create_subprocess_exec(
-                "docker", "ps", "-a",
-                "--filter", f"name={self._container_name}",
-                "--format", "{{.Names}}",
+                "docker",
+                "ps",
+                "-a",
+                "--filter",
+                f"name={self._container_name}",
+                "--format",
+                "{{.Names}}",
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.DEVNULL,
             )
-            check_stdout, _ = await asyncio.wait_for(check_proc.communicate(), timeout=5.0)
+            check_stdout, _ = await asyncio.wait_for(
+                check_proc.communicate(), timeout=5.0
+            )
 
             if self._container_name not in check_stdout.decode():
                 logger.warning(
@@ -422,7 +489,8 @@ class DockerEngine:
                 return
 
             proc = await asyncio.create_subprocess_exec(
-                "docker", "inspect",
+                "docker",
+                "inspect",
                 "--format",
                 "Status={{.State.Status}} ExitCode={{.State.ExitCode}} "
                 "OOMKilled={{.State.OOMKilled}} Error={{.State.Error}} "
@@ -432,7 +500,6 @@ class DockerEngine:
                 stderr=asyncio.subprocess.DEVNULL,
             )
             try:
-
                 stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=30.0)
                 info = stdout.decode(errors="replace").strip()
                 logger.error(
@@ -460,8 +527,8 @@ class DockerEngine:
                             "Fix: Tool crash (likely nmap/nuclei bug) — report to tool maintainer."
                         )
                     elif "error=" in info_lower and "error=''" not in info_lower:
-
                         import re
+
                         error_match = re.search(r"Error=([^\s]+)", info)
                         if error_match:
                             logger.critical(
@@ -475,8 +542,15 @@ class DockerEngine:
                 logger.critical(
                     "ROOT CAUSE: Docker daemon unresponsive — restart Docker: sudo systemctl restart docker"
                 )
+            except Exception as e:
+                logger.debug("Post-mortem inspect failed: %s", e)
         except Exception as e:
-            logger.debug("Post-mortem inspect failed: %s", e)
+            logger.debug("Container post-mortem setup failed: %s", e)
+
+    async def _wait_for_recovery_unlock(self) -> None:
+        """Wait until recovery lock is released — used by execute() to avoid deadlock."""
+        while self._recovery_lock.locked():
+            await asyncio.sleep(0.5)
 
     async def execute(
         self,
@@ -486,14 +560,15 @@ class DockerEngine:
         _retry: bool = False,
     ) -> dict[str, Any]:
         if not self._connected and self._recovery_lock.locked():
-            _wait_iters = 0
-            max_wait_iters = 20
-            while self._recovery_lock.locked() and _wait_iters < max_wait_iters:
-                logger.debug(
-                    "Recovery in progress — waiting 3 s (%d/%d)…", _wait_iters + 1, max_wait_iters
+            try:
+                await asyncio.wait_for(
+                    self._wait_for_recovery_unlock(),
+                    timeout=15.0,
                 )
-                await asyncio.sleep(3)
-                _wait_iters += 1
+            except asyncio.TimeoutError:
+                logger.warning(
+                    "Recovery lock held for >15s — proceeding anyway to avoid deadlock"
+                )
 
         if not self._connected or not self._container_name:
             return {
@@ -526,7 +601,6 @@ class DockerEngine:
             "pentester",
             "-w",
             "/workspace",
-
             "-e",
             f"PATH={CONTAINER_PATH}",
             "-e",
@@ -601,11 +675,15 @@ class DockerEngine:
                 except asyncio.CancelledError:
                     raise
                 except Exception as _stream_err:
-                    logger.debug("Stream read error (container may have died): %s", _stream_err)
+                    logger.debug(
+                        "Stream read error (container may have died): %s", _stream_err
+                    )
 
             try:
-                assert proc.stdout is not None
-                assert proc.stderr is not None
+                if proc.stdout is None or proc.stderr is None:
+                    logger.error("Process stdout/stderr not initialized")
+                    raise RuntimeError("Process streams not available")
+                
                 await asyncio.wait_for(
                     asyncio.gather(
                         _read_stream(proc.stdout, False),
@@ -622,7 +700,6 @@ class DockerEngine:
 
             if self._is_container_gone(stderr_str):
                 if _retry:
-
                     if not self._postmortem_fired:
                         self._postmortem_fired = True
                         await self._log_container_postmortem()
@@ -652,15 +729,15 @@ class DockerEngine:
 
                 async with self._recovery_lock:
                     if self._recovery_generation != _my_gen:
-
                         logger.info(
                             "Container already recovered by another coroutine "
                             "(gen %d→%d) — retrying: %s",
-                            _my_gen, self._recovery_generation, command[:80],
+                            _my_gen,
+                            self._recovery_generation,
+                            command[:80],
                         )
                         already_recovered = True
                     else:
-
                         if not self._postmortem_fired:
                             self._postmortem_fired = True
                             await self._log_container_postmortem()
@@ -674,18 +751,25 @@ class DockerEngine:
                             self._recovery_generation += 1
 
                             await asyncio.sleep(1)
-                            logger.info("Container recovered — retrying command: %s", command[:120])
+                            logger.info(
+                                "Container recovered — retrying command: %s",
+                                command[:120],
+                            )
                             should_retry = True
                         else:
-                            logger.error("Container recovery failed — sandbox is unavailable.")
+                            logger.error(
+                                "Container recovery failed — sandbox is unavailable."
+                            )
                             recovery_failed = True
 
                 if already_recovered:
-
-                    return await self.execute(command, timeout, on_output=on_output, _retry=False)
+                    return await self.execute(
+                        command, timeout, on_output=on_output, _retry=False
+                    )
                 elif should_retry:
-
-                    return await self.execute(command, timeout, on_output=on_output, _retry=True)
+                    return await self.execute(
+                        command, timeout, on_output=on_output, _retry=True
+                    )
                 elif recovery_failed:
                     return {
                         "success": False,
@@ -712,7 +796,6 @@ class DockerEngine:
             }
 
         except asyncio.CancelledError:
-
             try:
                 if proc is not None and proc.returncode is None:
                     proc.kill()
@@ -730,12 +813,12 @@ class DockerEngine:
             }
 
         except asyncio.TimeoutError:
-
             try:
                 if proc is not None and proc.returncode is None:
                     logger.warning(
                         "Command timed out after %ds — killing process (pid=%d)",
-                        timeout, proc.pid,
+                        timeout,
+                        proc.pid,
                     )
                     proc.kill()
                     await asyncio.wait_for(proc.wait(), timeout=5.0)
@@ -746,13 +829,11 @@ class DockerEngine:
 
             try:
                 kill_cmd = (
-
                     f"for pid in $(grep -rlZ '{_job_env}' /proc/*/environ 2>/dev/null "
                     f"| sed 's|/proc/||;s|/environ||'); do "
-                    f"  kill -KILL -- -\"$pid\" 2>/dev/null; "
-                    f"  kill -KILL \"$pid\" 2>/dev/null; "
+                    f'  kill -KILL -- -"$pid" 2>/dev/null; '
+                    f'  kill -KILL "$pid" 2>/dev/null; '
                     f"done; "
-
                     "pkill -KILL -f 'wpscan|nuclei|nmap|masscan|gobuster|dirsearch|ffuf' 2>/dev/null || true"
                 )
                 kill_proc = await asyncio.create_subprocess_exec(
@@ -819,7 +900,8 @@ class DockerEngine:
             if timeout != float(explicit_timeout):
                 logger.warning(
                     "Model set timeout=%ss, enforcing minimum %ss",
-                    explicit_timeout, cfg.command_timeout,
+                    explicit_timeout,
+                    cfg.command_timeout,
                 )
         else:
             timeout = cfg.command_timeout
@@ -827,7 +909,9 @@ class DockerEngine:
         return await self.execute(command, timeout, on_output=on_output)
 
     async def force_stop(self) -> None:
-        logger.info("force_stop() called - killing processes but keeping container alive")
+        logger.info(
+            "force_stop() called - killing processes but keeping container alive"
+        )
         logger.debug("force_stop() caller:\n%s", "".join(traceback.format_stack()[:-1]))
 
         async with self._proc_lock:
@@ -858,21 +942,21 @@ class DockerEngine:
             try:
                 if proc.returncode is None:
                     proc.kill()
-                    logger.debug("Killed straggler process registered during force_stop()")
+                    logger.debug(
+                        "Killed straggler process registered during force_stop()"
+                    )
             except Exception as _e:
                 logger.debug("Could not kill straggler process: %s", _e)
 
         if self._container_name and self._connected:
             try:
                 kill_cmd = (
-
                     "ps -u pentester -o pid,comm --no-headers 2>/dev/null "
-                    "| awk '$2 != \"sleep\" && $2 != \"chromium\" {print $1}' "
+                    '| awk \'$2 != "sleep" && $2 != "chromium" {print $1}\' '
                     "| xargs -r kill -TERM 2>/dev/null; "
                     "sleep 0.5; "
-
                     "ps -u pentester -o pid,comm --no-headers 2>/dev/null "
-                    "| awk '$2 != \"sleep\" && $2 != \"chromium\" {print $1}' "
+                    '| awk \'$2 != "sleep" && $2 != "chromium" {print $1}\' '
                     "| xargs -r kill -KILL 2>/dev/null; "
                     "true"
                 )
@@ -889,8 +973,11 @@ class DockerEngine:
                 await asyncio.wait_for(proc.wait(), timeout=5.0)
                 logger.info(
                     "Force stopped all active tool processes in container "
-                    "(sleep/chromium spared to keep container alive)")
+                    "(sleep/chromium spared to keep container alive)"
+                )
             except Exception as e:
                 logger.warning("force_stop container kill failed: %s", e)
 
-        logger.info("force_stop() complete - container %s remains running", self._container_name)
+        logger.info(
+            "force_stop() complete - container %s remains running", self._container_name
+        )

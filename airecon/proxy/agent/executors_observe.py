@@ -141,6 +141,18 @@ class _ObserveExecutorMixin:
             )
             exec_error = exec_result.get("error") or exec_result.get("stderr") or ""
             exec_success = bool(exec_result.get("success", True))
+            exit_code = exec_result.get("exit_code")
+
+            # If command failed but no error message, generate one from exit code / raw output
+            if not exec_success and not exec_error:
+                if exit_code is not None and exit_code != 0:
+                    exec_error = f"curl exited with code {exit_code}"
+                elif raw_output:
+                    exec_error = raw_output.strip()[:200]
+                else:
+                    # Handle case where exit_code is None, 0, or empty
+                    exit_code_str = str(exit_code) if exit_code is not None else "unknown"
+                    exec_error = f"curl command returned exit code {exit_code_str} with no output"
         except Exception as _e:
             duration = time.time() - start_time
             return False, duration, {"success": False, "error": str(_e)}, None

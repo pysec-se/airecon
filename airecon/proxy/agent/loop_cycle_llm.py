@@ -9,6 +9,10 @@ from typing import Any
 
 from ..system import auto_load_skills_for_message
 from .pipeline import PipelinePhase
+from .tool_scorer import (
+    build_tool_recommendation_context,
+    rank_tools_for_phase,
+)
 
 logger = logging.getLogger("airecon.agent")
 
@@ -22,6 +26,96 @@ except (OSError, json.JSONDecodeError) as _e:
 
 
 class _CycleLlmMixin:
+    def _check_phase_constraint(self, tool_name: str) -> str:
+
+        from .tool_scorer import _PHASE_BLOCKED_TOOLS
+
+        if not self.pipeline:
+            return ""
+
+        current_phase = self.pipeline.get_current_phase().value
+        blocked_tools = _PHASE_BLOCKED_TOOLS.get(current_phase, set())
+
+        if tool_name.lower() in {t.lower() for t in blocked_tools}:
+            return (
+                f"[PHASE CONSTRAINT] Tool '{tool_name}' is NOT allowed in {current_phase} phase.\n"
+                f"Use phase-appropriate tools instead. Check recommended tools for this phase."
+            )
+        return ""
+
+    def _inject_tool_intelligence(self, wrong_tool_picked: str = "") -> None:
+
+        if not self._tools_ollama:
+            return
+
+        current_phase = (
+            self.pipeline.get_current_phase().value
+            if self.pipeline
+            else "RECON"
+        )
+
+        tool_use_counts: dict[str, int] = {}
+        tool_success_counts: dict[str, int] = {}
+        tool_failure_counts: dict[str, int] = {}
+
+        if self._session:
+            for tool_name, count in getattr(self._session, "tool_counts", {}).items():
+                tool_use_counts[tool_name] = count
+
+        budget_remaining: dict[str, int] = {}
+        if self.pipeline:
+            from .pipeline import _PHASE_TOOL_BUDGETS
+            phase_budget = _PHASE_TOOL_BUDGETS.get(current_phase, {})
+            for tool_name, max_count in phase_budget.items():
+                used = tool_use_counts.get(tool_name, 0)
+                budget_remaining[tool_name] = max(0, max_count - used)
+
+        chain_step_hint = ""
+        if self.state.exploit_chains:
+            for chain in self.state.exploit_chains:
+                if chain.get("status") in ("planning", "active"):
+                    cur_idx = chain.get("current_step_index", 0)
+                    steps = chain.get("steps", [])
+                    if cur_idx < len(steps):
+                        chain_step_hint = steps[cur_idx].get("tool_hint", "")
+                        break
+
+        ranked_tools = rank_tools_for_phase(
+            self._tools_ollama,
+            current_phase=current_phase,
+            tool_use_counts=tool_use_counts,
+            tool_success_counts=tool_success_counts,
+            tool_failure_counts=tool_failure_counts,
+            budget_remaining=budget_remaining,
+            chain_step_hint=chain_step_hint,
+            session_evidence_count=len(self.state.evidence_log),
+            consecutive_failures=self._consecutive_failures,
+        )
+
+        if ranked_tools and len(ranked_tools) == len(self._tools_ollama):
+            self._tools_ollama = ranked_tools
+
+        rec_context = build_tool_recommendation_context(
+            current_phase=current_phase,
+            chain_step_hint=chain_step_hint,
+            consecutive_failures=self._consecutive_failures,
+            wrong_tool_picked=wrong_tool_picked,
+        )
+
+        if rec_context:
+            self.state.conversation = [
+                m for m in self.state.conversation
+                if not m.get("content", "").startswith("<system_tool_intelligence>")
+            ]
+            self.state.conversation.append({
+                "role": "system",
+                "content": rec_context,
+            })
+            logger.debug(
+                "Tool intelligence injected for phase=%s (chain_hint='%s', wrong_tool='%s', failures=%d)",
+                current_phase, chain_step_hint, wrong_tool_picked, self._consecutive_failures,
+            )
+
     def _analyze_llm_output(
         self,
         current_phase: Any,
@@ -279,10 +373,13 @@ class _CycleLlmMixin:
                 _session_skills_2 = None
                 if self._session:
                     _session_skills_2 = set(self._session.loaded_skills)
+                _current_target = self.state.active_target if self.state.active_target else (self._session.target if self._session else "")
                 _new_skill_ctx, _new_loaded_skills = auto_load_skills_for_message(
                     _llm_output_for_skills,
                     phase=self._get_current_phase().value,
                     session_loaded_skills=_session_skills_2,
+                    memory_manager=getattr(self, '_memory_manager', None),
+                    current_target=_current_target,
                 )
 
                 if _new_loaded_skills:

@@ -12,8 +12,10 @@ DEFAULT_RULE_SETS: list[str] = [
     "p/cwe-top-25",
 ]
 
+
 def get_default_rules() -> list[str]:
     return list(DEFAULT_RULE_SETS)
+
 
 def build_semgrep_command(
     target_path: str,
@@ -37,9 +39,10 @@ def build_semgrep_command(
         f"{target_path} 2>/dev/null"
     )
 
+
 def parse_semgrep_results(raw_json: str) -> dict[str, Any]:
-#    if not raw_json.strip():
-#        return {"findings": [], "errors": [], "summary": "No results"}
+    if not raw_json.strip():
+        return {"findings": [], "errors": [], "summary": "No results"}
 
     try:
         data = json.loads(raw_json)
@@ -82,12 +85,11 @@ def parse_semgrep_results(raw_json: str) -> dict[str, Any]:
         sev = f["severity"]
         by_severity[sev] = by_severity.get(sev, 0) + 1
 
-    severity_str = ", ".join(
-        f"{k}: {v}" for k, v in sorted(
-            by_severity.items()))
+    severity_str = ", ".join(f"{k}: {v}" for k, v in sorted(by_severity.items()))
     summary = (
         f"Found {len(results)} issues ({severity_str})"
-        if results else "No issues found"
+        if results
+        else "No issues found"
     )
 
     return {
@@ -96,6 +98,7 @@ def parse_semgrep_results(raw_json: str) -> dict[str, Any]:
         "summary": summary,
         "total": len(results),
     }
+
 
 async def run_code_analysis(
     engine: Any,
@@ -108,11 +111,9 @@ async def run_code_analysis(
         {"command": "which semgrep || pip install semgrep 2>&1 | tail -1"},
     )
     if not install_check.get("success", False):
-        logger.warning(
-            "Semgrep installation may have failed, attempting scan anyway")
+        logger.warning("Semgrep installation may have failed, attempting scan anyway")
 
-    scan_cmd = build_semgrep_command(
-        target_path, rules=rules, languages=languages)
+    scan_cmd = build_semgrep_command(target_path, rules=rules, languages=languages)
     result = await engine.execute_tool("execute", {"command": scan_cmd})
 
     if not result.get("success", False):

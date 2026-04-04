@@ -3,7 +3,10 @@ from textual.app import App, ComposeResult
 from textual.geometry import Offset
 from textual.selection import Selection
 
-from airecon.tui.widgets.chat import ChatPanel
+from pathlib import Path
+
+from airecon.tui.buddy import AVAILABLE_SPECIES
+from airecon.tui.widgets.chat import ChatPanel, ThinkingSpinner
 from airecon.tui.widgets.status import StatusBar
 
 
@@ -50,6 +53,43 @@ async def test_chat_panel_tool_lifecycle():
         await pilot.pause()
 
         assert "tool-123" not in chat._active_tools
+
+
+@pytest.mark.asyncio
+async def test_thinking_spinner_shows_full_buddy_rows_without_remount_churn():
+    async with ChatWidgetTestApp().run_test() as pilot:
+        chat = pilot.app.query_one("#chat", ChatPanel)
+        chat.start_thinking()
+        await pilot.pause(0.1)
+
+        spinner = chat.query_one(ThinkingSpinner)
+        assert spinner._buddy_row_count == 5
+        assert len(spinner._buddy_rows) == 5
+        assert len(spinner._buddy_parts) == 5
+        assert all(len(list(row.children)) == 1 for row in spinner._buddy_rows)
+
+        await pilot.pause(0.8)
+        assert all(len(list(row.children)) == 1 for row in spinner._buddy_rows)
+
+
+
+def test_stylesheet_keeps_thinking_spinner_multiline_height():
+    css = Path("airecon/tui/styles.tcss").read_text(encoding="utf-8")
+    assert "ThinkingSpinner {" in css
+    assert "min-height: 6;" in css
+    assert "align: left top;" in css
+
+
+def test_stylesheet_has_orange_buddy_spinner_accent():
+    css = Path("airecon/tui/styles.tcss").read_text(encoding="utf-8")
+    assert "ThinkingSpinner .buddy-part" in css
+    assert "color: #f59e0b;" in css
+
+
+def test_buddy_species_synced_with_openclaude_sprite_pack():
+    assert "goose" in AVAILABLE_SPECIES
+    assert "axolotl" in AVAILABLE_SPECIES
+    assert "frog" not in AVAILABLE_SPECIES
 
 
 @pytest.mark.asyncio

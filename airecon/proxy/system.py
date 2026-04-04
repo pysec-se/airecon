@@ -20,8 +20,7 @@ _BUGBOUNTY_PROMPT_PATH = Path(__file__).parent / "prompts" / "bugbounty.txt"
 with open(_BUGBOUNTY_PROMPT_PATH, "r") as f:
     BUGBOUNTY_SYSTEM_PROMPT = f.read()
 
-_PENTEST_PROMPT_PATH = Path(__file__).parent / \
-    "prompts" / "penetration_test.txt"
+_PENTEST_PROMPT_PATH = Path(__file__).parent / "prompts" / "penetration_test.txt"
 with open(_PENTEST_PROMPT_PATH, "r") as f:
     PENTEST_SYSTEM_PROMPT = f.read()
 
@@ -49,8 +48,8 @@ _CTF_MSG_RE = re.compile(
     re.IGNORECASE,
 )
 
-def _is_ctf_target(target: str | None = None,
-                   user_message: str | None = None) -> bool:
+
+def _is_ctf_target(target: str | None = None, user_message: str | None = None) -> bool:
     if target:
         t_lower = target.lower()
         if any(ind in t_lower for ind in _CTF_INDICATORS_TARGET):
@@ -61,6 +60,7 @@ def _is_ctf_target(target: str | None = None,
     if user_message and _CTF_MSG_RE.search(user_message):
         return True
     return False
+
 
 _BUGBOUNTY_INDICATORS_MSG = (
     "bug bounty",
@@ -89,8 +89,10 @@ _PUBLIC_DOMAIN_RE = re.compile(
     re.IGNORECASE,
 )
 
-def _is_bugbounty_target(target: str | None = None,
-                         user_message: str | None = None) -> bool:
+
+def _is_bugbounty_target(
+    target: str | None = None, user_message: str | None = None
+) -> bool:
     msg_has_indicator = False
     target_has_indicator = False
     target_is_public_domain = False
@@ -101,10 +103,14 @@ def _is_bugbounty_target(target: str | None = None,
 
     if target:
         t_lower = target.lower()
-        target_is_public_domain = bool(_PUBLIC_DOMAIN_RE.search(t_lower) and ":" not in t_lower)
+        target_is_public_domain = bool(
+            _PUBLIC_DOMAIN_RE.search(t_lower) and ":" not in t_lower
+        )
         target_has_indicator = any(ind in t_lower for ind in _BUGBOUNTY_INDICATORS_MSG)
         if not target_has_indicator:
-            target_has_indicator = any(hint in t_lower for hint in _BUGBOUNTY_TARGET_HINTS)
+            target_has_indicator = any(
+                hint in t_lower for hint in _BUGBOUNTY_TARGET_HINTS
+            )
 
     if msg_has_indicator:
         return True
@@ -116,6 +122,7 @@ def _is_bugbounty_target(target: str | None = None,
         return True
 
     return False
+
 
 _PENTEST_INDICATORS_MSG = (
     "pentest",
@@ -139,13 +146,14 @@ _PENTEST_TARGET_RE = re.compile(
     r"\b(10\.\d+\.\d+\.\d+|172\.(1[6-9]|2\d|3[01])\.\d+\.\d+|192\.168\.\d+\.\d+)\b"
 )
 
-def _is_pentest_target(target: str | None = None,
-                       user_message: str | None = None) -> bool:
+
+def _is_pentest_target(
+    target: str | None = None, user_message: str | None = None
+) -> bool:
     if target:
         t_lower = target.lower()
 
-        if _PENTEST_TARGET_RE.search(
-                t_lower) and not _PRIVATE_IP_RE.search(t_lower):
+        if _PENTEST_TARGET_RE.search(t_lower) and not _PRIVATE_IP_RE.search(t_lower):
             return True
         if any(ind in t_lower for ind in ("aws", "gcp", "azure", "cloud")):
             return True
@@ -155,6 +163,7 @@ def _is_pentest_target(target: str | None = None,
             return True
     return False
 
+
 _FULL_EMBED_SKILLS = {
     "tools/install.md",
 }
@@ -162,6 +171,7 @@ _FULL_EMBED_SKILLS = {
 _CTF_EMBED_SKILLS = {
     "tools/install.md",
 }
+
 
 def _load_local_skills(ctf_mode: bool = False) -> str:
     skills_dir = Path(__file__).resolve().parent / "skills"
@@ -182,7 +192,6 @@ def _load_local_skills(ctf_mode: bool = False) -> str:
                     f'\n<embedded_skill name="{path.name}">\n{content}\n</embedded_skill>\n'
                 )
             except Exception:
-
                 top = rel.split("/", 1)[0]
                 category_counts[top] = category_counts.get(top, 0) + 1
         else:
@@ -219,6 +228,7 @@ def _load_local_skills(ctf_mode: bool = False) -> str:
 
     return result
 
+
 def _load_skill_keywords() -> dict[str, str]:
     try:
         skills_json = Path(__file__).parent / "data" / "skills.json"
@@ -230,6 +240,7 @@ def _load_skill_keywords() -> dict[str, str]:
         logger.warning("Failed to load skill keywords from JSON: %s", e)
     return {}
 
+
 def _keyword_matches_message(keyword: str, msg_lower: str) -> bool:
     k = keyword.lower().strip()
     if not k:
@@ -240,13 +251,21 @@ def _keyword_matches_message(keyword: str, msg_lower: str) -> bool:
     pattern = prefix + re.escape(k) + suffix
     return re.search(pattern, msg_lower) is not None
 
+
 _SKILL_KEYWORDS: dict[str, str] = _load_skill_keywords()
 
 _PHASE_SKILL_DIRECTORIES: dict[str, set[str]] = {
-    "RECON":    {"reconnaissance", "tools", "protocols"},
+    "RECON": {"reconnaissance", "tools", "protocols"},
     "ANALYSIS": {"vulnerabilities", "frameworks", "technologies", "protocols"},
-    "EXPLOIT":  {"payloads", "vulnerabilities", "postexploit", "frameworks", "tools", "ctf"},
-    "REPORT":   set(),
+    "EXPLOIT": {
+        "payloads",
+        "vulnerabilities",
+        "postexploit",
+        "frameworks",
+        "tools",
+        "ctf",
+    },
+    "REPORT": set(),
     "COMPLETE": set(),
 }
 
@@ -258,7 +277,6 @@ _PHASE_ENTRY_SKILLS: dict[str, list[str]] = {
     "ANALYSIS": [
         "tools/semgrep.md",
         "vulnerabilities/api_testing.md",
-
     ],
     "EXPLOIT": [
         "tools/advanced_fuzzing.md",
@@ -267,10 +285,13 @@ _PHASE_ENTRY_SKILLS: dict[str, list[str]] = {
     "REPORT": [],
 }
 
+
 def auto_load_skills_for_message(
     user_message: str,
     phase: str = "",
     session_loaded_skills: set[str] | None = None,
+    memory_manager=None,
+    current_target: str = "",
 ) -> tuple[str, list[str]]:
     skills_dir = Path(__file__).resolve().parent / "skills"
     if not skills_dir.exists():
@@ -296,8 +317,29 @@ def auto_load_skills_for_message(
         key=lambda s: (-skill_scores[s], s),
     )
 
+    recommended_skills = []
+    if memory_manager and current_target:
+        try:
+            skill_recs = memory_manager.get_skill_recommendations(current_target, phase)
+            for rec in skill_recs:
+                skill_path = (
+                    f"ctf/{rec['skill_name']}.py"
+                    if phase == "EXPLOIT"
+                    else f"reconnaissance/{rec['skill_name']}.py"
+                )
+                skill_file = skills_dir / skill_path
+                if skill_file.exists() and skill_path not in skill_scores:
+                    skill_scores[skill_path] = int(rec["success_rate"] * 5)
+                    recommended_skills.append(skill_path)
+            sorted_skills = sorted(
+                skill_scores.keys(),
+                key=lambda s: (-skill_scores[s], s),
+            )
+        except Exception as e:
+            logger.debug("Skill recommendation lookup failed: %s", e)
+
     guaranteed = _PHASE_ENTRY_SKILLS.get(phase.upper(), []) if phase else []
-    keyword_slots = max(2, 3 - len(guaranteed))
+    max_keyword_skills = 2
 
     parts: list[str] = []
     loaded_skills: list[str] = []
@@ -308,9 +350,11 @@ def auto_load_skills_for_message(
             return False
 
         if session_loaded_skills:
-
             _legacy_stem = Path(skill_rel).stem
-            if skill_rel in session_loaded_skills or _legacy_stem in session_loaded_skills:
+            if (
+                skill_rel in session_loaded_skills
+                or _legacy_stem in session_loaded_skills
+            ):
                 logger.debug("Skill already loaded this session: %s", skill_rel)
                 return False
         skill_file = skills_dir / skill_rel
@@ -324,10 +368,14 @@ def auto_load_skills_for_message(
         try:
             content = skill_file.read_text(encoding="utf-8", errors="replace")
 
-            limit = 15000 if (
-                skill_rel.startswith("tools/")
-                or skill_rel.startswith("reconnaissance/")
-            ) else 3000
+            limit = (
+                5000
+                if (
+                    skill_rel.startswith("tools/")
+                    or skill_rel.startswith("reconnaissance/")
+                )
+                else 1500
+            )
             if len(content) > limit:
                 content = (
                     content[:limit]
@@ -346,7 +394,7 @@ def auto_load_skills_for_message(
 
     keyword_count = 0
     for skill_rel in sorted_skills:
-        if keyword_count >= keyword_slots:
+        if keyword_count >= max_keyword_skills:
             break
         if _load_skill(skill_rel):
             keyword_count += 1
@@ -356,8 +404,12 @@ def auto_load_skills_for_message(
 
     total_chars = sum(len(p) for p in parts)
     logger.debug(
-        "skill_injection_stats: phase=%s guaranteed=%d keyword_slots=%d loaded=%d total_chars=%d",
-        phase, len(guaranteed), keyword_slots, len(loaded_skills), total_chars,
+        "skill_injection_stats: phase=%s guaranteed=%d max_keywords=%d loaded=%d total_chars=%d",
+        phase,
+        len(guaranteed),
+        max_keyword_skills,
+        len(loaded_skills),
+        total_chars,
     )
 
     return (
@@ -365,6 +417,7 @@ def auto_load_skills_for_message(
         + "\n---\n".join(parts),
         loaded_skills,
     )
+
 
 def auto_load_skills_for_technologies(
     technologies: dict[str, str],
@@ -419,19 +472,25 @@ def auto_load_skills_for_technologies(
     loaded_names: list[str] = []
     used_chars = 0
     for skill_rel in sorted_skills[:3]:
-
         if skill_rel in already_loaded:
             continue
         skill_file = skills_dir / skill_rel
         if skill_file.exists():
             try:
                 content = skill_file.read_text(encoding="utf-8", errors="replace")
-                limit = tech_limit if (
-                    skill_rel.startswith("technologies/")
-                    or skill_rel.startswith("frameworks/")
-                ) else generic_limit
+                limit = (
+                    tech_limit
+                    if (
+                        skill_rel.startswith("technologies/")
+                        or skill_rel.startswith("frameworks/")
+                    )
+                    else generic_limit
+                )
                 if len(content) > limit:
-                    content = content[:limit] + f"\n... (truncated, use read_file for full: {skill_file.absolute().as_posix()})"
+                    content = (
+                        content[:limit]
+                        + f"\n... (truncated, use read_file for full: {skill_file.absolute().as_posix()})"
+                    )
                 block = f"[AUTO-LOADED TECH SKILL: {skill_rel}]\n{content}"
                 remaining = total_limit - used_chars
                 if remaining <= 0:
@@ -450,8 +509,8 @@ def auto_load_skills_for_technologies(
 
                 loaded_names.append(skill_rel)
                 already_loaded.add(skill_rel)
-            except Exception:
-                pass
+            except Exception as e:
+                logger.debug("Expected failure loading tech skill %s: %s", skill_rel, e)
 
     if not parts:
         return "", []
@@ -462,6 +521,7 @@ def auto_load_skills_for_technologies(
         + "\n---\n".join(parts),
         loaded_names,
     )
+
 
 def get_system_prompt(
     target: str | None = None,
@@ -491,7 +551,6 @@ RECON_MODE={recon_mode.upper()}
     base_prompt += "\n\n" + recon_policy
 
     if cfg.allow_destructive_testing:
-
         base_prompt = base_prompt.replace(
             "Full authorization for non-destructive penetration testing. No permission checks needed.",
             "FULL AUTHORIZATION for UNRESTRICTED penetration testing including destructive actions. No permission checks needed.",

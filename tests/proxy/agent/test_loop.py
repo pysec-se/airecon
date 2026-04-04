@@ -170,6 +170,55 @@ async def test_standard_mode_scoped_request_enables_scope_lock(agent_loop, mocke
     )
 
 
+@pytest.mark.asyncio
+async def test_wildcard_scope_moves_workspace_to_root_target(agent_loop, mocker):
+    cfg = MagicMock()
+    cfg.agent_recon_mode = "standard"
+    cfg.deep_recon_autostart = False
+    cfg.ollama_num_ctx_small = 4096
+    mocker.patch("airecon.proxy.agent.loop_message_entry.get_config", return_value=cfg)
+
+    agent_loop._tools_ollama = [MagicMock()]
+    agent_loop.state.active_target = "app.ringkas.co.id"
+    agent_loop._scope_anchor_target = "app.ringkas.co.id"
+    mocker.patch.object(agent_loop, "_scan_workspace_state", return_value="")
+
+    await agent_loop._prepare_message_context(
+        "scope ringkas.co.id/*.ringkas.co.id only"
+    )
+
+    assert agent_loop.state.active_target == "ringkas.co.id"
+    assert agent_loop._scope_anchor_target == "ringkas.co.id"
+
+
+@pytest.mark.asyncio
+async def test_prepare_message_context_does_not_emergency_truncate_on_high_cumulative_only(agent_loop, mocker):
+    cfg = MagicMock()
+    cfg.agent_recon_mode = "standard"
+    cfg.deep_recon_autostart = False
+    cfg.ollama_num_ctx_small = 4096
+    cfg.ollama_num_ctx = 32768
+    mocker.patch("airecon.proxy.agent.loop_message_entry.get_config", return_value=cfg)
+
+    agent_loop._tools_ollama = [MagicMock()]
+    agent_loop.state.active_target = "example.com"
+    agent_loop._scope_anchor_target = "example.com"
+    agent_loop._session = SessionData(target="example.com")
+    agent_loop._session.scan_count = 1
+    mocker.patch.object(agent_loop, "_scan_workspace_state", return_value="")
+
+    agent_loop.state.conversation = [
+        {"role": "system", "content": "You are AIRecon."},
+        {"role": "assistant", "content": "Ready."},
+    ]
+    agent_loop.state.token_usage["cumulative"] = 200_000
+    agent_loop.state.token_usage["used"] = 512
+
+    await agent_loop._prepare_message_context("continue with the same scope")
+
+    assert agent_loop.state.token_usage["cumulative"] == 200_000
+
+
 def test_scope_lock_disables_aggressive_exploration_directive(agent_loop):
     agent_loop._scope_lock_active = True
     directive = agent_loop._build_exploration_directive(PipelinePhase.RECON)
@@ -371,7 +420,7 @@ def test_recompute_used_tokens_from_conversation_updates_live_counter(agent_loop
 
     used = agent_loop._recompute_used_tokens_from_conversation()
 
-    assert used == len("abc\ndefghi") // 3
+    assert used == len("abc\ndefghi") // 4  # Changed from //3 to //4 for better non-English accuracy
     assert agent_loop.state.token_usage["used"] == used
 
 
@@ -384,7 +433,7 @@ def test_recompute_used_tokens_from_conversation_ignores_non_dict_messages(agent
 
     used = agent_loop._recompute_used_tokens_from_conversation()
 
-    assert used == len("hello\nworld") // 3
+    assert used == len("hello\nworld") // 4  # Changed from //3 to //4 for better non-English accuracy
 
 
 # ---------------------------------------------------------------------------

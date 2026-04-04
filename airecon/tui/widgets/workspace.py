@@ -1,10 +1,14 @@
 from __future__ import annotations
 
+import logging
 from pathlib import Path
 
 from textual.app import ComposeResult
 from textual.containers import Vertical
 from textual.widgets import DirectoryTree, Static
+
+logger = logging.getLogger(__name__)
+
 
 class WorkspaceTree(DirectoryTree):
     def __init__(self, *args, **kwargs) -> None:
@@ -15,6 +19,7 @@ class WorkspaceTree(DirectoryTree):
     def filter_paths(self, paths: list[Path]) -> list[Path]:
         filtered = [p for p in paths if not p.name.startswith(".")]
         return filtered[:500]
+
 
 class VulnTree(WorkspaceTree):
     def __init__(self, workspace_path: Path, *args, **kwargs) -> None:
@@ -33,7 +38,6 @@ class VulnTree(WorkspaceTree):
                 continue
 
             if depth == 1:
-
                 vuln_dir = p / "vulnerabilities"
                 try:
                     if vuln_dir.exists() and any(vuln_dir.iterdir()):
@@ -41,14 +45,13 @@ class VulnTree(WorkspaceTree):
                 except OSError:
                     pass
             elif depth == 2:
-
                 if p.name == "vulnerabilities":
                     result.append(p)
             else:
-
                 result.append(p)
 
         return result[:500]
+
 
 class WorkspacePanel(Vertical):
     DEFAULT_CSS = ""
@@ -90,14 +93,15 @@ class WorkspacePanel(Vertical):
                         count += 1
                 except OSError:
                     pass
-        except Exception:
-            pass
+        except Exception as e:
+            logger.debug("Expected failure in _count_targets_with_vulns: %s", e)
         return count
 
     def _has_any_targets(self) -> bool:
         try:
             return any(
-                d for d in self.workspace_path.iterdir()
+                d
+                for d in self.workspace_path.iterdir()
                 if d.is_dir() and not d.name.startswith(".")
             )
         except Exception:
@@ -109,11 +113,13 @@ class WorkspacePanel(Vertical):
         if count == 0:
             if not self._has_any_targets():
                 self._show_placeholder(
-                    "No workspace targets found.\nStart a recon scan to begin.")
+                    "No workspace targets found.\nStart a recon scan to begin."
+                )
             else:
                 self._show_placeholder(
                     "No vulnerability reports yet.\n"
-                    "Vulnerabilities will appear here automatically.")
+                    "Vulnerabilities will appear here automatically."
+                )
             self._remove_vuln_tree()
             self._update_header()
             return
@@ -123,8 +129,10 @@ class WorkspacePanel(Vertical):
 
         try:
             self.query_one("#vuln-placeholder", Static).display = False
-        except Exception:
-            pass
+        except Exception as e:
+            logger.debug(
+                "Expected failure in _refresh_vuln_panel hide placeholder: %s", e
+            )
 
         self._update_header(count)
 
@@ -138,8 +146,8 @@ class WorkspacePanel(Vertical):
                 h.update(f"🐞 VULNERABILITIES ({label})")
             else:
                 h.update("🐞 VULNERABILITIES")
-        except Exception:
-            pass
+        except Exception as e:
+            logger.debug("Expected failure in _update_header: %s", e)
 
     def _ensure_vuln_tree(self) -> None:
         try:
@@ -152,28 +160,30 @@ class WorkspacePanel(Vertical):
             section = self.query_one("#vuln-section", Vertical)
             new_tree = VulnTree(self.workspace_path, id="vuln-tree")
             section.mount(new_tree)
-        except Exception:
-            pass
+        except Exception as e:
+            logger.debug("Expected failure in _mount_vuln_tree: %s", e)
 
     def _reload_vuln_tree(self) -> None:
         try:
             self.query_one("#vuln-tree", VulnTree).reload()
-        except Exception:
-            pass
+        except Exception as e:
+            logger.debug("Expected failure in _reload_vuln_tree: %s", e)
 
     def _remove_vuln_tree(self) -> None:
         try:
-            self.query_one("#vuln-tree").remove()
-        except Exception:
-            pass
+            nodes = list(self.query("#vuln-tree"))
+            if nodes:
+                nodes[0].remove()
+        except Exception as e:
+            logger.debug("Expected failure in _remove_vuln_tree: %s", e)
 
     def _show_placeholder(self, msg: str) -> None:
         try:
             p = self.query_one("#vuln-placeholder", Static)
             p.update(msg)
             p.display = True
-        except Exception:
-            pass
+        except Exception as e:
+            logger.debug("Expected failure in _show_placeholder: %s", e)
 
     def update_vulnerabilities_path(self, target_path: Path) -> None:
         self._current_target_path = target_path
@@ -187,9 +197,9 @@ class WorkspacePanel(Vertical):
     def reload(self) -> None:
         try:
             self.query_one("#workspace-tree", WorkspaceTree).reload()
-        except Exception:
-            pass
+        except Exception as e:
+            logger.debug("Expected failure in reload workspace tree: %s", e)
         try:
             self._refresh_vuln_panel()
-        except Exception:
-            pass
+        except Exception as e:
+            logger.debug("Expected failure in reload refresh vuln panel: %s", e)

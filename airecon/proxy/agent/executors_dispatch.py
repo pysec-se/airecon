@@ -27,6 +27,7 @@ class _DispatchExecutorMixin:
         self,
         tool_name: str,
         arguments: dict[str, Any],
+        on_output: Callable[[str], None] | None = None,
     ) -> tuple[bool, float, dict[str, Any], str | None]:
         from .subagent import ParallelAgentRunner
         self._last_output_file = None
@@ -35,17 +36,162 @@ class _DispatchExecutorMixin:
         targets = arguments.get("targets", [])
         prompt = arguments.get("prompt", "")
 
+        parent_context = ""
+        if hasattr(self, "_session") and self._session is not None:
+            try:
+                from .session import session_to_context
+                parent_context = session_to_context(self._session)
+            except Exception as _e:
+                logger.debug("Could not build parent context for subagents: %s", _e)
+
+
+        tools_to_block = {"execute", "browser_action", "web_search", "http_observe"}
+        if hasattr(self, '_blocked_tools'):
+            self._blocked_tools.update(tools_to_block)
+            logger.info("Blocked tools during run_parallel_agents: %s", tools_to_block)
+
+        progress_lines: list[str] = []
+        _seen_progress: set[str] = set()
+
+        def _progress_cb(target: str, message: str) -> None:
+            if target == "orchestrator":
+                logger.debug("Orchestrator progress (hidden): %s", message)
+                return
+
+            key = f"{target}:{message}"
+            if key in _seen_progress:
+                return
+            _seen_progress.add(key)
+            if message.startswith("✅") or message.startswith("❌"):
+                _seen_progress.clear()  # Reset on completion
+
+            line = f"[{target}] {message}"
+            progress_lines.append(line)
+            logger.info("Parallel agent progress: [%s] %s", target, message)
+            if on_output:
+                event_json = json.dumps({
+                    "event_type": "subagent_text",
+                    "target": target,
+                    "content": message + "\n",
+                }) + "\n"
+                logger.debug("SubAgent _progress_cb: sending text for %s", target)
+                on_output(event_json)
+
+        def _event_cb(target: str, event: Any) -> None:
+            if not on_output:
+                logger.warning("SubAgent _event_cb: on_output is None, dropping event for target=%s", target)
+                return
+            
+            evt_type = getattr(event, "type", "")
+            evt_data = getattr(event, "data", {}) or {}
+            tool_id = str(evt_data.get("tool_id", ""))
+            
+            logger.info("SubAgent _event_cb: target=%s, evt_type=%s, tool_id=%s", target, evt_type, tool_id)
+
+            if evt_type == "tool_start":
+                tn = evt_data.get("tool", "?")
+                args = evt_data.get("arguments", {})
+                logger.debug("SubAgent _event_cb: tool_start target=%s tool=%s", target, tn)
+                event_json = json.dumps({
+                    "event_type": "subagent_tool_start",
+                    "target": target,
+                    "tool_id": tool_id or f"{tn}_{id(event)}",
+                    "tool": tn,
+                    "arguments": args,
+                }) + "\n"
+                logger.info("SubAgent _event_cb: sending tool_start JSON for %s::%s", target, tn)
+                on_output(event_json)
+
+            elif evt_type == "tool_output":
+                content = evt_data.get("content", "")
+                if content:
+                    on_output(json.dumps({
+                        "event_type": "subagent_tool_output",
+                        "target": target,
+                        "tool_id": tool_id,
+                        "content": content,
+                    }) + "\n")
+
+            elif evt_type == "tool_end":
+                tn = evt_data.get("tool", "?")
+                success = evt_data.get("success", False)
+                dur = evt_data.get("duration", 0)
+                on_output(json.dumps({
+                    "event_type": "subagent_tool_end",
+                    "target": target,
+                    "tool_id": tool_id,
+                    "tool": tn,
+                    "success": success,
+                    "duration": dur,
+                }) + "\n")
+
+            elif evt_type == "text":
+                content = evt_data.get("content", "")
+                if content:
+                    on_output(json.dumps({
+                        "event_type": "subagent_text",
+                        "target": target,
+                        "content": content,
+                    }) + "\n")
+
+            elif evt_type == "task_complete":
+                on_output(json.dumps({
+                    "event_type": "subagent_complete",
+                    "target": target,
+                }) + "\n")
+
         try:
-            runner = ParallelAgentRunner(
-                engine=self.engine)
-            results = await runner.run_parallel(targets, prompt)
+            runner = ParallelAgentRunner(engine=self.engine)
+            runner.set_progress_callback(_progress_cb)
+            runner.set_event_callback(_event_cb)
+            logger.info("SubAgent runner configured with progress and event callbacks")
+
+            cfg = get_config()
+            recon_mode = str(getattr(cfg, "agent_recon_mode", "standard")).strip().lower()
+            if recon_mode not in {"standard", "full"}:
+                recon_mode = "standard"
+            logger.info("Subagent recon_mode: %s (from agent_recon_mode config)", recon_mode)
+
+            if on_output:
+                logger.info("Sending initial status for %d targets", len(targets))
+
+                for t in targets:
+                    on_output(json.dumps({
+                        "event_type": "subagent_text",
+                        "target": t,
+                        "content": "⏳ Waiting for slot...\n",
+                    }) + "\n")
+                on_output("\n")
+
+            results = await runner.run_parallel(targets, prompt, parent_context=parent_context, recon_mode=recon_mode)
+
+            result_summary = {
+                "success": True,
+                "targets_scanned": len(results),
+                "targets": {},
+                "progress_log": progress_lines[-50:],
+            }
+            for t, s in results.items():
+                result_summary["targets"][t] = {
+                    "subdomains": len(s.subdomains),
+                    "live_hosts": len(s.live_hosts),
+                    "urls": len(s.urls),
+                    "vulnerabilities": len(s.vulnerabilities),
+                    "technologies": len(s.technologies),
+                }
+
+                if on_output:
+                    on_output(
+                        f"✅ {t}: {len(s.subdomains)} subdomains, "
+                        f"{len(s.live_hosts)} live hosts, "
+                        f"{len(s.urls)} URLs, "
+                        f"{len(s.vulnerabilities)} vulnerabilities\n"
+                    )
 
             res_dict = {
                 "success": True,
-                "results": {
-                    t: len(
-                        s.vulnerabilities) for t,
-                    s in results.items()}}
+                "results": result_summary,
+            }
 
             try:
                 self._save_tool_output(tool_name, arguments, res_dict)
@@ -54,8 +200,18 @@ class _DispatchExecutorMixin:
             success = True
         except Exception as e:
             logger.error("Subagent runner error: %s", e)
-            res_dict = {"success": False, "error": str(e)}
+            if on_output:
+                on_output(f"❌ Error: {e}\n")
+            res_dict = {
+                "success": False,
+                "error": str(e),
+                "progress_log": progress_lines[-20:] if progress_lines else [],
+            }
             success = False
+
+        if hasattr(self, '_blocked_tools'):
+            self._blocked_tools.difference_update(tools_to_block)
+            logger.info("Unblocked tools after run_parallel_agents: %s", tools_to_block)
 
         duration = time.time() - start_time
 
@@ -75,14 +231,11 @@ class _DispatchExecutorMixin:
         args_copy = dict(arguments)
         if tool_name == "execute" and "command" in args_copy:
             cmd = args_copy["command"]
-
             cmd = re.sub(r'(\s+-(oA|oN|oX|oG|oJ|o)\s+[^\s]+)', '', cmd)
             cmd = re.sub(r'(\s+--output\s*=?\s*[^\s]+)', '', cmd)
             cmd = re.sub(r'(\s*>\s*[^\s]+(\s+2>&1)?)', '', cmd)
-
             cmd = re.sub(r'(\s+-[bc]\s+output/cookies\.txt)', '', cmd)
             cmd = re.sub(r'(\s+--cookie(?:-jar)?\s+[^\s]+)', '', cmd)
-
             cmd = re.sub(r'_[0-9]{8}_[0-9]{6}\.', '.', cmd)
             args_copy["command"] = cmd.strip()
 
@@ -154,7 +307,6 @@ class _DispatchExecutorMixin:
                 tool = str(arguments.get("tool", "")).strip()
                 raw_args = arguments.get("arguments", {})
 
-                # Compatibility fallback: some models nest call payload as
                 # {"action":"call_tool","arguments":{"tool":"x","arguments":{...}}}
                 if not tool and isinstance(raw_args, dict):
                     tool = str(raw_args.get("tool", "")).strip()
@@ -201,7 +353,9 @@ class _DispatchExecutorMixin:
             return await self._execute_generate_wordlist_tool(tool_name, arguments)
 
         if tool_name == "run_parallel_agents":
-            return await self._execute_run_parallel_agents_tool(tool_name, arguments)
+            return await self._execute_run_parallel_agents_tool(
+                tool_name, arguments, on_output=on_output
+            )
 
         if tool_name == "caido_list_requests":
             return await self._execute_caido_list_requests_tool(tool_name, arguments)
@@ -261,23 +415,15 @@ class _DispatchExecutorMixin:
                     ),
                 }, None
 
-            cmd_stripped = cmd.strip()
-            _first_token = cmd_stripped.split()[0] if cmd_stripped.split() else ""
-            _cmd_lower = cmd_stripped.lower()
-
-            # Caido API/setup may run via execute ONLY for initial token acquisition.
-            # Rule: If caido-setup is called AND no token exists yet, allow it (bootstrap).
-            # If token already exists or explicit auth calls are present (127.0.0.1:48080/graphql, etc.),
-            # reject to prevent repeated/confusing setup attempts.
-            _is_caido_setup = "caido-setup" in _cmd_lower
+            _cmd_stripped = cmd.strip().lower()
+            _is_caido_setup = "caido-setup" in _cmd_stripped
             _has_graphql_url = (
-                "127.0.0.1:48080/graphql" in _cmd_lower
-                or "localhost:48080/graphql" in _cmd_lower
+                "127.0.0.1:48080/graphql" in _cmd_stripped
+                or "localhost:48080/graphql" in _cmd_stripped
             )
-            _has_loginasguest = "loginasguest" in _cmd_lower
+            _has_loginasguest = "loginasguest" in _cmd_stripped
 
             if _has_graphql_url or _has_loginasguest:
-                # Block explicit GraphQL/auth calls via execute (sandbox cannot reach host)
                 return False, 0.0, {
                     "success": False,
                     "error": (
@@ -301,6 +447,9 @@ class _DispatchExecutorMixin:
                     }, None
                 logger.info("Allowing caido-setup via execute for initial token bootstrap")
 
+            _cmd_stripped = cmd.strip()
+            _first_token = _cmd_stripped.split()[0] if _cmd_stripped.split() else ""
+
             if _first_token in _AIRECON_TOOL_NAMES and _first_token != "execute":
                 return False, 0.0, {
                     "success": False,
@@ -314,7 +463,7 @@ class _DispatchExecutorMixin:
 
             _func_call_match = re.search(
                 r"\b(" + "|".join(re.escape(t) for t in _AIRECON_TOOL_NAMES) + r")\s*\(",
-                cmd_stripped,
+                _cmd_stripped,
             ) if _AIRECON_TOOL_NAMES else None
             if _func_call_match:
                 _bad_tool = _func_call_match.group(1)
@@ -332,9 +481,9 @@ class _DispatchExecutorMixin:
                 _conflict_flags, _correct_tool = _TOOL_FLAG_CONFLICTS[_first_token]
 
                 try:
-                    _cmd_tokens = set(shlex.split(cmd_stripped))
+                    _cmd_tokens = set(shlex.split(_cmd_stripped))
                 except ValueError:
-                    _cmd_tokens = set(cmd_stripped.split())
+                    _cmd_tokens = set(_cmd_stripped.split())
                 _found = [f for f in _conflict_flags if f in _cmd_tokens]
                 if _found:
                     return False, 0.0, {
@@ -343,7 +492,7 @@ class _DispatchExecutorMixin:
                             f"Command rejected: '{_first_token}' was used with flags that "
                             f"belong to '{_correct_tool}': {_found}. "
                             f"Replace '{_first_token}' with '{_correct_tool}' and retry. "
-                            f"Example: {cmd_stripped.replace(_first_token, _correct_tool, 1)}"
+                            f"Example: {_cmd_stripped.replace(_first_token, _correct_tool, 1)}"
                         ),
                     }, None
             if self.state.active_target and cmd and not cmd.strip(
@@ -412,7 +561,6 @@ class _DispatchExecutorMixin:
             stderr = result.get("stderr", "") or ""
             output = (stdout + stderr).lower()
 
-            # Caido token extraction: if caido-setup ran successfully, try to extract token
             if "caido-setup" in cmd:
                 full_output = stdout + stderr
                 try:

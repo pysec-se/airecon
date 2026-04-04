@@ -11,12 +11,14 @@ from .session import session_to_context
 
 logger = logging.getLogger("airecon.agent.graph")
 
+
 class AgentRole(Enum):
     RECON = "recon"
     ANALYZER = "analyzer"
     EXPLOITER = "exploit"
     REPORTER = "reporter"
     SPECIALIST = "specialist"
+
 
 @dataclass
 class AgentNode:
@@ -26,13 +28,15 @@ class AgentNode:
     max_iterations: int = 200
     depends_on: list[str] = field(default_factory=list)
 
+
 @dataclass
 class AgentEdge:
     source_id: str
     target_id: str
 
+
 class AgentGraph:
-    def __init__(self, target: str, ollama: Any, engine: Any):
+    def __init__(self, target: str, ollama: Any = None, engine: Any = None):
         self.target = target
         self.ollama = ollama
         self.engine = engine
@@ -77,29 +81,44 @@ class AgentGraph:
 
         return order
 
-    async def execute(self, shared_session: Any) -> AsyncIterator[AgentEvent]:
+    async def execute(self, shared_session: Any, parent_context: str = "") -> AsyncIterator[AgentEvent]:
         from .loop import AgentLoop
+
         order = self.execution_order()
 
         for node in order:
             logger.info(
-                f"Graph orchestrator starting Node: {node.id} ({node.role.value})"
+                "Graph orchestrator starting Node: %s (%s)",
+                node.id,
+                node.role.value,
             )
-            yield AgentEvent(type="agent_state", data={"status": f"Starting {node.id}..."})
+            yield AgentEvent(
+                type="agent_state", data={"status": f"Starting {node.id}..."}
+            )
 
             agent = AgentLoop(ollama=self.ollama, engine=self.engine)
+            await agent.initialize(target=self.target)
             agent._override_max_iterations = node.max_iterations
-
             agent._blocked_tools = {"spawn_agent", "run_parallel_agents"}
-
             agent._session = shared_session
             agent.pipeline = PipelineEngine(shared_session)
 
-            session_ctx = session_to_context(
-                shared_session) if shared_session else ""
+            session_ctx = session_to_context(shared_session) if shared_session else ""
+
+            parent_ctx = ""
+            if parent_context:
+                parent_ctx = (
+                    f"[PARENT AGENT CONTEXT — Findings from the parent session]\n"
+                    f"{parent_context}\n\n"
+                    f"Use the parent's findings above as your starting point. "
+                    f"DO NOT repeat work the parent already completed. "
+                    f"Focus on deeper analysis, new attack vectors, or untested paths.\n\n"
+                )
+
             prompt = (
                 f"[SUBAGENT NODE: {node.id} | ROLE: {node.role.name}]\n"
                 f"[Target: {self.target}]\n\n"
+                + parent_ctx
                 + (f"{session_ctx}\n\n" if session_ctx else "")
                 + "DO NOT re-scan or re-enumerate data already shown above. "
                 "Continue from where the parent agent left off.\n\n"
@@ -112,41 +131,48 @@ class AgentGraph:
                     event.data["__source_node"] = node.id
                 yield event
 
-def create_default_graph(target: str, prompt: str = "") -> AgentGraph:
-    g = AgentGraph(target, ollama=None, engine=None)
 
+def create_default_graph(target: str, prompt: str = "", recon_mode: str = "full") -> AgentGraph:
+
+    g = AgentGraph(target, ollama=None, engine=None)
+    if recon_mode == "full":
+        return _build_full_pipeline(g, target, prompt)
+
+    return _build_single_task_node(g, target, prompt)
+
+
+def _build_full_pipeline(g: AgentGraph, target: str, prompt: str) -> AgentGraph:
     n_recon = AgentNode(
         id="recon_node",
         role=AgentRole.RECON,
-        prompt_template="Perform surface reconnaissance. Find subdomains, ports, and URLs.",
+        prompt_template=(
+            f"{prompt}\n\nPerform surface reconnaissance. Find subdomains, ports, and URLs."
+            if prompt
+            else "Perform surface reconnaissance. Find subdomains, ports, and URLs."
+        ),
         max_iterations=150,
     )
 
     n_analyzer = AgentNode(
         id="analyzer_node",
         role=AgentRole.ANALYZER,
-        prompt_template="Analyze the discovered attack surface for vulnerabilities and paths. Run semgrep if code exists.",
+        prompt_template=(
+            "Analyze the discovered attack surface for vulnerabilities and paths. Run semgrep if code exists."
+        ),
         max_iterations=100,
-        depends_on=["recon_node"]
+        depends_on=["recon_node"],
     )
 
     n_exploiter = AgentNode(
         id="exploiter_node",
         role=AgentRole.EXPLOITER,
         prompt_template=(
-            "Test and exploit vulnerabilities found. "
-            f"Additional context from parent: {prompt}" if prompt else "Focus on high-value exploits."
+            f"Test and exploit vulnerabilities found. Additional context: {prompt}"
+            if prompt
+            else "Focus on high-value exploits."
         ),
         max_iterations=200,
-        depends_on=["analyzer_node"]
-    )
-
-    n_specialist = AgentNode(
-        id="specialist_sqli",
-        role=AgentRole.SPECIALIST,
-        prompt_template="Focus purely on SQLi payloads against discovered parameters.",
-        max_iterations=50,
-        depends_on=["analyzer_node"]
+        depends_on=["analyzer_node"],
     )
 
     n_reporter = AgentNode(
@@ -154,16 +180,41 @@ def create_default_graph(target: str, prompt: str = "") -> AgentGraph:
         role=AgentRole.REPORTER,
         prompt_template="Create final vulnerability reports for all findings in the session.",
         max_iterations=100,
-        depends_on=["exploiter_node", "specialist_sqli"]
+        depends_on=["exploiter_node"],
     )
 
-    for node in [n_recon, n_analyzer, n_exploiter, n_specialist, n_reporter]:
+    for node in [n_recon, n_analyzer, n_exploiter, n_reporter]:
         g.add_node(node)
 
     g.add_edge("recon_node", "analyzer_node")
     g.add_edge("analyzer_node", "exploiter_node")
-    g.add_edge("analyzer_node", "specialist_sqli")
     g.add_edge("exploiter_node", "reporter_node")
-    g.add_edge("specialist_sqli", "reporter_node")
 
+    return g
+
+
+def _build_single_task_node(g: AgentGraph, target: str, prompt: str) -> AgentGraph:
+
+    if prompt:
+        task_description = (
+            f"{prompt}\n\n"
+            f"IMPORTANT: Your scope is LIMITED to the task above. "
+            f"Do NOT expand beyond what was asked. Do NOT proceed to analysis, "
+            f"exploitation, or reporting unless explicitly requested. "
+            f"Complete the requested task and output [TASK_COMPLETE]."
+        )
+    else:
+        task_description = (
+            "Perform surface reconnaissance. Find subdomains, ports, and URLs. "
+            "When complete, output [TASK_COMPLETE]."
+        )
+
+    n_task = AgentNode(
+        id="recon_node",
+        role=AgentRole.RECON,
+        prompt_template=task_description,
+        max_iterations=150,
+    )
+
+    g.add_node(n_task)
     return g
