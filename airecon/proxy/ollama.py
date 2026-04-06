@@ -4,7 +4,7 @@ import asyncio
 import json
 import logging
 import threading
-from typing import Any, AsyncIterator, Callable, Dict, List
+from typing import Any, AsyncIterator, Callable, Dict
 
 import httpx
 

@@ -1,10 +1,12 @@
 """Tests for loop.py output merge functionality."""
 
+from unittest.mock import MagicMock
+
 import pytest
 
-pytestmark = pytest.mark.skip(reason="output merge feature not yet implemented")
-from unittest.mock import MagicMock
 from airecon.proxy.agent.loop import AgentLoop
+
+pytestmark = pytest.mark.skip(reason="output merge feature not yet implemented")
 
 
 @pytest.fixture
