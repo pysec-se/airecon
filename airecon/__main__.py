@@ -7,6 +7,32 @@ import sys
 from airecon._version import __version__
 
 
+def _print_banner() -> None:
+    C = "\033[36m"
+    B = "\033[1m"
+    D = "\033[2m"
+    Y = "\033[33m"
+    X = "\033[0m"
+
+    print()
+    print(f"  {B}   █████████   █████ ███████████             {X}")                           
+    print(f"  {B}  ███▒▒▒▒▒███ ▒▒███ ▒▒███▒▒▒▒▒███              {X}")                        
+    print(f"  {B} ▒███    ▒███  ▒███  ▒███    ▒███   ██████   ██████   ██████  ████████  {X}")
+    print(f"  {B} ▒███████████  ▒███  ▒██████████   ███▒▒███ ███▒▒███ ███▒▒███▒▒███▒▒███ {X}")
+    print(f"  {B} ▒███▒▒▒▒▒███  ▒███  ▒███▒▒▒▒▒███ ▒███████ ▒███ ▒▒▒ ▒███ ▒███ ▒███ ▒███ {X}")
+    print(f"  {B} ▒███    ▒███  ▒███  ▒███    ▒███ ▒███▒▒▒  ▒███  ███▒███ ▒███ ▒███ ▒███ {X}")
+    print(f"  {B} █████   █████ █████ █████   █████▒▒██████ ▒▒██████ ▒▒██████  ████ █████ {X}")
+    print(f"  {B} ▒▒▒▒▒   ▒▒▒▒▒ ▒▒▒▒▒ ▒▒▒▒▒   ▒▒▒▒▒  ▒▒▒▒▒▒   ▒▒▒▒▒▒   ▒▒▒▒▒▒  ▒▒▒▒ ▒▒▒▒▒ {X}")                                                                                                                              
+    print()
+    print(f"  {D}          v{__version__} — AI-Powered Security Reconnaissance{X}")
+    print()
+    print(f"  {D}Quick start:{X} {C}airecon start{X}")
+    print(f"  {D}See all options:{X} {C}airecon -h{X}")
+    print()
+    print(f"  {D}For more information visit {C}https://pikpikcu.github.io/airecon/{X}")
+    print()
+
+
 def main() -> None:
 
     version = __version__
@@ -98,8 +124,8 @@ def main() -> None:
     elif args.command == "clean":
         _run_clean(args)
     else:
-        parser.print_help()
-        sys.exit(1)
+        _print_banner()
+        sys.exit(0)
 
 
 def _run_proxy(args) -> None:
