@@ -4,7 +4,7 @@ import asyncio
 import json
 import logging
 import threading
-from typing import Any, AsyncIterator, Callable
+from typing import Any, AsyncIterator, Callable, Dict, List
 
 import httpx
 
@@ -605,3 +605,31 @@ class OllamaClient:
         if operation == "compression":
             return max(180.0, cfg.ollama_chunk_timeout)
         return cfg.ollama_chunk_timeout
+
+    def _record_response_time(self, response_time: float) -> None:
+        """Record a response time for adaptive timeout calculations."""
+        if not hasattr(self, "_response_times"):
+            self._response_times = []
+        if not hasattr(self, "_max_response_times"):
+            self._max_response_times = 20
+        self._response_times.append(response_time)
+        max_len = self._max_response_times
+        if len(self._response_times) > max_len:
+            self._response_times = self._response_times[-max_len:]
+
+    def get_response_time_stats(self) -> Dict[str, float]:
+        """Get statistics for recorded response times.
+
+        Returns avg/min/max of last 10 response times.
+        """
+        if not hasattr(self, "_response_times"):
+            self._response_times = []
+        times = self._response_times[-10:] if self._response_times else []
+        if not times:
+            return {"avg": 0.0, "min": 0.0, "max": 0.0, "count": 0}
+        return {
+            "avg": sum(times) / len(times),
+            "min": min(times),
+            "max": max(times),
+            "count": len(self._response_times),
+        }
