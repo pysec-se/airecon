@@ -2457,6 +2457,7 @@ _manager = BrowserTabManager()
 
 def browser_action(
     action: BrowserAction,
+    timeout: float | None = None,
     url: str | None = None,
     coordinate: str | None = None,
     text: str | None = None,

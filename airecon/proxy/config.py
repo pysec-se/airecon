@@ -154,8 +154,8 @@ _CONFIG_SCHEMA: dict[str, tuple[Any, str]] = {
         "Delay after page load (seconds). 1.0s for JS-heavy sites.",
     ),
     "browser_action_timeout": (
-        45,
-        "Browser action timeout (seconds). 45s for standard recon (faster recovery).",
+        120,
+        "Browser action timeout (seconds). 120s for modern heavy pages.",
     ),
     "ollama_keep_alive": (
         -1,
