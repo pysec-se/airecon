@@ -37,6 +37,14 @@ except (OSError, json.JSONDecodeError) as _e:
     )
     _TOOLS_META = {}
 
+_SUBAGENT_EVENT_TYPE_MAP = {
+    "subagent_tool_start": "subagent_tool_start",
+    "subagent_tool_output": "subagent_tool_output",
+    "subagent_tool_end": "subagent_tool_end",
+    "subagent_text": "subagent_text",
+    "subagent_complete": "subagent_complete",
+}
+
 
 def _collect_known_shell_binaries() -> frozenset[str]:
     binaries: set[str] = set()
@@ -66,6 +74,93 @@ _KNOWN_SHELL_BINARIES = _collect_known_shell_binaries()
 
 
 class _ToolCycleMixin(_CyclePreludeMixin, _CycleLlmMixin, _CyclePostMixin):
+    def _ensure_timing_tracker(self) -> None:
+        if not hasattr(self, "_tool_response_times"):
+            self._tool_response_times: list[float] = []
+            self._tool_response_window: int = 10
+            self._timing_warning_injected: bool = False
+
+    def _record_tool_response_time(self, duration: float) -> None:
+        self._ensure_timing_tracker()
+        self._tool_response_times.append(duration)
+        if len(self._tool_response_times) > self._tool_response_window:
+            self._tool_response_times.pop(0)
+
+    def _get_avg_response_time_ms(self) -> float:
+        self._ensure_timing_tracker()
+        if not self._tool_response_times:
+            return 0.0
+        return (sum(self._tool_response_times) / len(self._tool_response_times)) * 1000
+
+    async def _execute_tool_with_timeout(
+        self,
+        tool_name: str,
+        args: dict,
+        cfg: Any,
+        exec_mode: str,
+    ) -> tuple:
+        self._ensure_timing_tracker()
+        timeout = float(getattr(cfg, "per_tool_timeout_seconds", 600.0))
+
+        try:
+            if exec_mode == "browser_action":
+                coro = self._execute_local_browser_tool(tool_name, args)
+            elif exec_mode == "report":
+                coro = self._execute_report_tool(tool_name, args)
+            elif exec_mode == "filesystem":
+                coro = self._execute_filesystem_tool(tool_name, args)
+            elif exec_mode == "web_search":
+                coro = self._execute_web_search_tool(args)
+            else:
+                coro = self._execute_tool_and_record(tool_name, args)
+
+            s, d, r, o = await asyncio.wait_for(coro, timeout=timeout)
+            self._record_tool_response_time(d)
+
+            threshold_ms = float(
+                getattr(cfg, "response_timing_alert_threshold_ms", 30000)
+            )
+            avg_ms = self._get_avg_response_time_ms()
+            if avg_ms > threshold_ms and not self._timing_warning_injected:
+                self._timing_warning_injected = True
+                self.state.conversation.append(
+                    {
+                        "role": "system",
+                        "content": (
+                            f"[SYSTEM: PERFORMANCE WARNING] Average tool response time is "
+                            f"{avg_ms:.0f}ms (threshold: {threshold_ms:.0f}ms). "
+                            f"Consider reducing tool complexity, using parallel execution, "
+                            f"or checking target responsiveness."
+                        ),
+                    }
+                )
+                logger.warning(
+                    "Tool response timing alert: avg=%.0fms threshold=%.0fms (window=%d)",
+                    avg_ms,
+                    threshold_ms,
+                    len(self._tool_response_times),
+                )
+
+            return s, d, r, o
+        except asyncio.TimeoutError:
+            logger.error(
+                "Tool '%s' timed out after %.0fs (per_tool_timeout_seconds)",
+                tool_name,
+                timeout,
+            )
+            self._record_tool_response_time(timeout)
+            return (
+                False,
+                timeout,
+                {
+                    "success": False,
+                    "error": f"Tool '{tool_name}' timed out after {timeout:.0f}s. "
+                    f"Consider breaking the task into smaller steps or increasing per_tool_timeout_seconds in config.",
+                    "timed_out": True,
+                },
+                None,
+            )
+
     def _rewrite_shell_binary_tool_call(
         self,
         tool_name: str,
@@ -122,6 +217,62 @@ class _ToolCycleMixin(_CyclePreludeMixin, _CycleLlmMixin, _CyclePostMixin):
             tool_name,
         )
         return "execute", {"command": command}, True
+
+    def _suggest_alternative_tool(
+        self,
+        tool_name: str,
+        raw_command: str,
+    ) -> str | None:
+        """After repeated failures, suggest alternative tools from tools_meta.json."""
+        if not _TOOLS_META or not _KNOWN_SHELL_BINARIES:
+            return None
+
+        binary = raw_command.split()[0].rsplit("/", 1)[-1].lower() if raw_command else tool_name.lower()
+
+        categories = _TOOLS_META.get("categories", {})
+        suggestions: list[str] = []
+
+        for group_name, phases in categories.items():
+            if not isinstance(phases, dict):
+                continue
+            for phase_name, tools in phases.items():
+                if not isinstance(tools, list):
+                    continue
+                # Find the phase where the failed binary belongs
+                if binary in [str(t).lower() for t in tools]:
+                    # Suggest other tools in the same phase
+                    for t in tools:
+                        t_str = str(t).lower()
+                        if t_str != binary:
+                            suggestions.append(t_str)
+                    # Also suggest adjacent phases in the same group
+                    for other_phase, other_tools in phases.items():
+                        if other_phase != phase_name and isinstance(other_tools, list):
+                            for t in other_tools:
+                                suggestions.append(str(t).lower())
+                    break
+            if suggestions:
+                break
+
+        # Fallback: if binary not found, suggest from web_probing/crawling as general recon
+        if not suggestions and binary not in {"execute", "http_observe"}:
+            general = (
+                categories.get("reconnaissance", {}).get("web_probing", [])
+                + categories.get("reconnaissance", {}).get("crawling", [])
+                + categories.get("reconnaissance", {}).get("fingerprinting", [])
+            )
+            suggestions = list({str(t).lower() for t in general})
+
+        unique = []
+        seen = set()
+        for s in suggestions:
+            if s not in seen:
+                seen.add(s)
+                unique.append(s)
+
+        if unique:
+            return ", ".join(unique[:8])
+        return None
 
     async def _run_iteration_loop(self, cfg: Any) -> AsyncIterator[AgentEvent]:
         while self.state.iteration < self.state.max_iterations:
@@ -354,6 +505,34 @@ class _ToolCycleMixin(_CyclePreludeMixin, _CycleLlmMixin, _CyclePostMixin):
                 cfg, current_phase, adaptive_num_ctx
             )
 
+            # Inject full vulnerability evidence when entering REPORT phase
+            # BEFORE char budget so enforced budget accounts for injected data.
+            # Qodo review fix: was after budget = potential overflow.
+            if current_phase.value == "REPORT":
+                try:
+                    _report_ctx = self._build_report_phase_evidence()
+                    if _report_ctx:
+                        self.state.conversation.append({
+                            "role": "system",
+                            "content": _report_ctx,
+                            "_protected": True,
+                        })
+                except Exception as _rep_err:
+                    logger.debug("REPORT evidence injection failed: %s", _rep_err)
+
+            # Inject learned insights — runs every iteration, independent of tool intelligence
+            try:
+                _phase = self.pipeline.get_current_phase().value if self.pipeline else "RECON"
+                self._inject_learned_insights(_phase)
+            except Exception as _li_err:
+                logger.debug("Learned insights injection failed: %s", _li_err)
+
+            # Inject tool intelligence before LLM call
+            try:
+                self._inject_tool_intelligence()
+            except Exception as _inj_err:
+                logger.debug("Tool intelligence injection failed: %s", _inj_err)
+
             _budget_start = time.monotonic()
             if trace_id:
                 _trace_chat_event(
@@ -388,12 +567,6 @@ class _ToolCycleMixin(_CyclePreludeMixin, _CycleLlmMixin, _CyclePostMixin):
 
             _last_chunk_data = {}
             _vram_retries_this_iter = 0
-
-            # Inject tool intelligence before LLM call
-            try:
-                self._inject_tool_intelligence()
-            except Exception as _inj_err:
-                logger.debug("Tool intelligence injection failed: %s", _inj_err)
 
             yield AgentEvent(
                 type="progress",
@@ -763,6 +936,40 @@ class _ToolCycleMixin(_CyclePreludeMixin, _CycleLlmMixin, _CyclePostMixin):
                         )
                         continue
 
+                    elif _stream_attempt < 4:
+                        _backoff_waits = [5, 15, 30, 60]
+                        wait_s = _backoff_waits[
+                            min(_stream_attempt, len(_backoff_waits) - 1)
+                        ]
+                        self._consecutive_failures += 1
+                        logger.warning(
+                            "Ollama connection failure (attempt %d/4) — "
+                            "retrying with progressive backoff in %ds: %s",
+                            _stream_attempt + 1,
+                            wait_s,
+                            err_str[:150],
+                        )
+                        yield AgentEvent(
+                            type="text",
+                            data={
+                                "content": (
+                                    f"\n[AUTO-RECOVERY] Ollama error "
+                                    f"(attempt {_stream_attempt + 1}/4). "
+                                    f"Retrying in {wait_s}s...\n"
+                                )
+                            },
+                        )
+                        await asyncio.sleep(wait_s)
+                        thinking_acc = ""
+                        content_acc = ""
+                        tool_calls_acc = []
+                        in_thinking_tag = False
+                        _carry = ""
+                        self._recovery_force_tool_calls = max(
+                            self._recovery_force_tool_calls, 1
+                        )
+                        continue
+
                     if _is_vram_crash:
                         error_msg = (
                             f"Ollama VRAM exhausted after "
@@ -772,7 +979,7 @@ class _ToolCycleMixin(_CyclePreludeMixin, _CycleLlmMixin, _CyclePostMixin):
                         )
                     elif _is_conn_refused:
                         error_msg = (
-                            "Cannot connect to Ollama after 4 retries "
+                            "Cannot connect to Ollama after all retries "
                             "(connection refused).\n"
                             "Fix: start Ollama with `ollama serve`."
                         )
@@ -1108,8 +1315,11 @@ class _ToolCycleMixin(_CyclePreludeMixin, _CycleLlmMixin, _CyclePostMixin):
                 # Hard phase constraint check — block inappropriate tools
                 _phase_blocked = self._check_phase_constraint(tn)
                 if _phase_blocked:
-                    logger.info("Phase constraint blocked tool '%s' in %s phase",
-                                tn, self._get_current_phase().value if self.pipeline else "unknown")
+                    logger.info(
+                        "Phase constraint blocked tool '%s' in %s phase",
+                        tn,
+                        self._get_current_phase().value if self.pipeline else "unknown",
+                    )
                     return (
                         idx,
                         tc,
@@ -1151,28 +1361,37 @@ class _ToolCycleMixin(_CyclePreludeMixin, _CycleLlmMixin, _CyclePostMixin):
                         False,
                     )
 
-                if tn == "execute":
-                    self._check_output_dedup(args)
-
                 if tn == "browser_action":
-                    s, d, r, o = await self._execute_local_browser_tool(tn, args)
+                    s, d, r, o = await self._execute_tool_with_timeout(
+                        tn, args, cfg, "browser_action"
+                    )
                     self.state.missing_tool_count = 0
                 elif tn == "create_vulnerability_report":
-                    s, d, r, o = await self._execute_report_tool(tn, args)
+                    s, d, r, o = await self._execute_tool_with_timeout(
+                        tn, args, cfg, "report"
+                    )
                     self.state.missing_tool_count = 0
                 elif tn in ("create_file", "read_file", "list_files"):
-                    s, d, r, o = await self._execute_filesystem_tool(tn, args)
+                    s, d, r, o = await self._execute_tool_with_timeout(
+                        tn, args, cfg, "filesystem"
+                    )
                     self.state.missing_tool_count = 0
                 elif tn == "web_search":
-                    s, d, r, o = await self._execute_web_search_tool(args)
+                    s, d, r, o = await self._execute_tool_with_timeout(
+                        tn, args, cfg, "web_search"
+                    )
                     self.state.missing_tool_count = 0
                 elif tn == "run_parallel_agents":
-                    s, d, r, o = await self._execute_tool_and_record(tn, args)
+                    s, d, r, o = await self._execute_tool_with_timeout(
+                        tn, args, cfg, "dispatch"
+                    )
                     self.state.missing_tool_count = 0
                 elif any(
                     tn == t["function"]["name"] for t in (self._tools_ollama or [])
                 ):
-                    s, d, r, o = await self._execute_tool_and_record(tn, args)
+                    s, d, r, o = await self._execute_tool_with_timeout(
+                        tn, args, cfg, "dispatch"
+                    )
                     self.state.missing_tool_count = 0
                 else:
                     self.state.missing_tool_count += 1
@@ -1188,8 +1407,6 @@ class _ToolCycleMixin(_CyclePreludeMixin, _CycleLlmMixin, _CyclePostMixin):
                         False,
                     )
 
-                if tn == "execute":
-                    self._apply_output_merge(args, s)
 
                 return (idx, tc, tn, args, True, d, r, o, s)
 
@@ -1259,21 +1476,18 @@ class _ToolCycleMixin(_CyclePreludeMixin, _CycleLlmMixin, _CyclePostMixin):
                             )
                             try:
                                 import json as _json_mod
+
                                 _pa_event = _json_mod.loads(_pa_chunk)
                                 _pa_evt_type = _pa_event.get("event_type", "")
                                 _pa_target = _pa_event.get("target", "")
-                                logger.debug("SubAgent queue parse: event_type=%s target=%s", _pa_evt_type, _pa_target)
-                                
-                                event_type_map = {
-                                    "subagent_tool_start": "subagent_tool_start",
-                                    "subagent_tool_output": "subagent_tool_output",
-                                    "subagent_tool_end": "subagent_tool_end",
-                                    "subagent_text": "subagent_text",
-                                    "subagent_complete": "subagent_complete",
-                                }
-                                
-                                if _pa_evt_type in event_type_map:
-                                    tui_event_type = event_type_map[_pa_evt_type]
+                                logger.debug(
+                                    "SubAgent queue parse: event_type=%s target=%s",
+                                    _pa_evt_type,
+                                    _pa_target,
+                                )
+
+                                if _pa_evt_type in _SUBAGENT_EVENT_TYPE_MAP:
+                                    tui_event_type = _SUBAGENT_EVENT_TYPE_MAP[_pa_evt_type]
                                     yield AgentEvent(
                                         type=tui_event_type,
                                         data=_pa_event,
@@ -1284,25 +1498,18 @@ class _ToolCycleMixin(_CyclePreludeMixin, _CycleLlmMixin, _CyclePostMixin):
                                     data={"tool_id": str(idx), "content": _pa_chunk},
                                 )
                         except asyncio.TimeoutError:
-                            pass
+                            await asyncio.sleep(0.1)
 
                     while not _pa_out_queue.empty():
                         _pa_chunk = _pa_out_queue.get_nowait()
                         try:
                             import json as _json_mod2
+
                             _pa_event = _json_mod2.loads(_pa_chunk)
                             _pa_evt_type = _pa_event.get("event_type", "")
-                            
-                            event_type_map = {
-                                "subagent_tool_start": "subagent_tool_start",
-                                "subagent_tool_output": "subagent_tool_output",
-                                "subagent_tool_end": "subagent_tool_end",
-                                "subagent_text": "subagent_text",
-                                "subagent_complete": "subagent_complete",
-                            }
-                            
-                            if _pa_evt_type in event_type_map:
-                                tui_event_type = event_type_map[_pa_evt_type]
+
+                            if _pa_evt_type in _SUBAGENT_EVENT_TYPE_MAP:
+                                tui_event_type = _SUBAGENT_EVENT_TYPE_MAP[_pa_evt_type]
                                 yield AgentEvent(
                                     type=tui_event_type,
                                     data=_pa_event,
@@ -1316,15 +1523,49 @@ class _ToolCycleMixin(_CyclePreludeMixin, _CycleLlmMixin, _CyclePostMixin):
                     s, d, r, o = _pa_task.result()
                     self.state.missing_tool_count = 0
                     all_results[idx] = (
-                        idx, tc, tn, args, True, d, r, o, s,
+                        idx,
+                        tc,
+                        tn,
+                        args,
+                        True,
+                        d,
+                        r,
+                        o,
+                        s,
                     )
                     continue
 
-                if tn == "execute":
-                    self._check_output_dedup(args)
-
                 if tn == "browser_action":
-                    s, d, r, o = await self._execute_local_browser_tool(tn, args)
+                    s, d, r, o = await self._execute_tool_with_timeout(
+                        tn, args, cfg, "browser_action"
+                    )
+                    self.state.missing_tool_count = 0
+                elif tn == "create_vulnerability_report":
+                    s, d, r, o = await self._execute_tool_with_timeout(
+                        tn, args, cfg, "report"
+                    )
+                    self.state.missing_tool_count = 0
+                elif tn in ("create_file", "read_file", "list_files"):
+                    s, d, r, o = await self._execute_tool_with_timeout(
+                        tn, args, cfg, "filesystem"
+                    )
+                    self.state.missing_tool_count = 0
+                elif tn == "web_search":
+                    s, d, r, o = await self._execute_tool_with_timeout(
+                        tn, args, cfg, "web_search"
+                    )
+                    self.state.missing_tool_count = 0
+                elif tn == "run_parallel_agents":
+                    s, d, r, o = await self._execute_tool_with_timeout(
+                        tn, args, cfg, "dispatch"
+                    )
+                    self.state.missing_tool_count = 0
+                elif any(
+                    tn == t["function"]["name"] for t in (self._tools_ollama or [])
+                ):
+                    s, d, r, o = await self._execute_tool_with_timeout(
+                        tn, args, cfg, "dispatch"
+                    )
                     self.state.missing_tool_count = 0
                 elif tn == "create_vulnerability_report":
                     s, d, r, o = await self._execute_report_tool(tn, args)
@@ -1445,8 +1686,6 @@ class _ToolCycleMixin(_CyclePreludeMixin, _CycleLlmMixin, _CyclePostMixin):
                         yield AgentEvent(type="done", data={})
                         return
 
-                if tn == "execute":
-                    self._apply_output_merge(args, s)
                 all_results[idx] = (idx, tc, tn, args, True, d, r, o, s)
 
             _finalize_start = time.monotonic()

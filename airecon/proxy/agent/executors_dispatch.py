@@ -6,6 +6,7 @@ import logging
 import re
 import shlex
 import time
+from pathlib import Path
 from typing import Any, Callable
 
 from ..caido_client import CaidoClient
@@ -30,6 +31,7 @@ class _DispatchExecutorMixin:
         on_output: Callable[[str], None] | None = None,
     ) -> tuple[bool, float, dict[str, Any], str | None]:
         from .subagent import ParallelAgentRunner
+
         self._last_output_file = None
         start_time = time.time()
 
@@ -40,13 +42,31 @@ class _DispatchExecutorMixin:
         if hasattr(self, "_session") and self._session is not None:
             try:
                 from .session import session_to_context
+
                 parent_context = session_to_context(self._session)
             except Exception as _e:
                 logger.debug("Could not build parent context for subagents: %s", _e)
 
+        # Block tools that subagents should not use — loaded from tools_meta.json
+        _meta_path = Path(__file__).parent.parent / "data" / "tools_meta.json"
+        _subagent_block = {"execute", "browser_action", "web_search", "http_observe"}
+        try:
+            if _meta_path.exists():
+                import json as _json
 
-        tools_to_block = {"execute", "browser_action", "web_search", "http_observe"}
-        if hasattr(self, '_blocked_tools'):
+                _meta = _json.loads(_meta_path.read_text(encoding="utf-8"))
+                # Subagents should not use parent-level orchestration tools
+                _subagent_block |= set(
+                    _meta.get("categories", {})
+                    .get("utilities", {})
+                    .get("custom_scripting", [])
+                )
+        except Exception as exc:
+            logger.debug(
+                "Could not load subagent blocklist from tools_meta.json: %s", exc
+            )
+        tools_to_block = _subagent_block
+        if hasattr(self, "_blocked_tools"):
             self._blocked_tools.update(tools_to_block)
             logger.info("Blocked tools during run_parallel_agents: %s", tools_to_block)
 
@@ -69,76 +89,118 @@ class _DispatchExecutorMixin:
             progress_lines.append(line)
             logger.info("Parallel agent progress: [%s] %s", target, message)
             if on_output:
-                event_json = json.dumps({
-                    "event_type": "subagent_text",
-                    "target": target,
-                    "content": message + "\n",
-                }) + "\n"
+                event_json = (
+                    json.dumps(
+                        {
+                            "event_type": "subagent_text",
+                            "target": target,
+                            "content": message + "\n",
+                        }
+                    )
+                    + "\n"
+                )
                 logger.debug("SubAgent _progress_cb: sending text for %s", target)
                 on_output(event_json)
 
         def _event_cb(target: str, event: Any) -> None:
             if not on_output:
-                logger.warning("SubAgent _event_cb: on_output is None, dropping event for target=%s", target)
+                logger.warning(
+                    "SubAgent _event_cb: on_output is None, dropping event for target=%s",
+                    target,
+                )
                 return
-            
+
             evt_type = getattr(event, "type", "")
             evt_data = getattr(event, "data", {}) or {}
             tool_id = str(evt_data.get("tool_id", ""))
-            
-            logger.info("SubAgent _event_cb: target=%s, evt_type=%s, tool_id=%s", target, evt_type, tool_id)
+
+            logger.info(
+                "SubAgent _event_cb: target=%s, evt_type=%s, tool_id=%s",
+                target,
+                evt_type,
+                tool_id,
+            )
 
             if evt_type == "tool_start":
                 tn = evt_data.get("tool", "?")
                 args = evt_data.get("arguments", {})
-                logger.debug("SubAgent _event_cb: tool_start target=%s tool=%s", target, tn)
-                event_json = json.dumps({
-                    "event_type": "subagent_tool_start",
-                    "target": target,
-                    "tool_id": tool_id or f"{tn}_{id(event)}",
-                    "tool": tn,
-                    "arguments": args,
-                }) + "\n"
-                logger.info("SubAgent _event_cb: sending tool_start JSON for %s::%s", target, tn)
+                logger.debug(
+                    "SubAgent _event_cb: tool_start target=%s tool=%s", target, tn
+                )
+                event_json = (
+                    json.dumps(
+                        {
+                            "event_type": "subagent_tool_start",
+                            "target": target,
+                            "tool_id": tool_id or f"{tn}_{id(event)}",
+                            "tool": tn,
+                            "arguments": args,
+                        }
+                    )
+                    + "\n"
+                )
+                logger.info(
+                    "SubAgent _event_cb: sending tool_start JSON for %s::%s", target, tn
+                )
                 on_output(event_json)
 
             elif evt_type == "tool_output":
                 content = evt_data.get("content", "")
                 if content:
-                    on_output(json.dumps({
-                        "event_type": "subagent_tool_output",
-                        "target": target,
-                        "tool_id": tool_id,
-                        "content": content,
-                    }) + "\n")
+                    on_output(
+                        json.dumps(
+                            {
+                                "event_type": "subagent_tool_output",
+                                "target": target,
+                                "tool_id": tool_id,
+                                "content": content,
+                            }
+                        )
+                        + "\n"
+                    )
 
             elif evt_type == "tool_end":
                 tn = evt_data.get("tool", "?")
                 success = evt_data.get("success", False)
                 dur = evt_data.get("duration", 0)
-                on_output(json.dumps({
-                    "event_type": "subagent_tool_end",
-                    "target": target,
-                    "tool_id": tool_id,
-                    "tool": tn,
-                    "success": success,
-                    "duration": dur,
-                }) + "\n")
+                on_output(
+                    json.dumps(
+                        {
+                            "event_type": "subagent_tool_end",
+                            "target": target,
+                            "tool_id": tool_id,
+                            "tool": tn,
+                            "success": success,
+                            "duration": dur,
+                        }
+                    )
+                    + "\n"
+                )
 
             elif evt_type == "text":
                 content = evt_data.get("content", "")
                 if content:
-                    on_output(json.dumps({
-                        "event_type": "subagent_text",
-                        "target": target,
-                        "content": content,
-                    }) + "\n")
+                    on_output(
+                        json.dumps(
+                            {
+                                "event_type": "subagent_text",
+                                "target": target,
+                                "content": content,
+                            }
+                        )
+                        + "\n"
+                    )
 
             elif evt_type == "task_complete":
-                on_output(json.dumps({
-                    "event_type": "subagent_complete",
-                    "target": target,
-                }) + "\n")
+                on_output(
+                    json.dumps(
+                        {
+                            "event_type": "subagent_complete",
+                            "target": target,
+                        }
+                    )
+                    + "\n"
+                )
 
         try:
             runner = ParallelAgentRunner(engine=self.engine)
@@ -147,23 +209,34 @@ class _DispatchExecutorMixin:
             logger.info("SubAgent runner configured with progress and event callbacks")
 
             cfg = get_config()
-            recon_mode = str(getattr(cfg, "agent_recon_mode", "standard")).strip().lower()
+            recon_mode = (
+                str(getattr(cfg, "agent_recon_mode", "standard")).strip().lower()
+            )
             if recon_mode not in {"standard", "full"}:
                 recon_mode = "standard"
-            logger.info("Subagent recon_mode: %s (from agent_recon_mode config)", recon_mode)
+            logger.info(
+                "Subagent recon_mode: %s (from agent_recon_mode config)", recon_mode
+            )
 
             if on_output:
                 logger.info("Sending initial status for %d targets", len(targets))
 
                 for t in targets:
-                    on_output(json.dumps({
-                        "event_type": "subagent_text",
-                        "target": t,
-                        "content": "⏳ Waiting for slot...\n",
-                    }) + "\n")
+                    on_output(
+                        json.dumps(
+                            {
+                                "event_type": "subagent_text",
+                                "target": t,
+                                "content": "⏳ Waiting for slot...\n",
+                            }
+                        )
+                        + "\n"
+                    )
                 on_output("\n")
 
-            results = await runner.run_parallel(targets, prompt, parent_context=parent_context, recon_mode=recon_mode)
+            results = await runner.run_parallel(
+                targets, prompt, parent_context=parent_context, recon_mode=recon_mode
+            )
 
             result_summary = {
                 "success": True,
@@ -209,7 +282,7 @@ class _DispatchExecutorMixin:
             }
             success = False
 
-        if hasattr(self, '_blocked_tools'):
+        if hasattr(self, "_blocked_tools"):
             self._blocked_tools.difference_update(tools_to_block)
             logger.info("Unblocked tools after run_parallel_agents: %s", tools_to_block)
 
@@ -217,8 +290,10 @@ class _DispatchExecutorMixin:
 
         self.state.tool_history.append(
             ToolExecution(
-                tool_name=tool_name, arguments=arguments,
-                result=res_dict, duration=duration,
+                tool_name=tool_name,
+                arguments=arguments,
+                result=res_dict,
+                duration=duration,
                 status="success" if success else "error",
             )
         )
@@ -227,19 +302,73 @@ class _DispatchExecutorMixin:
         return success, duration, res_dict, None
 
     def _normalize_args_for_dedup(
-            self, tool_name: str, arguments: dict[str, Any]) -> tuple[str, str]:
+        self, tool_name: str, arguments: dict[str, Any]
+    ) -> tuple[str, str]:
         args_copy = dict(arguments)
         if tool_name == "execute" and "command" in args_copy:
             cmd = args_copy["command"]
-            cmd = re.sub(r'(\s+-(oA|oN|oX|oG|oJ|o)\s+[^\s]+)', '', cmd)
-            cmd = re.sub(r'(\s+--output\s*=?\s*[^\s]+)', '', cmd)
-            cmd = re.sub(r'(\s*>\s*[^\s]+(\s+2>&1)?)', '', cmd)
-            cmd = re.sub(r'(\s+-[bc]\s+output/cookies\.txt)', '', cmd)
-            cmd = re.sub(r'(\s+--cookie(?:-jar)?\s+[^\s]+)', '', cmd)
-            cmd = re.sub(r'_[0-9]{8}_[0-9]{6}\.', '.', cmd)
+            cmd = re.sub(r"(\s+-(oA|oN|oX|oG|oJ|o)\s+[^\s]+)", "", cmd)
+            cmd = re.sub(r"(\s+--output\s*=?\s*[^\s]+)", "", cmd)
+            cmd = re.sub(r"(\s*>\s*[^\s]+(\s+2>&1)?)", "", cmd)
+            cmd = re.sub(r"(\s+-[bc]\s+output/cookies\.txt)", "", cmd)
+            cmd = re.sub(r"(\s+--cookie(?:-jar)?\s+[^\s]+)", "", cmd)
+            cmd = re.sub(r"_[0-9]{8}_[0-9]{6}\.", ".", cmd)
             args_copy["command"] = cmd.strip()
 
         return tool_name, json.dumps(args_copy, sort_keys=True, default=str)
+
+    @staticmethod
+    def _normalize_workspace_paths(cmd: str, target: str) -> str:
+        """Rewrite paths that would create nested workspace dirs.
+
+        Since the agent already `cd`'d into /workspace/<target>,
+        any path reference to <target> in output files should be relative.
+
+        E.g. ``amass -o target.com/output/file.txt`` becomes ``amass -o output/file.txt``
+        E.g. ``mkdir target.com/output`` becomes ``mkdir output``
+        """
+        if not cmd or not target:
+            return cmd
+
+        # Handle paths like "target/target/" -> "target/"
+        double_target = f"{target}/{target}/"
+        if double_target in cmd:
+            cmd = cmd.replace(double_target, target + "/")
+
+        # Handle paths where the command references the target from within
+        # the workspace dir (which is already the target dir):
+        #   "target.com/output" or "/workspace/target.com/output" -> "output"
+        replacements = [
+            f"/workspace/{target}/",
+            f"/workspace/{target}",
+        ]
+        for old_path in replacements:
+            if old_path in cmd:
+                cmd = cmd.replace(old_path, "")
+
+        # Also handle bare "target.com/" prefix in any path segment after the target itself.
+        # Since we're already cd'd into /workspace/<target>, "target.com/anything" -> "anything"
+        # This covers: -o target/output, mkdir target/output, cat target/file, etc.
+        # We must be careful not to break: curl https://target.com/api, curl api.target.com
+        target_prefix = f"{target}/"
+        if target_prefix in cmd:
+            # Match output flags: -o[NAGX], --output=, >
+            output_flag_pattern = rf"(?:-o[NAGX]?\s+|--output(?:-directory)?\s*=?\s*|>\s*)(\S*{re.escape(target_prefix)}\S*)"
+            for match in re.finditer(output_flag_pattern, cmd):
+                full = match.group(1)
+                if target_prefix in full:
+                    replacement = full.replace(target_prefix, "", 1)
+                    cmd = cmd.replace(full, replacement, 1)
+
+            # Also handle standalone paths: mkdir, cat, echo > target/output
+            bare_path_pattern = rf"(?:(?:mkdir|cp|mv|rm|touch|ls|cat|tee)\s+)(.*?{re.escape(target_prefix)}\S*)"
+            for match in re.finditer(bare_path_pattern, cmd):
+                full = match.group(1)
+                if target_prefix in full:
+                    replacement = full.replace(target_prefix, "", 1)
+                    cmd = cmd.replace(full, replacement, 1)
+
+        return cmd
 
     async def _execute_tool_and_record(
         self,
@@ -252,16 +381,22 @@ class _DispatchExecutorMixin:
         if not isinstance(arguments, dict):
             logger.warning(
                 "Tool '%s' received non-dict arguments (type=%s) — rejecting",
-                tool_name, type(arguments).__name__,
+                tool_name,
+                type(arguments).__name__,
             )
-            return False, 0.0, {
-                "success": False,
-                "error": (
-                    f"Tool call rejected: arguments must be a JSON object (dict), "
-                    f"got {type(arguments).__name__}. "
-                    f"Example: {{\"name\": \"{tool_name}\", \"arguments\": {{\"key\": \"value\"}}}}"
-                ),
-            }, None
+            return (
+                False,
+                0.0,
+                {
+                    "success": False,
+                    "error": (
+                        f"Tool call rejected: arguments must be a JSON object (dict), "
+                        f"got {type(arguments).__name__}. "
+                        f'Example: {{"name": "{tool_name}", "arguments": {{"key": "value"}}}}'
+                    ),
+                },
+                None,
+            )
 
         args_key = self._normalize_args_for_dedup(tool_name, arguments)
         count = self._executed_tool_counts.get(args_key, 0)
@@ -269,19 +404,29 @@ class _DispatchExecutorMixin:
 
         if self._is_recon_phase_repeat_blocked(tool_name, arguments, count):
             binary = self._extract_command_binary(arguments.get("command", ""))
-            return False, 0.0, {
-                "success": False,
-                "error": (
-                    f"Duplicate recon execution blocked for '{binary}'. "
-                    "Use previous results and pivot to a new recon vector."
-                ),
-            }, None
+            return (
+                False,
+                0.0,
+                {
+                    "success": False,
+                    "error": (
+                        f"Duplicate recon execution blocked for '{binary}'. "
+                        "Use previous results and pivot to a new recon vector."
+                    ),
+                },
+                None,
+            )
 
         if count >= limit:
-            return False, 0.0, {
-                "success": False,
-                "error": f"Duplicate tool execution prevented (already ran {count}x).",
-            }, None
+            return (
+                False,
+                0.0,
+                {
+                    "success": False,
+                    "error": f"Duplicate tool execution prevented (already ran {count}x).",
+                },
+                None,
+            )
 
         if tool_name.startswith("mcp_"):
             start_time = time.time()
@@ -301,7 +446,9 @@ class _DispatchExecutorMixin:
                 if not success:
                     result = listed
                 else:
-                    result = mcp_search_tools_payload(listed if isinstance(listed, dict) else {}, query, limit)
+                    result = mcp_search_tools_payload(
+                        listed if isinstance(listed, dict) else {}, query, limit
+                    )
                     success = "error" not in result
             elif action == "call_tool":
                 tool = str(arguments.get("tool", "")).strip()
@@ -315,19 +462,24 @@ class _DispatchExecutorMixin:
                         raw_args = nested_args
 
                 if not tool:
-                    success, result = False, {
-                        "error": "MCP call_tool requires a 'tool' field"
-                    }
+                    success, result = (
+                        False,
+                        {"error": "MCP call_tool requires a 'tool' field"},
+                    )
                 elif not isinstance(raw_args, dict):
-                    success, result = False, {
-                        "error": "MCP 'arguments' must be a JSON object"
-                    }
+                    success, result = (
+                        False,
+                        {"error": "MCP 'arguments' must be a JSON object"},
+                    )
                 else:
                     success, result = await mcp_call_tool(server_name, tool, raw_args)
             else:
-                success, result = False, {
-                    "error": "Invalid MCP action. Use 'list_tools', 'search_tools', or 'call_tool'."
-                }
+                success, result = (
+                    False,
+                    {
+                        "error": "Invalid MCP action. Use 'list_tools', 'search_tools', or 'call_tool'."
+                    },
+                )
 
             duration = time.time() - start_time
             self._append_tool_history(
@@ -399,21 +551,31 @@ class _DispatchExecutorMixin:
         if tool_name == "execute":
             cmd = arguments.get("command", "")
             if not cmd or not cmd.strip():
-                return False, 0.0, {
-                    "success": False,
-                    "error": (
-                        "Tool call error: 'command' argument is required and cannot be empty. "
-                        "Example: {\"name\": \"execute\", \"arguments\": {\"command\": \"ls -la /workspace\"}}"
-                    ),
-                }, None
+                return (
+                    False,
+                    0.0,
+                    {
+                        "success": False,
+                        "error": (
+                            "Tool call error: 'command' argument is required and cannot be empty. "
+                            'Example: {"name": "execute", "arguments": {"command": "ls -la /workspace"}}'
+                        ),
+                    },
+                    None,
+                )
             if len(cmd) > _MAX_COMMAND_LENGTH:
-                return False, 0.0, {
-                    "success": False,
-                    "error": (
-                        f"Command rejected: length {len(cmd)} exceeds "
-                        f"maximum {_MAX_COMMAND_LENGTH} characters."
-                    ),
-                }, None
+                return (
+                    False,
+                    0.0,
+                    {
+                        "success": False,
+                        "error": (
+                            f"Command rejected: length {len(cmd)} exceeds "
+                            f"maximum {_MAX_COMMAND_LENGTH} characters."
+                        ),
+                    },
+                    None,
+                )
 
             _cmd_stripped = cmd.strip().lower()
             _is_caido_setup = "caido-setup" in _cmd_stripped
@@ -424,58 +586,86 @@ class _DispatchExecutorMixin:
             _has_loginasguest = "loginasguest" in _cmd_stripped
 
             if _has_graphql_url or _has_loginasguest:
-                return False, 0.0, {
-                    "success": False,
-                    "error": (
-                        "Command rejected: GraphQL/auth API must not run via execute. "
-                        "Use native Caido tools directly: caido_intercept (action=status), "
-                        "caido_list_requests, caido_set_scope, caido_send_request, caido_automate, caido_get_findings. "
-                        "Reason: execute runs inside Docker sandbox and cannot reach host Caido (127.0.0.1 inside != host)."
-                    ),
-                }, None
+                return (
+                    False,
+                    0.0,
+                    {
+                        "success": False,
+                        "error": (
+                            "Command rejected: GraphQL/auth API must not run via execute. "
+                            "Use native Caido tools directly: caido_intercept (action=status), "
+                            "caido_list_requests, caido_set_scope, caido_send_request, caido_automate, caido_get_findings. "
+                            "Reason: execute runs inside Docker sandbox and cannot reach host Caido (127.0.0.1 inside != host)."
+                        ),
+                    },
+                    None,
+                )
 
             if _is_caido_setup:
                 existing_token = CaidoClient._token
                 if existing_token:
-                    return False, 0.0, {
-                        "success": False,
-                        "error": (
-                            "Command rejected: caido-setup bootstrap not needed because Caido token already exists. "
-                            "Use native Caido tools directly: caido_intercept (action=status), "
-                            "caido_list_requests, caido_set_scope, caido_send_request, caido_automate, caido_get_findings."
-                        ),
-                    }, None
-                logger.info("Allowing caido-setup via execute for initial token bootstrap")
+                    return (
+                        False,
+                        0.0,
+                        {
+                            "success": False,
+                            "error": (
+                                "Command rejected: caido-setup bootstrap not needed because Caido token already exists. "
+                                "Use native Caido tools directly: caido_intercept (action=status), "
+                                "caido_list_requests, caido_set_scope, caido_send_request, caido_automate, caido_get_findings."
+                            ),
+                        },
+                        None,
+                    )
+                logger.info(
+                    "Allowing caido-setup via execute for initial token bootstrap"
+                )
 
             _cmd_stripped = cmd.strip()
             _first_token = _cmd_stripped.split()[0] if _cmd_stripped.split() else ""
 
             if _first_token in _AIRECON_TOOL_NAMES and _first_token != "execute":
-                return False, 0.0, {
-                    "success": False,
-                    "error": (
-                        f"Command rejected: '{_first_token}' is an AIRecon tool, "
-                        "not a shell binary. Do NOT call AIRecon tools via execute — "
-                        f"use the '{_first_token}' tool directly with its own arguments. "
-                        f"Example: {{\"name\": \"{_first_token}\", \"arguments\": {{...}}}}"
-                    ),
-                }, None
+                return (
+                    False,
+                    0.0,
+                    {
+                        "success": False,
+                        "error": (
+                            f"Command rejected: '{_first_token}' is an AIRecon tool, "
+                            "not a shell binary. Do NOT call AIRecon tools via execute — "
+                            f"use the '{_first_token}' tool directly with its own arguments. "
+                            f'Example: {{"name": "{_first_token}", "arguments": {{...}}}}'
+                        ),
+                    },
+                    None,
+                )
 
-            _func_call_match = re.search(
-                r"\b(" + "|".join(re.escape(t) for t in _AIRECON_TOOL_NAMES) + r")\s*\(",
-                _cmd_stripped,
-            ) if _AIRECON_TOOL_NAMES else None
+            _func_call_match = (
+                re.search(
+                    r"\b("
+                    + "|".join(re.escape(t) for t in _AIRECON_TOOL_NAMES)
+                    + r")\s*\(",
+                    _cmd_stripped,
+                )
+                if _AIRECON_TOOL_NAMES
+                else None
+            )
             if _func_call_match:
                 _bad_tool = _func_call_match.group(1)
-                return False, 0.0, {
-                    "success": False,
-                    "error": (
-                        f"Command rejected: '{_bad_tool}(...)' is not valid bash syntax. "
-                        f"'{_bad_tool}' is an AIRecon tool — call it as a separate tool "
-                        f"with its own arguments, not as a shell function inside execute. "
-                        f"Example: {{\"name\": \"{_bad_tool}\", \"arguments\": {{...}}}}"
-                    ),
-                }, None
+                return (
+                    False,
+                    0.0,
+                    {
+                        "success": False,
+                        "error": (
+                            f"Command rejected: '{_bad_tool}(...)' is not valid bash syntax. "
+                            f"'{_bad_tool}' is an AIRecon tool — call it as a separate tool "
+                            f"with its own arguments, not as a shell function inside execute. "
+                            f'Example: {{"name": "{_bad_tool}", "arguments": {{...}}}}'
+                        ),
+                    },
+                    None,
+                )
 
             if _first_token in _TOOL_FLAG_CONFLICTS:
                 _conflict_flags, _correct_tool = _TOOL_FLAG_CONFLICTS[_first_token]
@@ -486,29 +676,38 @@ class _DispatchExecutorMixin:
                     _cmd_tokens = set(_cmd_stripped.split())
                 _found = [f for f in _conflict_flags if f in _cmd_tokens]
                 if _found:
-                    return False, 0.0, {
-                        "success": False,
-                        "error": (
-                            f"Command rejected: '{_first_token}' was used with flags that "
-                            f"belong to '{_correct_tool}': {_found}. "
-                            f"Replace '{_first_token}' with '{_correct_tool}' and retry. "
-                            f"Example: {_cmd_stripped.replace(_first_token, _correct_tool, 1)}"
-                        ),
-                    }, None
-            if self.state.active_target and cmd and not cmd.strip(
-            ).startswith("cd "):
+                    return (
+                        False,
+                        0.0,
+                        {
+                            "success": False,
+                            "error": (
+                                f"Command rejected: '{_first_token}' was used with flags that "
+                                f"belong to '{_correct_tool}': {_found}. "
+                                f"Replace '{_first_token}' with '{_correct_tool}' and retry. "
+                                f"Example: {_cmd_stripped.replace(_first_token, _correct_tool, 1)}"
+                            ),
+                        },
+                        None,
+                    )
+            if self.state.active_target and cmd and not cmd.strip().startswith("cd "):
                 workspace_dir = f"/workspace/{self.state.active_target}"
                 host_workspace = get_workspace_root() / self.state.active_target
                 try:
                     host_workspace.mkdir(parents=True, exist_ok=True)
                 except Exception as _e:
                     logger.debug("Could not create workspace dir: %s", _e)
-                for subdir in ["output", "command",
-                               "tools", "vulnerabilities"]:
+                for subdir in ["output", "command", "tools", "vulnerabilities"]:
                     try:
                         (host_workspace / subdir).mkdir(parents=True, exist_ok=True)
                     except Exception as _e:
                         logger.debug("Could not create subdir %s: %s", subdir, _e)
+
+                # Sanitize: rewrite nested workspace paths to relative equivalents.
+                # E.g. "target/target/output/file.txt" -> "output/file.txt"
+                # E.g. "target/output/file.txt" -> "output/file.txt"
+                target = self.state.active_target
+                cmd = self._normalize_workspace_paths(cmd, target)
 
                 arguments["command"] = f"cd {workspace_dir} && {cmd}"
                 logger.info("Enforced workspace context: %s", arguments["command"])
@@ -516,40 +715,51 @@ class _DispatchExecutorMixin:
         start_time = time.time()
         output_file: str | None = None
         try:
-
             if hasattr(self, "state") and getattr(self.state, "_stop_requested", False):
                 logger.info("Tool execution cancelled before start: %s", tool_name)
-                return False, 0.0, {
-                    "success": False,
-                    "error": "Tool execution cancelled: agent is stopping.",
-                    "cancelled": True,
-                }, None
+                return (
+                    False,
+                    0.0,
+                    {
+                        "success": False,
+                        "error": "Tool execution cancelled: agent is stopping.",
+                        "cancelled": True,
+                    },
+                    None,
+                )
 
             result = await self.engine.execute_tool(
                 tool_name, arguments, on_output=on_output
             )
             success = result.get("success", False)
             try:
-
                 output_file = self._save_tool_output(tool_name, arguments, result)
             except Exception as _e:
                 logger.debug("Could not save tool output: %s", _e)
         except asyncio.CancelledError:
-
             logger.info("Tool execution cancelled by agent: %s", tool_name)
-            return False, 0.0, {
-                "success": False,
-                "error": "Tool execution cancelled: agent is stopping.",
-                "cancelled": True,
-            }, None
+            return (
+                False,
+                0.0,
+                {
+                    "success": False,
+                    "error": "Tool execution cancelled: agent is stopping.",
+                    "cancelled": True,
+                },
+                None,
+            )
         except KeyboardInterrupt:
-
             logger.warning("Tool execution interrupted by user: %s", tool_name)
-            return False, 0.0, {
-                "success": False,
-                "error": "Tool execution interrupted by user.",
-                "interrupted": True,
-            }, None
+            return (
+                False,
+                0.0,
+                {
+                    "success": False,
+                    "error": "Tool execution interrupted by user.",
+                    "interrupted": True,
+                },
+                None,
+            )
         except Exception as e:
             success = False
             result = {"success": False, "error": str(e)}
@@ -564,8 +774,12 @@ class _DispatchExecutorMixin:
             if "caido-setup" in cmd:
                 full_output = stdout + stderr
                 try:
-                    if CaidoClient.extract_and_set_token_from_execute_output(full_output):
-                        logger.info("caido-setup token extracted and cached for future use")
+                    if CaidoClient.extract_and_set_token_from_execute_output(
+                        full_output
+                    ):
+                        logger.info(
+                            "caido-setup token extracted and cached for future use"
+                        )
                         if "next_action" not in result:
                             result["next_action"] = (
                                 "Caido token extracted successfully. "
@@ -573,27 +787,38 @@ class _DispatchExecutorMixin:
                                 "caido_intercept, caido_list_requests, etc."
                             )
                 except Exception as _e:
-                    logger.debug("Token extraction from caido-setup output failed: %s", _e)
+                    logger.debug(
+                        "Token extraction from caido-setup output failed: %s", _e
+                    )
 
             _dead_markers = (
-                "name_not_resolved", "err_name_not_resolved", "nodename nor servname",
-                "no such host", "could not resolve host", "getaddrinfo failed",
+                "name_not_resolved",
+                "err_name_not_resolved",
+                "nodename nor servname",
+                "no such host",
+                "could not resolve host",
+                "getaddrinfo failed",
                 "temporary failure in name resolution",
-                "failed to resolve", "unable to resolve",
+                "failed to resolve",
+                "unable to resolve",
                 "nxdomain",
-                "connection refused", "connection reset", "address unreachable",
-                "failed to connect", "no address associated",
+                "connection refused",
+                "connection reset",
+                "address unreachable",
+                "failed to connect",
+                "no address associated",
             )
             if any(m in output for m in _dead_markers):
-
                 _host_match = re.search(
                     r"(?:https?://|ssh://)([a-zA-Z0-9][-a-zA-Z0-9]*(?:\.[a-zA-Z0-9][-a-zA-Z0-9]*)+)"
                     r"|(?:^|\s)([a-zA-Z0-9][-a-zA-Z0-9]*(?:\.[a-zA-Z]{2,})(?::\d+)?(?=/|\s|$))",
                     cmd,
                 )
                 _host = (
-                    (_host_match.group(1) or _host_match.group(2) or "")
-                ).split(":")[0] if _host_match else None
+                    (_host_match.group(1) or _host_match.group(2) or "").split(":")[0]
+                    if _host_match
+                    else None
+                )
 
                 if _host:
                     added = self.state.add_dead_host(_host)
@@ -620,7 +845,9 @@ class _DispatchExecutorMixin:
             and "Command rejected" not in (result.get("error") or "")
         )
         if _is_exec_failure and hasattr(self.state, "add_failure"):
-            error_detail = result.get("error", "") or result.get("stderr", "") or "Unknown error"
+            error_detail = (
+                result.get("error", "") or result.get("stderr", "") or "Unknown error"
+            )
             target = arguments.get("target") or arguments.get("url", "")
             failure_id = self.state.add_failure(
                 name=tool_name,
@@ -628,9 +855,13 @@ class _DispatchExecutorMixin:
                 target=target,
                 failure_category="tool",
             )
-            logger.debug("Failure recorded with ID: %s for tool %s", failure_id, tool_name)
+            logger.debug(
+                "Failure recorded with ID: %s for tool %s", failure_id, tool_name
+            )
 
-            if "next_action" not in result and hasattr(self.state, "get_failure_summary"):
+            if "next_action" not in result and hasattr(
+                self.state, "get_failure_summary"
+            ):
                 failure_summary = self.state.get_failure_summary()
                 if failure_summary.get("most_common"):
                     result["next_action"] = (
@@ -666,7 +897,9 @@ class _DispatchExecutorMixin:
                     "Re-read the tool definition and include all required fields."
                 )
 
-            elif "NoneType" in err_msg or "'NoneType' object has no attribute" in err_msg:
+            elif (
+                "NoneType" in err_msg or "'NoneType' object has no attribute" in err_msg
+            ):
                 result["error"] = (
                     err_msg
                     + f"\n[SYSTEM HINT]: A None value was passed where a string/dict was expected for tool '{tool_name}'. "
@@ -685,8 +918,10 @@ class _DispatchExecutorMixin:
 
         self.state.tool_history.append(
             ToolExecution(
-                tool_name=tool_name, arguments=arguments,
-                result=history_result, duration=duration,
+                tool_name=tool_name,
+                arguments=arguments,
+                result=history_result,
+                duration=duration,
                 status="success" if success else "error",
             )
         )
@@ -694,6 +929,7 @@ class _DispatchExecutorMixin:
         self.state.tool_counts["total"] += 1
 
         if success:
-            self._executed_tool_counts[args_key] = self._executed_tool_counts.get(
-                args_key, 0) + 1
+            self._executed_tool_counts[args_key] = (
+                self._executed_tool_counts.get(args_key, 0) + 1
+            )
         return success, duration, result, output_file

@@ -106,42 +106,67 @@ airecon --version
 Config file: `~/.airecon/config.yaml` (auto-generated on first run).
 
 ```yaml
-
 # ======================================
 # Ollama Connection
 # ======================================
-# Ollama API endpoint. For remote servers use http://IP:11434
+# Ollama API endpoint. REQUIRED — must be set. For local: http://127.0.0.1:11434. For remote: http://IP:11434
 ollama_url: "http://127.0.0.1:11434"
-# Model to use. Recommended: qwen3.5:122b for best reasoning
+# Model to use. 122B for best reasoning (requires 60GB+ VRAM). For 12GB VRAM: use qwen2.5:7b or smaller. For 8GB VRAM: use qwen2.5:1.8b.
 ollama_model: "qwen3.5:122b"
-# Total request timeout (seconds). 300s = 5 min. Increase for slow remote servers.
-ollama_timeout: 300.0
-# Per-chunk stream timeout (seconds). 180s for 122B model prefill over network.
-ollama_chunk_timeout: 180.0
+# Total request timeout (seconds). 180s = 3 min. Stable for most models. Increase to 300s for slow remote servers or 122B models.
+ollama_timeout: 180.0
 
 # ======================================
 # Ollama Model Settings
 # ======================================
-# Context window size. 131072 = 128K (full). Reduce to 65536 if VRAM < 24GB.
-ollama_num_ctx: 131072
-# Context for CTF/summary mode. 65536 = 64K (half VRAM usage).
-ollama_num_ctx_small: 65536
-# LLM temperature. 0.15 = deterministic. Range: 0.0–0.3 for pentesting.
+# Context window size. 65536 = 64K (stable for 12GB VRAM with 8B models). 131072 = 128K requires 30GB+ VRAM. Set -1 for server default.
+ollama_num_ctx: 65536
+# Context for CTF/summary mode. 32768 = 32K (stable for 12GB VRAM). Reduced from 64K for stability with 8B+ models.
+ollama_num_ctx_small: 32768
+# LLM output randomness. 0.0=deterministic, 0.15=recommended (strict), 0.3=creative. Does NOT affect thinking mode — controls output diversity only.
 ollama_temperature: 0.15
-# Max tokens to generate. 32768 for detailed tool responses.
-ollama_num_predict: 32768
-# Enable extended thinking mode (for Qwen3.5+).
+# Max tokens to generate. 16384 = 16K (stable for 12GB VRAM). 32K requires more VRAM.
+ollama_num_predict: 16384
+# Enable extended thinking mode (for Qwen3.5+/Qwen2.5+). When enabled, model generates <think> reasoning blocks before answering.
 ollama_enable_thinking: true
-# Auto-detected: model supports <think> blocks.
-ollama_supports_thinking: true
-# Auto-detected: model supports native tool calling.
-ollama_supports_native_tools: true
-# Max concurrent Ollama requests. Keep 1 for 122B models.
-ollama_max_concurrent_requests: 1
-# Protect first N tokens from KV eviction. 8192 = protect system prompt (~8K tokens).
-ollama_num_keep: 8192
-# Prevent repetition loops. 1.05 = mild. Range: 1.0–1.2.
-ollama_repeat_penalty: 1.05
+# Thinking intensity: low|medium|high|adaptive. For 12GB VRAM: use 'low' or 'medium'. 'high' may cause OOM with 8B models. Low=only deep tools, Medium=ANALYSIS+deep tools, High=most iterations (high VRAM only).
+ollama_thinking_mode: low
+# Protect first N tokens from KV eviction. 4096 = 4K (reduced for 12GB VRAM stability). 8K for larger VRAM.
+ollama_num_keep: 4096
+
+# ======================================
+# Proxy Server
+# ======================================
+# Host to bind proxy server. 127.0.0.1 = localhost only.
+proxy_host: 127.0.0.1
+# Port for proxy server. Default 3000.
+proxy_port: 3000
+
+# ======================================
+# Timeouts
+# ======================================
+# Docker command timeout (seconds). 900s = 15 min for long scans (nmap, nuclei).
+command_timeout: 900.0
+
+# ======================================
+# Docker Sandbox
+# ======================================
+# Container memory limit. '16g' = 16GB (stable for 32GB+ RAM host, 18GB image + Chromium). Prevents OOM kills. Set to '12g' for 32GB RAM, '8g' for 16GB systems, '4g' for 8GB systems.
+docker_memory_limit: 16g
+
+# ======================================
+# Deep Recon
+# ======================================
+# Auto-start deep recon on session start.
+deep_recon_autostart: true
+# Recon execution mode: standard|full. standard=respect user scope, full=auto-expand simple target prompts into comprehensive recon.
+agent_recon_mode: standard
+
+# ======================================
+# Safety
+# ======================================
+# Allow destructive tests (e.g., DELETE requests). Default: False for safety.
+allow_destructive_testing: false
 ```
 
 | Key | Default | Notes |

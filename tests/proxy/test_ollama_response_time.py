@@ -87,7 +87,7 @@ class TestResponseTimeTracking:
 
 
 class TestDynamicTimeout:
-    """Test _get_dynamic_timeout method - simplified like openclaude."""
+    """Test _get_dynamic_timeout method."""
 
     def test_get_dynamic_timeout_uses_base_when_few_samples(self) -> None:
         """_get_dynamic_timeout should use base timeout when <3 samples."""
@@ -95,9 +95,9 @@ class TestDynamicTimeout:
         client._response_times = [10.0, 20.0]  # Only 2 samples
         client.model = "qwen3.5:122b"
 
-        # Like openclaude - simplified to fixed 120s for stability
+        # Simplified to fixed timeout for stability
         timeout = client._get_dynamic_timeout()
-        assert timeout == 120.0  # Simplified: fixed timeout like openclaude
+        assert timeout == 180.0  # config default ollama_chunk_timeout
 
     def test_get_dynamic_timeout_adapts_with_enough_samples(self) -> None:
         """_get_dynamic_timeout should return consistent 120s like openclaude."""
@@ -105,9 +105,9 @@ class TestDynamicTimeout:
         client._response_times = [10.0, 20.0, 30.0]  # 3 samples
         client.model = "test-model"
 
-        # Like openclaude - simplified to fixed timeouts, no adaptation
+        # Simplified to fixed timeouts, no adaptation
         timeout = client._get_dynamic_timeout()
-        assert timeout == 120.0  # Simplified: fixed timeout like openclaude
+        assert timeout == 180.0  # config default ollama_chunk_timeout
 
     def test_get_dynamic_timeout_compression_operation(self) -> None:
         """_get_dynamic_timeout should return consistent 120s like openclaude."""
@@ -115,9 +115,9 @@ class TestDynamicTimeout:
         client._response_times = []
         client.model = "test-model"
 
-        # Like openclaude - fixed timeout for compression too
+        # Simplified: fixed timeout - fixed timeout for compression too
         timeout = client._get_dynamic_timeout(operation="compression")
-        assert timeout == 120.0  # Simplified: fixed timeout
+        assert timeout == 180.0  # config default ollama_chunk_timeout
 
     def test_get_dynamic_timeout_caps_at_maximum(self) -> None:
         """_get_dynamic_timeout should return consistent 120s like openclaude."""
@@ -126,9 +126,9 @@ class TestDynamicTimeout:
         client._response_times = [500.0] * 10
         client.model = "test-model"
 
-        # Like openclaude - fixed timeout, no exponential growth
+        # Simplified: fixed timeout - fixed timeout, no exponential growth
         timeout = client._get_dynamic_timeout()
-        assert timeout == 120.0  # Simplified: fixed timeout
+        assert timeout == 180.0  # config default ollama_chunk_timeout
 
     def test_get_dynamic_timeout_works_without_init(self) -> None:
         """_get_dynamic_timeout should work even if __init__ not called."""
@@ -136,6 +136,6 @@ class TestDynamicTimeout:
         client.model = "qwen3.5:122b"
         # Don't initialize _response_times
 
-        # Should not raise AttributeError - like openclaude fixed timeout
+        # Should not raise AttributeError
         timeout = client._get_dynamic_timeout()
-        assert timeout == 120.0  # Simplified: fixed timeout like openclaude
+        assert timeout == 180.0  # config default ollama_chunk_timeout

@@ -25,9 +25,10 @@ from .session import (
     merge_prior_findings,
     session_to_context,
 )
-from .loop_exploration import _MEANINGFUL_EVIDENCE_THRESHOLD
-import asyncio
+from .loop_exploration import _get_meaningful_evidence_threshold
+from .target_prioritizer import TargetPrioritizer
 import logging
+import asyncio
 from pathlib import Path
 
 logger = logging.getLogger("airecon.agent")
@@ -51,13 +52,11 @@ class _MessageEntryMixin:
             ]
 
         if not self._tools_ollama:
-
             await self.initialize(
                 target=extracted_target,
                 user_message=user_message,
             )
         else:
-
             if not self._ctf_mode and extracted_target:
                 if _is_ctf_target(extracted_target, user_message=None):
                     self._ctf_mode = True
@@ -70,14 +69,13 @@ class _MessageEntryMixin:
                         self._adaptive_num_ctx = get_config().ollama_num_ctx_small
                     logger.info(
                         "CTF mode activated mid-session for target=%r — ctx=%d",
-                        extracted_target, self._adaptive_num_ctx,
+                        extracted_target,
+                        self._adaptive_num_ctx,
                     )
 
         cfg = get_config()
 
-        _recon_mode = normalize_recon_mode(
-            getattr(cfg, "agent_recon_mode", "standard")
-        )
+        _recon_mode = normalize_recon_mode(getattr(cfg, "agent_recon_mode", "standard"))
         _simple_kickoff = is_simple_target_kickoff(user_message, extracted_target)
         _requested_scope_lock = bool(_recon_mode == "standard" and not _simple_kickoff)
 
@@ -108,18 +106,13 @@ class _MessageEntryMixin:
                 )
 
         if _file_refs and not self.state.active_target:
-            self.state.active_target = workspace_name_for_ref(
-                _file_refs[0]
-            )
+            self.state.active_target = workspace_name_for_ref(_file_refs[0])
             self._scope_anchor_target = self.state.active_target
 
-        if (
-            isinstance(extracted_target, str)
-            and should_autostart_full_recon(
-                cfg=cfg,
-                user_message=user_message,
-                extracted_target=extracted_target,
-            )
+        if isinstance(extracted_target, str) and should_autostart_full_recon(
+            cfg=cfg,
+            user_message=user_message,
+            extracted_target=extracted_target,
         ):
             logger.info(
                 "Auto-starting deep recon (agent_recon_mode=%s) for %s",
@@ -131,7 +124,9 @@ class _MessageEntryMixin:
             _requested_scope_lock = False
 
         self._scope_lock_active = _requested_scope_lock
-        self._scope_lock_brief = user_message.strip()[:500] if self._scope_lock_active else ""
+        self._scope_lock_brief = (
+            user_message.strip()[:500] if self._scope_lock_active else ""
+        )
         if self._scope_lock_active:
             self.state.conversation.append(
                 {
@@ -168,7 +163,7 @@ class _MessageEntryMixin:
                 )
             )
         ]
-        
+
         if self.state.iteration % 10 == 0:
             self._check_ollama_context_pressure()
 
@@ -201,26 +196,12 @@ class _MessageEntryMixin:
                 }
             )
 
-            if not self._session:
-                self._session = SessionData(
-                    target=self.state.active_target)
-                self._sync_token_usage_from_session()
-                self.pipeline = PipelineEngine(self._session)
-                if self._ctf_mode and self.pipeline:
-                    self.pipeline.set_ctf_mode(True)
-            elif self._session.target != self.state.active_target:
-
-                logger.info(
-                    "Target switched %s → %s: creating fresh SessionData",
-                    self._session.target,
-                    self.state.active_target,
-                )
-                self._session = SessionData(
-                    target=self.state.active_target)
-                self._sync_token_usage_from_session()
-                self.pipeline = PipelineEngine(self._session)
-                if self._ctf_mode and self.pipeline:
-                    self.pipeline.set_ctf_mode(True)
+            _lock = getattr(self, "_session_lock", None)
+            if _lock is not None:
+                async with _lock:
+                    await self._create_or_switch_session()
+            else:
+                await self._create_or_switch_session()
 
             if (
                 self._session
@@ -244,7 +225,8 @@ class _MessageEntryMixin:
                     )
                     logger.info(
                         "Cross-session memory: merged prior session %s → %s",
-                        prior.session_id, self._session.session_id,
+                        prior.session_id,
+                        self._session.session_id,
                     )
 
                 self._session._prior_merged = True
@@ -257,6 +239,45 @@ class _MessageEntryMixin:
                         "content": session_ctx,
                     }
                 )
+
+                prioritizer = TargetPrioritizer()
+                high_value_urls = []
+                for url in list(self._session.urls):
+                    ts = prioritizer.score_url(url)
+                    if ts.score >= 0.5:
+                        high_value_urls.append(ts)
+
+                if high_value_urls:
+                    high_value_urls.sort(key=lambda s: s.score, reverse=True)
+                    top_targets = high_value_urls[:5]
+                    lines = [
+                        "[SYSTEM: HIGH-VALUE TARGETS DETECTED]",
+                        "The following endpoints have been identified as high-priority for testing:",
+                        "",
+                    ]
+                    for i, ts in enumerate(top_targets, 1):
+                        lines.append(
+                            f"  {i}. {ts.target} (score: {ts.score:.2f}, category: {ts.category})"
+                        )
+                        if ts.reasons:
+                            lines.append(f"     Why: {'; '.join(ts.reasons[:2])}")
+                        if ts.attack_vectors:
+                            lines.append(
+                                f"     Vectors: {', '.join(ts.attack_vectors[:3])}"
+                            )
+                    lines.append("")
+                    lines.append(
+                        "Prioritize these endpoints in your next tool calls. "
+                        "Focus on the highest-scoring targets first."
+                    )
+                    self.state.conversation.append(
+                        {"role": "system", "content": "\n".join(lines)}
+                    )
+                    logger.info(
+                        "Dynamic re-prioritization: injected %d high-value targets (top score: %.2f)",
+                        len(high_value_urls),
+                        high_value_urls[0].score,
+                    )
 
                 if self.pipeline:
                     _resumed_phase = self.pipeline.get_current_phase()
@@ -276,7 +297,8 @@ class _MessageEntryMixin:
             try:
                 if self.pipeline:
                     phase_hint = self.pipeline.get_current_phase().value
-            except Exception:
+            except Exception as e:
+                logger.debug("Exception in %s: %s", __name__, e)
                 phase_hint = ""
             pin_lines = [
                 "[SYSTEM: PINNED CONTEXT]",
@@ -292,7 +314,9 @@ class _MessageEntryMixin:
             if phase_hint:
                 pin_lines.append(f"PHASE: {phase_hint}")
             pin_lines.append("Do not change target unless the user explicitly asks.")
-            pin_lines.append("Use session summary and critical findings as the source of truth.")
+            pin_lines.append(
+                "Use session summary and critical findings as the source of truth."
+            )
             self.state.conversation.append(
                 {"role": "system", "content": "\n".join(pin_lines)}
             )
@@ -319,8 +343,7 @@ class _MessageEntryMixin:
                     {"role": "system", "content": _injection}
                 )
 
-        self.state.conversation.append(
-            {"role": "user", "content": user_message})
+        self.state.conversation.append({"role": "user", "content": user_message})
 
         _ctx_limit = (
             self._adaptive_num_ctx
@@ -340,16 +363,16 @@ class _MessageEntryMixin:
             if _ctx_used > _ctx_hard_cap:
                 logger.error(
                     "Context tokens (%d) exceeded hard cap (%d, num_ctx=%d) — forcing emergency truncation",
-                    _ctx_used, _ctx_hard_cap, _ctx_limit,
+                    _ctx_used,
+                    _ctx_hard_cap,
+                    _ctx_limit,
                 )
 
                 _system_msgs = [
-                    m for m in self.state.conversation
-                    if m.get("role") == "system"
+                    m for m in self.state.conversation if m.get("role") == "system"
                 ]
                 _non_system = [
-                    m for m in self.state.conversation
-                    if m.get("role") != "system"
+                    m for m in self.state.conversation if m.get("role") != "system"
                 ]
                 _keep_recent = max(int(len(_non_system) * 0.20), 6)
                 _recent_msgs = _non_system[-_keep_recent:]
@@ -361,14 +384,20 @@ class _MessageEntryMixin:
                 logger.warning(
                     "Emergency truncation complete: %d messages → %d "
                     "(sys=%d kept, non-sys %d → %d), context-used %d → %d tokens",
-                    _prev_total, len(self.state.conversation),
-                    len(_system_msgs), len(_non_system), len(_recent_msgs),
-                    _ctx_used, _new_used,
+                    _prev_total,
+                    len(self.state.conversation),
+                    len(_system_msgs),
+                    len(_non_system),
+                    len(_recent_msgs),
+                    _ctx_used,
+                    _new_used,
                 )
             elif _ctx_used > _ctx_soft_cap:
                 logger.warning(
                     "Context tokens (%d) approaching soft cap (%d, num_ctx=%d) — will truncate soon",
-                    _ctx_used, _ctx_soft_cap, _ctx_limit,
+                    _ctx_used,
+                    _ctx_soft_cap,
+                    _ctx_limit,
                 )
 
         _skill_phase = self._skill_phase_for_message_start()
@@ -376,12 +405,16 @@ class _MessageEntryMixin:
         _session_skills = None
         if self._session:
             _session_skills = set(self._session.loaded_skills)
-        _current_target = self.state.active_target if self.state.active_target else (self._session.target if self._session else "")
+        _current_target = (
+            self.state.active_target
+            if self.state.active_target
+            else (self._session.target if self._session else "")
+        )
         skill_context, loaded_skills = auto_load_skills_for_message(
             user_message,
             phase=_skill_phase,
             session_loaded_skills=_session_skills,
-            memory_manager=getattr(self, '_memory_manager', None),
+            memory_manager=getattr(self, "_memory_manager", None),
             current_target=_current_target,
         )
         if loaded_skills:
@@ -396,9 +429,12 @@ class _MessageEntryMixin:
                         self._session.loaded_skills.append(skill_rel)
 
         if skill_context:
-
             self.state.conversation.append(
-                {"role": "system", "content": skill_context, "iteration": self.state.iteration}
+                {
+                    "role": "system",
+                    "content": skill_context,
+                    "iteration": self.state.iteration,
+                }
             )
 
         self.state.iteration = 0
@@ -415,14 +451,16 @@ class _MessageEntryMixin:
         self._stagnation_iterations = 0
         self._recent_tool_names = []
         self._last_evidence_count = sum(
-            1 for e in self.state.evidence_log
-            if e.get("confidence", 0) >= _MEANINGFUL_EVIDENCE_THRESHOLD
+            1
+            for e in self.state.evidence_log
+            if e.get("confidence", 0) >= _get_meaningful_evidence_threshold()
         )
         self._watchdog_forced_calls = 0
         self._empty_response_retry_count = 0
         self._prev_phase = None
 
         import uuid
+
         self._current_trace_id = uuid.uuid4().hex[:12]
 
         if (
@@ -435,7 +473,8 @@ class _MessageEntryMixin:
 
             _HC_THRESHOLD = 0.8
             self.state.evidence_log = [
-                e for e in self.state.evidence_log
+                e
+                for e in self.state.evidence_log
                 if e.get("confidence", 0) >= _HC_THRESHOLD
             ][-30:]
             self._last_evidence_count = len(self.state.evidence_log)
@@ -446,3 +485,24 @@ class _MessageEntryMixin:
             )
 
         return cfg
+
+    async def _create_or_switch_session(self) -> None:
+        """Create a new session or switch to a different target, under caller-provided lock."""
+        _session_changed = False
+        if not self._session:
+            self._session = SessionData(target=self.state.active_target)
+            self._sync_token_usage_from_session()
+            self.pipeline = PipelineEngine(self._session)
+            _session_changed = True
+        elif self._session.target != self.state.active_target:
+            logger.info(
+                "Target switched %s → %s: creating fresh SessionData",
+                self._session.target,
+                self.state.active_target,
+            )
+            self._session = SessionData(target=self.state.active_target)
+            self._sync_token_usage_from_session()
+            self.pipeline = PipelineEngine(self._session)
+            _session_changed = True
+        if _session_changed and self._ctf_mode and self.pipeline:
+            self.pipeline.set_ctf_mode(True)

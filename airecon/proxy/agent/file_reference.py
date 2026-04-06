@@ -14,7 +14,7 @@ _AT_REF_RE = re.compile(r"@(/[^\s\"'<>]+)")
 _AT_REF_QUOTED_RE = re.compile(r"([\"'])@(/[^\n]*?)\1")
 
 _BINARY_EXTENSIONS = frozenset({
-    ".exe", ".elf", ".bin", ".so", ".dll", ".dylib",
+    ".exe", ".el", ".bin", ".so", ".dll", ".dylib",
     ".o", ".out", ".pyc", ".pyd", ".wasm", ".ko",
     ".sys", ".drv", ".class", ".jar", ".apk", ".dex",
     ".img", ".iso", ".rom", ".fw",
@@ -25,9 +25,9 @@ _TEXT_EXTENSIONS = frozenset({
     ".go", ".rs", ".java", ".c", ".cpp", ".h", ".hpp",
     ".cs", ".swift", ".kt", ".sh", ".bash", ".zsh",
     ".ps1", ".bat", ".cmd", ".html", ".css", ".json",
-    ".xml", ".yaml", ".yml", ".toml", ".ini", ".conf",
+    ".xml", ".yaml", ".yml", ".toml", ".ini", ".con",
     ".cfg", ".env", ".sql", ".md", ".txt", ".log",
-    ".dockerfile", ".tf", ".lua", ".pl", ".r",
+    ".dockerfile", ".t", ".lua", ".pl", ".r",
     ".asm", ".s", ".nasm",
 })
 
@@ -120,9 +120,9 @@ def strip_refs(message: str, refs: list[FileRef]) -> str:
     result = message
 
     for ref in sorted(refs, key=lambda r: r.start, reverse=True):
-        name = ref.path.name or "ref"
+        name = ref.path.name or "re"
 
-        safe_name = re.sub(r"[^a-zA-Z0-9_-]+", "_", name).strip("_") or "ref"
+        safe_name = re.sub(r"[^a-zA-Z0-9_-]+", "_", name).strip("_") or "re"
         replacement = f"[file:{safe_name}]"
         if ref.end > ref.start:
             result = result[:ref.start] + replacement + result[ref.end:]
@@ -168,46 +168,46 @@ def _resolve_binary(ref: FileRef, workspace_dir: Path) -> ResolvedRef:
             error=f"Failed to copy '{path.name}': {e}",
         )
 
-    docker_path = _docker_path_for(dest, fallback=Path("/workspace/uploads") / path.name)
+    _docker_path = _docker_path_for(dest, fallback=Path("/workspace/uploads") / path.name)
 
-    size_kb = path.stat().st_size // 1024
+    _size_kb = path.stat().st_size // 1024
     ext = path.suffix.lower()
 
     if ext == ".exe" or ext in (".dll", ".sys"):
-        arch_hint = "Windows PE binary"
-        tools_hint = (
+        _arch_hint = "Windows PE binary"
+        _tools_hint = (
             "file, strings -n 6, checksec, "
             "objdump -d, wine (if 32/64-bit exe)"
         )
-    elif ext in (".elf", ".out", ".so", ".ko"):
-        arch_hint = "ELF binary"
-        tools_hint = "file, strings -n 6, checksec, readelf -h, objdump -d, ltrace, strace"
+    elif ext in (".el", ".out", ".so", ".ko"):
+        _arch_hint = "ELF binary"
+        _tools_hint = "file, strings -n 6, checksec, readelf -h, objdump -d, ltrace, strace"
     elif ext in (".apk", ".dex"):
-        arch_hint = "Android APK/DEX"
-        tools_hint = "apktool d, jadx, strings, dexdump"
+        _arch_hint = "Android APK/DEX"
+        _tools_hint = "apktool d, jadx, strings, dexdump"
     elif ext in (".jar", ".class"):
-        arch_hint = "Java bytecode"
-        tools_hint = "javap -c, cfr decompiler, strings"
+        _arch_hint = "Java bytecode"
+        _tools_hint = "javap -c, cfr decompiler, strings"
     elif ext == ".pyc":
-        arch_hint = "Python compiled bytecode"
-        tools_hint = "python3 -m dis, uncompyle6"
+        _arch_hint = "Python compiled bytecode"
+        _tools_hint = "python3 -m dis, uncompyle6"
     else:
-        arch_hint = "binary file"
-        tools_hint = "file, strings -n 6, xxd | head -30, binwalk"
+        _arch_hint = "binary file"
+        _tools_hint = "file, strings -n 6, xxd | head -30, binwalk"
 
     context_block = f"""[FILE REFERENCE — BINARY]
 Name      : {path.name}
-Type      : {arch_hint}
-Size      : {size_kb} KB
+Type      : {_arch_hint}
+Size      : {_size_kb} KB
 Host path : {path}
-Docker path: {docker_path}
+Docker path: {_docker_path}
 
 The file has been copied into the Docker workspace.
 Use the execute tool to analyze it:
-  file {docker_path}
-  strings -n 6 {docker_path} | head -60
-  checksec --file={docker_path}
-  {tools_hint.split(",")[0].strip()} {docker_path}
+  file {_docker_path}
+  strings -n 6 {_docker_path} | head -60
+  checksec --file={_docker_path}
+  {_tools_hint.split(",")[0].strip()} {_docker_path}
 
 Suggested first steps depending on task:
   CTF/Reversing  → file + strings + ltrace + r2 -A + pdg @ main
@@ -233,11 +233,11 @@ def _resolve_text(ref: FileRef, workspace_dir: Path) -> ResolvedRef:
             raw=ref.raw, path=path, kind="text", context_block="",
             error=f"Failed to copy '{path.name}': {e}",
         )
-    docker_path = _docker_path_for(dest, fallback=Path("/workspace/uploads") / path.name)
+    _docker_path = _docker_path_for(dest, fallback=Path("/workspace/uploads") / path.name)
 
     if size > _MAX_TEXT_FILE_SIZE:
 
-        text_block = _read_partial(path, max_bytes=_MAX_TEXT_FILE_SIZE)
+        _text_block = _read_partial(path, max_bytes=_MAX_TEXT_FILE_SIZE)
     else:
         try:
             content = path.read_text(encoding="utf-8", errors="replace")
@@ -246,13 +246,13 @@ def _resolve_text(ref: FileRef, workspace_dir: Path) -> ResolvedRef:
                 raw=ref.raw, path=path, kind="text", context_block="",
                 error=str(e),
             )
-        text_block = _format_text_block(path, content)
+        _text_block = _format_text_block(path, content)
     context_block = f"""[FILE REFERENCE — TEXT]
 Name      : {path.name}
 Host path : {path}
-Docker path: {docker_path}
+Docker path: {_docker_path}
 
-{text_block}
+{_text_block}
 """
 
     return ResolvedRef(
@@ -272,7 +272,7 @@ def _resolve_directory(ref: FileRef, workspace_dir: Path) -> ResolvedRef:
             raw=ref.raw, path=path, kind="directory", context_block="",
             error=f"Failed to copy directory '{path.name}': {e}",
         )
-    docker_path = _docker_path_for(dest, fallback=Path("/workspace/uploads") / path.name)
+    _docker_path = _docker_path_for(dest, fallback=Path("/workspace/uploads") / path.name)
     tree_lines: list[str] = []
     file_contents: list[str] = []
     total_content_size = 0
@@ -306,8 +306,8 @@ def _resolve_directory(ref: FileRef, workspace_dir: Path) -> ResolvedRef:
         except OSError:
             skipped_too_large += 1
 
-    tree_str = "\n".join(tree_lines) if tree_lines else "  (empty)"
-    content_str = "\n\n".join(file_contents) if file_contents else ""
+    _tree_str = "\n".join(tree_lines) if tree_lines else "  (empty)"
+    _content_str = "\n\n".join(file_contents) if file_contents else ""
 
     skip_parts: list[str] = []
     if skipped_binary:
@@ -319,21 +319,21 @@ def _resolve_directory(ref: FileRef, workspace_dir: Path) -> ResolvedRef:
     if copy_skipped:
         skip_parts.append(f"{len(copy_skipped)} unreadable/deleted during copy")
 
-    summary = (
+    _summary = (
         f"Files copied: {copied_files} | Files read into context: {files_read}"
         + (f" | Skipped: {', '.join(skip_parts)}" if skip_parts else "")
     )
 
     context_block = f"""[FILE REFERENCE — DIRECTORY]
 Path : {path}
-Docker path: {docker_path}
-{summary}
+Docker path: {_docker_path}
+{_summary}
 
 Directory tree:
-{tree_str}
+{_tree_str}
 
 --- File Contents ---
-{content_str if content_str else "(no readable source files found)"}
+{_content_str if _content_str else "(no readable source files found)"}
 """
 
     return ResolvedRef(
@@ -401,7 +401,9 @@ def _docker_path_for(path: Path, fallback: Path) -> Path:
     except ValueError:
 
         return fallback
-    except Exception:
+    except Exception as e:
+
+        logger.debug("Exception: %s", e)
 
         logger.debug("_docker_path_for: unexpected error for %s, using fallback", path)
         return fallback
@@ -457,9 +459,9 @@ def _read_partial(path: Path, max_bytes: int) -> str:
             f"### {path.name}  ({size_kb} KB — truncated, file too large)\n"
             f"```{lang}\n"
             f"--- HEAD ---\n{head}\n"
-            f"...\n"
+            "...\n"
             f"--- TAIL ---\n{tail}\n"
-            f"```"
+            "```"
         )
     except OSError as e:
         return f"Error reading {path.name}: {e}"

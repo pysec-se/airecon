@@ -606,7 +606,7 @@ class DockerEngine:
             "-e",
             "GOPATH=/home/pentester/go",
             "-e",
-            "GOROOT=/usr/local/go",
+            "GOROOT=/usr/lib/go-1.26",
             "-e",
             "HOME=/home/pentester",
             "-e",

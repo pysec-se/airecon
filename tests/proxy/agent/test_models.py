@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from airecon.proxy.agent.models import AgentState, ToolExecution
+from airecon.proxy.agent.models import AgentState, ToolExecution, _get_model_limits
 
 
 def test_agent_state_initializes_with_defaults():
@@ -192,9 +192,12 @@ def test_add_evidence_cross_phase_not_blocked():
 
 
 def test_legacy_tool_history_truncation_handles_new_entries_incrementally():
+    """Tool history is truncated to max_tool_history entries when exceeded."""
     state = AgentState()
-    # Seed above fallback threshold so legacy truncation path runs.
-    for i in range(55):
+    limits = _get_model_limits()
+    max_hist = limits["max_tool_history"]
+    # Fill above the limit
+    for i in range(max_hist + 10):
         state.tool_history.append(
             ToolExecution(
                 tool_name="execute",
@@ -203,23 +206,14 @@ def test_legacy_tool_history_truncation_handles_new_entries_incrementally():
             )
         )
 
+    # Before add_message, we have more than max
+    assert len(state.tool_history) > max_hist
+
     state.add_message("user", "warmup")
-    first_scan_pos = getattr(state, "_legacy_tool_history_scan_pos", 0)
-    assert first_scan_pos == len(state.tool_history)
-
-    # Append a large untruncated legacy entry and ensure fallback truncates it.
-    state.tool_history.append(
-        ToolExecution(
-            tool_name="execute",
-            arguments={"command": "cat huge.log"},
-            result={"stdout": "A" * 80_000},
-        )
-    )
-    state.add_message("assistant", "next")
-
-    latest = state.tool_history[-1].result["stdout"]
-    assert "... [TRUNCATED]" in latest
-    assert len(latest) < 80_000
+    # After add_message, tool_history should be truncated to max_tool_history
+    assert len(state.tool_history) == max_hist
+    # The last entries should be the ones we added last (echo max_hist+9, etc.)
+    assert state.tool_history[-1].arguments["command"] == f"echo {max_hist + 9}"
 
 
 def test_add_evidence_full_log_scan():

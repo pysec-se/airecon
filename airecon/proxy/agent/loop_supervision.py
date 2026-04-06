@@ -536,13 +536,13 @@ class _SupervisionMixin:
         return "\n".join(lines)
 
     def _prune_stale_skills(self, max_age_iterations: int = 10) -> int:
-        from ..system import _PHASE_SKILL_DIRECTORIES
+        from ..system import _PHASE_SKILL_CATEGORIES
 
         if not hasattr(self.state, "conversation") or len(self.state.conversation) < 10:
             return 0
 
         current_phase = self._get_current_phase().value.upper()
-        phase_dirs = _PHASE_SKILL_DIRECTORIES.get(current_phase, set())
+        phase_dirs = _PHASE_SKILL_CATEGORIES.get(current_phase, set())
 
         recommended_skills = set()
         try:

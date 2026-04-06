@@ -1,19 +1,41 @@
 from __future__ import annotations
 
 import ast
-import json
-import logging
 import re
-import shlex
 from pathlib import Path
 from typing import Any
+import json
+import logging
+import shlex
 
 from .tuning import get_tuning
 
 logger = logging.getLogger("airecon.validation")
 
-# Valid input types for request_user_input tool
-VALID_USER_INPUT_TYPES = frozenset({"text", "captcha", "totp", "password", "otp"})
+# Valid input types for request_user_input tool — loaded from tools_meta.json
+_VALID_INPUT_TYPES_JSON = [
+    entry.get("function", {})
+    .get("parameters", {})
+    .get("properties", {})
+    .get("input_type", {})
+    .get("enum", [])
+    for entry in (
+        json.loads(
+            (Path(__file__).parent.parent / "data" / "tools.json").read_text(
+                encoding="utf-8"
+            )
+        )
+        if (Path(__file__).parent.parent / "data" / "tools.json").exists()
+        else []
+    )
+    if entry.get("function", {}).get("name") == "request_user_input"
+]
+VALID_USER_INPUT_TYPES: frozenset[str] = frozenset(
+    _VALID_INPUT_TYPES_JSON[0]
+    if _VALID_INPUT_TYPES_JSON
+    else {"text", "captcha", "totp", "password", "otp"}
+)
+
 
 def _load_known_tools() -> frozenset[str]:
     try:
@@ -28,9 +50,11 @@ def _load_known_tools() -> frozenset[str]:
             elif isinstance(category, list):
                 tools.update(t.lower() for t in category if t)
         return frozenset(tools)
-    except Exception as exc:
-        logger.debug("Could not load tools_meta.json for validator: %s", exc)
+    except Exception as e:
+        logger.debug("Exception: %s", e)
+        logger.debug("Operation failed")
         return frozenset()
+
 
 _KNOWN_TOOLS: frozenset[str] = _load_known_tools()
 _REPLAY_GAP_MESSAGES = {
@@ -102,31 +126,66 @@ _REPLAY_GAP_MESSAGES = {
     ),
 }
 _REPLAY_SCORE_WEIGHTS = {
-    "request_logged": float(get_tuning("validator.replay.score_weights.request_logged", 0.16)),
-    "response_logged": float(get_tuning("validator.replay.score_weights.response_logged", 0.16)),
-    "target_bound": float(get_tuning("validator.replay.score_weights.target_bound", 0.18)),
-    "payload_observed": float(get_tuning("validator.replay.score_weights.payload_observed", 0.14)),
-    "matching_finding": float(get_tuning("validator.replay.score_weights.matching_finding", 0.12)),
-    "artifact_bound": float(get_tuning("validator.replay.score_weights.artifact_bound", 0.09)),
-    "runtime_http": float(get_tuning("validator.replay.score_weights.runtime_http", 0.09)),
-    "runtime_signal": float(get_tuning("validator.replay.score_weights.runtime_signal", 0.06)),
-    "runtime_impact": float(get_tuning("validator.replay.score_weights.runtime_impact", 0.05)),
-    "runtime_host_bound": float(get_tuning("validator.replay.score_weights.runtime_host_bound", 0.05)),
-    "runtime_payload_bound": float(get_tuning("validator.replay.score_weights.runtime_payload_bound", 0.05)),
-    "no_runtime_text_bonus": float(get_tuning("validator.replay.score_weights.no_runtime_text_bonus", 0.08)),
+    "request_logged": float(
+        get_tuning("validator.replay.score_weights.request_logged", 0.16)
+    ),
+    "response_logged": float(
+        get_tuning("validator.replay.score_weights.response_logged", 0.16)
+    ),
+    "target_bound": float(
+        get_tuning("validator.replay.score_weights.target_bound", 0.18)
+    ),
+    "payload_observed": float(
+        get_tuning("validator.replay.score_weights.payload_observed", 0.14)
+    ),
+    "matching_finding": float(
+        get_tuning("validator.replay.score_weights.matching_finding", 0.12)
+    ),
+    "artifact_bound": float(
+        get_tuning("validator.replay.score_weights.artifact_bound", 0.09)
+    ),
+    "runtime_http": float(
+        get_tuning("validator.replay.score_weights.runtime_http", 0.09)
+    ),
+    "runtime_signal": float(
+        get_tuning("validator.replay.score_weights.runtime_signal", 0.06)
+    ),
+    "runtime_impact": float(
+        get_tuning("validator.replay.score_weights.runtime_impact", 0.05)
+    ),
+    "runtime_host_bound": float(
+        get_tuning("validator.replay.score_weights.runtime_host_bound", 0.05)
+    ),
+    "runtime_payload_bound": float(
+        get_tuning("validator.replay.score_weights.runtime_payload_bound", 0.05)
+    ),
+    "no_runtime_text_bonus": float(
+        get_tuning("validator.replay.score_weights.no_runtime_text_bonus", 0.08)
+    ),
 }
 _REPLAY_THRESHOLDS = {
-    "strict_with_runtime": float(get_tuning("validator.replay.thresholds.strict_with_runtime", 0.58)),
-    "strict_no_runtime": float(get_tuning("validator.replay.thresholds.strict_no_runtime", 0.48)),
+    "strict_with_runtime": float(
+        get_tuning("validator.replay.thresholds.strict_with_runtime", 0.58)
+    ),
+    "strict_no_runtime": float(
+        get_tuning("validator.replay.thresholds.strict_no_runtime", 0.48)
+    ),
     "non_strict": float(get_tuning("validator.replay.thresholds.non_strict", 0.38)),
 }
 _REPLAY_SEVERITY_OFFSETS = {
-    "CRITICAL": float(get_tuning("validator.replay.thresholds.severity_offset.critical", 0.10)),
+    "CRITICAL": float(
+        get_tuning("validator.replay.thresholds.severity_offset.critical", 0.10)
+    ),
     "HIGH": float(get_tuning("validator.replay.thresholds.severity_offset.high", 0.06)),
-    "MEDIUM": float(get_tuning("validator.replay.thresholds.severity_offset.medium", 0.02)),
+    "MEDIUM": float(
+        get_tuning("validator.replay.thresholds.severity_offset.medium", 0.02)
+    ),
     "LOW": float(get_tuning("validator.replay.thresholds.severity_offset.low", -0.02)),
-    "INFO": float(get_tuning("validator.replay.thresholds.severity_offset.info", -0.04)),
+    "INFO": float(
+        get_tuning("validator.replay.thresholds.severity_offset.info", -0.04)
+    ),
 }
+
 
 def validate_target_path(
     target: str, base_dir: str | Path = "/workspace"
@@ -144,7 +203,6 @@ def validate_target_path(
         for part in Path(target).parts:
             next_path = current / part
             if next_path.is_symlink():
-
                 resolved_link = next_path.resolve()
                 try:
                     resolved_link.relative_to(base_path)
@@ -164,6 +222,7 @@ def validate_target_path(
     except Exception as e:
         return False, f"Path validation error: {str(e)}"
 
+
 def extract_paths_from_command(command: str) -> list[str]:
     _Q = r'(?:"([^"]+)"|\'([^\']+)\'|(\S+))'
     patterns = [
@@ -177,11 +236,11 @@ def extract_paths_from_command(command: str) -> list[str]:
     paths: list[str] = []
     for pattern in patterns:
         for groups in re.findall(pattern, command):
-
             path = next((g for g in groups if g), None)
             if path:
                 paths.append(path)
     return paths
+
 
 def validate_command_paths(
     command: str, base_dir: str | Path = "/workspace"
@@ -192,15 +251,18 @@ def validate_command_paths(
             return False, str(error)
     return True, ""
 
+
 def validate_paths_in_semgrep_args(
     target_path: str, base_dir: str | Path = "/workspace"
 ) -> tuple[bool, str]:
     return validate_target_path(target_path, base_dir)
 
+
 def validate_paths_in_filesystem_args(
     file_path: str, base_dir: str | Path = "/workspace"
 ) -> tuple[bool, str]:
     return validate_target_path(file_path, base_dir)
+
 
 DANGEROUS_PATTERNS: list[tuple[str, str]] = [
     (r"rm\s+-rf\s+/", "Dangerous: rm -rf / detected"),
@@ -209,6 +271,7 @@ DANGEROUS_PATTERNS: list[tuple[str, str]] = [
     (r"pkill\s+-9", "Dangerous: killing critical processes"),
     (r">\s*/dev/sd[a-z]", "Dangerous: writing to disk device"),
 ]
+
 
 def _has_dangerous_chmod_mode(command: str) -> bool:
     if "chmod" not in command.lower():
@@ -242,6 +305,7 @@ def _has_dangerous_chmod_mode(command: str) -> bool:
 
     return False
 
+
 def has_dangerous_patterns(command: str) -> tuple[bool, str]:
     for pattern, description in DANGEROUS_PATTERNS:
         if re.search(pattern, command, re.IGNORECASE):
@@ -249,6 +313,7 @@ def has_dangerous_patterns(command: str) -> tuple[bool, str]:
     if _has_dangerous_chmod_mode(command):
         return True, "Dangerous: SUID/SGID bit change detected"
     return False, ""
+
 
 def validate_for_execution(
     command: str, base_dir: str | Path = "/workspace"
@@ -267,6 +332,7 @@ def validate_for_execution(
         )
     return validate_command_paths(command, base_dir)
 
+
 _HTTP_EVIDENCE_RE = re.compile(
     r"(http\s+[2345]\d{2}|status[:\s]+[2345]\d{2}|code\s+[2345]\d{2}|"
     r"\b[2345]\d{2}\s+(ok|found|forbidden|redirect|not found|created|"
@@ -276,7 +342,6 @@ _HTTP_EVIDENCE_RE = re.compile(
     r"\[[2345]\d{2}\]|\([2345]\d{2}\)|\{[2345]\d{2}\}|"
     r"returned\s+[2345]\d{2}|returns\s+[2345]\d{2}|got\s+[2345]\d{2}|"
     r"observed[:\s]+[2345]\d{2}|status\s*[2345]\d{2}|"
-
     r"\"status(?:Code)?\"\s*:\s*[2345]\d{2}|"
     r"\"code\"\s*:\s*[2345]\d{2}|"
     r"\"http_status\"\s*:\s*[2345]\d{2})",
@@ -286,26 +351,26 @@ _HTTP_EVIDENCE_RE = re.compile(
 _HTTP_EVIDENCE_PATTERNS = {
     "status_change": re.compile(
         r"(200|201|204|301|302|304|400|401|403|404|500|503)\s*→\s*(200|201|204|301|302|304|400|401|403|404|500|503)",
-        re.IGNORECASE
+        re.IGNORECASE,
     ),
     "response_content": re.compile(
         r"(response|returned|got|contain(?:s|ing)|found|showing|displays?|has|includes)\s+.*?"
         r"(admin|user|password|token|secret|key|cookie|session|data|record|list|table|error|exception|query|select|insert|update|delete|flag|id|username|email|api|credential)",
-        re.IGNORECASE
+        re.IGNORECASE,
     ),
     "error_indicator": re.compile(
         r"(error|exception|sql|syntax|warning|failed|denied|forbidden|timeout|connection|refused|unreachable|stack trace|traceback)",
-        re.IGNORECASE
+        re.IGNORECASE,
     ),
     "data_extraction": re.compile(
         r"(extracted|captured|dumped|found|leaked|exposed|retrieved|obtained|recovered|decrypted)\s+.*?"
         r"(password|token|api|key|secret|credential|session|cookie|hash|id|username|email|data)",
-        re.IGNORECASE
+        re.IGNORECASE,
     ),
 }
 
-class _ValidatorMixin:
 
+class _ValidatorMixin:
     @staticmethod
     def _str_arg(arguments: dict[str, Any], key: str) -> str:
         val = arguments.get(key)
@@ -375,14 +440,37 @@ class _ValidatorMixin:
             return min(0.95, max(0.25, base + offset))
         return _REPLAY_THRESHOLDS["non_strict"]
 
-    _VALID_BROWSER_ACTIONS = frozenset({
-        "launch", "goto", "click", "type", "scroll_down", "scroll_up", "back",
-        "forward", "new_tab", "switch_tab", "close_tab", "wait", "execute_js",
-        "double_click", "hover", "press_key", "save_pdf", "get_console_logs",
-        "get_network_logs", "view_source", "close", "list_tabs",
-
-        "login_form", "handle_totp", "save_auth_state", "inject_cookies", "oauth_authorize",
-    })
+    _VALID_BROWSER_ACTIONS = frozenset(
+        {
+            "launch",
+            "goto",
+            "click",
+            "type",
+            "scroll_down",
+            "scroll_up",
+            "back",
+            "forward",
+            "new_tab",
+            "switch_tab",
+            "close_tab",
+            "wait",
+            "execute_js",
+            "double_click",
+            "hover",
+            "press_key",
+            "save_pd",
+            "get_console_logs",
+            "get_network_logs",
+            "view_source",
+            "close",
+            "list_tabs",
+            "login_form",
+            "handle_totp",
+            "save_auth_state",
+            "inject_cookies",
+            "oauth_authorize",
+        }
+    )
 
     def _collect_runtime_verification_texts(self, max_entries: int = 24) -> list[str]:
         chunks: list[str] = []
@@ -405,7 +493,8 @@ class _ValidatorMixin:
                 merged = f"{tool_name} {arg_blob} {out_blob}".strip()
                 if merged:
                     chunks.append(merged)
-            except Exception:
+            except Exception as e:
+                logger.debug("Exception: %s", e)
                 continue
 
         evidence_log = list(getattr(state, "evidence_log", []) or [])[-max_entries:]
@@ -417,7 +506,8 @@ class _ValidatorMixin:
                 artifact = str(ev.get("artifact", "")).strip()
                 if summary:
                     chunks.append(f"{summary} {artifact}".strip())
-            except Exception:
+            except Exception as e:
+                logger.debug("Exception: %s", e)
                 continue
         return chunks
 
@@ -428,9 +518,17 @@ class _ValidatorMixin:
             token = str(m[1]).strip()
             if len(token) < 4:
                 continue
-            if re.search(r"(or\s+1=1|union\s+select|<script|../|169\.254|cmd=|token=|jwt)", token, re.IGNORECASE):
+            if re.search(
+                r"(or\s+1=1|union\s+select|<script|../|169\.254|cmd=|token=|jwt)",
+                token,
+                re.IGNORECASE,
+            ):
                 markers.append(token.lower()[:120])
-        for m in re.findall(r"(?:payload|param|query|id|user|url)\s*[:=]\s*([^\s,&]+)", text, re.IGNORECASE):
+        for m in re.findall(
+            r"(?:payload|param|query|id|user|url)\s*[:=]\s*([^\s,&]+)",
+            text,
+            re.IGNORECASE,
+        ):
             tok = str(m).strip().strip("'\"")
             if tok and len(tok) >= 3:
                 markers.append(tok.lower()[:80])
@@ -444,11 +542,7 @@ class _ValidatorMixin:
         right = right.strip().lower()
         if not left or not right:
             return False
-        return (
-            left == right
-            or left.endswith("." + right)
-            or right.endswith("." + left)
-        )
+        return left == right or left.endswith("." + right) or right.endswith("." + left)
 
     def _has_detected_waf_profile(self, hosts: list[str]) -> bool:
         session = getattr(self, "_session", None)
@@ -459,8 +553,11 @@ class _ValidatorMixin:
         active_target = ""
         try:
             state = getattr(self, "state", None)
-            active_target = str(getattr(state, "active_target", "") or "").strip().lower()
-        except Exception:
+            active_target = (
+                str(getattr(state, "active_target", "") or "").strip().lower()
+            )
+        except Exception as e:
+            logger.debug("Exception: %s", e)
             active_target = ""
 
         host_candidates = {
@@ -596,9 +693,16 @@ class _ValidatorMixin:
         if not target_bound:
             gaps.append(_REPLAY_GAP_MESSAGES["target_bound"])
 
-        runtime_http = has_runtime and bool(re.search(r"\b(http/?\d\.\d|status|code)\s*[=:]?\s*[2345]\d{2}", runtime_text))
+        runtime_http = has_runtime and bool(
+            re.search(
+                r"\b(http/?\d\.\d|status|code)\s*[=:]?\s*[2345]\d{2}", runtime_text
+            )
+        )
         runtime_command_logged = has_runtime and bool(
-            re.search(r"\b(curl|requests\.|httpx\.|urllib|fetch\(|\bget\b|\bpost\b|\bput\b|\bdelete\b|\bpatch\b)\b", runtime_text)
+            re.search(
+                r"\b(curl|requests\.|httpx\.|urllib|fetch\(|\bget\b|\bpost\b|\bput\b|\bdelete\b|\bpatch\b)\b",
+                runtime_text,
+            )
         )
         runtime_response_logged = has_runtime and bool(
             re.search(r"\b(response|returned|body|status|code)\b", runtime_text)
@@ -636,7 +740,10 @@ class _ValidatorMixin:
 
         artifact_bound = bool(
             re.search(r"\b(output/|artifact|log|trace|capture|pcap|json)\b", desc_lower)
-            or (has_runtime and re.search(r"\b(output/|artifact|log|trace|capture)\b", runtime_text))
+            or (
+                has_runtime
+                and re.search(r"\b(output/|artifact|log|trace|capture)\b", runtime_text)
+            )
         )
 
         score = 0.0
@@ -667,21 +774,26 @@ class _ValidatorMixin:
 
             if waf_false_positive:
                 score -= 0.4
-                gaps.append("WAF block detected without bypass evidence - may be false positive")
+                gaps.append(
+                    "WAF block detected without bypass evidence - may be false positive"
+                )
         else:
-
             if request_logged and response_logged and target_bound:
                 score += _REPLAY_SCORE_WEIGHTS["no_runtime_text_bonus"]
 
         runtime_bound = (
-            runtime_command_logged
-            and runtime_response_logged
-            and runtime_http
-            and runtime_signal
-            and runtime_impact
-            and (runtime_host_bound or not hosts)
-            and runtime_payload_bound
-        ) if has_runtime else False
+            (
+                runtime_command_logged
+                and runtime_response_logged
+                and runtime_http
+                and runtime_signal
+                and runtime_impact
+                and (runtime_host_bound or not hosts)
+                and runtime_payload_bound
+            )
+            if has_runtime
+            else False
+        )
         return min(1.0, max(0.0, score)), gaps, has_runtime, runtime_bound
 
     def _validate_tool_args(
@@ -692,7 +804,10 @@ class _ValidatorMixin:
             if not cmd.strip():
                 return False, "'command' must be a non-empty string."
             if len(cmd) > 20_000:
-                return False, f"'command' is too long ({len(cmd)} chars). Split into smaller calls."
+                return (
+                    False,
+                    f"'command' is too long ({len(cmd)} chars). Split into smaller calls.",
+                )
             has_danger, danger_msg = has_dangerous_patterns(cmd)
             if has_danger:
                 return False, f"Command rejected: {danger_msg}"
@@ -704,22 +819,37 @@ class _ValidatorMixin:
                     f"Invalid browser action '{action}'. "
                     f"Valid actions: {sorted(self._VALID_BROWSER_ACTIONS)}"
                 )
-            if action in ("goto", "new_tab") and not self._str_arg(arguments, "url").strip():
+            if (
+                action in ("goto", "new_tab")
+                and not self._str_arg(arguments, "url").strip()
+            ):
                 return False, f"browser_action '{action}' requires a non-empty 'url'."
             if action == "click" and not self._str_arg(arguments, "coordinate").strip():
-                return False, "browser_action 'click' requires 'coordinate' (format: 'x,y')."
+                return (
+                    False,
+                    "browser_action 'click' requires 'coordinate' (format: 'x,y').",
+                )
             if action == "type" and not isinstance(arguments.get("text"), str):
                 return False, "browser_action 'type' requires a 'text' string argument."
-            if action == "switch_tab" and not self._str_arg(arguments, "tab_id").strip():
+            if (
+                action == "switch_tab"
+                and not self._str_arg(arguments, "tab_id").strip()
+            ):
                 return False, "browser_action 'switch_tab' requires 'tab_id'."
             if action == "press_key" and not self._str_arg(arguments, "key").strip():
                 return False, "browser_action 'press_key' requires 'key'."
             if action == "execute_js":
                 if not self._str_arg(arguments, "js_code").strip():
-                    return False, "browser_action 'execute_js' requires non-empty 'js_code'."
+                    return (
+                        False,
+                        "browser_action 'execute_js' requires non-empty 'js_code'.",
+                    )
                 parallel = arguments.get("parallel", False)
                 if not isinstance(parallel, bool):
-                    return False, "browser_action 'execute_js' optional 'parallel' must be boolean."
+                    return (
+                        False,
+                        "browser_action 'execute_js' optional 'parallel' must be boolean.",
+                    )
                 if parallel and self._str_arg(arguments, "tab_id").strip():
                     return False, (
                         "browser_action 'execute_js' with parallel=true must not set 'tab_id'."
@@ -738,11 +868,19 @@ class _ValidatorMixin:
 
             path_lower = path_str.strip().lower()
             _REPORT_NAMES = (
-                "final_report", "report", "vuln", "vulnerability", "finding",
-                "assessment", "security_report", "pentest_report", "summary_report",
+                "final_report",
+                "report",
+                "vuln",
+                "vulnerability",
+                "finding",
+                "assessment",
+                "security_report",
+                "pentest_report",
+                "summary_report",
             )
             if path_lower.endswith(".md") and any(
-                    r in path_lower for r in _REPORT_NAMES):
+                r in path_lower for r in _REPORT_NAMES
+            ):
                 return False, (
                     "BLOCKED: Writing vulnerability findings to a markdown file is FORBIDDEN. "
                     "Use create_vulnerability_report for each confirmed finding. "
@@ -771,16 +909,27 @@ class _ValidatorMixin:
             pass
 
         elif tool_name in ("caido_send_request", "caido_automate"):
-            host_raw = self._str_arg(arguments, "host").removeprefix("https://").removeprefix("http://").rstrip("/")
+            host_raw = (
+                self._str_arg(arguments, "host")
+                .removeprefix("https://")
+                .removeprefix("http://")
+                .rstrip("/")
+            )
             if not host_raw.strip():
                 return False, (
                     f"'{tool_name}' requires a non-empty 'host' (e.g. 'target.com', not a full URL)."
                 )
             if tool_name == "caido_automate":
                 if not self._str_arg(arguments, "raw_http").strip():
-                    return False, "'caido_automate' requires 'raw_http' with §FUZZ§ marker."
+                    return (
+                        False,
+                        "'caido_automate' requires 'raw_http' with §FUZZ§ marker.",
+                    )
                 if not arguments.get("payloads"):
-                    return False, "'caido_automate' requires a non-empty 'payloads' list."
+                    return (
+                        False,
+                        "'caido_automate' requires a non-empty 'payloads' list.",
+                    )
 
         elif tool_name == "schemathesis_fuzz":
             if not self._str_arg(arguments, "schema_url").strip():
@@ -795,8 +944,12 @@ class _ValidatorMixin:
                     )
 
         elif tool_name == "create_vulnerability_report":
-            _phase_obj = self._get_current_phase() if hasattr(self, "_get_current_phase") else None
-            _phase_str = (_phase_obj.value if _phase_obj is not None else None)
+            _phase_obj = (
+                self._get_current_phase()
+                if hasattr(self, "_get_current_phase")
+                else None
+            )
+            _phase_str = _phase_obj.value if _phase_obj is not None else None
             if _phase_str is None:
                 _phase_str = "RECON"
             _phase_str = _phase_str.upper()
@@ -814,7 +967,11 @@ class _ValidatorMixin:
 
             matching_finding = False
             matched_finding_severity = ""
-            if hasattr(self, "_session") and self._session and self._session.vulnerabilities:
+            if (
+                hasattr(self, "_session")
+                and self._session
+                and self._session.vulnerabilities
+            ):
                 for v in self._session.vulnerabilities:
                     vuln_finding = str(v.get("finding", "")).lower()
                     if report_finding and any(
@@ -825,7 +982,9 @@ class _ValidatorMixin:
                         if isinstance(raw_severity, str):
                             matched_finding_severity = raw_severity
                         break
-            report_severity = self._derive_report_severity(arguments, matched_finding_severity)
+            report_severity = self._derive_report_severity(
+                arguments, matched_finding_severity
+            )
 
             if not poc_code:
                 return False, (
@@ -839,30 +998,46 @@ class _ValidatorMixin:
                 )
 
             poc_lower = poc_code.lower()
-            _is_python = any(sig in poc_lower for sig in (
-                "import ", "def ", "#!/usr/bin/env python", "#!/usr/bin/python",
-                "requests.", "urllib", "http.client",
-            ))
+            _is_python = any(
+                sig in poc_lower
+                for sig in (
+                    "import ",
+                    "def ",
+                    "#!/usr/bin/env python",
+                    "#!/usr/bin/python",
+                    "requests.",
+                    "urllib",
+                    "http.client",
+                )
+            )
             _is_curl = poc_lower.lstrip().startswith("curl ")
             _is_php = "<?php" in poc_lower
-            _is_js = any(sig in poc_lower for sig in ("fetch(", "xmlhttprequest", "require("))
+            _is_js = any(
+                sig in poc_lower for sig in ("fetch(", "xmlhttprequest", "require(")
+            )
             _is_bash = "#!/bin/bash" in poc_lower or "#!/bin/sh" in poc_lower
 
             if _is_python:
-
                 try:
                     ast.parse(poc_code)
                 except SyntaxError as syn_err:
                     return False, (
-                        f"REPORT REJECTED: 'poc_script_code' is not valid Python — "
+                        "REPORT REJECTED: 'poc_script_code' is not valid Python — "
                         f"SyntaxError at line {syn_err.lineno}: {syn_err.msg}. "
                         "Fix the syntax or provide a curl command instead."
                     )
             elif not (_is_curl or _is_php or _is_js or _is_bash):
-
                 NON_PYTHON_INDICATORS = (
-                    "curl ", "http", "payload", "exploit", "fetch(",
-                    "<?php", "<script", "burp", "#!/", "request",
+                    "curl ",
+                    "http",
+                    "payload",
+                    "exploit",
+                    "fetch(",
+                    "<?php",
+                    "<script",
+                    "burp",
+                    "#!/",
+                    "request",
                 )
                 if not any(ind in poc_lower for ind in NON_PYTHON_INDICATORS):
                     return False, (
@@ -882,15 +1057,31 @@ class _ValidatorMixin:
                     "Explain the root cause with specific technical details."
                 )
             GENERIC_TITLES = (
-                "vulnerability found", "security issue", "bug found", "potential",
-                "possible", "issue detected", "security bug",
+                "vulnerability found",
+                "security issue",
+                "bug found",
+                "potential",
+                "possible",
+                "issue detected",
+                "security bug",
             )
             UNVERIFIED_PHRASES = (
-                "further verification needed", "needs verification", "needs to be verified",
-                "may be vulnerable", "could be vulnerable", "appears to be vulnerable",
-                "potentially vulnerable", "might be vulnerable", "possible vulnerability",
-                "note:", "unconfirmed", "not confirmed", "could not confirm",
-                "needs more testing", "requires further", "needs further",
+                "further verification needed",
+                "needs verification",
+                "needs to be verified",
+                "may be vulnerable",
+                "could be vulnerable",
+                "appears to be vulnerable",
+                "potentially vulnerable",
+                "might be vulnerable",
+                "possible vulnerability",
+                "note:",
+                "unconfirmed",
+                "not confirmed",
+                "could not confirm",
+                "needs more testing",
+                "requires further",
+                "needs further",
             )
             combined_text = (poc_desc + " " + technical).lower()
             for phrase in UNVERIFIED_PHRASES:
@@ -907,23 +1098,27 @@ class _ValidatorMixin:
                 )
 
             scope_valid = True
-            if hasattr(self, '_session') and self._session:
+            if hasattr(self, "_session") and self._session:
 
                 def _is_ip_address(host: str) -> bool:
-                    parts = host.split('.')
-                    return len(parts) == 4 and all(p.isdigit() and 0 <= int(p) <= 255 for p in parts)
+                    parts = host.split(".")
+                    return len(parts) == 4 and all(
+                        p.isdigit() and 0 <= int(p) <= 255 for p in parts
+                    )
 
                 def _get_base_domain(host: str) -> str:
-                    host = host.lower().split(':')[0]
+                    host = host.lower().split(":")[0]
                     if _is_ip_address(host):
                         return host
-                    parts = host.split('.')
-                    return '.'.join(parts[-2:]) if len(parts) >= 2 else host
+                    parts = host.split(".")
+                    return ".".join(parts[-2:]) if len(parts) >= 2 else host
 
                 poc_url_match = re.search(r"https?://([^\s/\"']+)", poc_code.lower())
                 if poc_url_match:
-                    poc_host = poc_url_match.group(1).split(':')[0]
-                    session_hosts = [self._session.target] + list(self._session.live_hosts)
+                    poc_host = poc_url_match.group(1).split(":")[0]
+                    session_hosts = [self._session.target] + list(
+                        self._session.live_hosts
+                    )
 
                     if _is_ip_address(poc_host):
                         direct_match = poc_host in session_hosts
@@ -935,11 +1130,12 @@ class _ValidatorMixin:
                                 "PoC must target the actual session target IP."
                             )
                     else:
-
                         poc_base = _get_base_domain(poc_host)
                         session_bases = [_get_base_domain(h) for h in session_hosts]
 
-                        direct_match = any(poc_host == h.split(':')[0] for h in session_hosts)
+                        direct_match = any(
+                            poc_host == h.split(":")[0] for h in session_hosts
+                        )
                         base_match = any(poc_base == s_base for s_base in session_bases)
 
                         if not (direct_match or base_match):
@@ -951,7 +1147,6 @@ class _ValidatorMixin:
                             )
 
             if not is_ctf:
-
                 if not _HTTP_EVIDENCE_RE.search(poc_desc):
                     return False, (
                         "REPORT REJECTED: 'poc_description' must include actual HTTP response evidence. "
@@ -962,18 +1157,18 @@ class _ValidatorMixin:
 
                 _desc_lower = poc_desc.lower()
                 has_tool_reference = (
-                    "output/" in _desc_lower or
-                    "session" in _desc_lower or
-                    "response" in _desc_lower or
-                    "→" in poc_desc or
-                    "http " in _desc_lower or
-                    "observed" in _desc_lower or
-                    "received" in _desc_lower or
-                    "got" in _desc_lower or
-                    "server returned" in _desc_lower or
-                    "response body" in _desc_lower or
-                    "response contained" in _desc_lower or
-                    any(tool in _desc_lower for tool in _KNOWN_TOOLS)
+                    "output/" in _desc_lower
+                    or "session" in _desc_lower
+                    or "response" in _desc_lower
+                    or "→" in poc_desc
+                    or "http " in _desc_lower
+                    or "observed" in _desc_lower
+                    or "received" in _desc_lower
+                    or "got" in _desc_lower
+                    or "server returned" in _desc_lower
+                    or "response body" in _desc_lower
+                    or "response contained" in _desc_lower
+                    or any(tool in _desc_lower for tool in _KNOWN_TOOLS)
                 )
                 if not has_tool_reference:
                     return False, (
@@ -981,13 +1176,19 @@ class _ValidatorMixin:
                         "Reference the tool output file (e.g., 'output/nmap_scan.txt') or describe the actual response observed."
                     )
 
-                has_status_change = bool(_HTTP_EVIDENCE_PATTERNS["status_change"].search(poc_desc))
-                has_content_proof = bool(_HTTP_EVIDENCE_PATTERNS["response_content"].search(poc_desc))
+                has_status_change = bool(
+                    _HTTP_EVIDENCE_PATTERNS["status_change"].search(poc_desc)
+                )
+                has_content_proof = bool(
+                    _HTTP_EVIDENCE_PATTERNS["response_content"].search(poc_desc)
+                )
                 has_error_or_data = bool(
                     _HTTP_EVIDENCE_PATTERNS["error_indicator"].search(poc_desc)
                     or _HTTP_EVIDENCE_PATTERNS["data_extraction"].search(poc_desc)
                 )
-                impact_proven = has_status_change or has_content_proof or has_error_or_data
+                impact_proven = (
+                    has_status_change or has_content_proof or has_error_or_data
+                )
                 if not impact_proven:
                     return False, (
                         "REPORT REJECTED: HTTP status shown but exploitation impact not documented. "
@@ -999,11 +1200,13 @@ class _ValidatorMixin:
                         "Do not submit 'HTTP 200' alone without explaining the impact."
                     )
 
-            replay_score, replay_gaps, has_runtime_context, runtime_bound = self._replay_verification_score(
-                poc_code=poc_code,
-                poc_desc=poc_desc,
-                report_finding=report_finding,
-                matching_finding=matching_finding,
+            replay_score, replay_gaps, has_runtime_context, runtime_bound = (
+                self._replay_verification_score(
+                    poc_code=poc_code,
+                    poc_desc=poc_desc,
+                    report_finding=report_finding,
+                    matching_finding=matching_finding,
+                )
             )
             if not is_ctf:
                 if is_strict_phase and not has_runtime_context:
@@ -1013,8 +1216,12 @@ class _ValidatorMixin:
                         "before submitting create_vulnerability_report."
                     )
                 if is_strict_phase and not runtime_bound:
-                    gap_hint = "; ".join(dict.fromkeys(replay_gaps[:3])) if replay_gaps else (
-                        "ensure PoC host/payload/status are present in runtime replay evidence"
+                    gap_hint = (
+                        "; ".join(dict.fromkeys(replay_gaps[:3]))
+                        if replay_gaps
+                        else (
+                            "ensure PoC host/payload/status are present in runtime replay evidence"
+                        )
                     )
                     return False, (
                         "REPORT REJECTED: Replay verification confidence too low. "
@@ -1029,7 +1236,11 @@ class _ValidatorMixin:
                     severity=report_severity,
                 )
                 if replay_score < replay_threshold:
-                    gap_hint = "; ".join(dict.fromkeys(replay_gaps[:3])) if replay_gaps else "add clearer replay evidence"
+                    gap_hint = (
+                        "; ".join(dict.fromkeys(replay_gaps[:3]))
+                        if replay_gaps
+                        else "add clearer replay evidence"
+                    )
                     return False, (
                         "REPORT REJECTED: Replay verification confidence too low "
                         f"({replay_score:.2f}/{replay_threshold:.2f}, severity={report_severity}). "
@@ -1045,7 +1256,9 @@ class _ValidatorMixin:
             elif len(poc_code) >= 80:
                 score += 14
             else:
-                improvements.append("expand PoC code with full request and payload details")
+                improvements.append(
+                    "expand PoC code with full request and payload details"
+                )
 
             if _is_python or _is_curl or _is_php or _is_js or _is_bash:
                 score += 15
@@ -1068,10 +1281,16 @@ class _ValidatorMixin:
             else:
                 improvements.append("expand root-cause analysis")
 
-            if title and len(title) >= 15 and not any(g in title.lower() for g in GENERIC_TITLES):
+            if (
+                title
+                and len(title) >= 15
+                and not any(g in title.lower() for g in GENERIC_TITLES)
+            ):
                 score += 10
             else:
-                improvements.append("use a specific vulnerability title with endpoint/parameter")
+                improvements.append(
+                    "use a specific vulnerability title with endpoint/parameter"
+                )
 
             if scope_valid:
                 score += 5
@@ -1089,9 +1308,55 @@ class _ValidatorMixin:
             if not is_ctf:
                 score += int(replay_score * 20)
                 if replay_score < 0.65:
-                    improvements.append("perkuat replay verification (request/payload/response/impact)")
+                    improvements.append(
+                        "perkuat replay verification (request/payload/response/impact)"
+                    )
 
-            if is_strict_phase and hasattr(self, "_session") and self._session and self._session.vulnerabilities:
+            # ── Zero-FP Verification Bonus ────────────────────────────────
+            if not is_ctf:
+                try:
+                    from ..config import get_config
+
+                    _v_cfg = get_config()
+                    if _v_cfg.verification_enabled:
+                        from .verification import ConfidenceEscalator
+
+                        _escalator = ConfidenceEscalator()
+
+                        _v_replay = replay_score >= 0.5
+                        _v_cross = matching_finding
+                        _v_neg = True
+                        _v_fp = False
+                        _v_dyn = False
+
+                        _v_tier, _v_conf, _v_status = _escalator.escalate(
+                            original_confidence=replay_score,
+                            replay_verified=_v_replay,
+                            cross_tool_validated=_v_cross,
+                            negative_test_passed=_v_neg,
+                            fp_detected=_v_fp,
+                            dynamic_content=_v_dyn,
+                        )
+
+                        if _v_tier >= 2:
+                            score += 15
+                        elif _v_tier >= 1:
+                            score += 8
+
+                        if _v_conf < _v_cfg.verification_min_report_confidence:
+                            improvements.append(
+                                f"verification confidence too low ({_v_conf:.2f} < {_v_cfg.verification_min_report_confidence:.2f})"
+                            )
+                except Exception as e:
+                    logger.debug("Exception: %s", e)
+                    logger.debug("Operation failed")
+
+            if (
+                is_strict_phase
+                and hasattr(self, "_session")
+                and self._session
+                and self._session.vulnerabilities
+            ):
                 if not matching_finding and len(poc_code) < 200:
                     return False, (
                         "REPORT REJECTED: Vulnerability not found in session discoveries and PoC is too short. "
@@ -1103,7 +1368,11 @@ class _ValidatorMixin:
                 hint = "; ".join(dict.fromkeys(improvements[:3]))
                 return False, (
                     f"REPORT REJECTED: Report quality score too low ({score}/{threshold}) for {_phase_str} phase. "
-                    + (f"Improve: {hint}." if hint else "Add stronger evidence and technical detail.")
+                    + (
+                        f"Improve: {hint}."
+                        if hint
+                        else "Add stronger evidence and technical detail."
+                    )
                 )
 
         return True, None

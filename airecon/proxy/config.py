@@ -19,7 +19,7 @@ CONFIG_FILENAME = "config.yaml"
 _CONFIG_SCHEMA: dict[str, tuple[Any, str]] = {
     "ollama_url": (
         "http://127.0.0.1:11434",
-        "Ollama API endpoint. For remote servers use http://IP:11434",
+        "Ollama API endpoint. REQUIRED — must be set. For local: http://127.0.0.1:11434. For remote: http://IP:11434",
     ),
     "ollama_model": (
         "qwen3.5:122b",
@@ -213,6 +213,299 @@ _CONFIG_SCHEMA: dict[str, tuple[Any, str]] = {
         45,
         "Minimum seconds between forced Ollama context resets. 45s for 12GB VRAM (faster than 60s). 300s for regular recon on large VRAM.",
     ),
+    "caido_graphql_url": (
+        "http://127.0.0.1:48080/graphql",
+        "Caido GraphQL API endpoint. Change if Caido runs on different host/port.",
+    ),
+    "browser_cdp_port": (
+        9222,
+        "Chrome DevTools Protocol debug port. Default 9222.",
+    ),
+    "browser_cdp_bind_address": (
+        "0.0.0.0",  # nosec B104: Security testing tool binds to all interfaces for Docker/containerized deployments
+        "Chrome remote debugging bind address. 0.0.0.0 = all interfaces, 127.0.0.1 = localhost only.",
+    ),
+    "browser_connect_timeout_ms": (
+        3000,
+        "Playwright browser connect timeout in milliseconds.",
+    ),
+    "browser_navigation_timeout_ms": (
+        60000,
+        "Browser page navigation timeout in milliseconds.",
+    ),
+    "browser_login_form_wait_ms": (
+        8000,
+        "Browser wait time for login form rendering in milliseconds.",
+    ),
+    "browser_page_load_timeout_ms": (
+        10000,
+        "Browser page load timeout in milliseconds.",
+    ),
+    "browser_oauth_callback_timeout_ms": (
+        15000,
+        "Browser OAuth callback wait timeout in milliseconds.",
+    ),
+    "browser_totp_fill_timeout_ms": (
+        3000,
+        "Browser TOTP field fill timeout in milliseconds.",
+    ),
+    "browser_screenshot_timeout_ms": (
+        5000,
+        "Browser screenshot capture timeout in milliseconds.",
+    ),
+    # captcha_ollama_model removed — uses ollama_model instead (qwen3.5 supports vision)
+    "waf_bypass_timeout": (
+        30,
+        "WAF bypass engine HTTP timeout in seconds.",
+    ),
+    "fuzzer_threads": (
+        5,
+        "Default concurrent threads for quick_fuzz.",
+    ),
+    "fuzzer_timeout": (
+        15,
+        "Default per-request timeout for fuzzer in seconds.",
+    ),
+    "fuzzer_quick_max_payloads_per_type": (
+        10,
+        "Max payloads per vuln type for quick_fuzz. Lower = faster, higher = more thorough.",
+    ),
+    "fuzzer_quick_timeout_seconds": (
+        300.0,
+        "Aggregate timeout for quick_fuzz in seconds. Prevents stuck state.",
+    ),
+    "fuzzer_deep_timeout_seconds": (
+        300.0,
+        "Aggregate timeout for deep_fuzz in seconds.",
+    ),
+    "fuzzer_advanced_max_payloads": (
+        20,
+        "Max payloads for advanced_fuzz.",
+    ),
+    "fuzzer_waf_bypass_limit": (
+        5,
+        "Max WAF bypass attempts per param:vuln_type combination before giving up.",
+    ),
+    "rate_limiter_base_delay": (
+        1.0,
+        "Base delay between requests in seconds. Per-domain delay is overridden to 1.0/threads by Fuzzer.",
+    ),
+    "rate_limiter_max_delay": (
+        60.0,
+        "Maximum delay between requests in seconds after repeated rate limits.",
+    ),
+    "rate_limiter_max_retries": (
+        5,
+        "Max retries on rate limit (429) or timeout before giving up.",
+    ),
+    "rate_limiter_http_timeout": (
+        30,
+        "HTTP request timeout in seconds for rate limiter client.",
+    ),
+    "rate_limiter_abort_threshold": (
+        10,
+        "Consecutive 429 responses before aborting all requests to a domain.",
+    ),
+    "observe_request_timeout": (
+        15,
+        "HTTP request timeout for observe/intercept tools in seconds.",
+    ),
+    "ollama_status_timeout": (
+        3.5,
+        "Timeout for Ollama health check in seconds.",
+    ),
+    "ollama_status_sticky_ok_seconds": (
+        120.0,
+        "How long to consider Ollama 'healthy' after a successful check.",
+    ),
+    "mcp_probe_timeout": (
+        45.0,
+        "Timeout for MCP server probe in seconds.",
+    ),
+    "mcp_tools_list_timeout": (
+        30.0,
+        "Timeout for MCP tools list request in seconds.",
+    ),
+    "caido_token_timeout": (
+        1.5,
+        "Timeout for Caido auth token fetch in seconds.",
+    ),
+    "agent_idle_hard_timeout": (
+        1800.0,
+        "Hard timeout for agent idle state in seconds. Env var AIRECON_AGENT_IDLE_HARD_TIMEOUT overrides.",
+    ),
+    "exploration_meaningful_evidence_threshold": (
+        0.65,
+        "Minimum confidence score for evidence to be considered 'meaningful' in exploration mode.",
+    ),
+    "agent_max_browser_visits_per_domain": (
+        3,
+        "Max browser tool visits per domain before blocking.",
+    ),
+    "agent_command_hash_cache_limit": (
+        5000,
+        "Max entries in command deduplication hash cache.",
+    ),
+    "agent_command_hash_cache_prune_target": (
+        2500,
+        "Prune command hash cache to this size when limit is exceeded.",
+    ),
+    "agent_max_empty_retries": (
+        4,
+        "Max retries for empty LLM responses before giving up.",
+    ),
+    "agent_ctf_max_iterations": (
+        150,
+        "Max agent iterations in CTF mode.",
+    ),
+    "pipeline_recon_max_iterations": (
+        500,
+        "Max iterations for RECON phase.",
+    ),
+    "pipeline_analysis_max_iterations": (
+        300,
+        "Max iterations for ANALYSIS phase.",
+    ),
+    "pipeline_exploit_max_iterations": (
+        800,
+        "Max iterations for EXPLOIT phase.",
+    ),
+    "pipeline_report_max_iterations": (
+        100,
+        "Max iterations for REPORT phase.",
+    ),
+    "pipeline_recon_budget": (
+        10,
+        "Tool budget for RECON phase.",
+    ),
+    "pipeline_analysis_budget": (
+        30,
+        "Tool budget for ANALYSIS phase.",
+    ),
+    "pipeline_exploit_budget": (
+        60,
+        "Tool budget for EXPLOIT phase.",
+    ),
+    "pipeline_report_budget": (
+        0,
+        "Tool budget for REPORT phase (0 = blocked).",
+    ),
+    "model_max_tool_iterations": (
+        50,
+        "MAX_TOOL_ITERATIONS constant for agent state model.",
+    ),
+    "model_max_tool_history": (
+        100,
+        "MAX_TOOL_HISTORY constant for agent state model.",
+    ),
+    "model_max_objectives": (
+        64,
+        "MAX_OBJECTIVES constant for agent state model.",
+    ),
+    "model_max_evidence": (
+        200,
+        "MAX_EVIDENCE constant for agent state model.",
+    ),
+    "model_max_causal_observations": (
+        2000,
+        "MAX_CAUSAL_OBSERVATIONS constant for agent state model.",
+    ),
+    "model_max_tool_result_chars": (
+        50000,
+        "MAX_TOOL_RESULT_CHARS (in thousands) for agent state model.",
+    ),
+    "model_min_confidence_for_preservation": (
+        0.75,
+        "MIN_CONFIDENCE_FOR_PRESERVATION threshold for agent state model.",
+    ),
+    "verification_enabled": (
+        True,
+        "Enable zero-FP verification engine. When True, all findings go through multi-stage verification.",
+    ),
+    "verification_enable_replay": (
+        True,
+        "Enable replay verification. Re-tests findings with independent payloads.",
+    ),
+    "verification_enable_cross_tool": (
+        True,
+        "Enable cross-tool validation. Requires 2+ independent signals.",
+    ),
+    "verification_enable_negative_test": (
+        True,
+        "Enable negative testing. Tests clean payloads to calibrate FP rate.",
+    ),
+    "verification_enable_fp_detection": (
+        True,
+        "Enable false positive detection. Detects dynamic content, WAF, CDN, honeypots.",
+    ),
+    "verification_max_replays": (
+        3,
+        "Max replay payloads per finding. Higher = more thorough but slower.",
+    ),
+    "verification_timeout": (
+        15,
+        "HTTP timeout per verification request in seconds.",
+    ),
+    "verification_min_certified_confidence": (
+        0.90,
+        "Minimum confidence for CERTIFIED tier. Findings below this are VALIDATED or CONFIRMED.",
+    ),
+    "verification_min_report_confidence": (
+        0.75,
+        "Minimum confidence required before a finding can be included in a vulnerability report.",
+    ),
+    "intelligence_enabled": (
+        True,
+        "Enable genius-level intelligence features (adaptive learning, generative fuzzing, target profiling).",
+    ),
+    "intelligence_adaptive_learning_enabled": (
+        True,
+        "Enable adaptive learning engine for tool performance tracking and strategy reinforcement.",
+    ),
+    "intelligence_adaptive_min_observations": (
+        3,
+        "Minimum tool observations before making recommendations.",
+    ),
+    "intelligence_generative_fuzzing_enabled": (
+        True,
+        "Enable generative fuzzing engine with genetic algorithm payload evolution.",
+    ),
+    "intelligence_generative_population_size": (
+        50,
+        "Population size for generative fuzzing genetic algorithm.",
+    ),
+    "intelligence_generative_max_generations": (
+        10,
+        "Max generations for generative fuzzing evolution.",
+    ),
+    "intelligence_target_profiling_enabled": (
+        True,
+        "Enable intelligent target profiling (tech detection, security posture, attack surface mapping).",
+    ),
+    "intelligence_attack_chain_synthesis_enabled": (
+        True,
+        "Enable automatic attack chain synthesis with kill-chain mapping.",
+    ),
+    "payload_memory_enabled": (
+        True,
+        "Enable payload memory engine. Tracks payload success/failure per target to avoid repeating failed payloads.",
+    ),
+    "payload_memory_max_records": (
+        10000,
+        "Maximum payload records to keep in memory before pruning.",
+    ),
+    "payload_memory_ttl_days": (
+        7,
+        "Days to keep payload records before they expire.",
+    ),
+    "per_tool_timeout_seconds": (
+        600.0,
+        "Maximum time allowed for a single tool execution (seconds). Prevents hung tools from blocking the agent loop.",
+    ),
+    "response_timing_alert_threshold_ms": (
+        30000,
+        "Average tool response time threshold (milliseconds) that triggers a warning injection into agent context.",
+    ),
 }
 
 DEFAULT_CONFIG = {key: value for key, (value, _) in _CONFIG_SCHEMA.items()}
@@ -283,6 +576,168 @@ _CONFIG_CATEGORIES = [
             "agent_context_reset_cooldown_seconds",
         ],
     ),
+    (
+        "External Services",
+        [
+            "caido_graphql_url",
+            "searxng_url",
+            "searxng_engines",
+        ],
+    ),
+    (
+        "Browser Automation",
+        [
+            "browser_cdp_port",
+            "browser_cdp_bind_address",
+            "browser_connect_timeout_ms",
+            "browser_navigation_timeout_ms",
+            "browser_login_form_wait_ms",
+            "browser_page_load_timeout_ms",
+            "browser_oauth_callback_timeout_ms",
+            "browser_totp_fill_timeout_ms",
+            "browser_screenshot_timeout_ms",
+            "browser_page_load_delay",
+            "browser_action_timeout",
+        ],
+    ),
+    (
+        "Fuzzer",
+        [
+            "fuzzer_threads",
+            "fuzzer_timeout",
+            "fuzzer_quick_max_payloads_per_type",
+            "fuzzer_quick_timeout_seconds",
+            "fuzzer_deep_timeout_seconds",
+            "fuzzer_advanced_max_payloads",
+            "fuzzer_waf_bypass_limit",
+        ],
+    ),
+    (
+        "Rate Limiter",
+        [
+            "rate_limiter_base_delay",
+            "rate_limiter_max_delay",
+            "rate_limiter_max_retries",
+            "rate_limiter_http_timeout",
+            "rate_limiter_abort_threshold",
+        ],
+    ),
+    (
+        "WAF & Security",
+        [
+            "waf_bypass_timeout",
+        ],
+    ),
+    (
+        "Observation Tools",
+        [
+            "observe_request_timeout",
+        ],
+    ),
+    (
+        "MCP Integration",
+        [
+            "mcp_probe_timeout",
+            "mcp_tools_list_timeout",
+        ],
+    ),
+    (
+        "Caido Proxy",
+        [
+            "caido_token_timeout",
+            "agent_idle_hard_timeout",
+        ],
+    ),
+    (
+        "Health Checks",
+        [
+            "ollama_status_timeout",
+            "ollama_status_sticky_ok_seconds",
+        ],
+    ),
+    (
+        "Exploration & Intelligence",
+        [
+            "exploration_meaningful_evidence_threshold",
+        ],
+    ),
+    (
+        "Agent Limits",
+        [
+            "agent_max_browser_visits_per_domain",
+            "agent_command_hash_cache_limit",
+            "agent_command_hash_cache_prune_target",
+            "agent_max_empty_retries",
+            "agent_ctf_max_iterations",
+        ],
+    ),
+    (
+        "Phase Budgets",
+        [
+            "pipeline_recon_max_iterations",
+            "pipeline_analysis_max_iterations",
+            "pipeline_exploit_max_iterations",
+            "pipeline_report_max_iterations",
+            "pipeline_recon_budget",
+            "pipeline_analysis_budget",
+            "pipeline_exploit_budget",
+            "pipeline_report_budget",
+        ],
+    ),
+    (
+        "Model Constants",
+        [
+            "model_max_tool_iterations",
+            "model_max_tool_history",
+            "model_max_objectives",
+            "model_max_evidence",
+            "model_max_causal_observations",
+            "model_max_tool_result_chars",
+            "model_min_confidence_for_preservation",
+        ],
+    ),
+    (
+        "Verification Engine (Zero False Positive)",
+        [
+            "verification_enabled",
+            "verification_enable_replay",
+            "verification_enable_cross_tool",
+            "verification_enable_negative_test",
+            "verification_enable_fp_detection",
+            "verification_max_replays",
+            "verification_timeout",
+            "verification_min_certified_confidence",
+            "verification_min_report_confidence",
+        ],
+    ),
+    (
+        "Intelligence Engine (Genius-Level)",
+        [
+            "intelligence_enabled",
+            "intelligence_adaptive_learning_enabled",
+            "intelligence_adaptive_min_observations",
+            "intelligence_generative_fuzzing_enabled",
+            "intelligence_generative_population_size",
+            "intelligence_generative_max_generations",
+            "intelligence_target_profiling_enabled",
+            "intelligence_attack_chain_synthesis_enabled",
+        ],
+    ),
+    (
+        "Payload Memory Engine",
+        [
+            "payload_memory_enabled",
+            "payload_memory_max_records",
+            "payload_memory_ttl_days",
+        ],
+    ),
+    (
+        "Resilience & Performance",
+        [
+            "per_tool_timeout_seconds",
+            "response_timing_alert_threshold_ms",
+        ],
+    ),
 ]
 
 _workspace_root_cache: Path | None = None
@@ -301,6 +756,30 @@ def get_workspace_root() -> Path:
     return _workspace_root_cache
 
 
+# ── Essential keys that get written to config.yaml ──────────────────────────
+# Only these are written to config.yaml. All other values stay as defaults
+# in config.py to keep the config file clean and minimal.
+_ESSENTIAL_CONFIG_KEYS: set[str] = {
+    "proxy_host",
+    "proxy_port",
+    "ollama_url",
+    "ollama_model",
+    "ollama_timeout",
+    "ollama_num_ctx",
+    "ollama_num_ctx_small",
+    "ollama_num_predict",
+    "ollama_num_keep",
+    "ollama_temperature",
+    "ollama_enable_thinking",
+    "ollama_thinking_mode",
+    "command_timeout",
+    "docker_memory_limit",
+    "deep_recon_autostart",
+    "agent_recon_mode",
+    "allow_destructive_testing",
+}
+
+
 def _write_yaml_with_comments(config: dict, filepath: Path) -> None:
     from airecon._version import __version__
 
@@ -314,6 +793,9 @@ def _write_yaml_with_comments(config: dict, filepath: Path) -> None:
     lines.append("#║  Edit this file to customize AIRecon behavior            ║")
     lines.append("#║                                                          ║")
     lines.append("#║  Docs: https://github.com/pikpikcu/airecon               ║")
+    lines.append("#║                                                          ║")
+    lines.append("#║  NOTE: Only essential settings are written here.         ║")
+    lines.append("#║  All other values use sensible defaults in config.py.    ║")
     lines.append("#╚══════════════════════════════════════════════════════════╝")
     lines.append("")
     lines.append("# Quick Start:")
@@ -330,16 +812,30 @@ def _write_yaml_with_comments(config: dict, filepath: Path) -> None:
     lines.append("#   4. Run: airecon start")
     lines.append("")
 
+    # Only write essential keys
+    essential_keys = _ESSENTIAL_CONFIG_KEYS
+    written_keys: set[str] = set()
+
     for category, keys in _CONFIG_CATEGORIES:
+        category_keys = [
+            k for k in keys if k in essential_keys and k not in written_keys
+        ]
+        if not category_keys:
+            continue
+
         lines.append("")
         lines.append(f"# {'=' * 38}")
         lines.append(f"# {category}")
         lines.append(f"# {'=' * 38}")
 
-        for key in keys:
+        for key in category_keys:
             if key in config:
                 value = config[key]
                 comment = _CONFIG_SCHEMA.get(key, ("", ""))[1]
+
+                # Skip caido URL — always use default
+                if key == "caido_graphql_url":
+                    continue
 
                 if isinstance(value, str):
                     if value.startswith("http") or ":" in value or value == "":
@@ -358,6 +854,7 @@ def _write_yaml_with_comments(config: dict, filepath: Path) -> None:
                 if comment:
                     lines.append(f"# {comment}")
                 lines.append(f"{key}: {value_str}")
+                written_keys.add(key)
 
     with open(filepath, "w") as f:
         f.write("\n".join(lines) + "\n")
@@ -433,6 +930,85 @@ class Config:
     agent_llm_compression_num_ctx: int
     agent_llm_compression_num_predict: int
     agent_context_reset_cooldown_seconds: int
+
+    caido_graphql_url: str
+    browser_cdp_port: int
+    browser_cdp_bind_address: str
+    browser_connect_timeout_ms: int
+    browser_navigation_timeout_ms: int
+    browser_login_form_wait_ms: int
+    browser_page_load_timeout_ms: int
+    browser_oauth_callback_timeout_ms: int
+    browser_totp_fill_timeout_ms: int
+    browser_screenshot_timeout_ms: int
+    # CAPTCHA uses ollama_model for vision (qwen3.5 supports images)
+    waf_bypass_timeout: int
+    fuzzer_threads: int
+    fuzzer_timeout: int
+    fuzzer_quick_max_payloads_per_type: int
+    fuzzer_quick_timeout_seconds: float
+    fuzzer_deep_timeout_seconds: float
+    fuzzer_advanced_max_payloads: int
+    fuzzer_waf_bypass_limit: int
+    rate_limiter_base_delay: float
+    rate_limiter_max_delay: float
+    rate_limiter_max_retries: int
+    rate_limiter_http_timeout: int
+    rate_limiter_abort_threshold: int
+    observe_request_timeout: int
+    ollama_status_timeout: float
+    ollama_status_sticky_ok_seconds: float
+    mcp_probe_timeout: float
+    mcp_tools_list_timeout: float
+    caido_token_timeout: float
+    agent_idle_hard_timeout: float
+    exploration_meaningful_evidence_threshold: float
+    agent_max_browser_visits_per_domain: int
+    agent_command_hash_cache_limit: int
+    agent_command_hash_cache_prune_target: int
+    agent_max_empty_retries: int
+    agent_ctf_max_iterations: int
+    pipeline_recon_max_iterations: int
+    pipeline_analysis_max_iterations: int
+    pipeline_exploit_max_iterations: int
+    pipeline_report_max_iterations: int
+    pipeline_recon_budget: int
+    pipeline_analysis_budget: int
+    pipeline_exploit_budget: int
+    pipeline_report_budget: int
+    model_max_tool_iterations: int
+    model_max_tool_history: int
+    model_max_objectives: int
+    model_max_evidence: int
+    model_max_causal_observations: int
+    model_max_tool_result_chars: int
+    model_min_confidence_for_preservation: float
+
+    verification_enabled: bool
+    verification_enable_replay: bool
+    verification_enable_cross_tool: bool
+    verification_enable_negative_test: bool
+    verification_enable_fp_detection: bool
+    verification_max_replays: int
+    verification_timeout: int
+    verification_min_certified_confidence: float
+    verification_min_report_confidence: float
+
+    intelligence_enabled: bool
+    intelligence_adaptive_learning_enabled: bool
+    intelligence_adaptive_min_observations: int
+    intelligence_generative_fuzzing_enabled: bool
+    intelligence_generative_population_size: int
+    intelligence_generative_max_generations: int
+    intelligence_target_profiling_enabled: bool
+    intelligence_attack_chain_synthesis_enabled: bool
+
+    payload_memory_enabled: bool
+    payload_memory_max_records: int
+    payload_memory_ttl_days: int
+
+    per_tool_timeout_seconds: float
+    response_timing_alert_threshold_ms: float
 
     @classmethod
     def load(cls, config_path: str | Path | None = None) -> Config:
@@ -588,38 +1164,114 @@ class Config:
                     merged[key] = default_val
 
         _BOUNDS_RULES: dict[str, tuple[float | None, float | None]] = {
-            "vuln_similarity_threshold": (0.0, 1.0),
-            "evidence_similarity_threshold": (0.0, 1.0),
-            "ollama_timeout": (10.0, 86400.0),
-            "ollama_chunk_timeout": (10.0, 3600.0),
-            "command_timeout": (10.0, 86400.0),
-            "browser_action_timeout": (10, 600),
-            "agent_max_tool_iterations": (50, 5000),
-            "agent_repeat_tool_call_limit": (1, 10),
-            "agent_missing_tool_retry_limit": (0, 10),
-            "agent_plan_revision_interval": (5, 300),
-            "agent_stagnation_threshold": (1, 20),
-            "agent_tool_diversity_window": (3, 50),
-            "agent_max_same_tool_streak": (1, 20),
+            # LLM config
+            "ollama_temperature": (0.0, 1.2),
+            "ollama_num_predict": (64, 65536),
+            "ollama_num_ctx": (-1, 262144),
+            "ollama_num_ctx_small": (2048, 131072),
+            "ollama_repeat_penalty": (1.0, 1.5),
+            "ollama_num_keep": (0, 32768),
+            "ollama_max_concurrent_requests": (1, 8),
+            # Timeouts
+            "ollama_timeout": (10.0, 1800.0),
+            "ollama_chunk_timeout": (30.0, 1200.0),
+            "command_timeout": (30.0, 7200.0),
+            "per_tool_timeout_seconds": (10.0, 3600.0),
+            "response_timing_alert_threshold_ms": (1000, 300000),
+            # Ratios & intensities
+            "agent_exploration_intensity": (0.1, 1.0),
+            "agent_exploration_temperature": (0.0, 1.0),
             "agent_phase_creative_temperature": (0.0, 1.0),
-            "agent_exploration_intensity": (0.0, 1.0),
-            "agent_exploration_temperature": (0.0, 2.0),
-            "ollama_num_ctx": (-1, 10000000),
-            "ollama_num_ctx_small": (512, 5000000),
-            "ollama_num_predict": (1, 262144),
-            "ollama_max_concurrent_requests": (1, 10),
-            "ollama_num_keep": (0, 5000000),
-            "ollama_repeat_penalty": (1.0, 2.0),
-            "agent_max_conversation_messages": (50, 20000),
-            "agent_compression_trigger_ratio": (0.5, 0.95),
-            "agent_uncompressed_keep_count": (5, 200),
-            "agent_llm_compression_num_ctx": (1024, 32768),
-            "agent_llm_compression_num_predict": (256, 8192),
-            "agent_context_reset_cooldown_seconds": (0, 86400),
-            "browser_page_load_delay": (0.0, 30.0),
-            "pipeline_recon_min_subdomains": (0, 1000),
-            "pipeline_recon_min_urls": (0, 10000),
-            "pipeline_recon_soft_timeout": (5, 1000),
+            "agent_compression_trigger_ratio": (0.3, 0.95),
+            "vuln_similarity_threshold": (0.3, 0.95),
+            "evidence_similarity_threshold": (0.3, 0.95),
+            "verification_min_certified_confidence": (0.5, 1.0),
+            "verification_min_report_confidence": (0.3, 0.95),
+            # Ports
+            "proxy_port": (1, 65535),
+            "browser_cdp_port": (1, 65535),
+            # Iterations & limits
+            "agent_max_tool_iterations": (50, 5000),
+            "agent_ctf_max_iterations": (20, 1000),
+            "agent_repeat_tool_call_limit": (1, 10),
+            "agent_missing_tool_retry_limit": (1, 10),
+            "agent_plan_revision_interval": (5, 200),
+            "agent_stagnation_threshold": (1, 50),
+            "agent_tool_diversity_window": (2, 30),
+            "agent_max_same_tool_streak": (1, 10),
+            "agent_max_conversation_messages": (100, 5000),
+            "agent_uncompressed_keep_count": (3, 100),
+            "agent_max_browser_visits_per_domain": (1, 20),
+            "agent_command_hash_cache_limit": (500, 50000),
+            "agent_max_empty_retries": (1, 10),
+            # Browser timeouts (ms)
+            "browser_connect_timeout_ms": (500, 30000),
+            "browser_navigation_timeout_ms": (5000, 300000),
+            "browser_login_form_wait_ms": (1000, 60000),
+            "browser_page_load_timeout_ms": (2000, 120000),
+            "browser_oauth_callback_timeout_ms": (5000, 120000),
+            "browser_totp_fill_timeout_ms": (1000, 30000),
+            "browser_screenshot_timeout_ms": (1000, 30000),
+            # CAPTCHA — no numeric validation needed for model name
+            # Pipeline
+            "pipeline_recon_max_iterations": (50, 2000),
+            "pipeline_analysis_max_iterations": (50, 2000),
+            "pipeline_exploit_max_iterations": (50, 3000),
+            "pipeline_report_max_iterations": (10, 500),
+            "pipeline_recon_min_subdomains": (0, 50),
+            "pipeline_recon_min_urls": (0, 20),
+            "pipeline_recon_soft_timeout": (10, 500),
+            "pipeline_recon_budget": (0, 200),
+            "pipeline_analysis_budget": (0, 200),
+            "pipeline_exploit_budget": (0, 500),
+            "pipeline_report_budget": (0, 200),
+            # Model constants
+            "model_max_tool_iterations": (10, 500),
+            "model_max_tool_history": (10, 500),
+            "model_max_objectives": (10, 200),
+            "model_max_evidence": (20, 1000),
+            "model_max_causal_observations": (100, 10000),
+            "model_tool_result_chars": (5000, 200000),
+            "model_min_confidence_for_preservation": (0.1, 0.99),
+            # Fuzzer
+            "fuzzer_threads": (1, 50),
+            "fuzzer_timeout": (1, 120),
+            "fuzzer_quick_max_payloads_per_type": (1, 100),
+            "fuzzer_quick_timeout_seconds": (30.0, 1800.0),
+            "fuzzer_deep_timeout_seconds": (30.0, 1800.0),
+            "fuzzer_advanced_max_payloads": (1, 200),
+            "fuzzer_waf_bypass_limit": (1, 50),
+            # Rate limiter
+            "rate_limiter_base_delay": (0.0, 60.0),
+            "rate_limiter_max_delay": (1.0, 600.0),
+            "rate_limiter_max_retries": (1, 30),
+            "rate_limiter_http_timeout": (5, 120),
+            "rate_limiter_abort_threshold": (3, 50),
+            # Verification
+            "verification_max_replays": (1, 20),
+            "verification_timeout": (5, 120),
+            # Intelligence
+            "intelligence_adaptive_min_observations": (1, 20),
+            "intelligence_generative_population_size": (10, 500),
+            "intelligence_generative_max_generations": (1, 100),
+            # Payload memory
+            "payload_memory_max_records": (100, 100000),
+            "payload_memory_ttl_days": (1, 365),
+            # Misc
+            "waf_bypass_timeout": (5, 300),
+            "observe_request_timeout": (5, 120),
+            "ollama_status_timeout": (1.0, 30.0),
+            "ollama_status_sticky_ok_seconds": (10.0, 600.0),
+            "mcp_probe_timeout": (5.0, 300.0),
+            "mcp_tools_list_timeout": (5.0, 300.0),
+            "caido_token_timeout": (0.5, 30.0),
+            "agent_idle_hard_timeout": (60.0, 7200.0),
+            "agent_context_reset_cooldown_seconds": (10.0, 3600.0),
+            "browser_page_load_delay": (0.1, 10.0),
+            "browser_action_timeout": (10, 180),
+            "ollama_keep_alive": (-1, 86400),
+            "agent_llm_compression_num_ctx": (1024, 65536),
+            "agent_llm_compression_num_predict": (64, 4096),
         }
 
         for bkey, (lo, hi) in _BOUNDS_RULES.items():
@@ -673,6 +1325,14 @@ class Config:
             recon_mode = str(DEFAULT_CONFIG["agent_recon_mode"])
         merged["agent_recon_mode"] = recon_mode
 
+        # Validate required fields
+        if not merged.get("ollama_url"):
+            logger.error(
+                "ollama_url is REQUIRED. Set it in ~/.airecon/config.yaml "
+                "or via AIRECON_OLLAMA_URL environment variable. "
+                "Example: http://127.0.0.1:11434 or http://your-server:11434"
+            )
+
         return cls(**merged)
 
 
@@ -696,22 +1356,22 @@ def get_config(config_path: str | None = None) -> Config:
 
     if _config is not None:
         try:
-            current_mtime = (
-                _config_path.stat().st_mtime if _config_path.exists() else 0.0
-            )
-            if current_mtime > _config_mtime:
-                try:
-                    asyncio.get_running_loop()
+            try:
+                asyncio.get_running_loop()
 
-                    global _config_reload_lock
-                    if _config_reload_lock is None:
-                        _config_reload_lock = asyncio.Lock()
+                global _config_reload_lock
+                if _config_reload_lock is None:
+                    _config_reload_lock = asyncio.Lock()
 
-                except RuntimeError:
-                    pass
+            except RuntimeError:
+                pass
 
-                logger.info("Config file changed — reloading from %s", _config_path)
-                with _config_init_lock:
+            with _config_init_lock:
+                current_mtime = (
+                    _config_path.stat().st_mtime if _config_path.exists() else 0.0
+                )
+                if current_mtime > _config_mtime:
+                    logger.info("Config file changed — reloading from %s", _config_path)
                     _config = Config.load(_config_path)
                     _config_mtime = current_mtime
         except Exception as e:

@@ -1,28 +1,24 @@
 from __future__ import annotations
 
 import asyncio
+from pathlib import Path
 import heapq
 import logging
-import os
 import re
+from typing import Any
+import os
 import uuid
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from time import monotonic
-from typing import Any
 from urllib.parse import urlparse
 
 from ..config import get_config
 
 logger = logging.getLogger("airecon.agent")
 
-MAX_TOOL_ITERATIONS = 2000
-MAX_TOOL_HISTORY = 100
-MAX_OBJECTIVES = 64
-MAX_EVIDENCE = 200
 MAX_EVIDENCE_DEDUP_SCAN = 120
 MAX_HYPOTHESES = 32
-MAX_CAUSAL_OBSERVATIONS = 2000
 MAX_CAUSAL_INTERVENTIONS = 300
 MAX_CAUSAL_HYPOTHESES = 256
 MAX_CAUSAL_EDGES = 512
@@ -31,9 +27,43 @@ FLAG_PATTERN = re.compile(r"flag\{[^}]+\}", re.IGNORECASE)
 _THINK_BLOCK_RE = re.compile(r"<think>.*?</think>", re.DOTALL | re.IGNORECASE)
 _THINK_OPEN_RE = re.compile(r"<think>(?!</think>).*$", re.DOTALL | re.IGNORECASE)
 _SEVERITY_MULTIPLIER: dict[int, float] = {5: 2.0, 4: 1.5, 3: 1.0, 2: 0.7, 1: 0.5}
-_MAX_TOOL_RESULT_CHARS = 50_000
 _MIN_SEVERITY_FOR_PRESERVATION = 4
-_MIN_CONFIDENCE_FOR_PRESERVATION = 0.75
+
+
+def _get_model_limits() -> dict[str, Any]:
+    try:
+        config = get_config()
+        return {
+            "max_tool_iterations": int(config.model_max_tool_iterations),
+            "max_tool_history": int(config.model_max_tool_history),
+            "max_objectives": int(config.model_max_objectives),
+            "max_evidence": int(config.model_max_evidence),
+            "max_causal_observations": int(config.model_max_causal_observations),
+            "max_tool_result_chars": int(config.model_max_tool_result_chars),
+            "min_confidence_for_preservation": float(
+                config.model_min_confidence_for_preservation
+            ),
+        }
+    except Exception as e:
+        logger.debug("Exception: %s", e)
+        return {
+            "max_tool_iterations": 50,
+            "max_tool_history": 100,
+            "max_objectives": 64,
+            "max_evidence": 200,
+            "max_causal_observations": 2000,
+            "max_tool_result_chars": 50000,
+            "min_confidence_for_preservation": 0.75,
+        }
+
+
+MAX_TOOL_ITERATIONS = 50
+MAX_TOOL_HISTORY = 100
+MAX_OBJECTIVES = 64
+MAX_EVIDENCE = 200
+MAX_CAUSAL_OBSERVATIONS = 2000
+MAX_TOOL_RESULT_CHARS = 50000
+MIN_CONFIDENCE_FOR_PRESERVATION = 0.75
 
 
 def _get_evidence_similarity_threshold() -> float:
@@ -61,9 +91,10 @@ def _truncate_tool_result(result: dict[str, Any]) -> dict[str, Any]:
     if not isinstance(result, dict):
         return result
 
+    max_chars = _get_model_limits()["max_tool_result_chars"]
     for k, v in result.items():
-        if isinstance(v, str) and len(v) > _MAX_TOOL_RESULT_CHARS:
-            result[k] = v[:_MAX_TOOL_RESULT_CHARS] + " ... [TRUNCATED]"
+        if isinstance(v, str) and len(v) > max_chars:
+            result[k] = v[:max_chars] + " ... [TRUNCATED]"
     return result
 
 
@@ -85,7 +116,8 @@ def _get_context_limits():
             "llm_compression_num_ctx": config.agent_llm_compression_num_ctx,
             "llm_compression_num_predict": config.agent_llm_compression_num_predict,
         }
-    except Exception:
+    except Exception as e:
+        logger.debug("Exception: %s", e)
         return {
             "max_conversation_messages": 1024,
             "compression_trigger": 819,
@@ -275,8 +307,10 @@ class CausalState:
         if not obs.timestamp:
             obs.timestamp = datetime.now(timezone.utc).isoformat()
         self.observations.append(obs)
-        if len(self.observations) > MAX_CAUSAL_OBSERVATIONS:
-            self.observations = self.observations[-MAX_CAUSAL_OBSERVATIONS:]
+        limits = _get_model_limits()
+        max_obs = limits["max_causal_observations"]
+        if len(self.observations) > max_obs:
+            self.observations = self.observations[-max_obs:]
         return True
 
     def add_intervention(
@@ -401,7 +435,9 @@ class AgentState:
     skills_used: list[str] = field(default_factory=list)
     planned_tools: list[str] = field(default_factory=list)
     iteration: int = 0
-    max_iterations: int = MAX_TOOL_ITERATIONS
+    max_iterations: int = field(
+        default_factory=lambda: _get_model_limits()["max_tool_iterations"]
+    )
     active_target: str | None = None
     warnings_sent: bool = False
 
@@ -455,10 +491,11 @@ class AgentState:
         if len(self.conversation) > limits["max_conversation_messages"]:
             self._smart_truncate_conversation()
 
-        if len(self.tool_history) > MAX_TOOL_HISTORY:
-            self.tool_history = self.tool_history[-MAX_TOOL_HISTORY:]
+        model_limits = _get_model_limits()
+        if len(self.tool_history) > model_limits["max_tool_history"]:
+            self.tool_history = self.tool_history[-model_limits["max_tool_history"] :]
 
-        if len(self.tool_history) > 50:
+        if len(self.tool_history) > model_limits["max_tool_history"]:
             scan_pos = int(getattr(self, "_legacy_tool_history_scan_pos", 0) or 0)
             scan_tick = int(getattr(self, "_legacy_tool_history_scan_tick", 0) or 0) + 1
 
@@ -514,8 +551,9 @@ class AgentState:
                 }
             )
 
-        if len(self.objective_queue) > MAX_OBJECTIVES:
-            self.objective_queue = self.objective_queue[-MAX_OBJECTIVES:]
+        max_obj = _get_model_limits()["max_objectives"]
+        if len(self.objective_queue) > max_obj:
+            self.objective_queue = self.objective_queue[-max_obj:]
 
     def mark_objective(
         self,
@@ -879,7 +917,8 @@ class AgentState:
                 "created_at": datetime.now(timezone.utc).isoformat(),
             }
         )
-        if len(self.evidence_log) > MAX_EVIDENCE:
+        max_ev = _get_model_limits()["max_evidence"]
+        if len(self.evidence_log) > max_ev:
 
             def _evidence_score(e: dict) -> float:
                 conf = float(e.get("confidence", 0.0))
@@ -887,7 +926,7 @@ class AgentState:
                 return conf * _SEVERITY_MULTIPLIER.get(sev, 1.0)
 
             kept = heapq.nlargest(
-                MAX_EVIDENCE,
+                max_ev,
                 self.evidence_log,
                 key=_evidence_score,
             )
@@ -1040,11 +1079,12 @@ class AgentState:
 
     def resolve_hypotheses_from_evidence(self) -> int:
         confirmed_count = 0
+        min_conf = _get_model_limits()["min_confidence_for_preservation"]
         high_evidence = [
             e
             for e in self.evidence_log
             if int(e.get("severity", 1)) >= 4
-            and float(e.get("confidence", 0.0)) >= 0.75
+            and float(e.get("confidence", 0.0)) >= min_conf
         ]
         for hyp in self.hypothesis_queue:
             if str(hyp.get("status", "")) not in ("pending", "testing"):
@@ -1208,7 +1248,7 @@ class AgentState:
         if self.dead_hosts:
             dead_list = ", ".join(self.dead_hosts[:20])
             lines.append(
-                f"  <dead_hosts>NEVER use browser_action, httpx, curl, or any HTTP tool "
+                "  <dead_hosts>NEVER use browser_action, httpx, curl, or any HTTP tool "
                 f"against these unreachable hosts: {dead_list}</dead_hosts>"
             )
 
@@ -1377,8 +1417,9 @@ class AgentState:
                         self.objective_queue.insert(0, obj)
                     changed += 1
 
-        if len(self.objective_queue) > MAX_OBJECTIVES:
-            self.objective_queue = self.objective_queue[-MAX_OBJECTIVES:]
+        max_obj = _get_model_limits()["max_objectives"]
+        if len(self.objective_queue) > max_obj:
+            self.objective_queue = self.objective_queue[-max_obj:]
 
         return changed
 
@@ -1422,6 +1463,7 @@ class AgentState:
             "[SYSTEM: MEMORY BRAIN",
             "[SYSTEM: RECOVERY MODE",
             "[SYSTEM: COMPRESSION SUMMARY",
+            "[SYSTEM: REPORT PHASE —",
         )
 
         core_system: list[dict] = []
@@ -1706,8 +1748,7 @@ class AgentState:
         if not hasattr(AgentState._extract_tools, "_tool_names"):
             try:
                 import json
-                from pathlib import Path
-
+                
                 tools_path = Path(__file__).parent.parent / "data" / "tools_meta.json"
                 with open(tools_path) as f:
                     meta = json.load(f)
@@ -1979,7 +2020,7 @@ class AgentState:
                     {
                         "role": "system",
                         "content": (
-                            f"You are a memory compressor for an AI security testing agent.\n"
+                            "You are a memory compressor for an AI security testing agent.\n"
                             f"CURRENT PHASE: {phase}{phase_context}\n\n"
                             "TASK: Summarize the conversation into 2-4 DENSE technical sentences.\n\n"
                             "RULES:\n"

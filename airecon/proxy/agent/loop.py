@@ -1,17 +1,16 @@
 from __future__ import annotations
 
-import asyncio
 import hashlib
 import json
 import logging
-import re
-import shlex
 import warnings
-
-import aiohttp  # noqa: F401
+import asyncio
+import re
 from collections import deque
 from pathlib import Path
 from typing import Any
+
+import aiohttp  # noqa: F401
 
 from ..config import get_config, get_workspace_root
 from ..docker import DockerEngine
@@ -35,13 +34,6 @@ from .validators import _ValidatorMixin
 from .workspace import _WorkspaceMixin
 
 
-def _estimate_tokens(text: str) -> int:
-
-    if not text:
-        return 0
-    return len(text) // 4
-
-
 _tools_meta_path = Path(__file__).parent.parent / "data" / "tools_meta.json"
 try:
     with open(_tools_meta_path, "r") as f:
@@ -56,7 +48,7 @@ logger = logging.getLogger("airecon.agent")
 
 __all__ = ["AgentLoop", "get_config", "get_system_prompt"]
 
-_MAX_EMPTY_RETRIES = 4
+_MAX_EMPTY_RETRIES = get_config().agent_max_empty_retries
 
 
 class AgentLoop(
@@ -117,7 +109,7 @@ class AgentLoop(
         }
     )
 
-    _CTF_MAX_ITERATIONS = 150
+    _CTF_MAX_ITERATIONS = get_config().agent_ctf_max_iterations
 
     def __init__(self, ollama: OllamaClient, engine: DockerEngine) -> None:
         self.ollama = ollama
@@ -146,7 +138,6 @@ class AgentLoop(
 
         self._recovery_force_tool_calls: int = 0
         self._session: SessionData | None = None
-        self._pending_output_merges: dict[str, list[str]] = {}
         self._blocked_tools: set[str] = set()
         self._session_lock = asyncio.Lock()
 
@@ -157,6 +148,11 @@ class AgentLoop(
         self.pipeline: PipelineEngine | None = None
 
         self._loaded_tech_skill_paths: set[str] = set()
+
+        # Session persistence
+        self._session_persistence = None
+        self._last_session_save_iteration = 0
+        self._session_save_interval = 10
 
         self._loaded_skill_hashes: set[int] = set()
 
@@ -206,7 +202,9 @@ class AgentLoop(
         self._memory_health_interval: int = 10
 
         self._visited_browser_urls: set[str] = set()
-        self._max_browser_visits_per_domain: int = 3
+        self._max_browser_visits_per_domain: int = (
+            get_config().agent_max_browser_visits_per_domain
+        )
 
     def _is_simple_target_kickoff(
         self,
@@ -243,6 +241,9 @@ class AgentLoop(
                     "Session saved to ~/.airecon/sessions/%s.json",
                     self._session.session_id,
                 )
+
+                # Cross-session persistence: save payload memory + adaptive state
+                await self._save_session_persistence()
 
                 try:
                     from ..memory import get_memory_manager
@@ -294,8 +295,122 @@ class AgentLoop(
                     await self._token_snapshot_task
                 except (asyncio.CancelledError, Exception):
                     pass
-            except Exception:
+            except Exception as e:
+                logger.debug("Exception in %s: %s", __name__, e)
                 logger.debug("Token snapshot flush skipped during stop.")
+
+    async def _save_session_persistence(self) -> None:
+        """Save payload memory and adaptive learning state to workspace."""
+        try:
+            cfg = get_config()
+            if not cfg.session_persistence_enabled:
+                return
+            if not self._session or not self._session.target:
+                return
+
+            from .session_persistence import SessionPersistenceEngine
+
+            ws_root = get_workspace_root()
+            persist = SessionPersistenceEngine(ws_root)
+            self._session_persistence = persist
+
+            # Save payload memory from fuzzer
+            payload_records = []
+            if hasattr(self, "_fuzzer_instance") and self._fuzzer_instance:
+                pm = getattr(self._fuzzer_instance, "payload_memory", None)
+                if pm and pm.records:
+                    from dataclasses import asdict
+
+                    payload_records = [asdict(r) for r in pm.records.values()]
+            if payload_records:
+                persist.save_payload_memory(self._session.target, payload_records)
+
+            # Save adaptive learning state
+            if hasattr(self, "_adaptive_learning_engine"):
+                ale = self._adaptive_learning_engine
+                adaptive_state = {
+                    "tool_performances": {
+                        name: {
+                            "total_uses": p.total_uses,
+                            "successes": p.successes,
+                            "failures": p.failures,
+                            "avg_duration": p.avg_duration,
+                            "avg_confidence": p.avg_confidence,
+                            "success_streak": p.success_streak,
+                            "failure_streak": p.failure_streak,
+                        }
+                        for name, p in ale.tool_performances.items()
+                    },
+                    "strategy_patterns": [
+                        {
+                            "pattern_id": p.pattern_id,
+                            "description": p.description,
+                            "conditions": p.conditions,
+                            "tool_sequence": p.tool_sequence,
+                            "success_count": p.success_count,
+                            "failure_count": p.failure_count,
+                            "avg_result_confidence": p.avg_result_confidence,
+                        }
+                        for p in ale.strategy_patterns
+                    ],
+                }
+                persist.save_adaptive_state(self._session.target, adaptive_state)
+
+            self._last_session_save_iteration = self.state.iteration
+        except Exception as e:
+            logger.debug("Exception in %s: %s", __name__, e)
+            logger.debug("Operation failed")
+
+    async def _load_session_persistence(self) -> None:
+        """Load payload memory and adaptive learning state from workspace."""
+        try:
+            cfg = get_config()
+            if not cfg.session_persistence_enabled:
+                return
+            if not self._session or not self._session.target:
+                return
+
+            from .session_persistence import SessionPersistenceEngine
+
+            ws_root = get_workspace_root()
+            persist = SessionPersistenceEngine(ws_root)
+            self._session_persistence = persist
+
+            # Load payload memory into fuzzer
+            records = persist.load_payload_memory(self._session.target)
+            if records:
+                # Will be loaded when fuzzer is created
+                logger.info(
+                    "Payload memory available: %d records for %s",
+                    len(records),
+                    self._session.target,
+                )
+
+            # Load adaptive learning state
+            adaptive_state = persist.load_adaptive_state(self._session.target)
+            if adaptive_state and hasattr(self, "_adaptive_learning_engine"):
+                ale = self._adaptive_learning_engine
+                tp_data = adaptive_state.get("tool_performances", {})
+                for name, pdata in tp_data.items():
+                    if name not in ale.tool_performances:
+                        from .adaptive_learning import ToolPerformance
+
+                        ale.tool_performances[name] = ToolPerformance(
+                            tool_name=name,
+                            total_uses=pdata.get("total_uses", 0),
+                            successes=pdata.get("successes", 0),
+                            failures=pdata.get("failures", 0),
+                            avg_duration=pdata.get("avg_duration", 0.0),
+                            avg_confidence=pdata.get("avg_confidence", 0.0),
+                            success_streak=pdata.get("success_streak", 0),
+                            failure_streak=pdata.get("failure_streak", 0),
+                        )
+                logger.info(
+                    "Adaptive learning state loaded for %s", self._session.target
+                )
+        except Exception as e:
+            logger.debug("Exception in %s: %s", __name__, e)
+            logger.debug("Operation failed")
 
     def _is_duplicate_browser_url(self, url: str, action: str) -> bool:
         if action not in ("goto", "new_tab"):
@@ -308,7 +423,8 @@ class AgentLoop(
             normalized = url.strip().lower()
             normalized = re.sub(r"^https?://", "", normalized)
             normalized = re.sub(r"/+$", "", normalized)
-        except Exception:
+        except Exception as e:
+            logger.debug("Exception in %s: %s", __name__, e)
             return False
 
         count = sum(
@@ -354,7 +470,8 @@ class AgentLoop(
 
         try:
             _phase_ctx = self._get_current_phase().value
-        except Exception:
+        except Exception as e:
+            logger.debug("Failed to get phase context: %s", e)
             _phase_ctx = "unknown"
         raw = f"{_phase_ctx}:{tool_name}:{canonical}"
         cmd_hash = hashlib.md5(
@@ -391,9 +508,12 @@ class AgentLoop(
         self._executed_cmd_hashes.add(cmd_hash)
         self._executed_cmd_order.append(cmd_hash)
 
-        if len(self._executed_cmd_hashes) > 5000:
+        if len(self._executed_cmd_hashes) > get_config().agent_command_hash_cache_limit:
             before = len(self._executed_cmd_hashes)
-            while len(self._executed_cmd_order) > 2500:
+            while (
+                len(self._executed_cmd_order)
+                > get_config().agent_command_hash_cache_prune_target
+            ):
                 oldest = self._executed_cmd_order.popleft()
                 self._executed_cmd_hashes.discard(oldest)
             while len(self._executed_cmd_order) > len(self._executed_cmd_hashes):
@@ -564,119 +684,6 @@ class AgentLoop(
 
         return None
 
-    _MERGEABLE_EXTENSIONS = frozenset(
-        {".txt", ".csv", ".list", ".hosts", ".log", ".out"}
-    )
-
-    def _get_command_output_file(
-        self, arguments: dict[str, Any]
-    ) -> tuple[str | None, "Path | None"]:
-        cmd = arguments.get("command", "")
-        if not cmd or not self.state.active_target:
-            return None, None
-        try:
-            tokens = shlex.split(cmd)
-        except ValueError:
-            return None, None
-
-        output_file: str | None = None
-        for i, token in enumerate(tokens):
-            if token in (
-                "-o",
-                "--output",
-                "-oX",
-                "-oN",
-                "-oG",
-                "-oA",
-                "-oJ",
-            ) and i + 1 < len(tokens):
-                output_file = tokens[i + 1]
-                break
-            if (
-                token.startswith("-o")
-                and len(token) > 2
-                and not token.startswith("-oX")
-            ):
-                output_file = token[2:]
-                break
-
-        if not output_file:
-            return None, None
-
-        workspace = get_workspace_root() / self.state.active_target
-        full_path = (
-            workspace / output_file
-            if not output_file.startswith("/")
-            else Path(output_file)
-        )
-        return output_file, full_path
-
-    def _check_output_dedup(self, arguments: dict[str, Any]) -> None:
-        output_file, full_path = self._get_command_output_file(arguments)
-        if not output_file or not full_path:
-            return
-        if not full_path.exists() or full_path.stat().st_size <= 100:
-            return
-
-        if full_path.suffix.lower() not in self._MERGEABLE_EXTENSIONS:
-            return
-        try:
-            old_lines = full_path.read_text(errors="ignore").splitlines()
-            self._pending_output_merges[str(full_path)] = old_lines
-            logger.info(
-                "Saved %d existing lines from '%s' for post-run merge",
-                len(old_lines),
-                output_file,
-            )
-        except Exception as e:
-            logger.warning(
-                "Could not save old content of '%s' for merge: %s", output_file, e
-            )
-
-    def _apply_output_merge(self, arguments: dict[str, Any], success: bool) -> None:
-        if not success:
-            return
-        output_file, full_path = self._get_command_output_file(arguments)
-        if not output_file or not full_path:
-            return
-        old_lines = self._pending_output_merges.pop(str(full_path), None)
-        if old_lines is None:
-            return
-        if not full_path.exists():
-            return
-        try:
-            new_lines = full_path.read_text(errors="ignore").splitlines()
-            old_set = {line.strip() for line in old_lines if line.strip()}
-            new_set = {line.strip() for line in new_lines if line.strip()}
-            added = new_set - old_set
-            merged = sorted(old_set | new_set)
-            full_path.write_text("\n".join(merged) + "\n", encoding="utf-8")
-            logger.info(
-                "Merged '%s': %d new entries added, %d total lines (sorted)",
-                output_file,
-                len(added),
-                len(merged),
-            )
-        except Exception as e:
-            logger.warning("Failed to merge output file '%s': %s", output_file, e)
-
-    _TOOL_ALTERNATIVES: dict[str, str] = _TOOLS_META.get("tool_alternatives", {})
-
-    def _suggest_alternative_tool(self, tool_name: str, command: str = "") -> str:
-
-        cmd = command or ""
-        cmd_clean = re.sub(r"^cd\s+/workspace/[^\s]+\s*&&\s*", "", cmd).strip()
-        binary = cmd_clean.split()[0] if cmd_clean.split() else tool_name
-        binary = binary.rsplit("/", 1)[-1]
-        if binary == "sudo" and len(cmd_clean.split()) > 1:
-            binary = cmd_clean.split()[1]
-
-        suggestion = self._TOOL_ALTERNATIVES.get(binary)
-        if suggestion:
-            return suggestion
-
-        return "Try using a completely different tool. Run 'which <tool>' to verify availability."
-
     def get_progress(self) -> dict[str, Any]:
         session = self._session
         quality_scores = self._compute_quality_scores()
@@ -758,7 +765,7 @@ class AgentLoop(
                     and current_target not in content
                 ):
                     continue
-                if "previous scan of" in content and current_target not in content:
+                if "previous scan o" in content and current_target not in content:
                     continue
                 filtered_conversation.append(msg)
 

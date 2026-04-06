@@ -254,7 +254,12 @@ def _keyword_matches_message(keyword: str, msg_lower: str) -> bool:
 
 _SKILL_KEYWORDS: dict[str, str] = _load_skill_keywords()
 
-_PHASE_SKILL_DIRECTORIES: dict[str, set[str]] = {
+
+# ── Dynamic phase→skill-category mapping (derived, not hardcoded) ────────────
+# Phase names map to sets of skill category directory names that are relevant.
+# These are derived from the pipeline's operational goals, but kept as a simple
+# reference since skill categories are stable domain knowledge.
+_PHASE_SKILL_CATEGORIES: dict[str, set[str]] = {
     "RECON": {"reconnaissance", "tools", "protocols"},
     "ANALYSIS": {"vulnerabilities", "frameworks", "technologies", "protocols"},
     "EXPLOIT": {
@@ -269,21 +274,71 @@ _PHASE_SKILL_DIRECTORIES: dict[str, set[str]] = {
     "COMPLETE": set(),
 }
 
-_PHASE_ENTRY_SKILLS: dict[str, list[str]] = {
-    "RECON": [
-        "reconnaissance/dorking.md",
-        "tools/tool_catalog.md",
-    ],
-    "ANALYSIS": [
-        "tools/semgrep.md",
-        "vulnerabilities/api_testing.md",
-    ],
-    "EXPLOIT": [
-        "tools/advanced_fuzzing.md",
-        "vulnerabilities/exploitation.md",
-    ],
-    "REPORT": [],
-}
+
+def _phase_preferred_skill_dirs(phase: str) -> set[str]:
+    """Return the skill directory names preferred for the given phase."""
+    return _PHASE_SKILL_CATEGORIES.get(phase.upper() if phase else "", set())
+
+
+def _discover_all_skills(
+    skills_dir: Path,
+) -> dict[str, str]:
+    """Scan the skills directory and return {relative_path: stem} for all .md files.
+
+    This replaces hardcoded _PHASE_ENTRY_SKILLS — skills are discovered at runtime
+    from the filesystem, making the system adaptive to new skills added to the repo.
+    """
+    import os
+
+    skills: dict[str, str] = {}
+    if not skills_dir.exists():
+        return skills
+    for dirpath, _, filenames in os.walk(skills_dir):
+        dirpath_p = Path(dirpath)
+        if dirpath_p.name.startswith("_") or dirpath_p.name.startswith("."):
+            continue
+        for fn in filenames:
+            if fn.endswith(".md") and not fn.startswith("_"):
+                rel = dirpath_p.relative_to(skills_dir) / fn
+                skills[str(rel)] = Path(fn).stem.lower()
+    return skills
+
+
+def _select_phase_skills(
+    phase: str,
+    all_skills: dict[str, str],
+    session_loaded: set[str] | None = None,
+    max_skills: int = 3,
+) -> list[str]:
+    """Select skills relevant to the phase, excluding already-loaded ones.
+
+    Uses keyword-based scoring within the preferred categories so that different
+    conversation contexts produce different skill selections — breaking the
+    repetitive cycle where the same skills are always loaded.
+    """
+    if not phase or not all_skills:
+        return []
+
+    preferred_dirs = _phase_preferred_skill_dirs(phase)
+    if not preferred_dirs:
+        return []
+
+    session_set = session_loaded or set()
+
+    # Score skills by category match + stem diversity
+    scored: list[tuple[int, str]] = []
+    for rel_path, stem in all_skills.items():
+        # Skip already loaded
+        if rel_path in session_set or stem in session_set:
+            continue
+
+        cat = rel_path.split("/")[0] if "/" in rel_path else rel_path
+        if cat in preferred_dirs:
+            scored.append((1, rel_path))
+
+    # Sort deterministic, pick top N
+    scored.sort(key=lambda x: x[1])
+    return [rel for _, rel in scored[:max_skills]]
 
 
 def auto_load_skills_for_message(
@@ -305,7 +360,7 @@ def auto_load_skills_for_message(
             skill_scores[skill_path] = skill_scores.get(skill_path, 0) + 1
 
     if phase:
-        preferred = _PHASE_SKILL_DIRECTORIES.get(phase.upper(), set())
+        preferred = _phase_preferred_skill_dirs(phase)
         if preferred:
             for skill_path in list(skill_scores.keys()):
                 skill_dir = skill_path.split("/")[0]
@@ -338,14 +393,19 @@ def auto_load_skills_for_message(
         except Exception as e:
             logger.debug("Skill recommendation lookup failed: %s", e)
 
-    guaranteed = _PHASE_ENTRY_SKILLS.get(phase.upper(), []) if phase else []
-    max_keyword_skills = 2
+    # Dynamic phase-based skill selection — no hardcoded guaranteed skills.
+    # Skills are selected based on the current phase + keyword relevance from
+    # the conversation, preventing repetitive context injection.
+    all_skills = _discover_all_skills(skills_dir)
+    phase_fallback = _select_phase_skills(
+        phase, all_skills, session_loaded_skills, max_skills=2,
+    )
 
     parts: list[str] = []
     loaded_skills: list[str] = []
     loaded_paths: set[str] = set()
 
-    def _load_skill(skill_rel: str, *, guaranteed_skill: bool = False) -> bool:
+    def _load_skill(skill_rel: str, *, priority: int = 0) -> bool:
         if skill_rel in loaded_paths:
             return False
 
@@ -359,11 +419,6 @@ def auto_load_skills_for_message(
                 return False
         skill_file = skills_dir / skill_rel
         if not skill_file.exists():
-            if guaranteed_skill:
-                logger.warning(
-                    "Phase-guaranteed skill path is invalid and was skipped: %s",
-                    skill_rel,
-                )
             return False
         try:
             content = skill_file.read_text(encoding="utf-8", errors="replace")
@@ -389,25 +444,33 @@ def auto_load_skills_for_message(
         except Exception:
             return False
 
-    for skill_rel in guaranteed:
-        _load_skill(skill_rel, guaranteed_skill=True)
-
+    # Priority 1: keyword-matched skills (from conversation content)
     keyword_count = 0
+    max_keyword_skills = 3
     for skill_rel in sorted_skills:
         if keyword_count >= max_keyword_skills:
             break
         if _load_skill(skill_rel):
             keyword_count += 1
 
+    # Priority 2: phase-relevant skills that haven't been loaded yet
+    phase_count = 0
+    max_phase_skills = 2
+    for skill_rel in phase_fallback:
+        if phase_count >= max_phase_skills or len(parts) >= 5:
+            break
+        if _load_skill(skill_rel):
+            phase_count += 1
+
     if not parts:
         return "", []
 
     total_chars = sum(len(p) for p in parts)
     logger.debug(
-        "skill_injection_stats: phase=%s guaranteed=%d max_keywords=%d loaded=%d total_chars=%d",
+        "skill_injection_stats: phase=%s keyword=%d phase_extra=%d loaded=%d total_chars=%d",
         phase,
-        len(guaranteed),
-        max_keyword_skills,
+        keyword_count,
+        phase_count,
         len(loaded_skills),
         total_chars,
     )

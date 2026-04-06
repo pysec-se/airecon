@@ -180,6 +180,8 @@ class Fuzzer:
 
         self._timeout_counts: dict[str, int] = {}
         self._direct_client: httpx.AsyncClient | None = None
+        self._waf_bypass_attempts: dict[str, int] = {}
+        self._waf_bypass_limit = self._get_fuzzer_config().fuzzer_waf_bypass_limit
 
         self.enable_waf_bypass = enable_waf_bypass
         if enable_waf_bypass:
@@ -216,6 +218,22 @@ class Fuzzer:
             else None
         )
 
+        # Payload Memory Engine
+        self.payload_memory = None
+        try:
+            from .config import get_config
+
+            cfg = get_config()
+            if cfg.payload_memory_enabled:
+                from .agent.payload_memory import PayloadMemoryEngine
+
+                self.payload_memory = PayloadMemoryEngine(
+                    max_records=cfg.payload_memory_max_records,
+                    ttl_seconds=cfg.payload_memory_ttl_days * 86400,
+                )
+        except Exception as exc:
+            logger.debug("Payload memory init skipped: %s", exc)
+
     async def close(self) -> None:
         if self.waf_engine:
             await self.waf_engine.close()
@@ -232,6 +250,125 @@ class Fuzzer:
 
     async def __aexit__(self, exc_type, exc, tb) -> None:
         await self.close()
+
+    @staticmethod
+    def _get_fuzzer_config():
+        from .config import get_config
+
+        return get_config()
+
+    async def _profile_target_if_enabled(self):
+        """Profile target if intelligence is enabled."""
+        try:
+            cfg = self._get_fuzzer_config()
+            if (
+                not cfg.intelligence_enabled
+                or not cfg.intelligence_target_profiling_enabled
+            ):
+                return None
+
+            from .agent.target_profiler import TargetProfiler
+
+            profiler = TargetProfiler(timeout=min(self.timeout, 15))
+            profile = await profiler.profile_target(self.target, self.headers or None)
+            logger.info(
+                f"Target profiled: {len(profile.technologies)} technologies detected, "
+                f"security score={profile.security_score:.0f}, risk={profile.risk_level}"
+            )
+            return profile
+        except Exception as e:
+            logger.debug(f"Target profiling skipped: {e}")
+            return None
+
+    def _prioritize_vuln_types(
+        self, vuln_types: list[str] | None, profile
+    ) -> list[str] | None:
+        """Prioritize vulnerability types based on target profile."""
+        if not profile or not profile.attack_surface:
+            return vuln_types
+
+        attack_vectors = profile.attack_surface.get("attack_vectors", [])
+        tech_names = [t.name.lower() for t in profile.technologies]
+
+        priority_map = {
+            "sql_injection": ("mysql" in tech_names or "postgresql" in tech_names),
+            "nosql_injection": "mongodb" in tech_names,
+            "xss": any(
+                fw in tech_names for fw in ("django", "rails", "express", "flask")
+            ),
+            "path_traversal": "nginx" in tech_names,
+            "ssti": any(fw in tech_names for fw in ("flask", "django", "express")),
+            "command_injection": True,
+        }
+
+        if vuln_types:
+            scored = []
+            for vt in vuln_types:
+                is_relevant = priority_map.get(vt, False)
+                if vt in attack_vectors:
+                    is_relevant = True
+                scored.append((vt, 1.0 if is_relevant else 0.5))
+            scored.sort(key=lambda x: x[1], reverse=True)
+            return [vt for vt, _ in scored]
+
+        return vuln_types
+
+    async def _init_generative_fuzzing_if_enabled(self):
+        """Initialize generative fuzzing engine if enabled."""
+        try:
+            cfg = self._get_fuzzer_config()
+            if (
+                not cfg.intelligence_enabled
+                or not cfg.intelligence_generative_fuzzing_enabled
+            ):
+                return None
+
+            from .agent.generative_fuzzing import GenerativeFuzzingEngine
+
+            engine = GenerativeFuzzingEngine(
+                population_size=cfg.intelligence_generative_population_size,
+                max_generations=cfg.intelligence_generative_max_generations,
+            )
+            engine.initialize_population(FUZZ_PAYLOADS)
+            logger.info(
+                f"Generative fuzzing initialized: pop={cfg.intelligence_generative_population_size}, "
+                f"max_gen={cfg.intelligence_generative_max_generations}"
+            )
+            return engine
+        except Exception as e:
+            logger.debug(f"Generative fuzzing init skipped: {e}")
+            return None
+
+    async def _evolve_payloads_batch(self, gen_engine, results: list, batch_idx: int):
+        """Evolve payloads based on batch results."""
+        try:
+            test_results = []
+            for r in results:
+                if isinstance(r, FuzzResult):
+                    test_results.append(
+                        {
+                            "payload": r.payload,
+                            "fitness": r.confidence,
+                            "waf": self.detected_wafs[0]
+                            if self.detected_wafs
+                            else None,
+                        }
+                    )
+
+            if not test_results:
+                return
+
+            for vt in set(r.vuln_type for r in results if isinstance(r, FuzzResult)):
+                vt_results = [tr for tr in test_results if tr.get("vuln_type") == vt]
+                if vt_results:
+                    gen_engine.evolve(vt, vt_results)
+                    top = gen_engine.get_top_payloads(vt, n=3, min_fitness=0.5)
+                    if top:
+                        logger.debug(
+                            f"Gen fuzz batch {batch_idx}: evolved {len(top)} top {vt} payloads"
+                        )
+        except Exception as e:
+            logger.debug(f"Payload evolution skipped: {e}")
 
     async def _get_direct_client(self) -> httpx.AsyncClient:
         if self._direct_client is None:
@@ -577,6 +714,7 @@ class Fuzzer:
         params: list[str],
         vuln_types: list[str] | None = None,
         param_type_hints: dict[str, str] | None = None,
+        max_payloads_per_type: int = 0,
     ) -> list[FuzzResult]:
         self._timeout_counts.clear()
 
@@ -586,6 +724,10 @@ class Fuzzer:
                 "No fuzzing will be performed. Check package installation."
             )
             return []
+
+        # ── Intelligence: Target Profiling ─────────────────────────────────
+        target_profile = await self._profile_target_if_enabled()
+        priority_vuln_types = self._prioritize_vuln_types(vuln_types, target_profile)
 
         baseline_tasks = [self._fetch_baseline(p) for p in params]
         baseline_results = await asyncio.gather(*baseline_tasks, return_exceptions=True)
@@ -613,29 +755,132 @@ class Fuzzer:
 
         all_vuln_types = list(FUZZ_PAYLOADS.keys())
 
-        tasks = []
+        # ── Intelligence: Generative Fuzzing Init ──────────────────────────
+        gen_engine = await self._init_generative_fuzzing_if_enabled()
+
+        # Skip payloads that already failed
+        _skip_count = 0
+        filtered_tasks = []
         for param in clean_params:
             if param_type_hints and param in param_type_hints:
                 p_type = param_type_hints[param]
                 effective = _ATTACK_TYPE_TO_PAYLOADS.get(
-                    p_type, vuln_types or all_vuln_types
+                    p_type, priority_vuln_types or all_vuln_types
                 )
             else:
-                effective = vuln_types or all_vuln_types
+                effective = priority_vuln_types or all_vuln_types
             for vt in effective:
-                for payload in FUZZ_PAYLOADS.get(vt, []):
-                    tasks.append(self._fuzz_single(param, payload, vt))
+                payloads = FUZZ_PAYLOADS.get(vt, [])
+                if max_payloads_per_type > 0:
+                    payloads = payloads[:max_payloads_per_type]
+                for payload in payloads:
+                    if self.payload_memory:
+                        should_skip, reason = self.payload_memory.should_skip_payload(
+                            payload, vt, self.target, param
+                        )
+                        if should_skip:
+                            _skip_count += 1
+                            continue
+                    filtered_tasks.append(self._fuzz_single(param, payload, vt))
+        if _skip_count:
+            logger.info(
+                f"Payload memory: skipped {_skip_count} previously-failed payloads"
+            )
+
+        tasks = filtered_tasks
 
         results: list[Any] = []
-        for _i in range(0, len(tasks), _FUZZ_GATHER_BATCH):
+        total_batches = max(
+            1, (len(tasks) + _FUZZ_GATHER_BATCH - 1) // _FUZZ_GATHER_BATCH
+        )
+        logger.info(f"Starting fuzz: {len(tasks)} tests in {total_batches} batches")
+        for batch_idx, _i in enumerate(range(0, len(tasks), _FUZZ_GATHER_BATCH)):
             _batch = tasks[_i : _i + _FUZZ_GATHER_BATCH]
+            logger.info(f"Batch {batch_idx + 1}/{total_batches} ({len(_batch)} tests)")
             results.extend(await asyncio.gather(*_batch, return_exceptions=True))
+
+            # ── Intelligence: Evolve payloads after each batch ─────────────
+            if gen_engine:
+                await self._evolve_payloads_batch(gen_engine, results, batch_idx)
 
         for r in results:
             if isinstance(r, FuzzResult) and r.confidence > 0.6:
                 self.results.append(r)
 
-        return self.results
+        # ── Zero-FP Verification Stage ─────────────────────────────────────
+        verified_results = await self._verify_findings(self.results)
+        return verified_results
+
+    async def _verify_findings(self, findings: list[FuzzResult]) -> list[FuzzResult]:
+        """Run zero-FP verification on all findings."""
+        try:
+            from .config import get_config
+
+            cfg = get_config()
+        except Exception:
+            return findings
+
+        if not cfg.verification_enabled:
+            return findings
+
+        from .agent.verification import VerificationEngine
+
+        engine = VerificationEngine(
+            timeout=cfg.verification_timeout,
+            max_replays=cfg.verification_max_replays,
+            enable_replay=cfg.verification_enable_replay,
+            enable_cross_tool=cfg.verification_enable_cross_tool,
+            enable_negative_test=cfg.verification_enable_negative_test,
+            enable_fp_detection=cfg.verification_enable_fp_detection,
+        )
+
+        verified: list[FuzzResult] = []
+        min_report_conf = cfg.verification_min_report_confidence
+
+        logger.info(
+            f"Starting zero-FP verification on {len(findings)} findings "
+            f"(min report confidence: {min_report_conf})"
+        )
+
+        for finding in findings:
+            baseline = self._baseline.get(finding.parameter, {})
+            verification = await engine.verify_finding(
+                target_url=self.target,
+                param=finding.parameter,
+                vuln_type=finding.vuln_type,
+                original_payload=finding.payload,
+                original_confidence=finding.confidence,
+                baseline_body=baseline.get("body", ""),
+                fuzz_body=finding.payload,
+                response_headers={},
+                response_status=finding.response_code or 200,
+                http_headers=self.headers or None,
+            )
+
+            if verification.verified_confidence >= min_report_conf:
+                finding.confidence = verification.verified_confidence
+                finding.evidence = (
+                    f"[VERIFIED:{verification.details.get('status', 'OK')}] "
+                    f"{finding.evidence}"
+                )
+                verified.append(finding)
+                logger.info(
+                    f"  VERIFIED {finding.vuln_type} on '{finding.parameter}': "
+                    f"confidence {finding.confidence:.2f} "
+                    f"(tier={verification.verification_tier})"
+                )
+            else:
+                logger.info(
+                    f"  FILTERED {finding.vuln_type} on '{finding.parameter}': "
+                    f"confidence {verification.verified_confidence:.2f} "
+                    f"(reason: {verification.fp_reason or verification.details.get('status', 'low confidence')})"
+                )
+
+        logger.info(
+            f"Verification complete: {len(verified)}/{len(findings)} findings passed "
+            f"(filtered {len(findings) - len(verified)} potential false positives)"
+        )
+        return verified
 
     def _filter_fuzzable_params(self, params: list[str]) -> list[str]:
         has_auth = bool(self.headers)
@@ -785,27 +1030,64 @@ class Fuzzer:
             return None
 
         if resp.status_code == 403 and self.waf_engine and self.detected_wafs:
-            logger.info(
-                f"403 detected on param={param} — attempting WAF bypass "
-                f"for {', '.join(self.detected_wafs)}"
-            )
-            bypass_result = await self.waf_engine.test_bypass(
-                target_url=self.target,
-                waf_type=self.detected_wafs[0],
-                payload=payload,
-                param_name=param,
-                method=self.method,
-                base_headers=self.headers,
-            )
-            if bypass_result.get("successful_bypasses"):
-                logger.info(
-                    f"WAF bypass successful for {param}={payload}: "
-                    f"{bypass_result['successful_bypasses'][0]['strategy']}"
+            waf_key = f"{param}:{vuln_type}"
+            current_attempts = self._waf_bypass_attempts.get(waf_key, 0)
+            if current_attempts >= self._waf_bypass_limit:
+                logger.debug(
+                    f"WAF bypass limit reached ({self._waf_bypass_limit}) for {waf_key}, skipping further bypasses"
                 )
-                bypass_response = bypass_result.get("response")
-                if isinstance(bypass_response, httpx.Response):
-                    resp = bypass_response
-                    elapsed = self._response_elapsed_ms(resp, fallback_ms=elapsed)
+            else:
+                self._waf_bypass_attempts[waf_key] = current_attempts + 1
+                logger.info(
+                    f"403 detected on param={param} — attempting WAF bypass "
+                    f"for {', '.join(self.detected_wafs)}"
+                )
+                bypass_result = await self.waf_engine.test_bypass(
+                    target_url=self.target,
+                    waf_type=self.detected_wafs[0],
+                    payload=payload,
+                    param_name=param,
+                    method=self.method,
+                    base_headers=self.headers,
+                )
+                if bypass_result.get("successful_bypasses"):
+                    bypass_resp = bypass_result.get("response")
+                    if isinstance(bypass_resp, httpx.Response):
+                        # Validate that bypass actually changed behavior meaningfully
+                        # A real bypass should NOT return 403 or a generic block page
+                        bypass_status = bypass_resp.status_code
+                        bypass_body = bypass_resp.text.lower()
+
+                        # Check if it's still a block page (false bypass)
+                        block_indicators = [
+                            "access denied",
+                            "blocked",
+                            "forbidden",
+                            "security check",
+                            "challenge",
+                            "verify you are human",
+                        ]
+                        still_blocked = (
+                            bypass_status == 403
+                            or sum(1 for ind in block_indicators if ind in bypass_body)
+                            >= 2
+                        )
+
+                        if still_blocked:
+                            logger.debug(
+                                f"WAF bypass for {param}={payload}: still blocked "
+                                f"(status={bypass_status}) — false bypass, ignoring"
+                            )
+                        else:
+                            logger.info(
+                                f"WAF bypass successful for {param}={payload}: "
+                                f"{bypass_result['successful_bypasses'][0]['strategy']} "
+                                f"(status {bypass_status})"
+                            )
+                            resp = bypass_resp
+                            elapsed = self._response_elapsed_ms(
+                                resp, fallback_ms=elapsed
+                            )
 
         fuzz_sig = response_signature(resp.status_code, resp.text)
         baseline_sig = baseline.get("signature", "")
@@ -833,6 +1115,20 @@ class Fuzzer:
         )
 
         if analysis["vuln_confirmed"] or analysis["confidence"] > 0.5:
+            # Record successful payload
+            if self.payload_memory:
+                self.payload_memory.record_attempt(
+                    payload=payload,
+                    vuln_type=vuln_type,
+                    target=self.target,
+                    param=param,
+                    success=True,
+                    confidence=analysis["confidence"],
+                    status_code=resp.status_code,
+                    waf_detected=self.detected_wafs[0] if self.detected_wafs else "",
+                    tech_stack=list(self.detected_wafs),
+                    response_time_ms=elapsed,
+                )
             return FuzzResult(
                 target=self.target,
                 parameter=param,
@@ -844,6 +1140,20 @@ class Fuzzer:
                 response_code=resp.status_code,
                 response_length=len(resp.text),
                 time_ms=elapsed,
+            )
+        # Record failed payload
+        if self.payload_memory:
+            self.payload_memory.record_attempt(
+                payload=payload,
+                vuln_type=vuln_type,
+                target=self.target,
+                param=param,
+                success=False,
+                confidence=analysis.get("confidence", 0.0),
+                status_code=resp.status_code if resp else 0,
+                waf_detected=self.detected_wafs[0] if self.detected_wafs else "",
+                tech_stack=list(self.detected_wafs),
+                response_time_ms=elapsed,
             )
         return None
 
@@ -1982,25 +2292,6 @@ class ExpertHeuristics:
         return guidance
 
     @staticmethod
-    def fingerprint_waf(
-        response_headers: dict[str, str],
-        status_code: int,
-    ) -> str | None:
-        headers_lower = {k.lower(): v.lower() for k, v in response_headers.items()}
-
-        for waf_name, sig in WAF_SIGNATURES.items():
-            for h in sig["headers"]:
-                if h in headers_lower:
-                    return waf_name
-
-            if status_code in sig["status_codes"]:
-                for h in sig["headers"]:
-                    if any(h.split("-")[0] in k for k in headers_lower):
-                        return waf_name
-
-        return None
-
-    @staticmethod
     def suggest_next_tests(vuln_type: str) -> list[str]:
         suggestions: dict[str, list[str]] = {
             "sql_injection": [
@@ -2668,12 +2959,31 @@ async def quick_fuzz_url(
     url: str,
     params: list[str] | None = None,
     headers: dict[str, str] | None = None,
+    max_payloads_per_type: int | None = None,
+    timeout_seconds: float | None = None,
+    threads: int | None = None,
+    per_request_timeout: int | None = None,
 ) -> list[FuzzResult]:
+    from .config import get_config
+
+    cfg = get_config()
+    max_payloads_per_type = (
+        max_payloads_per_type or cfg.fuzzer_quick_max_payloads_per_type
+    )
+    timeout_seconds = timeout_seconds or cfg.fuzzer_quick_timeout_seconds
+    threads = threads or cfg.fuzzer_threads
+    per_request_timeout = per_request_timeout or cfg.fuzzer_timeout
     params = params or ["q", "search", "id", "page"]
-    async with Fuzzer(url, threads=5, timeout=15, headers=headers) as fuzzer:
-        return await fuzzer.fuzz_parameters(
-            params=params,
-            vuln_types=["sql_injection", "xss", "path_traversal", "ssti"],
+    async with Fuzzer(
+        url, threads=threads, timeout=per_request_timeout, headers=headers
+    ) as fuzzer:
+        return await asyncio.wait_for(
+            fuzzer.fuzz_parameters(
+                params=params,
+                vuln_types=["sql_injection", "xss", "path_traversal", "ssti"],
+                max_payloads_per_type=max_payloads_per_type,
+            ),
+            timeout=timeout_seconds,
         )
 
 

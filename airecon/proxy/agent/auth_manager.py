@@ -3,6 +3,7 @@ from __future__ import annotations
 import logging
 import re
 from typing import Any
+from urllib.parse import urlparse
 
 import httpx
 
@@ -65,6 +66,34 @@ class AuthManager:
 
         return False, ""
 
+    def _validate_login_url(self, login_url: str, target_url: str) -> bool:
+        try:
+            login_host = urlparse(login_url).hostname
+            if not login_host:
+                return False
+            # Normalize bare domains (no scheme) so urlparse works
+            if "://" not in target_url:
+                target_host = urlparse(f"https://{target_url}").hostname
+            else:
+                target_host = urlparse(target_url).hostname
+            if not target_host:
+                return False
+            if login_host == target_host:
+                return True
+            if login_host.endswith(f".{target_host}"):
+                return True
+            if target_host.endswith(f".{login_host}"):
+                return True
+            logger.warning(
+                "Auth domain mismatch: login=%s vs target=%s — skipping reauth to prevent credential leak",
+                login_host,
+                target_host,
+            )
+            return False
+        except Exception as e:
+            logger.error("Login URL validation error: %s — blocking reauth", e)
+            return False
+
     async def handle_auth_failure(
         self,
         response: httpx.Response,
@@ -95,6 +124,10 @@ class AuthManager:
 
     async def auto_reauth(self, login_url: str) -> bool:
         try:
+            target_host = self._safe_target_host if hasattr(self, '_safe_target_host') else None
+            if target_host:
+                if not self._validate_login_url(login_url, target_host):
+                    return False
             logger.info(f"Fetching login page: {login_url}")
             response = await self.client.get(login_url)
 
@@ -192,6 +225,7 @@ class AuthManager:
         username: str,
         password: str,
         extra_fields: dict[str, str] | None = None,
+        target_url: str | None = None,
     ) -> None:
         self.credentials = {
             "username": username,
@@ -200,6 +234,9 @@ class AuthManager:
 
         if extra_fields:
             self.credentials.update(extra_fields)
+
+        if target_url:
+            self._safe_target_host = target_url
 
         logger.info("Credentials stored for auto-reauth")
 

@@ -4,7 +4,7 @@ import asyncio
 import json
 import logging
 import threading
-from typing import Any, AsyncIterator, Callable
+from typing import Any, AsyncIterator, Callable, Dict
 
 import httpx
 
@@ -122,8 +122,12 @@ class OllamaClient:
             )
 
             if OllamaClient._httpx_client is None:
+                _cfg = get_config()
+                _http_timeout = _cfg.ollama_timeout
                 OllamaClient._httpx_client = httpx.AsyncClient(
-                    timeout=httpx.Timeout(120.0, connect=10.0, read=120.0, write=10.0),
+                    timeout=httpx.Timeout(
+                        _http_timeout, connect=10.0, read=_http_timeout, write=10.0
+                    ),
                     headers={"Content-Type": "application/json"},
                 )
                 OllamaClient._initialized = True
@@ -149,7 +153,11 @@ class OllamaClient:
                     timeout, connect=10.0, read=timeout, write=10.0
                 )
             else:
-                timeout_obj = httpx.Timeout(120.0, connect=10.0, read=120.0, write=10.0)
+                _cfg = get_config()
+                _http_timeout = _cfg.ollama_timeout
+                timeout_obj = httpx.Timeout(
+                    _http_timeout, connect=10.0, read=_http_timeout, write=10.0
+                )
 
             if stream:
                 raise RuntimeError(
@@ -448,7 +456,7 @@ class OllamaClient:
 
                             if _last_activity_time is not None:
                                 inactivity_time = current_time - _last_activity_time
-                                if inactivity_time > 120:
+                                if inactivity_time > get_config().ollama_timeout:
                                     logger.warning(
                                         "Ollama inactivity: %.0fs, cancelling request",
                                         inactivity_time,
@@ -597,3 +605,31 @@ class OllamaClient:
         if operation == "compression":
             return max(180.0, cfg.ollama_chunk_timeout)
         return cfg.ollama_chunk_timeout
+
+    def _record_response_time(self, response_time: float) -> None:
+        """Record a response time for adaptive timeout calculations."""
+        if not hasattr(self, "_response_times"):
+            self._response_times = []
+        if not hasattr(self, "_max_response_times"):
+            self._max_response_times = 20
+        self._response_times.append(response_time)
+        max_len = self._max_response_times
+        if len(self._response_times) > max_len:
+            self._response_times = self._response_times[-max_len:]
+
+    def get_response_time_stats(self) -> Dict[str, float]:
+        """Get statistics for recorded response times.
+
+        Returns avg/min/max of last 10 response times.
+        """
+        if not hasattr(self, "_response_times"):
+            self._response_times = []
+        times = self._response_times[-10:] if self._response_times else []
+        if not times:
+            return {"avg": 0.0, "min": 0.0, "max": 0.0, "count": 0}
+        return {
+            "avg": sum(times) / len(times),
+            "min": min(times),
+            "max": max(times),
+            "count": len(self._response_times),
+        }
