@@ -27,7 +27,7 @@ def _print_banner() -> None:
     print(f"  {D}          v{__version__} — AI-Powered Security Reconnaissance{X}")
     print()
     print(f"  {D}Quick start:{X} {C}airecon start{X}")
-    print(f"  {D}See all options:{X} {C}airecon -h{X}")
+    print(f"  {D}See all options:{X} {Y}airecon -h{X}")
     print()
     print(f"  {D}For more information visit {C}https://pikpikcu.github.io/airecon/{X}")
     print()
