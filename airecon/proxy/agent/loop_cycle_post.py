@@ -6,7 +6,7 @@ from typing import Any, AsyncIterator
 from urllib.parse import urlparse
 
 from ..system import auto_load_skills_for_technologies
-from .loop_exploration import _MEANINGFUL_EVIDENCE_THRESHOLD
+from .loop_exploration import _get_meaningful_evidence_threshold
 from .loop_phase_mentor import maybe_inject_mentor_analysis
 from .models import AgentEvent
 from .output_parser import parse_tool_output
@@ -22,24 +22,42 @@ logger = logging.getLogger("airecon.agent")
 
 # Static asset extensions that should NOT be fuzzed individually
 # But their PARENT DIRECTORY might be worth fuzzing!
-_PURE_STATIC_EXTS = frozenset({
-    "css", "png", "jpg", "jpeg", "gif", "svg", "ico", "bmp", "webp",
-    "woff", "woff2", "ttf", "otf", "eot",
-    "mp4", "webm", "ogg", "mp3", "wav",
-    "zip", "tar", "gz", "rar",
-    "dat", "bin",
-})
+_PURE_STATIC_EXTS = frozenset(
+    {
+        "css",
+        "png",
+        "jpg",
+        "jpeg",
+        "gif",
+        "svg",
+        "ico",
+        "bmp",
+        "webp",
+        "woff",
+        "woff2",
+        "ttf",
+        "otf",
+        "eot",
+        "mp4",
+        "webm",
+        "ogg",
+        "mp3",
+        "wav",
+        "zip",
+        "tar",
+        "gz",
+        "rar",
+        "dat",
+        "bin",
+    }
+)
 
 # JS files are GOLD — do NOT block analysis
 # PDFs can leak info — do NOT block entirely
 
 
 def _detect_static_asset_abuse(tool_name: str, arguments: dict) -> str | None:
-    """Detect if a tool is being used against a pure static asset endpoint.
 
-    If detected, suggests directory fuzzing instead of blocking entirely.
-    JS files and PDFs are NOT blocked — they contain valuable recon data.
-    """
     cmd = ""
     target_url = ""
 
@@ -86,8 +104,8 @@ def _detect_static_asset_abuse(tool_name: str, arguments: dict) -> str | None:
                     f"  - Source map: Check for {last_segment}.map for full source reconstruction\n"
                     f"  - Use linkfinder/jsleak for automated JS analysis"
                 )
-    except Exception:
-        pass
+    except Exception as exc:
+        logger.debug("Static asset abuse detection parse error: %s", exc)
 
     return None
 
@@ -96,7 +114,6 @@ class _CyclePostMixin:
     def _check_static_asset_abuse(
         self, tool_name: str, arguments: dict, success: bool
     ) -> str | None:
-        """Check if tool is being used against static asset endpoints."""
         return _detect_static_asset_abuse(tool_name, arguments)
 
     async def _finalize_tool_results(
@@ -122,8 +139,7 @@ class _CyclePostMixin:
                 ) = res
 
                 if not was_valid:
-                    arg_error = result.get(
-                        "error", "Unknown validation error")
+                    arg_error = result.get("error", "Unknown validation error")
                     yield AgentEvent(
                         type="tool_end",
                         data={
@@ -138,10 +154,11 @@ class _CyclePostMixin:
                             "skills_used": list(self.state.skills_used),
                             "caido": {
                                 "active": bool(getattr(self, "_caido_available", False))
-                                          or (
-                                              self.state.tool_counts.get("caido_send_request", 0)
-                                              + self.state.tool_counts.get("caido_automate", 0)
-                                          ) > 0,
+                                or (
+                                    self.state.tool_counts.get("caido_send_request", 0)
+                                    + self.state.tool_counts.get("caido_automate", 0)
+                                )
+                                > 0,
                                 "findings_count": (
                                     self.state.tool_counts.get("caido_send_request", 0)
                                     + self.state.tool_counts.get("caido_automate", 0)
@@ -172,10 +189,11 @@ class _CyclePostMixin:
                         "skills_used": list(self.state.skills_used),
                         "caido": {
                             "active": bool(getattr(self, "_caido_available", False))
-                                      or (
-                                          self.state.tool_counts.get("caido_send_request", 0)
-                                          + self.state.tool_counts.get("caido_automate", 0)
-                                      ) > 0,
+                            or (
+                                self.state.tool_counts.get("caido_send_request", 0)
+                                + self.state.tool_counts.get("caido_automate", 0)
+                            )
+                            > 0,
                             "findings_count": (
                                 self.state.tool_counts.get("caido_send_request", 0)
                                 + self.state.tool_counts.get("caido_automate", 0)
@@ -190,7 +208,8 @@ class _CyclePostMixin:
                 )
                 _output_size = len(
                     str(result.get("stdout", "") or result.get("result", ""))
-                    if isinstance(result, dict) else ""
+                    if isinstance(result, dict)
+                    else ""
                 )
                 self._record_tool_to_memory(
                     tool_name=tool_name,
@@ -223,17 +242,14 @@ class _CyclePostMixin:
                         content_str = _static_guard_note + "\n\n" + content_str
 
                 if self.pipeline:
-                    phase_warn = self.pipeline.check_tool_phase_fit(
-                        tool_name)
+                    phase_warn = self.pipeline.check_tool_phase_fit(tool_name)
                     if phase_warn:
                         content_str = phase_warn + "\n\n" + content_str
-                phase_gate_note = self._build_phase_gate_note(
-                    tool_name, success)
+                phase_gate_note = self._build_phase_gate_note(tool_name, success)
                 if phase_gate_note:
                     content_str = phase_gate_note + "\n\n" + content_str
 
-                if success and tool_name in (
-                        "web_search", "browser_action"):
+                if success and tool_name in ("web_search", "browser_action"):
                     content_str += (
                         "\n\n[SYSTEM: MANDATORY FILE SAVE]\n"
                         f"You just executed `{tool_name}` successfully. "
@@ -245,14 +261,13 @@ class _CyclePostMixin:
                     )
 
                 _SESSION_UPDATE_TOOLS = (
-                    "execute", "browser_action", "quick_fuzz", "code_analysis"
+                    "execute",
+                    "browser_action",
+                    "quick_fuzz",
+                    "code_analysis",
                 )
                 if success and tool_name in _SESSION_UPDATE_TOOLS and self._session:
-                    stdout = (
-                        result.get(
-                            "stdout", "") or result.get(
-                            "result", "") or ""
-                    )
+                    stdout = result.get("stdout", "") or result.get("result", "") or ""
                     if isinstance(stdout, str) and stdout.strip():
                         _techs_before = dict(self._session.technologies)
                         _phase_for_parse = self._get_current_phase().value
@@ -266,13 +281,16 @@ class _CyclePostMixin:
                             save_session(self._session)
 
                         _new_techs = {
-                            k: v for k, v in self._session.technologies.items()
+                            k: v
+                            for k, v in self._session.technologies.items()
                             if k not in _techs_before
                         }
                         if _new_techs:
-                            _tech_skill_ctx, _tech_names = auto_load_skills_for_technologies(
-                                _new_techs,
-                                already_loaded=self._loaded_tech_skill_paths,
+                            _tech_skill_ctx, _tech_names = (
+                                auto_load_skills_for_technologies(
+                                    _new_techs,
+                                    already_loaded=self._loaded_tech_skill_paths,
+                                )
                             )
                             if _tech_skill_ctx:
                                 self.state.conversation.append(
@@ -291,7 +309,8 @@ class _CyclePostMixin:
                 meaningful_before = sum(
                     1
                     for e in self.state.evidence_log
-                    if float(e.get("confidence", 0.0)) >= _MEANINGFUL_EVIDENCE_THRESHOLD
+                    if float(e.get("confidence", 0.0))
+                    >= _get_meaningful_evidence_threshold()
                 )
                 self._record_evidence_from_result(
                     phase=phase_after_tool.value,
@@ -313,14 +332,28 @@ class _CyclePostMixin:
                 meaningful_after = sum(
                     1
                     for e in self.state.evidence_log
-                    if float(e.get("confidence", 0.0)) >= _MEANINGFUL_EVIDENCE_THRESHOLD
+                    if float(e.get("confidence", 0.0))
+                    >= _get_meaningful_evidence_threshold()
                 )
                 self.state.record_tool_outcome(
                     phase_after_tool.value,
                     tool_name,
                     success=bool(success),
-                    meaningful_evidence_delta=max(0, meaningful_after - meaningful_before),
+                    meaningful_evidence_delta=max(
+                        0, meaningful_after - meaningful_before
+                    ),
                 )
+
+                # ── Intelligence: Adaptive Learning ────────────────────────
+                if hasattr(self, "_record_adaptive_learning"):
+                    self._record_adaptive_learning(
+                        tool_name=tool_name,
+                        arguments=arguments,
+                        result=result,
+                        success=bool(success),
+                        duration=duration,
+                        phase=phase_after_tool.value,
+                    )
 
                 if (
                     success
@@ -339,36 +372,62 @@ class _CyclePostMixin:
                             _hint = str(_cur_step.get("tool_hint", "")).lower()
 
                             _match_token = tool_name.lower()
-                            if _match_token == "execute" and isinstance(arguments, dict):
+                            if _match_token == "execute" and isinstance(
+                                arguments, dict
+                            ):
                                 _raw_cmd = str(arguments.get("command", "")).strip()
-                                _stripped = re.sub(r"^cd\s+\S+\s*&&\s*", "", _raw_cmd).strip()
-                                _binary = _stripped.split()[0].lower() if _stripped else ""
-                                _shell_builtins = {"cd", "echo", "export", "source", ".", "for", "while", "if"}
+                                _stripped = re.sub(
+                                    r"^cd\s+\S+\s*&&\s*", "", _raw_cmd
+                                ).strip()
+                                _binary = (
+                                    _stripped.split()[0].lower() if _stripped else ""
+                                )
+                                _shell_builtins = {
+                                    "cd",
+                                    "echo",
+                                    "export",
+                                    "source",
+                                    ".",
+                                    "for",
+                                    "while",
+                                    "if",
+                                }
                                 if _binary and _binary not in _shell_builtins:
                                     _match_token = _binary
-                            if _hint and (_match_token in _hint or tool_name.lower() in _hint):
-
+                            if _hint and (
+                                _match_token in _hint or tool_name.lower() in _hint
+                            ):
                                 _cur_step["status"] = "done"
                                 _next_idx = _cs_idx + 1
                                 _chain_name = _cd.get("name", "?")
-                                _vuln_basis = str(_cd.get("vuln_basis", "")).lower().strip()
+                                _vuln_basis = (
+                                    str(_cd.get("vuln_basis", "")).lower().strip()
+                                )
                                 if _next_idx >= len(_steps):
                                     _cd["status"] = "completed"
                                     _cd["current_step_index"] = _next_idx
                                     logger.info(
                                         "Exploit chain '%s' COMPLETED after %d steps",
-                                        _chain_name, len(_steps),
+                                        _chain_name,
+                                        len(_steps),
                                     )
 
                                     if _vuln_basis and self.state.hypothesis_queue:
                                         _vb_words = {
-                                            w for w in _vuln_basis.split() if len(w) >= 4
+                                            w
+                                            for w in _vuln_basis.split()
+                                            if len(w) >= 4
                                         }
                                         for _hyp in self.state.hypothesis_queue:
-                                            if _hyp.get("status") not in ("pending", "testing"):
+                                            if _hyp.get("status") not in (
+                                                "pending",
+                                                "testing",
+                                            ):
                                                 continue
                                             _hwords = set(
-                                                str(_hyp.get("claim", "")).lower().split()
+                                                str(_hyp.get("claim", ""))
+                                                .lower()
+                                                .split()
                                             )
                                             if _vb_words & _hwords:
                                                 self.state.update_hypothesis(
@@ -391,13 +450,17 @@ class _CyclePostMixin:
 
                                     if _vuln_basis and self.state.hypothesis_queue:
                                         _vb_words = {
-                                            w for w in _vuln_basis.split() if len(w) >= 4
+                                            w
+                                            for w in _vuln_basis.split()
+                                            if len(w) >= 4
                                         }
                                         for _hyp in self.state.hypothesis_queue:
                                             if _hyp.get("status") != "pending":
                                                 continue
                                             _hwords = set(
-                                                str(_hyp.get("claim", "")).lower().split()
+                                                str(_hyp.get("claim", ""))
+                                                .lower()
+                                                .split()
                                             )
                                             if _vb_words & _hwords:
                                                 self.state.update_hypothesis(
@@ -410,7 +473,11 @@ class _CyclePostMixin:
                     except Exception as _chain_adv_e:
                         logger.debug("Chain advancement error: %s", _chain_adv_e)
 
-                    if success and phase_after_tool.value == "EXPLOIT" and self.state.exploit_chains:
+                    if (
+                        success
+                        and phase_after_tool.value == "EXPLOIT"
+                        and self.state.exploit_chains
+                    ):
                         try:
                             _chain_found_match = False
                             _chain_hint_for_correction = ""
@@ -427,21 +494,44 @@ class _CyclePostMixin:
 
                                 if _hint:
                                     _match_token = tool_name.lower()
-                                    if _match_token == "execute" and isinstance(arguments, dict):
-                                        _raw_cmd = str(arguments.get("command", "")).strip()
-                                        _stripped = re.sub(r"^cd\s+\S+\s*&&\s*", "", _raw_cmd).strip()
-                                        _binary = _stripped.split()[0].lower() if _stripped else ""
-                                        _shell_builtins = {"cd", "echo", "export", "source", ".", "for", "while", "if"}
+                                    if _match_token == "execute" and isinstance(
+                                        arguments, dict
+                                    ):
+                                        _raw_cmd = str(
+                                            arguments.get("command", "")
+                                        ).strip()
+                                        _stripped = re.sub(
+                                            r"^cd\s+\S+\s*&&\s*", "", _raw_cmd
+                                        ).strip()
+                                        _binary = (
+                                            _stripped.split()[0].lower()
+                                            if _stripped
+                                            else ""
+                                        )
+                                        _shell_builtins = {
+                                            "cd",
+                                            "echo",
+                                            "export",
+                                            "source",
+                                            ".",
+                                            "for",
+                                            "while",
+                                            "if",
+                                        }
                                         if _binary and _binary not in _shell_builtins:
                                             _match_token = _binary
-                                    if _match_token in _hint or tool_name.lower() in _hint:
+                                    if (
+                                        _match_token in _hint
+                                        or tool_name.lower() in _hint
+                                    ):
                                         _chain_found_match = True
                                         break
 
                             if not _chain_found_match and _chain_hint_for_correction:
                                 logger.info(
                                     "Chain correction: LLM used '%s' but chain requires '%s'",
-                                    tool_name, _chain_hint_for_correction,
+                                    tool_name,
+                                    _chain_hint_for_correction,
                                 )
                                 content_str += (
                                     f"\n\n[EXPLOIT CHAIN CORRECTION] You used '{tool_name}' but your active "
@@ -450,7 +540,9 @@ class _CyclePostMixin:
                                     f"This tool hint is a strong recommendation — ignoring it will waste iterations."
                                 )
                         except Exception as _chain_corr_e:
-                            logger.debug("Chain correction injection error: %s", _chain_corr_e)
+                            logger.debug(
+                                "Chain correction injection error: %s", _chain_corr_e
+                            )
 
                 self.state.record_tool_use(phase_after_tool.value, tool_name)
 
@@ -463,15 +555,26 @@ class _CyclePostMixin:
                     }
                     if tool_name not in _skip_learning_tools:
                         _phase_name = str(phase_after_tool.value).upper()
-                        _pattern_type = "exploit" if _phase_name in {"EXPLOIT", "REPORT"} else "recon"
+                        _pattern_type = (
+                            "exploit"
+                            if _phase_name in {"EXPLOIT", "REPORT"}
+                            else "recon"
+                        )
                         _technique_name = tool_name
                         _cmd_snapshot = tool_name
                         if tool_name == "execute" and isinstance(arguments, dict):
                             _raw_cmd = str(arguments.get("command", "")).strip()
-                            _stripped = re.sub(r"^cd\s+\S+\s*&&\s*", "", _raw_cmd).strip()
+                            _stripped = re.sub(
+                                r"^cd\s+\S+\s*&&\s*", "", _raw_cmd
+                            ).strip()
                             if _stripped:
                                 _cmd_snapshot = _stripped[:300]
-                                _first = _stripped.split(maxsplit=1)[0].rsplit("/", 1)[-1].strip().lower()
+                                _first = (
+                                    _stripped.split(maxsplit=1)[0]
+                                    .rsplit("/", 1)[-1]
+                                    .strip()
+                                    .lower()
+                                )
                                 if _first:
                                     _technique_name = _first
                         self._save_recon_exploit_pattern(
@@ -482,8 +585,7 @@ class _CyclePostMixin:
                             description=f"{_phase_name} step using {_technique_name}",
                         )
 
-                budget_note = self._check_tool_budget(
-                    tool_name, phase_after_tool.value)
+                budget_note = self._check_tool_budget(tool_name, phase_after_tool.value)
                 if budget_note:
                     content_str = budget_note + "\n\n" + content_str
 
@@ -493,17 +595,26 @@ class _CyclePostMixin:
                     and self._session
                 ):
                     _waf_headers: dict[str, str] = result.get("headers", {}) or {}
-                    _waf_body: str = str(result.get("body_excerpt") or result.get("stdout") or "")[:3000]
+                    _waf_body: str = str(
+                        result.get("body_excerpt") or result.get("stdout") or ""
+                    )[:3000]
                     _waf_status: int = int(result.get("status_code") or 0)
                     if _waf_headers or _waf_body:
                         try:
-                            _waf_url = arguments.get("url") or arguments.get("command", "")
+                            _waf_url = arguments.get("url") or arguments.get(
+                                "command", ""
+                            )
                             try:
-                                _waf_host = urlparse(str(_waf_url)).netloc or str(_waf_url)
-                            except Exception:
+                                _waf_host = urlparse(str(_waf_url)).netloc or str(
+                                    _waf_url
+                                )
+                            except Exception as exc:
+                                logger.debug("WAF host URL parse error: %s", exc)
                                 _waf_host = str(_waf_url)[:50]
                             if not _waf_host or " " in _waf_host:
-                                _url_match = re.search(r"https?://[^\s\"']+", str(_waf_url))
+                                _url_match = re.search(
+                                    r"https?://[^\s\"']+", str(_waf_url)
+                                )
                                 if _url_match:
                                     _waf_host = urlparse(_url_match.group(0)).netloc
                             _waf_host = str(_waf_host).strip()[:120]
@@ -525,26 +636,56 @@ class _CyclePostMixin:
                             if _merged:
                                 _old_stats = {}
                                 if isinstance(_existing, dict):
-                                    _old_stats = _existing.get("strategy_stats", {}) or {}
+                                    _old_stats = (
+                                        _existing.get("strategy_stats", {}) or {}
+                                    )
 
-                                if tool_name == "execute" and isinstance(arguments, dict):
-                                    _cmd_lower = str(arguments.get("command", "")).lower()
+                                if tool_name == "execute" and isinstance(
+                                    arguments, dict
+                                ):
+                                    _cmd_lower = str(
+                                        arguments.get("command", "")
+                                    ).lower()
                                     _prior_strategies = []
                                     if isinstance(_existing, dict):
-                                        _prior_strategies = list(_existing.get("bypass_strategies", []))
+                                        _prior_strategies = list(
+                                            _existing.get("bypass_strategies", [])
+                                        )
                                     _matched_strategy = ""
                                     for _st in _prior_strategies:
                                         _st_l = str(_st).lower()
-                                        if "header" in _st_l and any(h in _cmd_lower for h in ("x-forwarded-for", "user-agent", "-h ")):
+                                        if "header" in _st_l and any(
+                                            h in _cmd_lower
+                                            for h in (
+                                                "x-forwarded-for",
+                                                "user-agent",
+                                                "-h ",
+                                            )
+                                        ):
                                             _matched_strategy = str(_st)
                                             break
-                                        if "encoding" in _st_l and ("%25" in _cmd_lower or "%2f" in _cmd_lower or "%27" in _cmd_lower):
+                                        if "encoding" in _st_l and (
+                                            "%25" in _cmd_lower
+                                            or "%2f" in _cmd_lower
+                                            or "%27" in _cmd_lower
+                                        ):
                                             _matched_strategy = str(_st)
                                             break
-                                        if "case variation" in _st_l and any(k in _cmd_lower for k in ("union", "select", "script")):
+                                        if "case variation" in _st_l and any(
+                                            k in _cmd_lower
+                                            for k in ("union", "select", "script")
+                                        ):
                                             _matched_strategy = str(_st)
                                             break
-                                        if "verb" in _st_l and any(m in _cmd_lower for m in ("-x post", "-x put", "-x patch", "-x delete")):
+                                        if "verb" in _st_l and any(
+                                            m in _cmd_lower
+                                            for m in (
+                                                "-x post",
+                                                "-x put",
+                                                "-x patch",
+                                                "-x delete",
+                                            )
+                                        ):
                                             _matched_strategy = str(_st)
                                             break
                                     if _matched_strategy:
@@ -552,21 +693,38 @@ class _CyclePostMixin:
                                             _matched_strategy,
                                             {"attempts": 0, "successes": 0},
                                         )
-                                        _stat["attempts"] = int(_stat.get("attempts", 0)) + 1
-                                        if _waf_status and _waf_status not in (403, 406, 412, 429, 501, 999):
-                                            _stat["successes"] = int(_stat.get("successes", 0)) + 1
-                                _ranked = rank_bypass_strategies(_merged, _old_stats)[:8]
+                                        _stat["attempts"] = (
+                                            int(_stat.get("attempts", 0)) + 1
+                                        )
+                                        if _waf_status and _waf_status not in (
+                                            403,
+                                            406,
+                                            412,
+                                            429,
+                                            501,
+                                            999,
+                                        ):
+                                            _stat["successes"] = (
+                                                int(_stat.get("successes", 0)) + 1
+                                            )
+                                _ranked = rank_bypass_strategies(_merged, _old_stats)[
+                                    :8
+                                ]
                                 _merged.bypass_strategies = _ranked
                                 _history: list[dict[str, Any]] = []
-                                if isinstance(_existing, dict) and isinstance(_existing.get("history"), list):
+                                if isinstance(_existing, dict) and isinstance(
+                                    _existing.get("history"), list
+                                ):
                                     _history = list(_existing["history"])
-                                _history.append({
-                                    "iteration": self.state.iteration,
-                                    "status_code": _waf_status,
-                                    "tool": tool_name,
-                                    "confidence": round(_merged.confidence, 3),
-                                    "waf_name": _merged.waf_name,
-                                })
+                                _history.append(
+                                    {
+                                        "iteration": self.state.iteration,
+                                        "status_code": _waf_status,
+                                        "tool": tool_name,
+                                        "confidence": round(_merged.confidence, 3),
+                                        "waf_name": _merged.waf_name,
+                                    }
+                                )
                                 self._session.waf_profiles[_waf_host] = {
                                     "host": _waf_host,
                                     "waf_name": _merged.waf_name,
@@ -579,20 +737,23 @@ class _CyclePostMixin:
                                 }
                                 _waf_ctx = build_waf_bypass_context(_merged)
                                 if _waf_ctx:
-
                                     self.state.conversation = [
-                                        m for m in self.state.conversation
+                                        m
+                                        for m in self.state.conversation
                                         if not m.get("content", "").startswith(
                                             f'<waf_bypass host="{_waf_host}"'
                                         )
                                     ]
-                                    self.state.conversation.append({
-                                        "role": "system",
-                                        "content": _waf_ctx,
-                                    })
+                                    self.state.conversation.append(
+                                        {
+                                            "role": "system",
+                                            "content": _waf_ctx,
+                                        }
+                                    )
                                     logger.info(
                                         "WAF detected on %s: %s (conf=%.0f%%)",
-                                        _waf_host, _merged.waf_name,
+                                        _waf_host,
+                                        _merged.waf_name,
                                         _merged.confidence * 100,
                                     )
                         except Exception as _waf_e:
@@ -615,9 +776,7 @@ class _CyclePostMixin:
                     )
 
                 if success and self.state.tool_counts["total"] >= 1:
-
                     if self.state.planned_tools:
-
                         executed_tools = set()
                         for hist in self.state.tool_history:
                             executed_tools.add(hist.tool_name)
@@ -647,9 +806,7 @@ class _CyclePostMixin:
                     )
 
                 self._record_tested_endpoint(tool_name, arguments)
-                self._append_tool_result(
-                    tool_name, content_str, success, tc.get("id")
-                )
+                self._append_tool_result(tool_name, content_str, success, tc.get("id"))
 
                 self._mentor_tool_call_count += 1
 
@@ -665,8 +822,7 @@ class _CyclePostMixin:
                 save_session(self._session)
 
             if has_task_complete:
-                logger.info(
-                    "Agent emitted [TASK_COMPLETE] after tools — stopping.")
+                logger.info("Agent emitted [TASK_COMPLETE] after tools — stopping.")
                 self._iteration_terminated = True
                 yield AgentEvent(type="done", data={})
                 return

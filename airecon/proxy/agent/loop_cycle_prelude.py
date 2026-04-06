@@ -38,6 +38,38 @@ def _chain_step_to_text(step: Any) -> str:
 
 class _CyclePreludeMixin:
     async def _run_iteration_housekeeping(self, cfg: Any, current_phase: Any) -> None:
+        # Inject output file manifest at iteration 1 and 3 so the AI knows
+        # what artifacts already exist BEFORE running any discovery tools.
+        if self.state.iteration in (1, 3) and self._session and not self._ctf_mode:
+            try:
+                from ..config import get_workspace_root as _gws
+
+                _workspace = _gws() / self._session.target
+                _manifest_parts: list[str] = []
+                for _subdir in ("output", "recon", "scan_results", "findings", "reports", "tools"):
+                    _d = _workspace / _subdir
+                    if _d.is_dir():
+                        _files = sorted([f.name for f in _d.iterdir() if f.is_file()])[:15]
+                        if _files:
+                            _manifest_parts.append(f"{_subdir}/: {', '.join(_files)}")
+                if _manifest_parts:
+                    _manifest = (
+                        "[SYSTEM: OUTPUT FILE MANIFEST — these artifacts already exist]\n"
+                        "READ existing files with read_file before re-running any scan.\n"
+                        "DO NOT re-scan if the information you need is already in these files.\n" +
+                        "\n".join(f"  {p}" for p in _manifest_parts)
+                    )
+                    self.state.conversation.append(
+                        {"role": "system", "content": _manifest}
+                    )
+                    logger.info(
+                        "Output file manifest injected at iteration %d (%d dirs)",
+                        self.state.iteration,
+                        len(_manifest_parts),
+                    )
+            except Exception as _manifest_err:
+                logger.debug("File manifest injection failed: %s", _manifest_err)
+
         if self.state.iteration % 10 == 0:
             self._check_ollama_context_pressure()
 
@@ -155,6 +187,77 @@ class _CyclePreludeMixin:
             self._stagnation_iterations = 0
             self._recent_tool_names.clear()
         self._prev_phase = current_phase
+
+        # Memory-based pattern learning: inject tech-matched patterns every 8 iterations
+        if (
+            self._session
+            and self.state.iteration > 0
+            and self.state.iteration % 8 == 0
+        ):
+            try:
+                from ..memory import get_memory_manager
+
+                _mem = get_memory_manager()
+                _techs = getattr(self._session, "technologies", {}) or {}
+                _tech_names = list(_techs.keys())[:3] if _techs else []
+
+                _learned_patterns = _mem.get_patterns(
+                    target_tech=_tech_names[0] if _tech_names else None,
+                    limit=5,
+                    min_success_rate=0.60,
+                )
+                _similar_findings = _mem.get_similar_findings(
+                    target=self._session.target, limit=5
+                )
+
+                if _learned_patterns:
+                    _p_lines = ["[SYSTEM: LEARNED PATTERNS — proven from past sessions]"]
+                    for _p in _learned_patterns[:4]:
+                        _desc = str(_p.get("description", ""))[:120]
+                        _sr = float(_p.get("success_rate", 0)) * 100
+                        _eff = float(_p.get("effectiveness_score", _sr))
+                        _tools_used = _p.get("commands_used", [])
+                        _tools_str = (
+                            f" used: {', '.join(str(x) for x in _tools_used[:3])}"
+                            if _tools_used
+                            else ""
+                        )
+                        _p_lines.append(
+                            f"- {_desc} (success={_sr:.0f}%, effectiveness={_eff:.0f}){_tools_str}"
+                        )
+                    self.state.conversation = [
+                        m
+                        for m in self.state.conversation
+                        if not str(m.get("content", "")).startswith(
+                            "[SYSTEM: LEARNED PATTERNS"
+                        )
+                    ]
+                    self.state.conversation.append(
+                        {"role": "system", "content": "\n".join(_p_lines)}
+                    )
+                    logger.info(
+                        "Learned patterns injected: %d (tech=%s)",
+                        len(_learned_patterns),
+                        ", ".join(_tech_names) if _tech_names else "generic",
+                    )
+
+                if _similar_findings and self.state.iteration <= 16:
+                    _f_lines = [
+                        "[SYSTEM: SIMILAR TARGET FINDINGS — from past sessions on subdomains]"
+                    ]
+                    for _f in _similar_findings[:3]:
+                        _desc = str(_f.get("description", ""))[:100]
+                        _sev = str(_f.get("severity", "Info"))
+                        _ftype = str(_f.get("finding_type", "unknown"))
+                        _f_lines.append(f"- [{_sev}] {_ftype}: {_desc}")
+                    self.state.conversation.append(
+                        {"role": "system", "content": "\n".join(_f_lines)}
+                    )
+                    logger.info(
+                        "Similar findings injected: %d", len(_similar_findings)
+                    )
+            except Exception as _pattern_err:
+                logger.debug("Pattern learning injection failed: %s", _pattern_err)
 
         current_time = time.time()
         if self._last_request_time > 0:
@@ -356,6 +459,13 @@ class _CyclePreludeMixin:
                     f"{len(s.urls)} URLs, "
                     f"{len(s.vulnerabilities)} vulnerabilities"
                 )
+            self.state.conversation = [
+                msg
+                for msg in self.state.conversation
+                if not msg.get("content", "").startswith(
+                    "[SYSTEM: MANDATORY PLAN REVISION"
+                )
+            ]
             self.state.conversation.append(
                 {
                     "role": "system",
@@ -449,6 +559,13 @@ class _CyclePreludeMixin:
                     if _app_ctx:
                         session_info += "\n" + _app_ctx
 
+            self.state.conversation = [
+                msg
+                for msg in self.state.conversation
+                if not msg.get("content", "").startswith(
+                    "[SYSTEM: EXECUTION CHECKPOINT"
+                )
+            ]
             self.state.conversation.append(
                 {
                     "role": "system",

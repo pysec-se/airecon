@@ -7,6 +7,7 @@ import contextlib
 import hashlib
 import hmac
 import logging
+import re
 import struct
 import threading
 import time
@@ -70,6 +71,57 @@ def _classify_dead_reason(err: str) -> str:
 
 def _is_dead_host_error(err_lower: str) -> bool:
     return any(m in err_lower for m in _DEAD_HOST_MARKERS)
+
+
+_TRACKING_PATTERNS: tuple[str, ...] = (
+    "cdn-cgi/rum",
+    "cdn-cgi/challenge-platform",
+    "cdn-cgi/trace",
+    "__ptq.gif",
+    "hubspot.com/__ptq",
+    "linkedin.com/px/li_sync",
+    "px.ads.linkedin.com",
+    "app.clearbit.com",
+    "google-analytics.com/collect",
+    "facebook.com/tr/",
+    "facebook.com/privacy_sandbox/pixel",
+    "facebook.com/ads/pixel",
+    "facebook.com/plugins/",
+    ".facebook.com/",
+    ".fbcdn.net/",
+    ".connect.facebook.net/",
+    "doubleclick.net",
+    "adservice.google.",
+    "googletagmanager.com/gtm.js",
+    "googlesyndication.com",
+    "adservice.googleadservices.com",
+    "bat.bing.com",
+    "mc.yandex.ru",
+    "hotjar.com",
+    "fullstory.com",
+    "mixpanel.com/track",
+    "segment.io",
+    "api.segment.io",
+    "rum.cloudflare.com",
+    "browser-intake-datadoghq.com",
+    "logs.browser-intake-datadoghq.com",
+    "pixel-config.reddit.com",
+    "sc-analytics.appspot.com",
+    "pinterest.com/log/",
+    "ads.twitter.com/",
+    "advertising.com/",
+    "criteo.net",
+    "outbrain.com",
+    "taboola.com",
+    "sentry.",
+    "sentry_key=",
+)
+
+
+def _is_tracking_url(url: str) -> bool:
+    """Check if a URL matches known tracking/analytics patterns."""
+    url_lower = url.lower()
+    return any(p in url_lower for p in _TRACKING_PATTERNS)
 
 
 BrowserAction = Literal[
@@ -208,14 +260,15 @@ def _ensure_event_loop() -> None:
 
 async def _start_docker_chromium() -> bool:
     _CONTAINER = "airecon-sandbox-active"
+    _cfg = get_config()
     _CHROMIUM_CMD = (
         "chromium "
         "--headless=new "
         "--no-sandbox "
         "--disable-dev-shm-usage "
         "--disable-gpu "
-        "--remote-debugging-port=9222 "
-        "--remote-debugging-address=0.0.0.0 "
+        f"--remote-debugging-port={_cfg.browser_cdp_port} "
+        f"--remote-debugging-address={_cfg.browser_cdp_bind_address} "
         "--disable-web-security "
         '--remote-allow-origins="*" '
         "--ignore-certificate-errors "
@@ -267,14 +320,15 @@ async def _create_browser() -> Browser:
     playwright = await async_playwright().start()
     _state.playwright = playwright
 
-    _CDP_URL = "http://localhost:9222"
+    _cfg = get_config()
+    _CDP_URL = f"http://localhost:{_cfg.browser_cdp_port}"
     _docker_chromium_started = False
 
     for attempt in range(4):
         try:
             _state.browser = await playwright.chromium.connect_over_cdp(
                 _CDP_URL,
-                timeout=3000,
+                timeout=get_config().browser_connect_timeout_ms,
             )
             return _state.browser
         except Exception as _cdp_err:
@@ -368,12 +422,15 @@ class BrowserInstance:
         raise ValueError("No active browser tab available")
 
     async def _navigate_with_fallback(
-        self, page: Any, url: str, timeout_ms: int = 15000
+        self, page: Any, url: str, timeout_ms: int | None = None
     ) -> None:
         """Navigate with redirect loop detection and shorter timeout."""
+        if timeout_ms is None:
+            timeout_ms = get_config().browser_navigation_timeout_ms
         redirect_count = 0
         last_url = url
-        redirect_handler_added = False
+        seen_urls: set[str] = {url}
+        max_redirects = 10  # Increased from 3 — modern sites often chain 5-8 redirects
 
         def check_redirect(request: Any) -> None:
             nonlocal redirect_count, last_url
@@ -382,17 +439,28 @@ class BrowserInstance:
                 redirect_count += 1
                 last_url = current_url
 
-                if redirect_count > 3:
+                # Detect actual loops (same URL visited twice) vs long chains
+                if current_url in seen_urls:
                     logger.warning(
-                        f"Detected redirect loop ({redirect_count} redirects) for {url!r}"
+                        f"Detected redirect loop ({redirect_count} redirects, "
+                        f"revisited {current_url!r}) for {url!r}"
                     )
                     raise RuntimeError(
-                        "Too many redirects (>3) - possible redirect loop"
+                        f"Redirect loop detected — revisited same URL after {redirect_count} redirects"
+                    )
+                seen_urls.add(current_url)
+
+                if redirect_count > max_redirects:
+                    logger.warning(
+                        f"Exceeded redirect limit ({redirect_count} > {max_redirects}) for {url!r}"
+                    )
+                    raise RuntimeError(
+                        f"Too many redirects ({redirect_count} > {max_redirects}) — "
+                        f"final URL: {current_url[:120]}"
                     )
 
         try:
             page.on("request", check_redirect)
-            redirect_handler_added = True
             await page.goto(url, wait_until="domcontentloaded", timeout=timeout_ms)
         except Exception as e:
             err_str = str(e)
@@ -411,15 +479,19 @@ class BrowserInstance:
                     raise
             else:
                 raise
-        finally:
-            # Remove the redirect handler if it was added
-            if redirect_handler_added:
-                try:
-                    page.remove_event_listener("request", check_redirect)
-                except Exception as e:
-                    logger.debug(
-                        "Expected failure removing redirect event listener: %s", e
-                    )
+
+    async def _setup_tracking_blocker(self, page: Page) -> None:
+        """Abort tracking/analytics requests at the network layer before they
+        are ever sent. This prevents redirect loops caused by third-party pixels
+        loaded inside normal pages."""
+        async def _route_handler(route: Any) -> None:
+            if _is_tracking_url(route.request.url):
+                logger.debug("Network route blocked (tracking): %s", route.request.url[:120])
+                await route.abort()
+            else:
+                await route.continue_()
+
+        await page.route("**/*", _route_handler)
 
     async def _setup_console_logging(self, page: Page, tab_id: str) -> None:
         self.console_logs[tab_id] = []
@@ -519,6 +591,7 @@ class BrowserInstance:
         self._next_tab_id += 1
         self.pages[tab_id] = page
         self.current_page_id = tab_id
+        await self._setup_tracking_blocker(page)
         await self._setup_console_logging(page, tab_id)
         if url:
             try:
@@ -570,7 +643,9 @@ class BrowserInstance:
         if include_screenshot:
             try:
                 screenshot_bytes = await page.screenshot(
-                    type="png", full_page=False, timeout=5000
+                    type="png",
+                    full_page=False,
+                    timeout=get_config().browser_screenshot_timeout_ms,
                 )
                 screenshot_b64 = base64.b64encode(screenshot_bytes).decode("utf-8")
             except Exception as e:
@@ -630,6 +705,16 @@ class BrowserInstance:
             return self._run_async(self._goto(url, tab_id))
 
     async def _goto(self, url: str, tab_id: str | None = None) -> dict[str, Any]:
+        if _is_tracking_url(url):
+            logger.info("Browser: skipping tracking/analytics URL: %s", url[:120])
+            return {
+                "success": False,
+                "tracking_url": True,
+                "url": url,
+                "message": "Skipped tracking/analytics URL (would cause redirect loop)",
+                "next_action": "Skip this URL — it is a third-party analytics/tracking pixel, not a target endpoint.",
+            }
+
         tab_id = self._resolve_tab_id(tab_id)
         page = self.pages[tab_id]
         try:
@@ -717,13 +802,19 @@ class BrowserInstance:
         tab_id = self._resolve_tab_id(tab_id)
         page = self.pages[tab_id]
         try:
-            await page.go_back(wait_until="domcontentloaded", timeout=60000)
+            await page.go_back(
+                wait_until="domcontentloaded",
+                timeout=get_config().browser_navigation_timeout_ms,
+            )
         except Exception as e:
             if "timeout" in str(e).lower():
                 logger.warning(
                     "go_back domcontentloaded timed out, falling back to 'commit'"
                 )
-                await page.go_back(wait_until="commit", timeout=60000)
+                await page.go_back(
+                    wait_until="commit",
+                    timeout=get_config().browser_navigation_timeout_ms,
+                )
             else:
                 raise
         return await self._get_page_state(tab_id)
@@ -736,13 +827,19 @@ class BrowserInstance:
         tab_id = self._resolve_tab_id(tab_id)
         page = self.pages[tab_id]
         try:
-            await page.go_forward(wait_until="domcontentloaded", timeout=60000)
+            await page.go_forward(
+                wait_until="domcontentloaded",
+                timeout=get_config().browser_navigation_timeout_ms,
+            )
         except Exception as e:
             if "timeout" in str(e).lower():
                 logger.warning(
                     "go_forward domcontentloaded timed out, falling back to 'commit'"
                 )
-                await page.go_forward(wait_until="commit", timeout=60000)
+                await page.go_forward(
+                    wait_until="commit",
+                    timeout=get_config().browser_navigation_timeout_ms,
+                )
             else:
                 raise
         return await self._get_page_state(tab_id)
@@ -759,6 +856,7 @@ class BrowserInstance:
         self._next_tab_id += 1
         self.pages[tab_id] = page
         self.current_page_id = tab_id
+        await self._setup_tracking_blocker(page)
         await self._setup_console_logging(page, tab_id)
         if url:
             try:
@@ -1147,8 +1245,10 @@ class BrowserInstance:
         page: Any,
         selectors: str,
         value: str,
-        timeout_ms: int = 3000,
+        timeout_ms: int | None = None,
     ) -> bool:
+        if timeout_ms is None:
+            timeout_ms = get_config().browser_totp_fill_timeout_ms
         for sel in selectors.split(","):
             try:
                 await page.fill(sel.strip(), value, timeout=timeout_ms)
@@ -1161,8 +1261,10 @@ class BrowserInstance:
         self,
         page: Any,
         selectors: str | tuple[str, ...],
-        timeout_ms: int = 3000,
+        timeout_ms: int | None = None,
     ) -> bool:
+        if timeout_ms is None:
+            timeout_ms = get_config().browser_totp_fill_timeout_ms
         sel_list = (
             selectors.split(",") if isinstance(selectors, str) else list(selectors)
         )
@@ -1209,7 +1311,9 @@ class BrowserInstance:
                 await page.keyboard.press("Enter")
 
             try:
-                await page.wait_for_load_state("networkidle", timeout=8000)
+                await page.wait_for_load_state(
+                    "networkidle", timeout=get_config().browser_login_form_wait_ms
+                )
             except Exception as e:
                 logger.debug(
                     "Expected failure waiting for networkidle in multi-step login: %s",
@@ -1218,7 +1322,9 @@ class BrowserInstance:
 
             try:
                 await page.wait_for_selector(
-                    'input[type="password"]', state="visible", timeout=8000
+                    'input[type="password"]',
+                    state="visible",
+                    timeout=get_config().browser_login_form_wait_ms,
                 )
             except Exception:
                 await asyncio.sleep(2)
@@ -1245,7 +1351,9 @@ class BrowserInstance:
                 await page.keyboard.press("Enter")
 
         try:
-            await page.wait_for_load_state("domcontentloaded", timeout=10000)
+            await page.wait_for_load_state(
+                "domcontentloaded", timeout=get_config().browser_page_load_timeout_ms
+            )
         except Exception:
             await asyncio.sleep(2)
 
@@ -1292,14 +1400,76 @@ class BrowserInstance:
                 except Exception as _ss_err:
                     logger.debug("Auto-screenshot on CAPTCHA failed: %s", _ss_err)
 
+                # Auto-solve CAPTCHA via Ollama vision + DOM bypass
+                _capt_type = r.get("captchaType") or "unknown"
+                _captcha_bypass_applied = False
+                try:
+                    from .agent.captcha_solver import CaptchaSolver
+
+                    _cfg = get_config()
+                    _captcha_model_cfg = _cfg.ollama_model
+                    _solver = CaptchaSolver(
+                        ollama_url=_cfg.ollama_url,
+                        captcha_model=_captcha_model_cfg,
+                        timeout=_cfg.ollama_timeout,
+                    )
+
+                    # Always try DOM bypass first for widget-type CAPTCHAs
+                    _bypass_js = _solver._get_dom_bypass_js(_capt_type)
+                    if _captcha_screenshot:
+                        # Send screenshot to Ollama vision for text CAPTCHA solving
+                        _solve_result = await _solver.solve_from_page(
+                            page_screenshot_b64=base64.b64encode(
+                                await page.screenshot(type="png", full_page=False)
+                            ).decode("utf-8"),
+                            page_html=await page.evaluate("() => document.documentElement.outerHTML"),
+                            captcha_type=_capt_type,
+                        )
+                        if _solve_result.get("success"):
+                            state["captcha_bypass_applied"] = True
+                            state["captcha_solution"] = _solve_result.get("solution")
+                            state["captcha_method"] = _solve_result.get("method")
+                            _captcha_bypass_applied = True
+                            logger.info(
+                                "CAPTCHA solved: type=%s method=%s solution=%r",
+                                _capt_type,
+                                _solve_result.get("method"),
+                                _solve_result.get("solution"),
+                            )
+                    elif _bypass_js:
+                        # No screenshot available — try DOM bypass only
+                        _dom_result = await page.evaluate(_bypass_js)
+                        if isinstance(_dom_result, dict) and _dom_result.get("success"):
+                            state["captcha_bypass_applied"] = True
+                            _captcha_bypass_applied = True
+                            logger.info(
+                                "CAPTCHA DOM bypass success: type=%s",
+                                _capt_type,
+                            )
+                except Exception as _bypass_err:
+                    logger.debug("CAPTCHA auto-solve failed: %s", _bypass_err)
+
+                _captcha_strategy_msg = ""
+                if _captcha_bypass_applied:
+                    _captcha_strategy_msg = (
+                        f" Auto-solved via {state.get('captcha_method', 'DOM bypass')}."
+                        if state.get("captcha_method")
+                        else " Auto DOM bypass applied."
+                    )
+                elif _captcha_model_cfg:
+                    _captcha_strategy_msg = (
+                        f" Ollama vision model configured ({_captcha_model_cfg}) but failed."
+                    )
+
                 _captcha_hint = (
-                    f"CAPTCHA detected ({r.get('captchaType')})."
+                    f"CAPTCHA detected ({_capt_type})."
                     + (
                         f" Screenshot saved: {_captcha_screenshot}."
                         if _captcha_screenshot
                         else ""
                     )
-                    + " Call request_user_input(input_type='captcha', prompt='Solve the CAPTCHA"
+                    + _captcha_strategy_msg
+                    + " If auto-solve failed: call request_user_input(input_type='captcha', prompt='Solve the CAPTCHA"
                     + (
                         f" shown in {_captcha_screenshot}"
                         if _captcha_screenshot
@@ -1393,7 +1563,9 @@ class BrowserInstance:
         otp_filled = False
         for sel in field_selector.split(","):
             try:
-                await page.fill(sel.strip(), code, timeout=3000)
+                await page.fill(
+                    sel.strip(), code, timeout=get_config().browser_totp_fill_timeout_ms
+                )
                 otp_filled = True
                 logger.debug("handle_totp: filled field %s with code", sel.strip())
                 break
@@ -1431,7 +1603,9 @@ class BrowserInstance:
             await page.keyboard.press("Enter")
 
         try:
-            await page.wait_for_load_state("domcontentloaded", timeout=10000)
+            await page.wait_for_load_state(
+                "domcontentloaded", timeout=get_config().browser_page_load_timeout_ms
+            )
         except Exception:
             await asyncio.sleep(2)
 
@@ -1557,9 +1731,15 @@ class BrowserInstance:
         captured_url: str | None = None
         try:
             if callback_prefix:
-                await page.wait_for_url(f"{callback_prefix}**", timeout=15000)
+                await page.wait_for_url(
+                    f"{callback_prefix}**",
+                    timeout=get_config().browser_oauth_callback_timeout_ms,
+                )
             else:
-                await page.wait_for_load_state("networkidle", timeout=15000)
+                await page.wait_for_load_state(
+                    "networkidle",
+                    timeout=get_config().browser_oauth_callback_timeout_ms,
+                )
             current_url = page.url
             if callback_prefix and current_url.startswith(callback_prefix):
                 from urllib.parse import parse_qs, urlparse
@@ -1782,7 +1962,9 @@ class BrowserInstance:
 class BrowserTabManager:
     MAX_TABS = 3
 
-    def __init__(self) -> None:
+    def __init__(
+        self,
+    ) -> None:
         self._browser: BrowserInstance | None = None
         self._lock = threading.Lock()
         self._restart_count = 0
@@ -1815,6 +1997,18 @@ class BrowserTabManager:
                     raise RuntimeError(f"Browser auto-launch failed: {e}") from e
         return browser
 
+    _RESTARTABLE_ERRORS = (
+        "target closed",
+        "browser has been closed",
+        "connection refused",
+        "execution context was destroyed",
+        "page crashed",
+        "navigation failed",
+        "session closed",
+        "browser instance is not running",
+        "invalid auth credentials",
+    )
+
     def _safe_action(self, action_name: str, fn, *args, **kwargs) -> dict[str, Any]:
         try:
             result = fn(*args, **kwargs)
@@ -1836,21 +2030,49 @@ class BrowserTabManager:
                 ),
             }
         except Exception as e:
-            error_str = str(e).lower()
-            is_crash = any(
-                k in error_str
-                for k in (
-                    "target closed",
-                    "browser has been closed",
-                    "connection refused",
-                    "execution context was destroyed",
-                    "page crashed",
-                    "navigation failed",
-                    "session closed",
-                )
+            error_str = str(e)
+            error_lower = error_str.lower()
+
+            # Redirect loops are server-side — restarting the browser never helps.
+            # Return a structured result immediately so the AI can pivot.
+            is_redirect_loop = (
+                "too many redirects" in error_lower
+                or "redirect loop" in error_lower
             )
-            is_redirect_loop = "too many redirects" in error_str
-            if is_crash or is_redirect_loop:
+            if is_redirect_loop:
+                # Extract the final URL from the error if present
+                redirected_url = ""
+                _final_m = re.search(r"final URL:\s*(\S+)", error_str)
+                if _final_m:
+                    redirected_url = _final_m.group(1)
+                logger.warning(
+                    "Browser redirect loop on %s — skipping restart (%s)",
+                    action_name,
+                    error_str[:200],
+                )
+                result = {
+                    "success": False,
+                    "redirect_loop": True,
+                    "error": error_str[:500],
+                    "message": (
+                        "The page redirect chain exceeded 10 hops. This is usually caused by "
+                        "tracking pixels, ad blockers, or SSO redirect chains — not a real page."
+                    ),
+                    "final_url": redirected_url[:200],
+                    "next_action": (
+                        "Do NOT retry the same URL. If it redirected to a third-party domain "
+                        "(ads, analytics, SSO, or CDN), skip it and test the next endpoint. "
+                        "If you need to see this page, try with JavaScript disabled or "
+                        "use curl --head to inspect redirects manually."
+                    ),
+                }
+                return result
+
+            is_crash = any(
+                k in error_lower
+                for k in self._RESTARTABLE_ERRORS
+            )
+            if is_crash:
                 with self._lock:
                     _can_restart = self._restart_count < 5
                     if _can_restart:
@@ -1866,31 +2088,34 @@ class BrowserTabManager:
                         f"Browser action '{action_name}' failed (max restarts reached): {e}"
                     )
                     return {"error": f"Browser action failed: {e}"}
-                restart_reason = "redirect loop" if is_redirect_loop else "crash"
                 logger.warning(
-                    f"Browser {restart_reason} during '{action_name}': {e}. Auto-restarting..."
+                    f"Browser crash during '{action_name}': {e}. Auto-restarting..."
                 )
 
                 try:
                     fresh = self._ensure_launched()
-
                     method = getattr(fresh, fn.__name__, None)
                     if method is None:
                         return {
-                            "error": f"Browser {restart_reason} and could not rebind method '{fn.__name__}' after restart"
+                            "error": f"Browser crashed and could not rebind method '{fn.__name__}' after restart"
                         }
                     result = method(*args, **kwargs)
                     if not isinstance(result, dict):
                         result = {"result": result}
-                    result["warning"] = (
-                        f"Browser was auto-restarted after {restart_reason}"
-                    )
+                    result["warning"] = "Browser was auto-restarted after crash"
                     return result
                 except Exception as e2:
-                    return {"error": f"Browser {restart_reason} and retry failed: {e2}"}
+                    return {"error": f"Browser crashed and retry failed: {e2}"}
             else:
+                error_str = f"Browser action failed: {e}"
+                if "ERR_INVALID_AUTH_CREDENTIALS" in str(e):
+                    error_str += (
+                        " — This appears to be an authentication error. "
+                        "Check that your credentials are valid, clear browser cookies/session data, "
+                        "or try a different authentication approach."
+                    )
                 logger.error(f"Browser action '{action_name}' failed (non-crash): {e}")
-                return {"error": f"Browser action failed: {e}"}
+                return {"error": error_str}
 
     def launch_browser(self, url: str | None = None) -> dict[str, Any]:
         browser = self._get_browser()
@@ -2103,6 +2328,87 @@ class BrowserTabManager:
         result.setdefault("message", "TOTP code submitted")
         return result
 
+    def solve_captcha(
+        self,
+        captcha_type: str,
+        page_url: str = "",
+        sitekey: str = "",
+        tab_id: str | None = None,
+    ) -> dict[str, Any]:
+        """Auto-solve CAPTCHA using Ollama vision or DOM bypass."""
+        from .agent.captcha_solver import CaptchaSolver
+
+        cfg = get_config()
+
+        solver = CaptchaSolver(
+            ollama_url=cfg.ollama_url,
+            captcha_model=cfg.ollama_model,
+            timeout=cfg.ollama_timeout,
+        )
+
+        try:
+            browser = self._ensure_launched()
+            tab_id = tab_id or browser.current_page_id
+            if tab_id is None or tab_id not in browser.pages:
+                return {"error": "No browser page available for CAPTCHA solving"}
+
+            page = browser.pages[tab_id]
+
+            # Build result using async event loop
+            loop = browser._loop
+            if loop is None:
+                return {"error": "No event loop available for async CAPTCHA solving"}
+
+            import asyncio
+
+            # Run async page methods on the browser's event loop
+            ss_future = asyncio.run_coroutine_threadsafe(
+                page.screenshot(type="png", full_page=False),
+                loop,
+            )
+            ss_bytes = ss_future.result(timeout=solver.timeout)
+            ss_b64 = base64.b64encode(ss_bytes).decode("utf-8")
+
+            content_future = asyncio.run_coroutine_threadsafe(
+                page.content(), loop
+            )
+            page_html = content_future.result(timeout=solver.timeout)
+
+            future = asyncio.run_coroutine_threadsafe(
+                solver.solve_from_page(
+                    page_screenshot_b64=ss_b64,
+                    page_html=page_html,
+                    captcha_type=captcha_type,
+                ),
+                loop,
+            )
+            solve_result = future.result(timeout=solver.timeout)
+
+            # If DOM bypass was provided, execute it on the page
+            if solve_result.get("bypass_js"):
+                dom_result = page.evaluate(solve_result["bypass_js"])
+                solve_result["dom_result"] = dom_result
+                if isinstance(dom_result, dict) and dom_result.get("success"):
+                    solve_result["success"] = True
+
+            return {
+                "captcha_type": captcha_type,
+                "method": solve_result.get("method"),
+                "success": solve_result.get("success", False),
+                "solution": solve_result.get("solution"),
+                "message": (
+                    f"CAPTCHA solved via {solve_result.get('method', 'unknown')} ({captcha_type})"
+                    if solve_result.get("success")
+                    else f"CAPTCHA auto-solve failed for {captcha_type}"
+                ),
+            }
+
+        except Exception as e:
+            return {
+                "captcha_type": captcha_type,
+                "error": f"CAPTCHA solve failed: {e}",
+            }
+
     def save_auth_state(self) -> dict[str, Any]:
         result = self._safe_action(
             "save_auth_state", self._ensure_launched().save_auth_state
@@ -2176,6 +2482,8 @@ def browser_action(
     wait_selector: str | None = None,
     wait_timeout: float = 10.0,
     wait_state: str = "visible",
+    captcha_type: str | None = None,
+    sitekey: str | None = None,
 ) -> dict[str, Any]:
     try:
         if action == "launch":
@@ -2248,6 +2556,17 @@ def browser_action(
                 tab_id=tab_id,
                 totp_digits=totp_digits,
                 totp_period=totp_period,
+            )
+        elif action == "solve_captcha":
+            if not captcha_type:
+                return {
+                    "error": "solve_captcha requires: captcha_type (recaptcha/hcaptcha/cloudflare_turnstile/unknown)"
+                }
+            return _manager.solve_captcha(
+                captcha_type=captcha_type,
+                page_url=url or "",
+                sitekey=sitekey or "",
+                tab_id=tab_id,
             )
         elif action == "save_auth_state":
             return _manager.save_auth_state()

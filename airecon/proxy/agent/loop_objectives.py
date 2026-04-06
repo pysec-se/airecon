@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import re
 import warnings
 from pathlib import Path
@@ -15,6 +16,8 @@ from .executors import (
 )
 from .owasp import classify_owasp, severity_for_evidence
 from .pipeline import _PHASE_TOOL_BUDGETS, PipelinePhase
+
+logger = logging.getLogger("airecon.agent.loop_objectives")
 
 _tools_meta_path = Path(__file__).parent.parent / "data" / "tools_meta.json"
 try:
@@ -170,7 +173,7 @@ class _ObjectivesMixin:
                     [
                         str(v.get("finding", "")),
                         str(v.get("title", "")),
-                        str(v.get("proof", "")),
+                        str(v.get("proo", "")),
                         str(v.get("evidence", "")),
                         str(v.get("url", "")),
                         str(v.get("endpoint", "")),
@@ -197,7 +200,7 @@ class _ObjectivesMixin:
                 self.state.mark_objective(phase.value, defaults[3], "done")
 
             if (
-                any(v.get("flag") or v.get("proof") or v.get("evidence") or v.get("poc_script_code") for v in s.vulnerabilities)
+                any(v.get("flag") or v.get("proo") or v.get("evidence") or v.get("poc_script_code") for v in s.vulnerabilities)
                 or _has(r"\b(flag\{[^}\n]+\}|credential|secret|token|api[_-]?key|database\s+dump|exfiltrat|unauthorized\s+data|admin\s+access|read\s+/etc/passwd)\b")
             ) and len(defaults) > 4:
                 self.state.mark_objective(phase.value, defaults[4], "done")
@@ -439,7 +442,7 @@ class _ObjectivesMixin:
 
         for flag in re.findall(r"(?:FLAG|flag)\{[^}\n]{1,200}\}", blob):
             _summary = f"Flag pattern captured: {flag}"
-            _t, _s = self._enrich_evidence(_summary, ["flag", "ctf"], 1.0, tool_name)
+            _t, _s = self._enrich_evidence(_summary, ["flag", "ct"], 1.0, tool_name)
             self.state.add_evidence(
                 phase=phase,
                 source_tool=tool_name,
@@ -486,7 +489,8 @@ class _ObjectivesMixin:
             for _u in url_matches:
                 try:
                     _h = _up2.urlparse(_u).hostname or ""
-                except Exception:
+                except Exception as e:
+                    logger.debug("Exception in %s: %s", __name__, e)
                     continue
                 if _h.endswith(_target_domain):
                     in_scope_urls.append(_u)
@@ -589,7 +593,7 @@ class _ObjectivesMixin:
         (re.compile(
             r"\b(ssrf|server.side\s+request|internal\s+host|metadata\s+endpoint|"
             r"169\.254\.169\.254)\b", re.IGNORECASE),
-         "ssrf", "ffuf"),
+         "ssr", "ffu"),
         (re.compile(
             r"\b(idor|insecure\s+direct|object\s+reference|bola|broken\s+access\s+control)\b",
             re.IGNORECASE),
@@ -604,7 +608,7 @@ class _ObjectivesMixin:
         (re.compile(
             r"\b(lfi|local\s+file\s+inclus|path\s+travers|directory\s+travers|"
             r"\.\./|etc/passwd)\b", re.IGNORECASE),
-         "lfi", "ffuf"),
+         "lfi", "ffu"),
         (re.compile(
             r"\b(auth\s+bypass|broken\s+auth|default\s+cred|weak\s+pass|"
             r"admin:admin|password123)\b", re.IGNORECASE),
@@ -653,7 +657,7 @@ class _ObjectivesMixin:
                     f"Search for a public PoC for {_cve}. "
                     f"Run: nuclei -t cve/{_cve.lower()}.yaml "
                     f"or searchsploit {_cve}. "
-                    f"Verify exploitability against the installed version."
+                    "Verify exploitability against the installed version."
                 ),
                 phase=phase,
                 tags=["cve", "vulnerability"],
@@ -674,9 +678,9 @@ class _ObjectivesMixin:
                 ),
                 test_plan=(
                     f"Use {_confirm_tool} to confirm. "
-                    f"Test all input parameters on the endpoint. "
-                    f"Look for error messages or behavioural differences "
-                    f"that distinguish positive from negative responses."
+                    "Test all input parameters on the endpoint. "
+                    "Look for error messages or behavioural differences "
+                    "that distinguish positive from negative responses."
                 ),
                 phase=phase,
                 tags=[_vuln_type, "needs_confirmation"],
@@ -695,8 +699,8 @@ class _ObjectivesMixin:
                     ),
                     test_plan=(
                         f"Run: nmap -sV -sC -p {','.join(_port_hits[:3])} <target>. "
-                        f"Check service versions against CVE databases. "
-                        f"Test for default credentials and known exploits."
+                        "Check service versions against CVE databases. "
+                        "Test for default credentials and known exploits."
                     ),
                     phase=phase,
                     tags=["network", "service"],
@@ -720,7 +724,7 @@ class _ObjectivesMixin:
             and len(phase_evidence) < min_required_evidence
         ):
             return (
-                f"[SYSTEM: PHASE GATE]\n"
+                "[SYSTEM: PHASE GATE]\n"
                 f"You used exploit-heavy tool '{tool_name}' while phase is {phase_name} "
                 "with insufficient evidence.\n"
                 "Before further exploitation, collect stronger artifacts first "

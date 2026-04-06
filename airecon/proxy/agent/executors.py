@@ -51,11 +51,7 @@ def _load_recon_bins(category: str, fallback: frozenset[str]) -> frozenset[str]:
     try:
         path = Path(__file__).resolve().parent.parent / "data" / "tools_meta.json"
         data = json.loads(path.read_text(encoding="utf-8"))
-        bins = (
-            data.get("categories", {})
-            .get("reconnaissance", {})
-            .get(category, [])
-        )
+        bins = data.get("categories", {}).get("reconnaissance", {}).get(category, [])
         return frozenset(str(x).strip().lower() for x in bins if str(x).strip())
     except Exception as exc:
         logger.warning(
@@ -84,6 +80,41 @@ class _ExecutorMixin(
         _last_output_file: str | None
         _executed_tool_counts: dict[tuple[str, str], int]
 
+    def _get_executor_providers(self) -> dict[str, dict[str, Any]]:
+   
+        try:
+            self._executor_providers
+        except AttributeError:
+            self._executor_providers: dict[str, dict[str, Any]] = {
+                "browser": {
+                    "browser_action": browser_action,
+                    "get_config": get_config,
+                    "get_workspace_root": get_workspace_root,
+                    "ToolExecution": ToolExecution,
+                },
+                "filesystem": {
+                    "create_file": create_file,
+                    "read_file": read_file,
+                    "list_files": list_files,
+                    "get_workspace_root": get_workspace_root,
+                    "ToolExecution": ToolExecution,
+                    "_REPORT_FILE_PATTERNS": _REPORT_FILE_PATTERNS,
+                    "_READ_FILE_CONTENT_TRUNCATION_THRESHOLD": (
+                        _READ_FILE_CONTENT_TRUNCATION_THRESHOLD
+                    ),
+                },
+                "web_search": {
+                    "web_search": web_search,
+                    "get_workspace_root": get_workspace_root,
+                    "ToolExecution": ToolExecution,
+                },
+                "report": {
+                    "create_vulnerability_report": create_vulnerability_report,
+                    "ToolExecution": ToolExecution,
+                },
+            }
+        return self._executor_providers
+
     def _append_tool_history(
         self,
         tool_name: str,
@@ -108,7 +139,9 @@ class _ExecutorMixin(
     def _extract_command_binary(self, command: str) -> str:
         return extract_primary_binary(command)
 
-    def _is_recon_phase_repeat_blocked(self, tool_name: str, arguments: dict[str, Any], count: int) -> bool:
+    def _is_recon_phase_repeat_blocked(
+        self, tool_name: str, arguments: dict[str, Any], count: int
+    ) -> bool:
         if tool_name != "execute" or count < 1:
             return False
 
@@ -116,7 +149,10 @@ class _ExecutorMixin(
         try:
             if hasattr(self, "_get_current_phase"):
                 phase_name = str(self._get_current_phase().value).upper()
-        except Exception:
+        except Exception as exc:
+            logger.debug(
+                "Could not determine current phase for recon repeat check: %s", exc
+            )
             phase_name = ""
 
         if phase_name != "RECON":
@@ -137,7 +173,9 @@ class _ExecutorMixin(
         _browser_mod.get_config = get_config
         _browser_mod.get_workspace_root = get_workspace_root
         _browser_mod.ToolExecution = ToolExecution
-        return await _BrowserExecutorMixin._execute_local_browser_tool(self, tool_name, arguments)
+        return await _BrowserExecutorMixin._execute_local_browser_tool(
+            self, tool_name, arguments
+        )
 
     async def _execute_filesystem_tool(
         self,
@@ -152,8 +190,12 @@ class _ExecutorMixin(
         _fs_mod.get_workspace_root = get_workspace_root
         _fs_mod.ToolExecution = ToolExecution
         _fs_mod._REPORT_FILE_PATTERNS = _REPORT_FILE_PATTERNS
-        _fs_mod._READ_FILE_CONTENT_TRUNCATION_THRESHOLD = _READ_FILE_CONTENT_TRUNCATION_THRESHOLD
-        return await _FilesystemExecutorMixin._execute_filesystem_tool(self, tool_name, arguments)
+        _fs_mod._READ_FILE_CONTENT_TRUNCATION_THRESHOLD = (
+            _READ_FILE_CONTENT_TRUNCATION_THRESHOLD
+        )
+        return await _FilesystemExecutorMixin._execute_filesystem_tool(
+            self, tool_name, arguments
+        )
 
     async def _execute_web_search_tool(
         self,
@@ -175,4 +217,6 @@ class _ExecutorMixin(
 
         _report_mod.create_vulnerability_report = create_vulnerability_report
         _report_mod.ToolExecution = ToolExecution
-        return await _ReportingExecutorMixin._execute_report_tool(self, tool_name, arguments)
+        return await _ReportingExecutorMixin._execute_report_tool(
+            self, tool_name, arguments
+        )

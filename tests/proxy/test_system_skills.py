@@ -1,4 +1,4 @@
-import logging
+
 from types import SimpleNamespace
 
 import airecon.proxy.system as system_module
@@ -58,28 +58,16 @@ def test_auto_load_avoids_substring_false_positive_for_express():
     assert "frameworks/express.md" not in loaded
 
 
-def test_exploit_phase_guaranteed_skills_exist():
+def test_exploit_phase_has_recommended_skills():
+    """Dynamic selection should return relevant skills for EXPLOIT phase."""
     skills_root = system_module.Path(system_module.__file__).resolve().parent / "skills"
-    for skill_rel in system_module._PHASE_ENTRY_SKILLS["EXPLOIT"]:
+    all_skills = system_module._discover_all_skills(skills_root)
+    selected = system_module._select_phase_skills("EXPLOIT", all_skills, max_skills=5)
+    assert len(selected) > 0
+    for skill_rel in selected:
         assert (skills_root / skill_rel).exists(), (
-            f"Missing guaranteed skill: {skill_rel}"
+            f"Selected skill does not exist: {skill_rel}"
         )
-
-
-def test_invalid_guaranteed_skill_logs_warning(mocker, caplog):
-    caplog.set_level(logging.WARNING)
-    mocker.patch.object(
-        system_module,
-        "_PHASE_ENTRY_SKILLS",
-        {"EXPLOIT": ["missing/does-not-exist.md"]},
-    )
-
-    _ctx, loaded = auto_load_skills_for_message("unrelated", phase="EXPLOIT")
-
-    assert loaded == []
-    assert any(
-        "Phase-guaranteed skill path is invalid" in r.message for r in caplog.records
-    )
 
 
 def test_get_system_prompt_includes_standard_recon_mode_policy(monkeypatch):
@@ -112,6 +100,10 @@ def test_get_system_prompt_includes_full_recon_mode_policy(monkeypatch):
     assert "RECON_MODE=FULL" in prompt
 
 
-def test_recon_phase_guaranteed_skills_do_not_force_full_recon_skill():
-    recon_skills = system_module._PHASE_ENTRY_SKILLS.get("RECON", [])
-    assert "reconnaissance/full_recon.md" not in recon_skills
+def test_recon_phase_does_not_overload_skills():
+    """Dynamic selection should keep skill count in check."""
+    skills_root = system_module.Path(system_module.__file__).resolve().parent / "skills"
+    all_skills = system_module._discover_all_skills(skills_root)
+    selected = system_module._select_phase_skills("RECON", all_skills, max_skills=5)
+    # max_skills=5 is a soft limit — should not exceed it
+    assert len(selected) <= 5

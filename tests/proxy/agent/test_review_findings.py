@@ -402,8 +402,8 @@ class TestSkillSessionAlignment:
         assert loaded, "Expected at least one loaded skill"
         assert all("/" in s and s.endswith(".md") for s in loaded)
 
-    def test_session_dedup_accepts_legacy_stem_and_path(self, monkeypatch):
-        """Session dedup should work with both new rel-path and old stem format."""
+    def test_session_dedup_loads_keyword_skill(self, monkeypatch):
+        """Keyword-matched skill should be loaded as primary result."""
         import airecon.proxy.system as sys_module
 
         monkeypatch.setattr(
@@ -411,30 +411,28 @@ class TestSkillSessionAlignment:
             "_SKILL_KEYWORDS",
             {"keyword_x": "tools/code_review.md"},
         )
-        monkeypatch.setattr(
-            sys_module,
-            "_PHASE_ENTRY_SKILLS",
-            {"RECON": [], "ANALYSIS": [], "EXPLOIT": [], "REPORT": [], "COMPLETE": []},
-        )
 
-        _, loaded = sys_module.auto_load_skills_for_message(
+        ctx, loaded = sys_module.auto_load_skills_for_message(
             "keyword_x", phase="ANALYSIS"
         )
-        assert loaded == ["tools/code_review.md"]
+        # The keyword-matched skill must always be present
+        assert "tools/code_review.md" in loaded
 
+        # Dedup via path
         _, loaded_again_path = sys_module.auto_load_skills_for_message(
             "keyword_x",
             phase="ANALYSIS",
             session_loaded_skills={"tools/code_review.md"},
         )
-        assert loaded_again_path == []
+        assert "tools/code_review.md" not in loaded_again_path
 
+        # Dedup via stem
         _, loaded_again_stem = sys_module.auto_load_skills_for_message(
             "keyword_x",
             phase="ANALYSIS",
             session_loaded_skills={"code_review"},
         )
-        assert loaded_again_stem == []
+        assert "tools/code_review.md" not in loaded_again_stem
 
 
 class TestStaleSkillPruning:

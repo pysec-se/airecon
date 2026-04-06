@@ -37,17 +37,17 @@ class _WorkspaceMixin:
             "cpp",
             "h",
             "log",
-            "conf",
+            "con",
             "cfg",
             "ini",
             "toml",
             "lock",
             "env",
-            "pdf",
+            "pd",
             "png",
             "jpg",
             "jpeg",
-            "gif",
+            "gi",
             "svg",
             "ico",
             "zip",
@@ -200,7 +200,8 @@ class _WorkspaceMixin:
         if isinstance(arguments, str):
             try:
                 arguments = json.loads(arguments)
-            except Exception:
+            except Exception as e:
+                logger.debug("Exception: %s", e)
                 arguments = {}
         if not isinstance(arguments, dict):
             return {}

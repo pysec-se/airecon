@@ -5,14 +5,17 @@ from typing import Any
 from urllib.parse import urlparse
 
 from ..config import get_config
-from .models import AgentState
+from .models import AgentState, _get_model_limits
 from .session import get_untested_injection_points
 
 logger = logging.getLogger("airecon.agent")
 
 
 class _ContextMixin:
-    _MAX_TOOL_RESULT_CHARS: int = 3_000
+    @property
+    def _MAX_TOOL_RESULT_CHARS(self) -> int:
+        limits = _get_model_limits()
+        return min(3_000, limits.get("max_tool_result_chars", 50000))
 
     def _inject_exploit_vuln_context(self) -> None:
         if not self._session:
@@ -99,6 +102,8 @@ class _ContextMixin:
 
         for i, msg in enumerate(msgs[:cutoff]):
             role = msg.get("role")
+            if msg.get("_protected"):
+                continue
             content = str(msg.get("content", ""))
 
             if role == "tool" and len(content) > 400:
@@ -307,7 +312,7 @@ class _ContextMixin:
         _tools_count = len(self._tools_ollama) if self._tools_ollama is not None else 20
         _tools_overhead = _tools_count * 500
         effective_input_ctx = max(1024, num_ctx - effective_predict - _tools_overhead)
-        budget = int(effective_input_ctx * 0.50)
+        budget = int(effective_input_ctx * 0.35)
         total = sum(
             len(str(m.get("content") or ""))
             + len(str(m.get("tool_calls") or ""))
@@ -324,6 +329,32 @@ class _ContextMixin:
             num_ctx,
         )
 
+        # Step 0: Deduplicate old CRITICAL FINDINGS messages.
+        # These are added every compression cycle and compound, consuming
+        # budget without adding value. Keep only the latest one.
+        _critical_indices = [
+            i
+            for i, m in enumerate(self.state.conversation)
+            if str(m.get("content", "")).startswith("[SYSTEM: CRITICAL FINDINGS")
+        ]
+        if len(_critical_indices) > 1:
+            _cf_chars = 0
+            for idx in _critical_indices[:-1]:
+                _cf_chars += len(str(self.state.conversation[idx].get("content", "")))
+                self.state.conversation[idx] = {
+                    "role": "tool",
+                    "content": "[Critical findings deduped — latest version retained]",
+                }
+            total -= _cf_chars
+            logger.info(
+                "Deduped %d old CRITICAL FINDINGS messages (%d chars freed)",
+                len(_critical_indices) - 1,
+                _cf_chars,
+            )
+            if total <= budget:
+                logger.info("Budget satisfied after deduping critical findings")
+                return
+
         # Step 1: Drop stale tool results (fast, no LLM)
         self._drop_stale_tool_results()
         total = sum(
@@ -335,6 +366,32 @@ class _ContextMixin:
         if total <= budget:
             logger.info("Budget satisfied after dropping stale tool results")
             return
+
+        # Step 1.5: Drop old [SYSTEM: AUTO-TRUNCATED ...] metadata summaries.
+        # These accumulate as filler without providing actionable context.
+        # Keep only the most recent one if multiple exist.
+        _at_indices = [
+            i
+            for i, m in enumerate(self.state.conversation)
+            if str(m.get("content", "")).startswith("[SYSTEM: AUTO-TRUNCATED")
+        ]
+        if len(_at_indices) > 1:
+            _at_chars = 0
+            for idx in _at_indices[:-1]:
+                _at_chars += len(str(self.state.conversation[idx].get("content", "")))
+                self.state.conversation[idx] = {
+                    "role": "tool",
+                    "content": "[Auto-truncated summary deduped — latest retained]",
+                }
+            total -= _at_chars
+            logger.info(
+                "Step 1.5: Deduped %d old AUTO-TRUNCATED summaries (%d chars freed)",
+                len(_at_indices) - 1,
+                _at_chars,
+            )
+            if total <= budget:
+                logger.info("Budget satisfied after deduping truncated summaries")
+                return
 
         # Step 2: Strip thinking from all but last 2 assistant messages
         assistant_indices = [
@@ -493,10 +550,10 @@ class _ContextMixin:
 
         if s.subdomains:
             parts.append(
-                f"SUBDOMAINS ({len(s.subdomains)}): {', '.join(s.subdomains[:10])}"
+                f"SUBDOMAINS ({len(s.subdomains)}): {', '.join(s.subdomains[:5])}"
             )
-            if len(s.subdomains) > 10:
-                parts.append(f"... and {len(s.subdomains) - 10} more")
+            if len(s.subdomains) > 5:
+                parts.append(f"... and {len(s.subdomains) - 5} more")
 
         if s.live_hosts:
             parts.append(
@@ -516,13 +573,14 @@ class _ContextMixin:
             parts.append(f"OPEN PORTS: {'; '.join(port_summary)}")
 
         if s.urls:
-            parts.append(f"URLs ({len(s.urls)}): {', '.join(s.urls[:5])}")
-            if len(s.urls) > 5:
-                parts.append(f"... and {len(s.urls) - 5} more URLs")
+            parts.append(f"URLs ({len(s.urls)}): {', '.join(s.urls[:3])}")
+            if len(s.urls) > 3:
+                parts.append(f"... and {len(s.urls) - 3} more URLs")
 
             # URL intelligence — classify and warn about static assets
             try:
                 from .url_intelligence import build_url_intelligence_context
+
                 _url_ctx = build_url_intelligence_context(list(s.urls))
                 if _url_ctx:
                     parts.append("")
@@ -574,21 +632,10 @@ class _ContextMixin:
         if s.completed_phases:
             parts.append(f"COMPLETED PHASES: {', '.join(s.completed_phases)}")
 
-        if s.tested_endpoints:
-            shown = s.tested_endpoints[-20:]
-            remainder = len(s.tested_endpoints) - len(shown)
-            ep_note = (
-                f"... and {remainder} more already tested" if remainder > 0 else ""
-            )
-            parts.append(
-                f"ALREADY TESTED ENDPOINTS ({len(s.tested_endpoints)} total"
-                + (", showing last 20" if remainder > 0 else "")
-                + "):\n"
-                + "\n".join(f"  {ep}" for ep in shown)
-                + (f"\n  {ep_note}" if ep_note else "")
-            )
-
-        return "\n".join(parts)
+        result = "\n".join(parts)
+        if len(result) > 2000:
+            result = result[:1980] + "\n... [truncated, total exceeded 2000 chars]"
+        return result
 
     def _build_compressed_findings_summary(self) -> str:
         active_target = str(self.state.active_target or "").strip()
@@ -827,6 +874,8 @@ class _ContextMixin:
 
         for msg in self.state.conversation:
             if id(msg) in boundary_ids:
+                continue
+            if msg.get("_protected"):
                 continue
             role = msg.get("role", "")
             content = str(msg.get("content", ""))

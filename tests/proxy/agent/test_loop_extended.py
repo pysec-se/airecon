@@ -25,6 +25,11 @@ def loop(mocker):
         cfg = MagicMock()
         cfg.agent_max_tool_iterations = 10
         cfg.ollama_num_ctx_small = 16384
+        cfg.agent_max_browser_visits_per_domain = 3
+        cfg.agent_command_hash_cache_limit = 5000
+        cfg.agent_command_hash_cache_prune_target = 2500
+        cfg.agent_max_empty_retries = 4
+        cfg.agent_ctf_max_iterations = 150
         mock_cfg.return_value = cfg
         agent = AgentLoop(ollama=ollama_mock, engine=engine_mock)
         return agent
@@ -525,12 +530,12 @@ class TestLoopStreamingWithMockedOllama:
 
         tool_start = next(e for e in events if e.type == "tool_start")
         assert tool_start.data.get("tool") == "execute"
-        assert tool_start.data.get("arguments", {}).get("command", "").startswith("ffuf ")
+        assert (
+            tool_start.data.get("arguments", {}).get("command", "").startswith("ffuf ")
+        )
 
         error_messages = [
-            str(e.data.get("message", ""))
-            for e in events
-            if e.type == "error"
+            str(e.data.get("message", "")) for e in events if e.type == "error"
         ]
         assert all("unknown tool" not in m.lower() for m in error_messages)
 
@@ -651,11 +656,13 @@ class TestAdvancedStateOrchestration:
         # Mock helper methods
         loop._cfg_bool = mocker.MagicMock(return_value=True)
         loop._cfg_float = mocker.MagicMock(return_value=0.9)
-        loop._cfg_int = mocker.MagicMock(side_effect=lambda cfg, key, default: {
-            'agent_stagnation_threshold': 1,
-            'agent_max_same_tool_streak': 3,
-            'agent_tool_diversity_window': 8,
-        }.get(key, default))
+        loop._cfg_int = mocker.MagicMock(
+            side_effect=lambda cfg, key, default: {
+                "agent_stagnation_threshold": 1,
+                "agent_max_same_tool_streak": 3,
+                "agent_tool_diversity_window": 8,
+            }.get(key, default)
+        )
         directive = loop._build_exploration_directive(PipelinePhase.RECON)
         assert "AGGRESSIVE EXPLORATION MODE" in directive
         assert "novel" in directive.lower()

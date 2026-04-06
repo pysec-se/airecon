@@ -78,8 +78,32 @@ class _BrowserExecutorMixin:
                         logger.warning("Failed to auto-inject session cookies: %s", e)
 
             success = not (isinstance(result, dict) and "error" in result)
-            if not success and isinstance(result, dict) and "error" in result:
-                result = {"success": False, "error": result["error"]}
+            if not success and isinstance(result, dict):
+                error_str = str(result.get("error", ""))
+                # Redirect loop — detect and give constructive guidance
+                if "Too many redirects" in error_str or "redirect" in error_str.lower():
+                    redirected_url = ""
+                    _final_m = re.search(r"final URL:\s*(\S+)", error_str)
+                    if _final_m:
+                        redirected_url = _final_m.group(1)
+                    result = {
+                        "success": False,
+                        "redirect_loop": True,
+                        "error": error_str,
+                        "message": (
+                            "The page redirect chain exceeded 10 hops. This is usually caused by "
+                            "tracking pixels, ad blockers, or SSO redirect chains — not a real page."
+                        ),
+                        "final_url": redirected_url[:200],
+                        "next_action": (
+                            "Do NOT retry the same URL. If it redirected to a third-party domain "
+                            "(ads, analytics, SSO, or CDN), skip it and test the next endpoint. "
+                            "If you need to see this page, try with JavaScript disabled or "
+                            "use curl --head to inspect redirects manually."
+                        ),
+                    }
+                elif "success" not in result:
+                    result = {"success": False, "error": result.get("error", error_str)}
             elif "success" not in result:
                 result = {"success": success, "result": result}
 

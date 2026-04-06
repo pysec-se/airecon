@@ -22,7 +22,8 @@
       "wpscan",
       "nikto",
       "dirb"
-    ]
+    ],
+    "category": "cms"
   },
   "drupal": {
     "vulns": [
@@ -40,7 +41,8 @@
     "tools": [
       "droopescan",
       "nikto"
-    ]
+    ],
+    "category": "cms"
   },
   "joomla": {
     "vulns": [
@@ -55,7 +57,8 @@
     ],
     "tools": [
       "joomscan"
-    ]
+    ],
+    "category": "cms"
   },
   "magento": {
     "vulns": [
@@ -71,7 +74,8 @@
     ],
     "tools": [
       "magescan"
-    ]
+    ],
+    "category": "cms"
   },
   "nginx": {
     "vulns": [
@@ -81,7 +85,8 @@
       "Nginx misconfiguration"
     ],
     "paths": [],
-    "tools": []
+    "tools": [],
+    "category": "infrastructure"
   },
   "apache": {
     "vulns": [
@@ -91,7 +96,8 @@
       "Apache .htaccess bypass"
     ],
     "paths": [],
-    "tools": []
+    "tools": [],
+    "category": "infrastructure"
   },
   "tomcat": {
     "vulns": [
@@ -109,7 +115,8 @@
     "tools": [
       "tomcatwar",
       "hydra -M tomcat"
-    ]
+    ],
+    "category": "framework"
   },
   "jenkins": {
     "vulns": [
@@ -125,7 +132,8 @@
     ],
     "tools": [
       "jenkins_exploit"
-    ]
+    ],
+    "category": "infrastructure"
   },
   "gitlab": {
     "vulns": [
@@ -137,14 +145,16 @@
       "/api"
     ],
     "tools": [],
-    "severity": "CRITICAL"
+    "severity": "CRITICAL",
+    "category": "infrastructure"
   },
   "gitlab-ce": {
     "vulns": [
       "Same as GitLab"
     ],
     "paths": [],
-    "tools": []
+    "tools": [],
+    "category": "infrastructure"
   },
   "jupyter": {
     "vulns": [
@@ -157,7 +167,8 @@
       "/lab",
       "/tree"
     ],
-    "tools": []
+    "tools": [],
+    "category": "infrastructure"
   },
   "elasticsearch": {
     "vulns": [
@@ -170,7 +181,8 @@
       "/_search",
       "/_cluster"
     ],
-    "tools": []
+    "tools": [],
+    "category": "database"
   },
   "kibana": {
     "vulns": [
@@ -181,7 +193,8 @@
       "/app/kibana",
       "/api"
     ],
-    "tools": []
+    "tools": [],
+    "category": "infrastructure"
   },
   "grafana": {
     "vulns": [
@@ -193,7 +206,8 @@
       "/api",
       "/login"
     ],
-    "tools": []
+    "tools": [],
+    "category": "infrastructure"
   },
   "prometheus": {
     "vulns": [
@@ -204,7 +218,8 @@
       "/metrics",
       "/api/v1"
     ],
-    "tools": []
+    "tools": [],
+    "category": "infrastructure"
   },
   "zabbix": {
     "vulns": [
@@ -216,7 +231,8 @@
       "/zabbix",
       "/api_jsonrpc.php"
     ],
-    "tools": []
+    "tools": [],
+    "category": "infrastructure"
   },
   "cacti": {
     "vulns": [
@@ -226,7 +242,8 @@
     "paths": [
       "/cacti"
     ],
-    "tools": []
+    "tools": [],
+    "category": "infrastructure"
   },
   "moodle": {
     "vulns": [
@@ -238,7 +255,8 @@
       "/moodle",
       "/login/index.php"
     ],
-    "tools": []
+    "tools": [],
+    "category": "cms"
   },
   "dokuwiki": {
     "vulns": [
@@ -249,7 +267,8 @@
       "/dokuwiki",
       "/lib/exe"
     ],
-    "tools": []
+    "tools": [],
+    "category": "cms"
   },
   "owncloud": {
     "vulns": [
@@ -261,7 +280,8 @@
       "/owncloud",
       "/remote.php"
     ],
-    "tools": []
+    "tools": [],
+    "category": "cms"
   },
   "nextcloud": {
     "vulns": [
@@ -273,7 +293,8 @@
       "/nextcloud",
       "/remote.php"
     ],
-    "tools": []
+    "tools": [],
+    "category": "cms"
   },
   "openvpn": {
     "vulns": [
@@ -283,14 +304,16 @@
     "paths": [
       "/"
     ],
-    "tools": []
+    "tools": [],
+    "category": "infrastructure"
   },
   "wireguard": {
     "vulns": [
       "WireGuard config exposure"
     ],
     "paths": [],
-    "tools": []
+    "tools": [],
+    "category": "infrastructure"
   },
   "aws-s3": {
     "vulns": [
@@ -306,7 +329,8 @@
     "tools": [
       "aws",
       "s3scanner"
-    ]
+    ],
+    "category": "cloud"
   },
   "azure-blob": {
     "vulns": [
@@ -314,7 +338,8 @@
       "Azure Blob SAS token leak"
     ],
     "paths": [],
-    "tools": []
+    "tools": [],
+    "category": "cloud"
   },
   "google-cloud-storage": {
     "vulns": [
@@ -322,7 +347,8 @@
       "GCS bucket takeover"
     ],
     "paths": [],
-    "tools": []
+    "tools": [],
+    "category": "cloud"
   },
   "php": {
     "vulns": [
@@ -335,7 +361,8 @@
       "/info.php",
       "/phpinfo.php"
     ],
-    "tools": []
+    "tools": [],
+    "category": "framework"
   },
   "node.js": {
     "vulns": [
@@ -344,7 +371,8 @@
       "Prototype pollution"
     ],
     "paths": [],
-    "tools": []
+    "tools": [],
+    "category": "framework"
   },
   "express": {
     "vulns": [
@@ -352,7 +380,8 @@
       "Express.js SSTI"
     ],
     "paths": [],
-    "tools": []
+    "tools": [],
+    "category": "framework"
   },
   "django": {
     "vulns": [
@@ -364,7 +393,8 @@
       "/admin",
       "/api"
     ],
-    "tools": []
+    "tools": [],
+    "category": "framework"
   },
   "flask": {
     "vulns": [
@@ -372,7 +402,8 @@
       "Flask debug mode RCE"
     ],
     "paths": [],
-    "tools": []
+    "tools": [],
+    "category": "framework"
   },
   "laravel": {
     "vulns": [
@@ -386,7 +417,8 @@
       "/artisan",
       "/api"
     ],
-    "tools": []
+    "tools": [],
+    "category": "framework"
   },
   "spring": {
     "vulns": [
@@ -400,7 +432,8 @@
       "/env",
       "/heapdump"
     ],
-    "tools": []
+    "tools": [],
+    "category": "framework"
   },
   "struts": {
     "vulns": [
@@ -411,7 +444,8 @@
     "paths": [],
     "tools": [
       "struts-scanner"
-    ]
+    ],
+    "category": "framework"
   },
   "weblogic": {
     "vulns": [
@@ -423,7 +457,8 @@
       "/console",
       "/workspaces"
     ],
-    "tools": []
+    "tools": [],
+    "category": "framework"
   },
   "jboss": {
     "vulns": [
@@ -437,7 +472,8 @@
     ],
     "tools": [
       "jboss-autopwn"
-    ]
+    ],
+    "category": "framework"
   },
   "websphere": {
     "vulns": [
@@ -448,7 +484,8 @@
       "/admin",
       "/ibm/console"
     ],
-    "tools": []
+    "tools": [],
+    "category": "framework"
   },
   "sharepoint": {
     "vulns": [
@@ -462,7 +499,8 @@
     ],
     "tools": [
       "sized"
-    ]
+    ],
+    "category": "cms"
   },
   "exchange": {
     "vulns": [
@@ -480,7 +518,8 @@
     "tools": [
       "proxylogon",
       "proxyshell"
-    ]
+    ],
+    "category": "infrastructure"
   },
   "iis": {
     "vulns": [
@@ -489,7 +528,8 @@
       "IIS short filename enumeration"
     ],
     "paths": [],
-    "tools": []
+    "tools": [],
+    "category": "framework"
   },
   "graphql": {
     "vulns": [
@@ -506,7 +546,8 @@
     "tools": [
       "inql",
       "graphql-map"
-    ]
+    ],
+    "category": "infrastructure"
   },
   "rest-api": {
     "vulns": [
@@ -519,7 +560,8 @@
       "/api/v1",
       "/api/v2"
     ],
-    "tools": []
+    "tools": [],
+    "category": "infrastructure"
   },
   "soap": {
     "vulns": [
@@ -530,7 +572,8 @@
       "/soap",
       "/service"
     ],
-    "tools": []
+    "tools": [],
+    "category": "infrastructure"
   },
   "oauth": {
     "vulns": [
@@ -542,7 +585,8 @@
       "/oauth",
       "/oauth/authorize"
     ],
-    "tools": []
+    "tools": [],
+    "category": "infrastructure"
   },
   "openid": {
     "vulns": [
@@ -552,7 +596,8 @@
     "paths": [
       "/.well-known/openid-configuration"
     ],
-    "tools": []
+    "tools": [],
+    "category": "infrastructure"
   },
   "saml": {
     "vulns": [
@@ -564,7 +609,8 @@
       "/saml",
       "/sso"
     ],
-    "tools": []
+    "tools": [],
+    "category": "infrastructure"
   },
   "jwt": {
     "vulns": [
@@ -577,7 +623,8 @@
     "tools": [
       "jwt_tool",
       "jwt2john"
-    ]
+    ],
+    "category": "infrastructure"
   },
   "ldap": {
     "vulns": [
@@ -585,7 +632,8 @@
       "LDAP unauthenticated access"
     ],
     "paths": [],
-    "tools": []
+    "tools": [],
+    "category": "infrastructure"
   },
   "samba": {
     "vulns": [
@@ -596,7 +644,8 @@
       "nmblookup",
       "smbclient"
     ],
-    "severity": "CRITICAL"
+    "severity": "CRITICAL",
+    "category": "infrastructure"
   },
   "nfs": {
     "vulns": [
@@ -608,7 +657,8 @@
       "showmount",
       "mount.nfs"
     ],
-    "severity": "HIGH"
+    "severity": "HIGH",
+    "category": "infrastructure"
   },
   "smb": {
     "vulns": [
@@ -622,7 +672,8 @@
       "smbclient",
       "impacket"
     ],
-    "severity": "CRITICAL"
+    "severity": "CRITICAL",
+    "category": "infrastructure"
   },
   "ftp": {
     "vulns": [
@@ -634,7 +685,8 @@
       "ftp",
       "nmap --script ftp*"
     ],
-    "severity": "MEDIUM"
+    "severity": "MEDIUM",
+    "category": "infrastructure"
   },
   "telnet": {
     "vulns": [
@@ -642,7 +694,8 @@
       "Telnet default credentials"
     ],
     "tools": [],
-    "severity": "MEDIUM"
+    "severity": "MEDIUM",
+    "category": "infrastructure"
   },
   "redis": {
     "vulns": [
@@ -653,7 +706,8 @@
     "tools": [
       "redis-cli"
     ],
-    "severity": "CRITICAL"
+    "severity": "CRITICAL",
+    "category": "database"
   },
   "memcached": {
     "vulns": [
@@ -663,7 +717,8 @@
     "tools": [
       "memcached-tool"
     ],
-    "severity": "MEDIUM"
+    "severity": "MEDIUM",
+    "category": "database"
   },
   "rabbitmq": {
     "vulns": [
@@ -671,7 +726,8 @@
       "RabbitMQ management access"
     ],
     "tools": [],
-    "severity": "MEDIUM"
+    "severity": "MEDIUM",
+    "category": "database"
   },
   "kafka": {
     "vulns": [
@@ -679,7 +735,8 @@
       "Kafka data exposure"
     ],
     "tools": [],
-    "severity": "MEDIUM"
+    "severity": "MEDIUM",
+    "category": "database"
   },
   "zookeeper": {
     "vulns": [
@@ -690,7 +747,8 @@
       "ncat",
       "zkCli.sh"
     ],
-    "severity": "HIGH"
+    "severity": "HIGH",
+    "category": "database"
   },
   "activemq": {
     "vulns": [
@@ -699,7 +757,8 @@
       "ActiveMQ webshell upload"
     ],
     "tools": [],
-    "severity": "CRITICAL"
+    "severity": "CRITICAL",
+    "category": "database"
   },
   "glassfish": {
     "vulns": [
@@ -710,14 +769,16 @@
       "/common/commonJSF.jsf"
     ],
     "tools": [],
-    "severity": "HIGH"
+    "severity": "HIGH",
+    "category": "framework"
   },
   "payara": {
     "vulns": [
       "Payara RCE"
     ],
     "tools": [],
-    "severity": "HIGH"
+    "severity": "HIGH",
+    "category": "framework"
   },
   "wildfly": {
     "vulns": [
@@ -728,7 +789,8 @@
       "/management"
     ],
     "tools": [],
-    "severity": "HIGH"
+    "severity": "HIGH",
+    "category": "framework"
   },
   "node-red": {
     "vulns": [
@@ -740,7 +802,8 @@
       "/editor"
     ],
     "tools": [],
-    "severity": "HIGH"
+    "severity": "HIGH",
+    "category": "infrastructure"
   },
   "sonarqube": {
     "vulns": [
@@ -752,7 +815,8 @@
       "/sonar"
     ],
     "tools": [],
-    "severity": "MEDIUM"
+    "severity": "MEDIUM",
+    "category": "infrastructure"
   },
   "nexus": {
     "vulns": [
@@ -765,7 +829,8 @@
       "/service"
     ],
     "tools": [],
-    "severity": "HIGH"
+    "severity": "HIGH",
+    "category": "infrastructure"
   },
   "artifactory": {
     "vulns": [
@@ -777,7 +842,8 @@
       "/ui"
     ],
     "tools": [],
-    "severity": "HIGH"
+    "severity": "HIGH",
+    "category": "infrastructure"
   },
   "confluence": {
     "vulns": [
@@ -792,7 +858,8 @@
     "tools": [
       "confluence-exp"
     ],
-    "severity": "CRITICAL"
+    "severity": "CRITICAL",
+    "category": "cms"
   },
   "jira": {
     "vulns": [
@@ -805,7 +872,8 @@
       "/rest"
     ],
     "tools": [],
-    "severity": "HIGH"
+    "severity": "HIGH",
+    "category": "cms"
   },
   "github": {
     "vulns": [
@@ -817,7 +885,8 @@
       "/_git"
     ],
     "tools": [],
-    "severity": "HIGH"
+    "severity": "HIGH",
+    "category": "infrastructure"
   },
   "aws": {
     "vulns": [
@@ -831,7 +900,8 @@
       "cloudmapper",
       "pacbot"
     ],
-    "severity": "CRITICAL"
+    "severity": "CRITICAL",
+    "category": "cloud"
   },
   "azure": {
     "vulns": [
@@ -843,7 +913,8 @@
       "az",
       "microburst"
     ],
-    "severity": "CRITICAL"
+    "severity": "CRITICAL",
+    "category": "cloud"
   },
   "gcp": {
     "vulns": [
@@ -855,7 +926,8 @@
       "gcloud",
       "gcpbucketbrute"
     ],
-    "severity": "CRITICAL"
+    "severity": "CRITICAL",
+    "category": "cloud"
   },
   "kubernetes": {
     "vulns": [
@@ -868,7 +940,8 @@
       "kubectl",
       "kubesploit"
     ],
-    "severity": "CRITICAL"
+    "severity": "CRITICAL",
+    "category": "infrastructure"
   },
   "docker": {
     "vulns": [
@@ -880,7 +953,8 @@
       "docker",
       "docker breakout"
     ],
-    "severity": "CRITICAL"
+    "severity": "CRITICAL",
+    "category": "infrastructure"
   },
   "vmware": {
     "vulns": [
@@ -889,14 +963,16 @@
       "VMware ESXi exploit"
     ],
     "tools": [],
-    "severity": "CRITICAL"
+    "severity": "CRITICAL",
+    "category": "infrastructure"
   },
   "openvswitch": {
     "vulns": [
       "Open vSwitch issues"
     ],
     "tools": [],
-    "severity": "MEDIUM"
+    "severity": "MEDIUM",
+    "category": "infrastructure"
   },
   "mongodb": {
     "vulns": [
@@ -907,7 +983,8 @@
       "mongosh",
       "mongodump"
     ],
-    "severity": "HIGH"
+    "severity": "HIGH",
+    "category": "database"
   },
   "hadoop": {
     "vulns": [
@@ -915,7 +992,8 @@
       "Hadoop command execution"
     ],
     "tools": [],
-    "severity": "HIGH"
+    "severity": "HIGH",
+    "category": "database"
   },
   "spark": {
     "vulns": [
@@ -923,7 +1001,8 @@
       "Spark UI exposure"
     ],
     "tools": [],
-    "severity": "HIGH"
+    "severity": "HIGH",
+    "category": "database"
   },
   "solr": {
     "vulns": [
@@ -936,7 +1015,8 @@
       "/api"
     ],
     "tools": [],
-    "severity": "HIGH"
+    "severity": "HIGH",
+    "category": "database"
   },
   "cassandra": {
     "vulns": [
@@ -944,21 +1024,24 @@
       "Cassandra data exposure"
     ],
     "tools": [],
-    "severity": "MEDIUM"
+    "severity": "MEDIUM",
+    "category": "database"
   },
   "hdfs": {
     "vulns": [
       "HDFS unauthenticated"
     ],
     "tools": [],
-    "severity": "HIGH"
+    "severity": "HIGH",
+    "category": "database"
   },
   "rabbitmq-management": {
     "vulns": [
       "RabbitMQ management RCE"
     ],
     "tools": [],
-    "severity": "HIGH"
+    "severity": "HIGH",
+    "category": "database"
   },
   "consul": {
     "vulns": [
@@ -966,7 +1049,8 @@
       "Consul API unauthenticated"
     ],
     "tools": [],
-    "severity": "CRITICAL"
+    "severity": "CRITICAL",
+    "category": "database"
   },
   "etcd": {
     "vulns": [
@@ -976,7 +1060,8 @@
     "tools": [
       "etcdctl"
     ],
-    "severity": "HIGH"
+    "severity": "HIGH",
+    "category": "database"
   },
   "vault": {
     "vulns": [
@@ -984,6 +1069,39 @@
       "Vault secrets exposure"
     ],
     "tools": [],
-    "severity": "CRITICAL"
+    "severity": "CRITICAL",
+    "category": "database"
+  },
+  "mysql": {
+    "vulns": [
+      "MySQL authentication bypass",
+      "MySQL UDF injection",
+      "CVE-2012-2122 - MySQL auth bypass"
+    ],
+    "tools": [
+      "mysql",
+      "sqlmap"
+    ],
+    "category": "database"
+  },
+  "postgresql": {
+    "vulns": [
+      "PostgreSQL injection",
+      "PostgreSQL RCE via COPY",
+      "CVE-2018-1058 - PostgreSQL privilege escalation"
+    ],
+    "tools": [
+      "psql",
+      "sqlmap"
+    ],
+    "category": "database"
+  },
+  "cloudflare": {
+    "vulns": [
+      "Cloudflare bypass",
+      "Cloudflare misconfiguration"
+    ],
+    "tools": [],
+    "category": "cdn_waf"
   }
 }

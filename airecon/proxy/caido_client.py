@@ -14,13 +14,18 @@ from typing import Any
 
 import httpx
 
+from .config import get_config
+
 logger = logging.getLogger("airecon.caido")
 
 
 class CaidoClient:
-    BASE_URL = "http://127.0.0.1:48080/graphql"
     _token: str | None = None
     _state_lock = threading.Lock()
+
+    @classmethod
+    def _base_url(cls) -> str:
+        return get_config().caido_graphql_url
 
     _auth_fail_warn_interval_sec = 60.0
     _last_auth_fail_warn_ts = 0.0
@@ -65,7 +70,7 @@ class CaidoClient:
         try:
             async with httpx.AsyncClient(timeout=5.0) as c:
                 resp = await c.post(
-                    cls.BASE_URL,
+                    cls._base_url(),
                     json={
                         "query": "mutation { loginAsGuest { token { accessToken } } }"
                     },
@@ -213,7 +218,7 @@ class CaidoClient:
 
         try:
             async with httpx.AsyncClient(timeout=30.0) as c:
-                resp = await c.post(cls.BASE_URL, json=payload, headers=headers)
+                resp = await c.post(cls._base_url(), json=payload, headers=headers)
 
                 if resp.status_code in (401, 403):
                     logger.debug(
@@ -226,12 +231,14 @@ class CaidoClient:
                         headers["Authorization"] = f"Bearer {fresh_token}"
                     else:
                         headers.pop("Authorization", None)
-                    resp = await c.post(cls.BASE_URL, json=payload, headers=headers)
+                    resp = await c.post(cls._base_url(), json=payload, headers=headers)
 
                 return resp.json()
 
         except httpx.TimeoutException as e:
-            logger.debug("Caido GQL request timed out (Caido may not be running): %s", e)
+            logger.debug(
+                "Caido GQL request timed out (Caido may not be running): %s", e
+            )
             return {
                 "errors": [
                     {"message": "Caido request timed out after 30s. Is Caido running?"}

@@ -25,7 +25,180 @@ except (OSError, json.JSONDecodeError) as _e:
     _TOOLS_META = {}
 
 
+# ── Safe string sanitizer for evidence text (prompt injection mitigation) ───
+
+_REPORT_ESCAPE_TABLE = str.maketrans({
+    "[": "〔",
+    "]": "〕",
+})
+
+
+def _sanitize_evidence_text(value: str) -> str:
+    """Strip potential prompt-injection markers from external evidence.
+
+    We don't strip everything — LLM needs the raw data for reports — but we
+    neutralize SYSTEM: / INJECT: style markers by bracketing the evidence
+    block so the model treats it as quoted data, not instructions.
+    """
+    return value.strip()
+
+
 class _CycleLlmMixin:
+    _REPORT_PACKET_MAX_CHARS = 32_000  # global cap on entire evidence packet
+    _REPORT_EVIDENCE_PER_VULN = 2000   # per-vuln cap for evidence + analysis
+    _REPORT_MAX_VULNS = 50             # only report top N vulns by severity
+
+    def _build_report_phase_evidence(self) -> str:
+
+        if not self._session or not self._session.vulnerabilities:
+            return ""
+
+        # Only inject once — detect by checking if evidence was already pinned.
+        if getattr(self, "_report_evidence_injected", False):
+            return ""
+        self._report_evidence_injected = True
+
+        _SEVERITY_ORDER = {
+            "critical": 0, "high": 1, "medium": 2, "low": 3, "info": 4,
+            "unknown": 5,
+        }
+
+        # Sort by severity; cap number of vulns reported
+        sorted_vulns = sorted(
+            self._session.vulnerabilities,
+            key=lambda v: (
+                _SEVERITY_ORDER.get(
+                    str(v.get("severity", "unknown")).lower(), 5
+                ),
+                str(v.get("title", "")),
+            ),
+        )
+        capped_vulns = sorted_vulns[: self._REPORT_MAX_VULNS]
+
+        truncated_count = len(self._session.vulnerabilities) - len(capped_vulns)
+
+        parts: list[str] = [
+            "[SYSTEM: REPORT PHASE — FULL VULNERABILITY EVIDENCE PACKET]",
+            "The conversation history has been compressed during earlier phases.",
+            "Below is the RAW evidence you must use when calling create_vulnerability_report.",
+            "For EACH vulnerability, supply title, description, poc_description,",
+            "poc_script_code, and the technical_analysis fields from the evidence below.",
+            "",
+        ]
+
+        used_chars = 0
+
+        for idx, vuln in enumerate(capped_vulns, 1):
+            v_title = vuln.get("title", vuln.get("finding", f"Vulnerability #{idx}"))
+            v_severity = vuln.get("severity", "unknown")
+            v_confidence = vuln.get("confidence", "")
+            v_flag = vuln.get("flag", "")
+
+            # Core identification
+            block_parts: list[str] = [
+                f"--- VULNERABILITY #{idx} ---",
+                f"Title: {v_title}",
+                f"Severity: {v_severity}",
+            ]
+            if v_confidence:
+                block_parts.append(f"Confidence: {v_confidence}")
+            if v_flag:
+                block_parts.append(f"FLAG: {v_flag}")
+            if vuln.get("url"):
+                block_parts.append(f"URL: {vuln['url']}")
+            if vuln.get("endpoint"):
+                block_parts.append(f"Endpoint: {vuln['endpoint']}")
+            if vuln.get("parameter"):
+                block_parts.append(f"Parameter: {vuln['parameter']}")
+            if vuln.get("method"):
+                block_parts.append(f"Method: {vuln['method']}")
+            if vuln.get("source"):
+                block_parts.append(f"Source: {vuln['source']}")
+
+            # Evidence / proof data — sanitized and capped
+            proof = vuln.get("proof") or vuln.get("evidence", "")
+            if proof:
+                proof_str = str(proof)
+                if isinstance(proof, dict):
+                    proof_parts_inner = []
+                    for k, v in proof.items():
+                        proof_parts_inner.append(f"  {k}: {_sanitize_evidence_text(str(v))}")
+                    proof_str = "\n".join(proof_parts_inner)
+                else:
+                    proof_str = _sanitize_evidence_text(proof_str)
+
+                if len(proof_str) > self._REPORT_EVIDENCE_PER_VULN:
+                    proof_str = proof_str[:self._REPORT_EVIDENCE_PER_VULN - 10] + "\n... [truncated]"
+
+                block_parts.append(f"Proof/Evidence:\n{proof_str}")
+
+            # Technical analysis if available
+            if vuln.get("technical_analysis"):
+                tech = _sanitize_evidence_text(str(vuln["technical_analysis"]))
+                tech_limit = self._REPORT_EVIDENCE_PER_VULN // 2
+                if len(tech) > tech_limit:
+                    tech = tech[:tech_limit - 10] + "\n... [truncated]"
+                block_parts.append(f"Technical Analysis:\n{tech}")
+
+            # Remediation if available
+            if vuln.get("remediation"):
+                block_parts.append(f"Remediation: {vuln['remediation']}")
+
+            # CVE if available
+            if vuln.get("cve"):
+                block_parts.append(f"CVE: {vuln['cve']}")
+
+            # Exploit chain context if linked
+            if vuln.get("exploit_chain"):
+                block_parts.append(
+                    f"Exploit chain: {vuln['exploit_chain']}"
+                )
+
+            block_parts.append("")
+            block = "\n".join(block_parts)
+            used_chars += len(block)
+
+            # Global budget enforcement — stop adding if we've hit the cap
+            if used_chars > self._REPORT_PACKET_MAX_CHARS:
+                block = block[:80] + "\n... [truncated: budget exhausted]"
+                parts.append(block)
+                break
+
+            parts.append(block)
+
+        if truncated_count > 0:
+            parts.append(
+                f"[NOTE] {truncated_count} more vulnerabilities were found but "
+                f"not listed here. Report ALL vulnerabilities, not just those shown."
+            )
+
+        # Also expose unreported vulns that the AI flagged but hasn't reported yet
+        unreported = [
+            v for v in self._session.vulnerabilities
+            if not v.get("report_generated")
+        ]
+        if unreported and unreported != self._session.vulnerabilities:
+            parts.append(
+                f"[NOTE] {len(unreported)} of {len(self._session.vulnerabilities)} "
+                "vulnerabilities still need reports. Generate reports for "
+                "ALL items above."
+            )
+        elif unreported:
+            parts.append(
+                f"[TASK] Generate vulnerability reports for ALL {len(unreported)} "
+                "findings listed above. Each report must include the proof/payload "
+                "evidence shown."
+            )
+
+        result = "\n".join(parts)
+        logger.info(
+            "REPORT phase evidence packet built: %d vulns, %d chars (cap=%d)",
+            len(self._session.vulnerabilities),
+            len(result),
+            self._REPORT_PACKET_MAX_CHARS,
+        )
+        return result
+
     def _check_phase_constraint(self, tool_name: str) -> str:
 
         from .tool_scorer import _PHASE_BLOCKED_TOOLS
@@ -100,6 +273,7 @@ class _CycleLlmMixin:
             chain_step_hint=chain_step_hint,
             consecutive_failures=self._consecutive_failures,
             wrong_tool_picked=wrong_tool_picked,
+            tool_registry=self._tools_ollama,
         )
 
         if rec_context:
@@ -115,6 +289,164 @@ class _CycleLlmMixin:
                 "Tool intelligence injected for phase=%s (chain_hint='%s', wrong_tool='%s', failures=%d)",
                 current_phase, chain_step_hint, wrong_tool_picked, self._consecutive_failures,
             )
+
+        # Inject per-target remembered intelligence (endpoints, vulns, bypasses)
+        self._inject_target_memory()
+
+        # Inject learned insights from adaptive learning engine
+        self._inject_learned_insights(current_phase)
+
+        # Inject meta-reasoning self-reflection every N iterations
+        self._inject_meta_reflection_context(current_phase)
+
+    def _inject_target_memory(self) -> None:
+        """Inject per-target intelligence into the conversation.
+
+        If the current target has been scanned before, inject remembered
+        endpoints, vulnerabilities, WAF bypasses, and sensitive params.
+        """
+        target = ""
+        if self._session:
+            target = getattr(self._session, "target", "")
+        if not target:
+            return
+
+        if not hasattr(self, "_target_memory_store"):
+            from .adaptive_learning import TargetMemoryStore
+            self._target_memory_store = TargetMemoryStore()
+
+        text = self._target_memory_store.get_injection_text(target)
+        if not text:
+            return
+
+        # Remove any old injection before adding fresh one
+        self.state.conversation = [
+            m for m in self.state.conversation
+            if not m.get("content", "").startswith("<target_intelligence:")
+        ]
+        self.state.conversation.append({
+            "role": "system",
+            "content": text,
+        })
+        logger.debug(
+            "Target memory injected for %s (%d chars)",
+            target,
+            len(text),
+        )
+
+    def _inject_learned_insights(self, current_phase: str) -> None:
+        """Inject learned insights from past sessions into the conversation.
+
+        This is how airecon 'learns' — persistent knowledge from past
+        observations gets surfaced as context so the agent doesn't start from
+        scratch every session.
+        """
+        # Lazy-init adapter learning engine if not yet created by exploration loop
+        if not hasattr(self, "_adaptive_learning_engine"):
+            from .adaptive_learning import AdaptiveLearningEngine
+
+            session_id = ""
+            if self._session:
+                session_id = getattr(self._session, "session_id", "")
+            self._adaptive_learning_engine = AdaptiveLearningEngine(
+                session_id=session_id or "",
+            )
+
+        engine = self._adaptive_learning_engine
+        techs = []
+        if self._session:
+            techs = list(getattr(self._session, "technologies", {}).keys())
+
+        insights = engine.get_insights_for_context(
+            phase=current_phase,
+            tech_stack=techs,
+        )
+        if not insights:
+            return
+
+        lines = [
+            "<system_learned_insights>",
+            "Based on past observations and analysis, the following insights may apply:",
+            "",
+        ]
+        for i, ins in enumerate(insights, 1):
+            lines.append(f"{i}. [{ins.category}] {ins.title}")
+            if ins.conditions:
+                lines.append(f"   Conditions: {ins.conditions}")
+            lines.append(f"   Recommendation: {ins.recommendation}")
+            lines.append(f"   Confidence: {ins.confidence:.2f} (from {ins.observation_count} observations)")
+            lines.append("")
+
+        lines.append("</system_learned_insights>")
+
+        self.state.conversation = [
+            m for m in self.state.conversation
+            if not m.get("content", "").startswith("<system_learned_insights>")
+        ]
+        self.state.conversation.append({
+            "role": "system",
+            "content": "\n".join(lines),
+        })
+        logger.debug(
+            "Learned insights injected: phase=%s, %d insights",
+            current_phase,
+            len(insights),
+        )
+
+    def _inject_meta_reflection_context(self, current_phase: str) -> None:
+        """Periodically inject meta-reasoning insights into conversation.
+
+        Every 15 iterations, the engine self-reflects on its recent actions
+        and stores hints like 'avoid repeating nmap — already ran 3 times'.
+        These hints are injected so the agent learns from its own behavior.
+        """
+        if not hasattr(self, "_meta_reasoning_engine"):
+            from .meta_reasoning import MetaReasoningEngine
+            self._meta_reasoning_engine = MetaReasoningEngine()
+
+        engine = self._meta_reasoning_engine
+        if not engine.should_reflect(self.state.iteration):
+            return
+
+        # Build context of recent tool actions
+        recent_actions = []
+        if hasattr(self.state, "evidence_log"):
+            for ev in self.state.evidence_log[-20:]:
+                if isinstance(ev, dict):
+                    recent_actions.append({
+                        "iteration": ev.get("iteration", self.state.iteration),
+                        "tool": ev.get("tool", ""),
+                        "success": ev.get("success", False),
+                    })
+
+        vuln_count = len(self._session.vulnerabilities) if self._session else 0
+
+        prompt = engine.build_reflection_prompt(
+            phase=current_phase,
+            recent_actions=recent_actions,
+            failures=self._consecutive_failures,
+            vulnerabilities_found=vuln_count,
+            iterations_completed=self.state.iteration,
+        )
+
+        # Inject reflection prompt as system message — LLM will reflect
+        # in its next response when it sees this context
+        self.state.conversation.append({
+            "role": "system",
+            "content": prompt,
+        })
+        engine.last_reflection_iteration = self.state.iteration
+        engine.record_reflection_hint(
+            f"[iter={self.state.iteration}] phase={current_phase}, "
+            f"failures={self._consecutive_failures}, vulns={vuln_count}, "
+            f"recent_tools={[a.get('tool','?') for a in recent_actions[-5:]]}"
+        )
+        logger.info(
+            "[MetaReasoning] Reflection injected at iteration %d (phase=%s, failures=%d)",
+            self.state.iteration,
+            current_phase,
+            self._consecutive_failures,
+        )
 
     def _analyze_llm_output(
         self,
@@ -152,6 +484,10 @@ class _CycleLlmMixin:
                 bool(self._FAKE_CMD_BLOCK_RE.search(content_acc))
                 or bool(self._FAKE_PLAIN_CMD_RE.search(content_acc))
             ) if not tool_calls_acc else False
+
+            # Self-consistency check for critical LLM decisions
+            if content_acc and not self._is_text_only_response(content_acc):
+                self._check_critical_decision_consistency(content_acc, tool_calls_acc)
 
             is_exploit_phase = self.pipeline and self.pipeline.get_current_phase(
             ) == PipelinePhase.EXPLOIT
@@ -283,6 +619,16 @@ class _CycleLlmMixin:
             _has_task_complete = "[TASK_COMPLETE]" in content_acc
             content_acc = content_acc.replace(
                 "[TASK_COMPLETE]", "").strip()
+
+            # Ensure assistant message always has non-empty content when
+            # tool calls are emitted — models like local Ollama get confused
+            # by content="" + tool_calls (appears as an empty turn).
+            if tool_calls_acc and not content_acc.strip():
+                tool_names = ", ".join(
+                    tc.get("function", {}).get("name", "unknown")
+                    for tc in tool_calls_acc
+                )
+                content_acc = f"Executing: {tool_names}"
 
             if "<objective_patch" in content_acc:
                 self._apply_objective_patch(content_acc, current_phase)
@@ -425,3 +771,85 @@ class _CycleLlmMixin:
 
 
             return content_acc, thinking_acc, tool_calls_acc, _has_task_complete
+
+    # ── Self-Consistency Check ───────────────────────────────────────────
+
+    def _is_text_only_response(self, text: str) -> bool:
+        """Quick check if text is just planning/meta text."""
+        return any(w in ("executing:", "[system:") for w in text.lower().split()[:2])
+
+    def _check_critical_decision_consistency(
+        self,
+        text: str,
+        tool_calls: list[dict[str, Any]],
+    ) -> None:
+        """Run self-consistency check when LLM makes a critical claim.
+
+        When the agent claims to have found a vulnerability or makes a
+        confident assertion about security, verify by running the same
+        question through the model again (self-consistency).
+        """
+        # Only check occasionally (every 8 iterations)
+        if not hasattr(self, "_consistency_counter"):
+            self._consistency_counter = 0
+        self._consistency_counter += 1
+        if self._consistency_counter % 8 != 0:
+            return
+
+        import re as _re
+        critical_patterns = [
+            _re.compile(r"(?:vulnerabilities?\s+(?:found|detected|discovered|confirmed))", _re.I),
+            _re.compile(r"(?:critical|high|medium|low)\s+(?:severity|vulnerab|issue)", _re.I),
+            _re.compile(r"(?:sql\s*injection|xss|ssrf|idor|rce|lfi|xxe)\s+(?:in|at|on|found)", _re.I),
+        ]
+
+        match = None
+        for pattern in critical_patterns:
+            match = pattern.search(text)
+            if match:
+                break
+
+        if not match:
+            return
+
+        # Lazy-init meta-reasoning engine
+        if not hasattr(self, "_meta_reasoning_engine"):
+            from .meta_reasoning import MetaReasoningEngine
+            self._meta_reasoning_engine = MetaReasoningEngine()
+
+        engine = self._meta_reasoning_engine
+
+        if not engine.needs_consistency_check("vulnerability_classification", {}):
+            return
+
+        engine.build_consistency_check_prompt(
+            question="What is the most important next step in this security assessment?",
+            initial_answer=text[:300],
+            context={
+                "phase": self.pipeline.get_current_phase().value if self.pipeline else "RECON",
+                "iterations": self.state.iteration,
+                "failures": self._consecutive_failures,
+            },
+        )
+
+        # Fire-and-forget: inject the prompt into conversation so the
+        # NEXT LLM call will see it as context for self-correction.
+        # This avoids blocking the main loop with extra API calls.
+        self.state.conversation.append({
+            "role": "system",
+            "content": (
+                f"<self_consistency_check>\n"
+                f"Your previous response was: {text[:200]}\n"
+                f"Self-verify: Consider if your reasoning holds up from a different angle. "
+                f"Are you certain? Is there an alternative explanation? "
+                f"Do you have sufficient evidence?\n"
+                f"If confident, continue with tool execution as planned.\n"
+                f"If uncertain, choose a safer verification step.\n"
+                f"</self_consistency_check>"
+            ),
+        })
+        logger.debug(
+            "[SelfConsistency] Check triggered at iteration %d: claim='%s'",
+            self.state.iteration,
+            match.group()[:80],
+        )

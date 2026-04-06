@@ -42,8 +42,9 @@ def _load_port_hints() -> dict[int, str]:
                 parts.append(f"[{sev}]")
             hints[port] = " | ".join(parts)
         return hints
-    except Exception as exc:
-        logger.debug("Could not load port_correlations.json: %s", exc)
+    except Exception as e:
+        logger.debug("Exception: %s", e)
+        logger.debug("Operation failed")
         return {}
 
 def _load_tech_hints() -> dict[str, str]:
@@ -63,8 +64,9 @@ def _load_tech_hints() -> dict[str, str]:
                 parts.append("tool: " + tools[0])
             hints[tech.lower()] = " | ".join(parts)
         return hints
-    except Exception as exc:
-        logger.debug("Could not load tech_correlations.json: %s", exc)
+    except Exception as e:
+        logger.debug("Exception: %s", e)
+        logger.debug("Operation failed")
         return {}
 
 _PORT_HINTS: dict[int, str] = _load_port_hints()
@@ -241,7 +243,7 @@ class _FormatterMixin:
                 parts.append(
                     f"TIP: Tool '{tool_bin}' is missing. You have full ROOT privileges to install it.\n"
                     f"SUGGESTED ACTION 1: Run `sudo apt update && sudo apt install -y {tool_bin}` or `pip install {tool_bin}`\n"
-                    f"SUGGESTED ACTION 2: If not in APT/PIP, use `web_search` to find its Github repo, `git clone` it into `/home/pentester/tools/`, and compile it."
+                    "SUGGESTED ACTION 2: If not in APT/PIP, use `web_search` to find its Github repo, `git clone` it into `/home/pentester/tools/`, and compile it."
                 )
             elif "permission denied" in combined and not command.strip().startswith(
                 "sudo"
@@ -497,7 +499,8 @@ class _FormatterMixin:
             if len(text) > max_len:
                 return f"Result too large ({len(text)} chars). Check output file."
             return text
-        except Exception:
+        except Exception as e:
+            logger.debug("Exception: %s", e)
             return "Result (unserializable). Check output file."
 
     def _auto_help_lookup(self, tool_binary: str) -> str | None:
@@ -526,13 +529,15 @@ class _FormatterMixin:
                             )
                         finally:
                             loop.close()
-                    except Exception:
+                    except Exception as e:
+                        logger.debug("Exception: %s", e)
                         return None
 
                 with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
                     future = pool.submit(_run_help)
                     result = future.result(timeout=15)
-            except Exception:
+            except Exception as e:
+                logger.debug("Exception: %s", e)
                 return None
 
             if result is None:
@@ -586,7 +591,8 @@ class _FormatterMixin:
                     try:
                         compact = await asyncio.to_thread(_blocking_lookup)
                         _help_cache[tool_binary] = compact or ""
-                    except Exception:
+                    except Exception as e:
+                        logger.debug("Exception: %s", e)
                         _help_cache[tool_binary] = ""
                     finally:
                         _help_lookup_inflight.discard(tool_binary)

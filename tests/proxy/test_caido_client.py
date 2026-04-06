@@ -7,10 +7,10 @@ from airecon.proxy.caido_client import CaidoClient
 @pytest.fixture(autouse=True)
 def reset_token_and_failure_state():
     """Reset module-level singleton state before each test."""
-    CaidoClient._token=None
-    CaidoClient._auth_fail_count=0
-    CaidoClient._last_auth_fail_warn_ts=0.0
-    CaidoClient._last_bootstrap_attempt_ts=0.0
+    CaidoClient._token = None
+    CaidoClient._auth_fail_count = 0
+    CaidoClient._last_auth_fail_warn_ts = 0.0
+    CaidoClient._last_bootstrap_attempt_ts = 0.0
 
 
 @pytest.mark.asyncio
@@ -31,7 +31,7 @@ async def test_get_token_success(mocker):
     assert CaidoClient._token == "test_token_123"
     mock_post.assert_called_once()
     args, kwargs = mock_post.call_args
-    assert args[0] == CaidoClient.BASE_URL
+    assert args[0] == CaidoClient._base_url()
     assert "loginAsGuest" in kwargs["json"]["query"]
 
 
@@ -108,10 +108,14 @@ def test_find_fuzz_offsets():
 @pytest.mark.asyncio
 async def test_get_token_bootstrap_path_uses_extracted_token(mocker):
     mocker.patch.object(CaidoClient, "_try_guest_login", side_effect=[None, None])
-    mocker.patch.object(CaidoClient, "_find_bootstrap_command", return_value=["caido-setup"])
+    mocker.patch.object(
+        CaidoClient, "_find_bootstrap_command", return_value=["caido-setup"]
+    )
     mocker.patch(
         "asyncio.to_thread",
-        new=AsyncMock(return_value=(0, "✅ Caido\n🔑 Access Token: token_from_bootstrap\n")),
+        new=AsyncMock(
+            return_value=(0, "✅ Caido\n🔑 Access Token: token_from_bootstrap\n")
+        ),
     )
 
     token = await CaidoClient._get_token(allow_bootstrap=True)

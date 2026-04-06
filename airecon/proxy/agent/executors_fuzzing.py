@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import logging
 import time
 from pathlib import Path
@@ -175,7 +176,10 @@ class _FuzzingExecutorMixin:
             scope_host = scope_host.lower()
 
             return target_host == scope_host or target_host.endswith("." + scope_host)
-        except Exception:
+        except Exception as exc:
+            logger.debug(
+                "Expected failure normalizing target URL for scope check: %s", exc
+            )
             return True
 
     async def _execute_quick_fuzz_tool(
@@ -223,10 +227,13 @@ class _FuzzingExecutorMixin:
             return False, duration, oos_result, None
 
         try:
-            results = await quick_fuzz_url(
-                url=target,
-                params=params,
-                headers=self._build_fuzz_headers(),
+            results = await asyncio.wait_for(
+                quick_fuzz_url(
+                    url=target,
+                    params=params,
+                    headers=self._build_fuzz_headers(),
+                ),
+                timeout=300.0,
             )
 
             if not results:

@@ -1,93 +1,36 @@
 from __future__ import annotations
 
+import logging
 import re
 from typing import Any
 from urllib.parse import parse_qs, urlparse
 
-#from airecon.proxy.agent.tool_scorer import ToolScorer
+from ..data_loader import load_endpoint_patterns, load_file_extensions
 
-_PURE_STATIC_EXTS: frozenset[str] = frozenset({
-    "png", "jpg", "jpeg", "gif", "svg", "ico", "bmp", "webp", "avif", "tiff",
-    "woff", "woff2", "ttf", "otf", "eot",
-    "mp4", "webm", "ogg", "mp3", "wav", "flac", "avi", "mov",
-    "dat", "bin", "exe", "dll", "so",
-    "css", "scss", "sass", "less",
-    "lock",
-})
+logger = logging.getLogger("airecon.agent.url_intelligence")
 
+# ── Load file extensions from data file (single source of truth) ─────────────
+_EXT_DATA = load_file_extensions()
 
-_INFORMATIONAL_EXTS: frozenset[str] = frozenset({
-    "js", "jsx", "ts", "tsx", "mjs", "cjs",
-    "map",
-    "pdf", "doc", "docx", "xls", "xlsx", "ppt", "pptx",
-    "xml", "yml", "yaml", "json", "toml", "ini", "conf", "cfg",
-    "txt", "md", "log",
-    "zip", "tar", "gz", "rar", "7z", "bz2",
-})
+_PURE_STATIC_EXTS: frozenset[str] = frozenset(_EXT_DATA.get("static", []))
 
-_DYNAMIC_EXTS: frozenset[str] = frozenset({
-    "php", "phtml", "php3", "php4", "php5", "phps",
-    "asp", "aspx", "ascx", "ashx", "asmx",
-    "jsp", "jspx", "jhtml",
-    "cgi", "pl", "py", "rb", "sh",
-    "html", "htm",
-})
+_HIGH_VALUE_EXTS: frozenset[str] = frozenset(_EXT_DATA.get("high_value", []))
 
+_DOCUMENT_EXTS: frozenset[str] = frozenset(_EXT_DATA.get("document", []))
+
+_BACKEND_EXTS: frozenset[str] = frozenset(_EXT_DATA.get("backend", []))
+
+_DYNAMIC_EXTS: frozenset[str] = _BACKEND_EXTS
+
+# ── Load URL patterns from endpoint_patterns.json ────────────────────────────
+_ENDPOINT_DATA = load_endpoint_patterns()
 _TESTABLE_URL_PATTERNS: list[tuple[str, str]] = [
-    (r"/api/", "API endpoint"),
-    (r"/graphql", "GraphQL endpoint"),
-    (r"/admin/", "Admin panel"),
-    (r"/dashboard", "Dashboard"),
-    (r"/login", "Login page"),
-    (r"/register", "Registration"),
-    (r"/signup", "Signup"),
-    (r"/logout", "Logout"),
-    (r"/auth/", "Auth endpoint"),
-    (r"/oauth/", "OAuth endpoint"),
-    (r"/password", "Password reset"),
-    (r"/reset", "Reset endpoint"),
-    (r"/profile", "User profile"),
-    (r"/settings", "Settings page"),
-    (r"/account", "Account page"),
-    (r"/user/", "User endpoint"),
-    (r"/users/", "Users endpoint"),
-    (r"/search", "Search functionality"),
-    (r"/upload", "File upload"),
-    (r"/download", "File download"),
-    (r"/import", "Import functionality"),
-    (r"/export", "Export functionality"),
-    (r"/webhook", "Webhook endpoint"),
-    (r"/callback", "Callback endpoint"),
-    (r"/redirect", "Redirect endpoint"),
-    (r"/proxy", "Proxy endpoint"),
-    (r"/fetch", "Fetch endpoint"),
-    (r"/v\d+/", "Versioned API"),
-    (r"\?(?=[^=]+=)", "URL with query parameters"),
-    (r"/\{[^}]+\}", "URL with path parameters"),
-    (r"/:[a-zA-Z]", "URL with colon parameters (Express.js style)"),
-    (r"/param/", "URL with 'param' in path"),
-    (r"/filter", "Filter functionality"),
-    (r"/sort", "Sort functionality"),
-    (r"/page=", "Pagination"),
-    (r"/limit=", "Pagination limit"),
-    (r"/offset=", "Pagination offset"),
+    (entry["pattern"], entry["description"])
+    for entry in _ENDPOINT_DATA.get("url_patterns", [])
 ]
 
-# Directories commonly containing static assets
-_STATIC_DIR_PATTERNS: list[str] = [
-    r"/assets/",
-    r"/static/",
-    r"/cdn/",
-    r"/images?/",
-    r"/img/",
-    r"/fonts?/",
-    r"/icons?/",
-    r"/favicon",
-    r"/apple-touch-icon",
-    r"/opengraph",
-    r"/og-",
-    r"/social-image",
-]
+# Directories commonly containing static assets — loaded from endpoint_patterns.json
+_STATIC_DIR_PATTERNS: list[str] = _ENDPOINT_DATA.get("static_dir_patterns", [])
 
 # JS file analysis hints — what to look for
 _JS_ANALYSIS_HINTS: str = (
@@ -120,13 +63,13 @@ def _get_url_extension(url: str) -> str:
         if "." in last_segment:
             ext = last_segment.rsplit(".", 1)[-1].lower()
             return ext
-    except Exception:
-        pass
+    except Exception as exc:
+        logger.debug("Operation failed: %s", exc)
     return ""
 
 
 def extract_parent_directory(url: str) -> str | None:
-
+    """Extract the parent directory URL from a full URL path."""
     try:
         parsed = urlparse(url)
         path = parsed.path.rstrip("/")
@@ -134,20 +77,24 @@ def extract_parent_directory(url: str) -> str | None:
             return None
         parent_path = path.rsplit("/", 1)[0] + "/"
         from urllib.parse import urlunparse
-        return urlunparse((
-            parsed.scheme,
-            parsed.netloc,
-            parent_path,
-            "",
-            "",
-            "",
-        ))
-    except Exception:
+
+        return urlunparse(
+            (
+                parsed.scheme,
+                parsed.netloc,
+                parent_path,
+                "",
+                "",
+                "",
+            )
+        )
+    except Exception as exc:
+        logger.debug("URL intelligence error: %s", exc)
         return None
 
 
 def has_path_parameters(url: str) -> bool:
-
+    """Check if URL contains path parameters (REST-style or Express-style)."""
     try:
         parsed = urlparse(url)
         path = parsed.path
@@ -157,10 +104,12 @@ def has_path_parameters(url: str) -> bool:
             return True
         if re.search(r"/\d{3,}(?:/|$)", path):
             return True
-        if re.search(r"/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}", path, re.I):
+        if re.search(
+            r"/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}", path, re.I
+        ):
             return True
-    except Exception:
-        pass
+    except Exception as exc:
+        logger.debug("Operation failed: %s", exc)
     return False
 
 
@@ -169,7 +118,8 @@ def has_query_parameters(url: str) -> bool:
     try:
         parsed = urlparse(url)
         return bool(parsed.query) and "=" in parsed.query
-    except Exception:
+    except Exception as exc:
+        logger.debug("URL intelligence error: %s", exc)
         return False
 
 
@@ -178,12 +128,13 @@ def get_query_param_names(url: str) -> list[str]:
     try:
         parsed = urlparse(url)
         return list(parse_qs(parsed.query).keys())
-    except Exception:
+    except Exception as exc:
+        logger.debug("URL intelligence error: %s", exc)
         return []
 
 
 def classify_url(url: str) -> dict[str, Any]:
-
+    """Classify a URL by its extension and patterns to determine testability and priority."""
     ext = _get_url_extension(url)
     has_path = has_path_parameters(url)
     has_query = has_query_parameters(url)
@@ -212,17 +163,21 @@ def classify_url(url: str) -> dict[str, Any]:
             priority = 60
             matched_pattern = f"Dynamic page: .{ext}"
 
-    elif ext in ("js", "jsx", "ts", "tsx", "mjs", "cjs"):
-        category = "js_file"
+    elif ext in _HIGH_VALUE_EXTS:
+        category = (
+            "js_file"
+            if ext in ("js", "jsx", "ts", "tsx", "mjs", "cjs")
+            else "informational"
+        )
         is_pure_static = False
-        is_testable = False  # Don't fuzz the JS file itself
+        is_testable = False
         is_informational = True
         priority = 70
         matched_pattern = f"JavaScript/TypeScript file: .{ext} (recon gold!)"
         guidance = _JS_ANALYSIS_HINTS
         directory_url = extract_parent_directory(url)
         if directory_url:
-            priority = 75  # Boost if we can fuzz the directory
+            priority = 75
 
     elif ext in _PURE_STATIC_EXTS:
         category = "static_asset"
@@ -236,7 +191,7 @@ def classify_url(url: str) -> dict[str, Any]:
             priority = 40
             matched_pattern = f"Static .{ext} → fuzz directory: {directory_url}"
 
-    elif ext in _INFORMATIONAL_EXTS:
+    elif ext in _DOCUMENT_EXTS:
         category = "informational"
         is_pure_static = False
         is_testable = False
@@ -262,10 +217,14 @@ def classify_url(url: str) -> dict[str, Any]:
         elif ext in ("json", "xml", "yml", "yaml"):
             priority = 45
             matched_pattern = f"Config/data file: .{ext}"
-            guidance = f"Check if .{ext} file is publicly accessible and leaks config/secrets."
+            guidance = (
+                f"Check if .{ext} file is publicly accessible and leaks config/secrets."
+            )
         elif ext in ("css", "scss", "less"):
             priority = 15
-            matched_pattern = f"Stylesheet: .{ext} (low value but check for internal paths)"
+            matched_pattern = (
+                f"Stylesheet: .{ext} (low value but check for internal paths)"
+            )
         elif ext in ("txt", "md", "log"):
             priority = 25
             matched_pattern = f"Text/log file: .{ext}"
@@ -328,6 +287,7 @@ def classify_url(url: str) -> dict[str, Any]:
 
 
 def filter_static_assets(urls: list[str]) -> tuple[list[str], list[str], list[str]]:
+    """Separate URLs into testable, informational, and static categories."""
     testable: list[str] = []
     informational: list[str] = []
     static: list[str] = []
@@ -341,12 +301,13 @@ def filter_static_assets(urls: list[str]) -> tuple[list[str], list[str], list[st
         elif classification["is_pure_static"]:
             static.append(url)
         else:
-            testable.append(url)  # Unknown = treat as testable
+            testable.append(url)
 
     return testable, informational, static
 
 
 def sort_urls_by_priority(urls: list[str]) -> list[str]:
+    """Sort URLs by priority score (highest first)."""
     scored = []
     for url in urls:
         classification = classify_url(url)
@@ -357,7 +318,7 @@ def sort_urls_by_priority(urls: list[str]) -> list[str]:
 
 
 def build_url_intelligence_context(urls: list[str]) -> str:
- 
+    """Build a structured intelligence context string from a list of URLs."""
     if not urls:
         return ""
 
@@ -365,7 +326,11 @@ def build_url_intelligence_context(urls: list[str]) -> str:
 
     testable = [u for u, c in classifications if c["is_testable"]]
     js_files = [u for u, c in classifications if c["category"] == "js_file"]
-    informational = [u for u, c in classifications if c["is_informational"] and c["category"] != "js_file"]
+    informational = [
+        u
+        for u, c in classifications
+        if c["is_informational"] and c["category"] != "js_file"
+    ]
     pure_static = [u for u, c in classifications if c["is_pure_static"]]
     static_dirs: list[str] = []
     for u, c in classifications:
@@ -384,15 +349,17 @@ def build_url_intelligence_context(urls: list[str]) -> str:
     if js_files:
         parts.append(f"  JS FILE ANALYSIS — {len(js_files)} JavaScript files found:")
         for url in js_files[:10]:
-            parts.append(f"    🔍 {url[:120]}")
+            parts.append(f"    {url[:120]}")
         if len(js_files) > 10:
             parts.append(f"    ... and {len(js_files) - 10} more JS files")
-        parts.append("  Use linkfinder, jsleak, or grep on JS files for API keys, routes, secrets.")
+        parts.append(
+            "  Use linkfinder, jsleak, or grep on JS files for API keys, routes, secrets."
+        )
 
     if static_dirs:
         parts.append("  Directories for fuzzing (extracted from static URLs):")
         for d in sorted(set(static_dirs))[:15]:
-            parts.append(f"    📁 {d}")
+            parts.append(f"    {d}")
         if len(static_dirs) > 15:
             parts.append(f"    ... and {len(static_dirs) - 15} more directories")
 
@@ -422,6 +389,7 @@ def build_url_intelligence_context(urls: list[str]) -> str:
 
     parts.append("</url_intelligence>")
     return "\n".join(parts)
+
 
 def is_endpoint_worth_testing(url: str) -> bool:
     """Quick check: should this URL be tested for vulnerabilities?"""

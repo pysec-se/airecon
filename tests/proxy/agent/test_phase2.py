@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import pytest
 
-from airecon.proxy.system import auto_load_skills_for_message, _PHASE_SKILL_DIRECTORIES
+from airecon.proxy.system import auto_load_skills_for_message, _PHASE_SKILL_CATEGORIES
 from airecon.proxy.agent.models import AgentState
 from airecon.proxy.agent.pipeline import _PHASE_TOOL_BUDGETS, PipelineEngine
 from airecon.proxy.agent.session import SessionData
@@ -14,9 +14,9 @@ from airecon.proxy.agent.session import SessionData
 
 
 def test_phase_skill_directories_defined():
-    """_PHASE_SKILL_DIRECTORIES should cover all pipeline phases."""
+    """_PHASE_SKILL_CATEGORIES should cover all pipeline phases."""
     for phase in ("RECON", "ANALYSIS", "EXPLOIT", "REPORT", "COMPLETE"):
-        assert phase in _PHASE_SKILL_DIRECTORIES
+        assert phase in _PHASE_SKILL_CATEGORIES
 
 
 def test_skill_phase_boost_exploit_score_logic():
@@ -40,7 +40,7 @@ def test_skill_phase_boost_exploit_score_logic():
 
     # Apply EXPLOIT boost
     phase = "EXPLOIT"
-    preferred = sys_module._PHASE_SKILL_DIRECTORIES[phase]
+    preferred = sys_module._PHASE_SKILL_CATEGORIES[phase]
     for skill_path in list(scores.keys()):
         if skill_path.split("/")[0] in preferred:
             scores[skill_path] += 2
@@ -90,7 +90,7 @@ def test_skill_phase_report_no_boost(mocker):
 
     import airecon.proxy.system as sys_module
 
-    original_dirs = sys_module._PHASE_SKILL_DIRECTORIES
+    original_dirs = sys_module._PHASE_SKILL_CATEGORIES
 
     # Verify REPORT has empty preferred set
     assert original_dirs["REPORT"] == set()
@@ -123,7 +123,7 @@ def test_skill_boost_additive_not_multiplicative(mocker):
     assert scores["vulnerabilities/xss.md"] == 1
 
     # Apply EXPLOIT phase boost: both dirs are preferred
-    preferred = sys_module._PHASE_SKILL_DIRECTORIES["EXPLOIT"]
+    preferred = sys_module._PHASE_SKILL_CATEGORIES["EXPLOIT"]
     assert "payloads" in preferred
     assert "vulnerabilities" in preferred
 
@@ -213,30 +213,30 @@ def test_pipeline_get_tool_budget_method():
 def test_check_tool_budget_no_warning_below_75pct():
     """No warning when usage is below 75% of budget."""
     state = AgentState()
-    # advanced_fuzz budget in ANALYSIS = 15, 75% = 11
-    for _ in range(10):
-        state.record_tool_use("ANALYSIS", "advanced_fuzz")
-
-    # Simulate what _check_tool_budget would do
-    phase = "ANALYSIS"
-    tool = "advanced_fuzz"
-    budget = _PHASE_TOOL_BUDGETS[phase][tool]  # 15
-    usage = state.get_phase_tool_count(phase, tool)  # 10
-    assert usage < int(budget * 0.75)  # 10 < 11
-
-
-def test_check_tool_budget_at_75pct():
-    """At 75% of budget, a warning should be generated."""
-    state = AgentState()
-    # ANALYSIS advanced_fuzz budget = 15, 75% = 11
-    for _ in range(12):
+    budget = _PHASE_TOOL_BUDGETS["ANALYSIS"]["advanced_fuzz"]
+    below_75 = max(1, int(budget * 0.50))
+    for _ in range(below_75):
         state.record_tool_use("ANALYSIS", "advanced_fuzz")
 
     phase = "ANALYSIS"
     tool = "advanced_fuzz"
     budget = _PHASE_TOOL_BUDGETS[phase][tool]
     usage = state.get_phase_tool_count(phase, tool)
-    # 12 >= int(15 * 0.75) = 11 → should warn
+    assert usage < int(budget * 0.75)
+
+
+def test_check_tool_budget_at_75pct():
+    """At 75% of budget, a warning should be generated."""
+    state = AgentState()
+    budget = _PHASE_TOOL_BUDGETS["ANALYSIS"]["advanced_fuzz"]
+    at_75 = int(budget * 0.75) + 1
+    for _ in range(at_75):
+        state.record_tool_use("ANALYSIS", "advanced_fuzz")
+
+    phase = "ANALYSIS"
+    tool = "advanced_fuzz"
+    budget = _PHASE_TOOL_BUDGETS[phase][tool]
+    usage = state.get_phase_tool_count(phase, tool)
     assert usage >= int(budget * 0.75)
     assert usage < budget
 
@@ -244,7 +244,7 @@ def test_check_tool_budget_at_75pct():
 def test_check_tool_budget_exhausted():
     """At or above budget, exhaustion warning should fire."""
     state = AgentState()
-    budget = _PHASE_TOOL_BUDGETS["ANALYSIS"]["advanced_fuzz"]  # 15
+    budget = _PHASE_TOOL_BUDGETS["ANALYSIS"]["advanced_fuzz"]
     for _ in range(budget):
         state.record_tool_use("ANALYSIS", "advanced_fuzz")
 

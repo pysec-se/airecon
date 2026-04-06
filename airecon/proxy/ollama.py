@@ -122,8 +122,12 @@ class OllamaClient:
             )
 
             if OllamaClient._httpx_client is None:
+                _cfg = get_config()
+                _http_timeout = _cfg.ollama_timeout
                 OllamaClient._httpx_client = httpx.AsyncClient(
-                    timeout=httpx.Timeout(120.0, connect=10.0, read=120.0, write=10.0),
+                    timeout=httpx.Timeout(
+                        _http_timeout, connect=10.0, read=_http_timeout, write=10.0
+                    ),
                     headers={"Content-Type": "application/json"},
                 )
                 OllamaClient._initialized = True
@@ -149,7 +153,11 @@ class OllamaClient:
                     timeout, connect=10.0, read=timeout, write=10.0
                 )
             else:
-                timeout_obj = httpx.Timeout(120.0, connect=10.0, read=120.0, write=10.0)
+                _cfg = get_config()
+                _http_timeout = _cfg.ollama_timeout
+                timeout_obj = httpx.Timeout(
+                    _http_timeout, connect=10.0, read=_http_timeout, write=10.0
+                )
 
             if stream:
                 raise RuntimeError(
@@ -448,7 +456,7 @@ class OllamaClient:
 
                             if _last_activity_time is not None:
                                 inactivity_time = current_time - _last_activity_time
-                                if inactivity_time > 120:
+                                if inactivity_time > get_config().ollama_timeout:
                                     logger.warning(
                                         "Ollama inactivity: %.0fs, cancelling request",
                                         inactivity_time,

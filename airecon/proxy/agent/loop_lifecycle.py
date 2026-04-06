@@ -130,6 +130,61 @@ class _LifecycleMixin:
                         "system",
                         f"## MEMORY AUGMENTATION (from past sessions)\n{_memory_context}",
                     )
+
+                    # Inject tool performance patterns
+                    # Show the agent which tools historically succeed/fail
+                    try:
+                        tool_stats = memory.get_tool_statistics()
+                        if isinstance(tool_stats, list) and tool_stats:
+                            high_sr = [
+                                t
+                                for t in tool_stats
+                                if t.get("success_count", 0) + t.get("failure_count", 0) >= 2
+                                and t.get("success_count", 0) / max(
+                                    t.get("success_count", 0) + t.get("failure_count", 0), 1
+                                )
+                                >= 0.70
+                            ]
+                            low_sr = [
+                                t
+                                for t in tool_stats
+                                if t.get("success_count", 0) + t.get("failure_count", 0) >= 3
+                                and t.get("success_count", 0) / max(
+                                    t.get("success_count", 0) + t.get("failure_count", 0), 1
+                                )
+                                < 0.50
+                            ]
+                            if high_sr or low_sr:
+                                parts = [
+                                    "[SYSTEM: HISTORICAL TOOL PERFORMANCE — learn from past sessions]"
+                                ]
+                                if high_sr:
+                                    lines = []
+                                    for t in high_sr[:5]:
+                                        total = t["success_count"] + t["failure_count"]
+                                        sr = t["success_count"] / max(total, 1) * 100
+                                        lines.append(
+                                            f"- {t['tool_name']}: {sr:.0f}% success ({total} runs) — proven reliable"
+                                        )
+                                    parts.append("Proven tools (use these first):")
+                                    parts.extend(lines)
+                                if low_sr:
+                                    lines = []
+                                    for t in low_sr[:5]:
+                                        total = t["success_count"] + t["failure_count"]
+                                        sr = t["success_count"] / max(total, 1) * 100
+                                        lines.append(
+                                            f"- {t['tool_name']}: {sr:.0f}% success ({total} runs) — unreliable, use with caution"
+                                        )
+                                    parts.append(
+                                        "Unreliable tools (avoid or expect issues):"
+                                    )
+                                    parts.extend(lines)
+                                self.state.add_message("system", "\n".join(parts))
+                    except Exception as _tool_perf_err:
+                        logger.debug(
+                            "Tool performance injection failed: %s", _tool_perf_err
+                        )
             except Exception as _mem_err:
                 logger.debug("Memory augmentation failed: %s", _mem_err)
 
@@ -149,6 +204,15 @@ class _LifecycleMixin:
             logger.info("Created new session %s", self._session.session_id)
         self._sync_recovery_state_from_session()
         self._sync_token_usage_from_session()
+
+        # Cross-session persistence: load payload memory + adaptive learning
+        if hasattr(self, "_load_session_persistence"):
+            try:
+                loop = asyncio.get_event_loop()
+                if loop.is_running():
+                    loop.create_task(self._load_session_persistence())
+            except Exception as exc:
+                logger.debug("Operation failed: %s", exc)
 
         self.pipeline = PipelineEngine(self._session)
         if self._ctf_mode and self.pipeline:

@@ -9,6 +9,7 @@ import httpx
 
 logger = logging.getLogger("airecon.proxy.agent.waf_bypass")
 
+
 def _load_waf_bypass_config() -> tuple[
     dict[str, list[dict[str, Any]]],
     dict[str, dict[str, Any]],
@@ -75,7 +76,9 @@ def _load_waf_bypass_config() -> tuple[
     except (TypeError, ValueError):
         min_detection_score = 2
     try:
-        max_strategies_per_profile = int(raw_policy_cfg.get("max_strategies_per_profile", 8))
+        max_strategies_per_profile = int(
+            raw_policy_cfg.get("max_strategies_per_profile", 8)
+        )
     except (TypeError, ValueError):
         max_strategies_per_profile = 8
 
@@ -84,6 +87,7 @@ def _load_waf_bypass_config() -> tuple[
 
     return strategies, patterns, min_detection_score, max_strategies_per_profile
 
+
 (
     _BYPASS_STRATEGIES,
     _WAF_PATTERNS,
@@ -91,20 +95,25 @@ def _load_waf_bypass_config() -> tuple[
     _MAX_STRATEGIES_PER_PROFILE,
 ) = _load_waf_bypass_config()
 
+
 class WAFBypassEngine:
     BYPASS_STRATEGIES = _BYPASS_STRATEGIES
     WAF_PATTERNS = _WAF_PATTERNS
     DETECTION_MIN_SCORE = _DETECTION_MIN_SCORE
     MAX_STRATEGIES_PER_PROFILE = _MAX_STRATEGIES_PER_PROFILE
 
-    def __init__(self, timeout: int = 30):
-        self.timeout = timeout
+    def __init__(self, timeout: int | None = None):
+        from ..config import get_config
+
+        self.timeout = (
+            timeout if timeout is not None else get_config().waf_bypass_timeout
+        )
         self.client = httpx.AsyncClient(
-            timeout=timeout,
+            timeout=self.timeout,
             follow_redirects=False,
             headers={
                 "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
-            }
+            },
         )
 
     async def close(self) -> None:
@@ -135,7 +144,11 @@ class WAFBypassEngine:
             return []
         waf_name = profile.waf_name if profile.waf_name != "Unknown" else ""
         if waf_name:
-            logger.info("WAF detected via waf_detector: %s (confidence=%.2f)", waf_name, profile.confidence)
+            logger.info(
+                "WAF detected via waf_detector: %s (confidence=%.2f)",
+                waf_name,
+                profile.confidence,
+            )
 
             return [waf_name.lower()]
         return []
@@ -175,31 +188,38 @@ class WAFBypassEngine:
                 )
 
                 if bypass_result.get("success"):
-                    results["successful_bypasses"].append({
-                        "strategy": strategy_name,
-                        "description": strategy.get("description", ""),
-                        "response_status": bypass_result.get("status_code"),
-                        "response_length": bypass_result.get("content_length"),
-                    })
-                    if results["response"] is None and bypass_result.get("response") is not None:
-                        results["response"] = bypass_result.get("response")
-                    logger.info(
-                        f"Bypass successful: {strategy_name} on {waf_type}"
+                    results["successful_bypasses"].append(
+                        {
+                            "strategy": strategy_name,
+                            "description": strategy.get("description", ""),
+                            "response_status": bypass_result.get("status_code"),
+                            "response_length": bypass_result.get("content_length"),
+                        }
                     )
+                    if (
+                        results["response"] is None
+                        and bypass_result.get("response") is not None
+                    ):
+                        results["response"] = bypass_result.get("response")
+                    logger.info(f"Bypass successful: {strategy_name} on {waf_type}")
 
                     break
                 else:
-                    results["failed_bypasses"].append({
-                        "strategy": strategy_name,
-                        "reason": bypass_result.get("reason", "Unknown"),
-                    })
+                    results["failed_bypasses"].append(
+                        {
+                            "strategy": strategy_name,
+                            "reason": bypass_result.get("reason", "Unknown"),
+                        }
+                    )
 
             except Exception as e:
                 logger.error(f"Strategy {strategy_name} failed: {e}")
-                results["failed_bypasses"].append({
-                    "strategy": strategy_name,
-                    "reason": str(e),
-                })
+                results["failed_bypasses"].append(
+                    {
+                        "strategy": strategy_name,
+                        "reason": str(e),
+                    }
+                )
 
         return results
 
@@ -374,7 +394,9 @@ class WAFBypassEngine:
                     if str(k).strip()
                 )
                 if cookie_header:
-                    headers = self._merge_headers(base_headers, {"Cookie": cookie_header})
+                    headers = self._merge_headers(
+                        base_headers, {"Cookie": cookie_header}
+                    )
                     response = await self._send_request(
                         url,
                         payload,
@@ -458,13 +480,24 @@ class WAFBypassEngine:
     ) -> httpx.Response:
         from urllib.parse import parse_qsl, quote_plus, urlencode, urlparse, urlunparse
 
+        parsed = urlparse(url)
+        if parsed.scheme not in ("http", "https"):
+            logger.error(
+                "WAF bypass: rejecting URL with unsafe scheme '%s': %s",
+                parsed.scheme,
+                url[:120],
+            )
+            return httpx.Response(status_code=400, content=b"Unsafe URL scheme")
+
         try:
             if method.upper() == "GET":
                 parsed = urlparse(url)
                 query_pairs = parse_qsl(parsed.query, keep_blank_values=True)
                 query_pairs.append((param_name, payload))
                 query_pairs.append((param_name, f"{payload}_dup"))
-                polluted_url = urlunparse(parsed._replace(query=urlencode(query_pairs, doseq=True)))
+                polluted_url = urlunparse(
+                    parsed._replace(query=urlencode(query_pairs, doseq=True))
+                )
                 return await self.client.get(polluted_url, headers=headers)
 
             body = (
@@ -475,7 +508,9 @@ class WAFBypassEngine:
             req_headers.setdefault("Content-Type", "application/x-www-form-urlencoded")
             if method.upper() == "POST":
                 return await self.client.post(url, content=body, headers=req_headers)
-            return await self.client.request(method, url, content=body, headers=req_headers)
+            return await self.client.request(
+                method, url, content=body, headers=req_headers
+            )
         except Exception as exc:
             logger.error("Parameter pollution request failed: %s", exc)
             return httpx.Response(status_code=0, content=b"")
@@ -511,7 +546,6 @@ class WAFBypassEngine:
                 )
 
             elif method.upper() == "POST":
-
                 if headers and "application/json" in headers.get("Content-Type", ""):
                     data = {param_name: payload}
                     response = await self.client.post(url, json=data, headers=headers)
@@ -520,7 +554,6 @@ class WAFBypassEngine:
                     response = await self.client.post(url, data=data, headers=headers)
 
             else:
-
                 response = await self.client.request(
                     method, url, data={param_name: payload}, headers=headers
                 )
@@ -572,7 +605,7 @@ class WAFBypassEngine:
 
     def _mix_case(self, payload: str) -> str:
         import random
+
         return "".join(
-            c.upper() if random.random() > 0.5 else c.lower()
-            for c in payload
+            c.upper() if random.random() > 0.5 else c.lower() for c in payload
         )

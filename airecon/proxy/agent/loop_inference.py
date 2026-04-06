@@ -1,9 +1,9 @@
 from __future__ import annotations
 
 import logging
-from typing import Any
 
 from .pipeline import PipelinePhase
+from typing import Any
 
 logger = logging.getLogger("airecon.agent.inference")
 
@@ -27,21 +27,24 @@ class _InferenceMixin:
             if isinstance(val, str):
                 return val.lower() in ("1", "true", "yes", "on")
             return bool(val)
-        except Exception:
+        except Exception as e:
+            logger.debug("Exception in %s: %s", __name__, e)
             return default
 
     @staticmethod
     def _cfg_int(cfg: Any, key: str, default: int) -> int:
         try:
             return int(getattr(cfg, key, default))
-        except Exception:
+        except Exception as e:
+            logger.debug("Exception in %s: %s", __name__, e)
             return default
 
     @staticmethod
     def _cfg_float(cfg: Any, key: str, default: float) -> float:
         try:
             return float(getattr(cfg, key, default))
-        except Exception:
+        except Exception as e:
+            logger.debug("Exception in %s: %s", __name__, e)
             return default
 
     @staticmethod

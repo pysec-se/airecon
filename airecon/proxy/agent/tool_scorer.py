@@ -10,56 +10,61 @@ logger = logging.getLogger("airecon.agent.tool_scorer")
 
 # ── Load tool metadata ──────────────────────────────────────────────────────
 _TOOLS_META_PATH = Path(__file__).parent.parent / "data" / "tools_meta.json"
+_TOOLS_JSON_PATH = Path(__file__).parent.parent / "data" / "tools.json"
 try:
     _TOOLS_META = json.loads(_TOOLS_META_PATH.read_text(encoding="utf-8"))
 except Exception as _e:
     logger.warning("tools_meta.json unavailable: %s", _e)
     _TOOLS_META = {}
 
-_CATEGORY_PHASE_MAP: dict[str, list[str]] = {
-    "RECON": [
-        "subdomain_enum", "port_scan", "web_probing", "fingerprinting",
-        "parameter_discovery", "crawling", "live_host_probe",
-        "directory_bruteforce", "extraction",
-    ],
-    "ANALYSIS": [
-        "generic_scanners", "cms_scanners", "fuzzing",
-        "specific_vulnerabilities", "evasion_and_waf",
-        "analysis", "code_analysis", "secrets_scanning",
-    ],
-    "EXPLOIT": [
-        "web", "network_pivoting", "ad_smb", "bruteforce",
-        "priv_esc", "advanced_injection",
-        "cloud_enum", "cloud_exploitation",
-    ],
-    "REPORT": [], 
-}
 
-_CORE_TOOLS = frozenset({
-    "execute", "web_search", "browser_action",
-    "create_file", "read_file", "list_files",
-})
+# ── Derive core tools from tools.json (agent-level tools always available) ──
+def _derive_core_tools() -> frozenset[str]:
+    """Core tools = tools that are NOT categorized in tools_meta.json subcategories.
+    These are agent-level tools (execute, browser_action, create_file, etc.)
+    loaded dynamically from tools.json."""
+    core: set[str] = set()
+    try:
+        tools_path = _TOOLS_JSON_PATH
+        if tools_path.exists():
+            tools_list = json.loads(tools_path.read_text(encoding="utf-8"))
+            for tool_def in tools_list:
+                name = tool_def.get("function", {}).get("name", "")
+                if name:
+                    core.add(name)
+    except Exception as exc:
+        logger.debug("Operation failed: %s", exc)
+    # Remove tools that belong to specific categories in tools_meta.json
+    categories = _TOOLS_META.get("categories", {})
+    categorized: set[str] = set()
+    for group in categories.values():
+        if isinstance(group, dict):
+            for tool_list in group.values():
+                if isinstance(tool_list, list):
+                    categorized.update(tool_list)
+    # Core = tools.json tools MINUS categorized tools from tools_meta.json
+    core_tools = core - categorized
+    # Always include these agent-level tools
+    core_tools |= {
+        "execute",
+        "browser_action",
+        "web_search",
+        "create_file",
+        "read_file",
+        "list_files",
+    }
+    return frozenset(core_tools)
+
+
+_CORE_TOOLS = _derive_core_tools()
+
+_CATEGORY_PHASE_MAP: dict[str, list[str]] = _TOOLS_META.get("phase_category_map", {})
 
 _PHASE_EXTRAS: dict[str, set[str]] = {
-    "RECON": {
-        "run_parallel_agents",
-        "caido_set_scope", "caido_sitemap", "caido_list_requests",
-    },
-    "ANALYSIS": {
-        "caido_list_requests", "caido_send_request", "caido_sitemap",
-    },
-    "EXPLOIT": {
-        "quick_fuzz", "advanced_fuzz", "deep_fuzz",
-        "spawn_agent", "schemathesis_fuzz",
-        "caido_send_request", "caido_automate", "caido_list_requests",
-        "caido_get_findings",
-    },
-    "REPORT": set(),
+    phase: set(tools) for phase, tools in _TOOLS_META.get("phase_extras", {}).items()
 }
 
-_REPORT_TOOLS = frozenset({
-    "create_vulnerability_report", "create_file", "read_file", "list_files",
-})
+_REPORT_TOOLS = frozenset(_TOOLS_META.get("report_tools", []))
 
 
 def _lookup_category(categories: dict, name: str) -> set[str]:
@@ -127,7 +132,9 @@ def _build_phase_blocked() -> dict[str, set[str]]:
         for other_phase in phases:
             if other_phase == phase:
                 continue
-            other_only = all_phase_tools[other_phase] - all_phase_tools[phase] - _CORE_TOOLS
+            other_only = (
+                all_phase_tools[other_phase] - all_phase_tools[phase] - _CORE_TOOLS
+            )
             blocked[phase].update(other_only)
 
     return blocked
@@ -136,6 +143,55 @@ def _build_phase_blocked() -> dict[str, set[str]]:
 _PHASE_APPROPRIATE_TOOLS: dict[str, set[str]] = _build_phase_appropriate()
 _PHASE_BLOCKED_TOOLS: dict[str, set[str]] = _build_phase_blocked()
 _KNOWN_TOOL_BINARIES: set[str] = _collect_all_known_tools()
+
+
+# Shell binary descriptions sourced from tools_meta.json["tool_descriptions"]
+# No hardcoded descriptions in Python code — all maintained in JSON.
+
+# Map phases to relevant shell binary subcategory names from tools_meta.json
+_PHASE_SHELL_CATEGORIES = {
+    "RECON": {
+        "subdomain_enum", "port_scan", "web_probing", "fingerprinting",
+        "crawling", "live_host_probe", "directory_bruteforce",
+        "parameter_discovery", "extraction",
+    },
+    "ANALYSIS": {
+        "generic_scanners", "cms_scanners", "fuzzing",
+        "specific_vulnerabilities", "evasion_and_waf",
+        "analysis", "code_analysis",
+    },
+    "EXPLOIT": {
+        "specific_vulnerabilities", "advanced_injection", "evasion_and_waf",
+        "network_pivoting", "networking", "bruteforce",
+        "priv_esc", "cloud_exploitation",
+    },
+    "REPORT": set(),
+}
+
+
+def _collect_shell_binary_descriptions() -> dict[str, str]:
+    """Return mapping of shell binary name → description from tools_meta.json."""
+    descriptions = _TOOLS_META.get("tool_descriptions", {})
+    if not isinstance(descriptions, dict):
+        descriptions = {}
+    return descriptions
+
+
+def _match_shells_for_phase(phase: str) -> set[str]:
+    """Return shell binaries relevant for the given phase."""
+    cats = _PHASE_SHELL_CATEGORIES.get(phase, set())
+    if not cats:
+        return set()
+
+    result: set[str] = set()
+    categories = _TOOLS_META.get("categories", {})
+    for cat_name in cats:
+        for group in categories.values():
+            if isinstance(group, dict) and cat_name in group:
+                tlist = group[cat_name]
+                if isinstance(tlist, list):
+                    result.update(t for t in tlist if isinstance(t, str))
+    return result
 
 
 def extract_binary_from_command(command: str) -> str:
@@ -147,8 +203,24 @@ def extract_binary_from_command(command: str) -> str:
         return ""
     binary = cmd.split()[0].lower() if cmd.split() else ""
     binary = binary.rsplit("/", 1)[-1]
-    _shell_builtins = {"cd", "echo", "export", "source", ".", "for", "while", "if",
-                       "then", "fi", "done", "do", "case", "esac", "true", "false"}
+    _shell_builtins = {
+        "cd",
+        "echo",
+        "export",
+        "source",
+        ".",
+        "for",
+        "while",
+        "if",
+        "then",
+        "fi",
+        "done",
+        "do",
+        "case",
+        "esac",
+        "true",
+        "false",
+    }
     if binary in _shell_builtins:
         for token in cmd.split():
             t = token.rsplit("/", 1)[-1].lower()
@@ -166,6 +238,7 @@ def _get_memory_tool_stats() -> tuple[dict[str, int], dict[str, int], dict[str, 
 
     try:
         from ..memory import get_memory_manager
+
         memory = get_memory_manager()
         stats = memory.get_tool_statistics()
 
@@ -213,7 +286,9 @@ def score_tool(
 
     if is_blocked:
         score = 0.0
-        reasons.append(f"BLOCKED: '{tool_name}' is not appropriate for {phase_upper} phase")
+        reasons.append(
+            f"BLOCKED: '{tool_name}' is not appropriate for {phase_upper} phase"
+        )
         return {
             "score": 0.0,
             "phase_appropriate": False,
@@ -239,7 +314,9 @@ def score_tool(
                 reasons.append(f"Moderate historical success rate ({success_rate:.0%})")
             elif success_rate < 0.4:
                 score -= 0.15
-                reasons.append(f"Low historical success rate ({success_rate:.0%}) — consider alternatives")
+                reasons.append(
+                    f"Low historical success rate ({success_rate:.0%}) — consider alternatives"
+                )
 
     if tool_use_counts:
         use_count = tool_use_counts.get(tool_name, 0)
@@ -264,7 +341,9 @@ def score_tool(
         tool_lower = tool_name.lower()
         if tool_lower in chain_hint_lower or chain_hint_lower in tool_lower:
             score += 0.25
-            reasons.append(f"ALIGNMENT: Matches current exploit chain step hint '{chain_step_hint}'")
+            reasons.append(
+                f"ALIGNMENT: Matches current exploit chain step hint '{chain_step_hint}'"
+            )
 
     if consecutive_failures >= 3:
         if tool_use_counts and tool_name in tool_use_counts:
@@ -313,7 +392,9 @@ def rank_tools_for_phase(
     scored_tools: list[tuple[float, dict[str, Any]]] = []
 
     for tool_def in available_tools:
-        tool_name = tool_def.get("function", {}).get("name", "") or tool_def.get("name", "")
+        tool_name = tool_def.get("function", {}).get("name", "") or tool_def.get(
+            "name", ""
+        )
         if not tool_name:
             continue
 
@@ -330,8 +411,11 @@ def rank_tools_for_phase(
         )
 
         if result["phase_blocked"]:
-            logger.debug("Tool '%s' phase-blocked for %s — removing from tool list",
-                         tool_name, current_phase)
+            logger.debug(
+                "Tool '%s' phase-blocked for %s — removing from tool list",
+                tool_name,
+                current_phase,
+            )
             continue
 
         scored_tools.append((result["score"], tool_def))
@@ -351,19 +435,76 @@ def build_tool_recommendation_context(
     consecutive_failures: int = 0,
     blocked_tools: list[str] | None = None,
     wrong_tool_picked: str = "",
+    tool_registry: list[dict[str, Any]] | None = None,
 ) -> str:
-    """Build a context string to inject into the conversation."""
+    """Build a context string to inject into the conversation.
+
+    Now includes tool descriptions so the agent is NOT blind.
+    """
     parts: list[str] = []
 
     phase_upper = current_phase.upper()
     appropriate = _PHASE_APPROPRIATE_TOOLS.get(phase_upper, set())
     if appropriate:
         top_tools = sorted(appropriate)[:15]
+
+        # Build a named→description lookup from the tool registry
+        desc_map: dict[str, str] = {}
+        if tool_registry:
+            for tdef in tool_registry:
+                fn = tdef.get("function", {}) if isinstance(tdef, dict) else {}
+                tname = fn.get("name", "")
+                tdesc = fn.get("description", "")
+                if tname and tdesc:
+                    desc_map[tname.lower()] = tdesc
+
+        # Also pull shell binary descriptions from tools_meta.json
+        categories = _TOOLS_META.get("categories", {})
+        for cat in categories.values():
+            if isinstance(cat, dict):
+                for subcat, tlist in cat.items():
+                    if isinstance(tlist, list):
+                        # subcategory name acts as a keyword for the binary
+                        pass
+
+        tool_lines: list[str] = []
+        for tname in top_tools:
+            tl = tname.lower()
+            desc = desc_map.get(tl, "")
+            if desc:
+                # Truncate long descriptions
+                if len(desc) > 200:
+                    desc = desc[:197] + "..."
+                tool_lines.append(f"    - {tname}: {desc}")
+            else:
+                tool_lines.append(f"    - {tname}")
+
+        # Add known shell binaries accessible via execute()
+        shell_binaries = _collect_shell_binary_descriptions()
+        relevant_shells = _match_shells_for_phase(phase_upper)
+        if relevant_shells:
+            shell_lines: list[str] = []
+            for shell_name in sorted(relevant_shells)[:25]:
+                desc = shell_binaries.get(shell_name, "")
+                if desc:
+                    shell_lines.append(f"    - {shell_name}: {desc}")
+                    desc_len = len(shell_name) + len(desc)
+                    if desc_len > 150:
+                        break
+                else:
+                    shell_lines.append(f"    - {shell_name}")
+                if len(shell_lines) >= 25:
+                    break
+            tool_lines.append("")
+            tool_lines.append("  You can ALSO run these via execute(command='...'):")
+            tool_lines.extend(shell_lines)
+
         parts.append(
-            f'<tool_guidance phase="{phase_upper}">\n'
-            f"  Recommended tools for this phase: {', '.join(top_tools)}\n"
-            f"  Prioritize tools that advance your current objective.\n"
-            f"</tool_guidance>"
+            '<tool_guidance phase="' + phase_upper + '">\n'
+            '  Recommended tools for this phase (with descriptions):\n'
+            + "\n".join(tool_lines)
+            + "\n  Prioritize tools that advance your current objective.\n"
+            "</tool_guidance>"
         )
 
     blocked = _PHASE_BLOCKED_TOOLS.get(phase_upper, set())
@@ -402,7 +543,55 @@ def build_tool_recommendation_context(
             f"</failure_recovery>"
         )
 
+    # Skills catalog index — tell agent about available knowledge
+    _skills = _TOOLS_META.get("skills_catalog", {})
+    if isinstance(_skills, dict):
+        phase_skills: dict[str, set[str]] = {
+            "RECON": {"subdomain_enum", "full_recon", "dorking", "asn_whois_osint"},
+            "ANALYSIS": {"javascript_analysis", "waf_detection", "cors", "idor"},
+            "EXPLOIT": {
+                "xss", "sql_injection", "ssrf", "lfi", "ssti", "command_injection",
+                "xxe", "deserialization", "auth_workflow", "business_logic",
+            },
+            "REPORT": {"information_disclosure", "web_cache_poisoning"},
+        }
+        relevant_skill_names = phase_skills.get(phase_upper, set())
+        # Auto-derive relevant tool↔skill cross-links from catalog itself
+        _skill_tool_names: set[str] = {
+            sname.lower()
+            for sub in _skills.values()
+            if isinstance(sub, dict)
+            for sname in sub.keys()
+        } & _KNOWN_TOOL_BINARIES
+
+        skill_entries: list[str] = []
+        for cat, skills in _skills.items():
+            if isinstance(skills, dict):
+                for sname, sdesc in skills.items():
+                    if sname in relevant_skill_names:
+                        skill_entries.append(f"    - skills/{cat}/{sname}.md: {sdesc[:180]}")
+                    # Match if skill name is also a known tool/binary
+                    if sname.lower() in _skill_tool_names and sname not in relevant_skill_names:
+                        skill_entries.append(f"    - skills/{cat}/{sname}.md: {sdesc[:180]}")
+        if skill_entries:
+            # Deduplicate
+            seen = set()
+            unique_skills = []
+            for line in skill_entries:
+                if line not in seen:
+                    seen.add(line)
+                    unique_skills.append(line)
+            parts.append(
+                '<skills_catalog>\n'
+                '  Available knowledge modules. Load with read_file(path="skills/<cat>/<name>.md"):\n'
+                + "\n".join(unique_skills)
+                + "\n  Use these modules to guide your approach and avoid common pitfalls.\n"
+                "</skills_catalog>"
+            )
+
     if not parts:
         return ""
 
-    return "\n\n".join(["<system_tool_intelligence>"] + parts + ["</system_tool_intelligence>"])
+    return "\n\n".join(
+        ["<system_tool_intelligence>"] + parts + ["</system_tool_intelligence>"]
+    )

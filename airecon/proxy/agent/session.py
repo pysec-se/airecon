@@ -1,15 +1,15 @@
 from __future__ import annotations
 
 import ast
+import re
+from pathlib import Path
 import hashlib
 import json
 import logging
-import re
 import time
 import uuid
 from dataclasses import asdict, dataclass, field
 from datetime import datetime
-from pathlib import Path
 from typing import Any, Iterable, TypeVar
 from urllib.parse import parse_qsl, urlencode, urlparse, urlunparse
 
@@ -104,7 +104,8 @@ def _coerce_sequence_field(
                 return BoundedList(parsed, maxlen=maxlen)
             if isinstance(parsed, tuple):
                 return BoundedList(list(parsed), maxlen=maxlen)
-        except Exception:
+        except Exception as e:
+            logger.debug("Exception: %s", e)
             logger.warning(
                 "Failed to parse legacy %s field value; resetting to empty.",
                 field_name,
@@ -112,7 +113,8 @@ def _coerce_sequence_field(
         return BoundedList(maxlen=maxlen)
     try:
         return BoundedList(list(value), maxlen=maxlen)
-    except Exception:
+    except Exception as e:
+        logger.debug("Exception: %s", e)
         logger.warning(
             "Unsupported %s field type %s; resetting to empty.",
             field_name,
@@ -156,7 +158,7 @@ _TRACKING_PARAMS: frozenset[str] = frozenset(
         "_gl",
         "_hsenc",
         "_hsmi",
-        "ref",
+        "re",
         "referrer",
         "source",
         "medium",
@@ -247,16 +249,7 @@ def _extract_injection_points(url: str) -> list[dict[str, Any]]:
         if p.scheme not in ("http", "https"):
             return points
 
-        base = urlunparse(
-            (
-                p.scheme.lower(),
-                p.netloc.lower(),
-                p.path.rstrip("/") or "/",
-                "",
-                "",
-                "",
-            )
-        )
+        base = _normalize_url(url)
 
         _path_lower = p.path.lower()
         _path_is_redirect = any(ind in _path_lower for ind in _REDIRECT_PATH_INDICATORS)
@@ -352,7 +345,8 @@ def _normalize_url(url: str) -> str:
                 "",
             )
         )
-    except Exception:
+    except Exception as e:
+        logger.debug("Exception: %s", e)
         return url
 
 
@@ -386,7 +380,8 @@ def _is_duplicate_vulnerability(new_vuln: dict, existing_vulns: list[dict]) -> b
         from ..config import get_config
 
         threshold = get_config().vuln_similarity_threshold
-    except Exception:
+    except Exception as e:
+        logger.debug("Exception: %s", e)
         from ..config import DEFAULT_CONFIG
 
         threshold = DEFAULT_CONFIG["vuln_similarity_threshold"]
@@ -440,7 +435,8 @@ class ApplicationModel:
         try:
             parsed = urlparse(url)
             endpoint = parsed.path.rstrip("/") or "/"
-        except Exception:
+        except Exception as e:
+            logger.debug("Exception: %s", e)
             endpoint = url
 
         entry = self.resources.setdefault(
@@ -484,7 +480,7 @@ class ApplicationModel:
 
         if body_excerpt:
             body_lower = body_excerpt.lower()
-            for role in ("admin", "superuser", "moderator", "staff", "manager"):
+            for role in ("admin", "superuser", "moderator", "sta", "manager"):
                 if role in body_lower and role not in self.roles_detected:
                     self.roles_detected.append(role)
 
@@ -1629,6 +1625,9 @@ def update_from_parsed_output(
             url = _normalize_url(url_token.rstrip(".,;:)]}>\"'"))
             if url not in session.urls:
                 session.urls.append(url)
+            # Live hosts: URLs from probing tools (httpx, etc.) ARE confirmed live
+            if url not in session.live_hosts:
+                session.live_hosts.append(url)
 
             new_pts = _extract_injection_points(url)
             if new_pts:
@@ -1665,17 +1664,7 @@ def update_from_parsed_output(
             if _cmd_url_m:
                 try:
                     _raw_url = _cmd_url_m.group(0).rstrip(".,;:)]}>\"'")
-                    _pu = urlparse(_raw_url)
-                    _cookie_url = urlunparse(
-                        (
-                            _pu.scheme.lower(),
-                            _pu.netloc.lower(),
-                            _pu.path.rstrip("/") or "/",
-                            "",
-                            "",
-                            "",
-                        )
-                    )
+                    _cookie_url = _normalize_url(_raw_url)
                 except Exception as e:
                     logger.debug(
                         "Expected failure normalizing cookie URL for injection points: %s",

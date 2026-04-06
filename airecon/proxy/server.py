@@ -117,8 +117,14 @@ _ollama_health_cooldown_until: float = 0.0
 _ollama_last_ok_at: float = 0.0
 _ollama_last_known_ok: bool = False
 
-_OLLAMA_STATUS_TIMEOUT_SECONDS: float = 3.5
-_OLLAMA_STICKY_OK_SECONDS: float = 120.0
+
+def _ollama_status_timeout() -> float:
+    return get_config().ollama_status_timeout
+
+
+def _ollama_sticky_ok_seconds() -> float:
+    return get_config().ollama_status_sticky_ok_seconds
+
 
 _skills_cache: list[dict] | None = None
 _skills_cache_lock: asyncio.Lock | None = None
@@ -231,7 +237,9 @@ async def _run_mcp_probe(
     error: str | None = "MCP probe did not complete"
 
     try:
-        ok, info = await asyncio.wait_for(mcp_list_tools(server_name), timeout=45.0)
+        ok, info = await asyncio.wait_for(
+            mcp_list_tools(server_name), timeout=get_config().mcp_probe_timeout
+        )
         if ok:
             raw_tools = info.get("tools", []) if isinstance(info, dict) else []
             tool_names: list[str] = []
@@ -258,7 +266,7 @@ async def _run_mcp_probe(
             )
     except asyncio.TimeoutError:
         status = "error"
-        error = "MCP startup timed out (>45s)"
+        error = f"MCP startup timed out (>{get_config().mcp_probe_timeout:.0f}s)"
     except BaseException as e:
         status = "error"
         error = f"MCP probe crashed: {e}"
@@ -586,7 +594,7 @@ async def get_status() -> ORJSONResponse:
             ollama_ok = bool(
                 await asyncio.wait_for(
                     ollama_client.health_check(),
-                    timeout=_OLLAMA_STATUS_TIMEOUT_SECONDS,
+                    timeout=_ollama_status_timeout(),
                 )
             )
 
@@ -601,7 +609,7 @@ async def get_status() -> ORJSONResponse:
             ollama_probe_soft_fail = True
             logger.debug(
                 "Ollama health check timed out (%.1fs) — using sticky status fallback when available",
-                _OLLAMA_STATUS_TIMEOUT_SECONDS,
+                _ollama_status_timeout(),
             )
             _ollama_health_failures.append(True)
             if len(_ollama_health_failures) > 10:
@@ -634,7 +642,7 @@ async def get_status() -> ORJSONResponse:
         not ollama_ok
         and ollama_probe_soft_fail
         and _ollama_last_known_ok
-        and (current_time - _ollama_last_ok_at) <= _OLLAMA_STICKY_OK_SECONDS
+        and (current_time - _ollama_last_ok_at) <= _ollama_sticky_ok_seconds()
     ):
         ollama_ok = True
         logger.debug(
@@ -696,7 +704,9 @@ async def get_status() -> ORJSONResponse:
     try:
         from .caido_client import CaidoClient
 
-        _token = await asyncio.wait_for(CaidoClient._get_token(), timeout=1.5)
+        _token = await asyncio.wait_for(
+            CaidoClient._get_token(), timeout=get_config().caido_token_timeout
+        )
         caido_connected = bool(_token)
     except Exception:
         caido_connected = False
@@ -955,10 +965,15 @@ async def mcp_tools(name: str) -> ORJSONResponse:
         )
 
     try:
-        ok, info = await asyncio.wait_for(mcp_list_tools(name), timeout=30.0)
+        ok, info = await asyncio.wait_for(
+            mcp_list_tools(name), timeout=get_config().mcp_tools_list_timeout
+        )
     except asyncio.TimeoutError:
         return ORJSONResponse(
-            {"error": "MCP tools list timed out (>30s)"}, status_code=504
+            {
+                "error": f"MCP tools list timed out (>{get_config().mcp_tools_list_timeout:.0f}s)"
+            },
+            status_code=504,
         )
 
     if not ok:
@@ -1121,7 +1136,10 @@ async def _stream_agent_events(message: str, trace_id: str) -> AsyncIterator[dic
                 os.environ.get("AIRECON_AGENT_IDLE_SOFT_TIMEOUT", "120")
             )
             _IDLE_HARD_SECONDS = float(
-                os.environ.get("AIRECON_AGENT_IDLE_HARD_TIMEOUT", "300")
+                os.environ.get(
+                    "AIRECON_AGENT_IDLE_HARD_TIMEOUT",
+                    str(get_config().agent_idle_hard_timeout),
+                )
             )
             _IDLE_HARD_TOOL_SECONDS = float(
                 os.environ.get(

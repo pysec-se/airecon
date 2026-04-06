@@ -1,34 +1,30 @@
 from __future__ import annotations
 
 import logging
-import os
-import random
 import re
-from dataclasses import dataclass, field
-from enum import Enum
 from pathlib import Path
 from typing import Any
+import os
+import random
+from dataclasses import dataclass, field
+from enum import Enum
 
 from ..config import get_config as _get_config
+from ..data_loader import load_tools_meta
 
 logger = logging.getLogger("airecon.agent.pipeline")
 
 _PROMPTS_DIR = Path(__file__).parent.parent / "prompts" / "phases"
 
-try:
-    import json as _json
-    _tools_meta = _json.loads(
-        (Path(__file__).parent.parent / "data" / "tools_meta.json").read_text(encoding="utf-8")
-    )
-    _recon_hints: dict[str, str] = _tools_meta.get("recon_phase_hints", {})
-except Exception:
-    _recon_hints = {}
+_TOOLS_META = load_tools_meta()
+_RECON_HINTS: dict[str, str] = _TOOLS_META.get("recon_phase_hints", {})
 
-_LIVE_HOST_HINT: str = _recon_hints.get(
+_LIVE_HOST_HINT: str = _RECON_HINTS.get(
     "live_host_validation",
     "CRITICAL: After subdomain enumeration, ALWAYS validate which hosts are alive before "
     "port scanning or directory brute-force. Never scan dead/unresolved hosts.",
 )
+
 
 class PipelinePhase(Enum):
     RECON = "RECON"
@@ -36,6 +32,7 @@ class PipelinePhase(Enum):
     EXPLOIT = "EXPLOIT"
     REPORT = "REPORT"
     COMPLETE = "COMPLETE"
+
 
 _PHASE_ORDER = [
     PipelinePhase.RECON,
@@ -52,6 +49,7 @@ _PHASE_CONFIDENCE_THRESHOLDS: dict[PipelinePhase, float] = {
     PipelinePhase.REPORT: 0.50,
 }
 
+
 @dataclass
 class PhaseConfig:
     phase: PipelinePhase
@@ -62,19 +60,26 @@ class PhaseConfig:
 
     exploration_hints: list[str] = field(default_factory=list)
 
+
 DEFAULT_PHASES: dict[PipelinePhase, PhaseConfig] = {
     PipelinePhase.RECON: PhaseConfig(
         phase=PipelinePhase.RECON,
-        max_iterations=500,
+        max_iterations=_get_config().pipeline_recon_max_iterations,
         objective=(
             "Understand the target deeply — choose the recon approach best suited to this "
             "specific target. Prioritise breadth initially; pivot to unusual entry points "
             "if standard paths yield nothing. " + _LIVE_HOST_HINT
         ),
         recommended_tools=[
-            "execute", "web_search", "browser_action", "create_file",
-            "read_file", "list_files",
-            "caido_set_scope", "caido_sitemap", "caido_list_requests",
+            "execute",
+            "web_search",
+            "browser_action",
+            "create_file",
+            "read_file",
+            "list_files",
+            "caido_set_scope",
+            "caido_sitemap",
+            "caido_list_requests",
         ],
         transition_criteria=[
             "subdomains_discovered",
@@ -107,16 +112,22 @@ DEFAULT_PHASES: dict[PipelinePhase, PhaseConfig] = {
     ),
     PipelinePhase.ANALYSIS: PhaseConfig(
         phase=PipelinePhase.ANALYSIS,
-        max_iterations=300,
+        max_iterations=_get_config().pipeline_analysis_max_iterations,
         objective=(
             "Identify exploitable weaknesses — go beyond standard injection points. "
             "Look for logic flaws, misconfigured access controls, trust boundary violations, "
             "and technology-specific vulnerabilities based on the identified stack."
         ),
         recommended_tools=[
-            "execute", "browser_action", "code_analysis", "web_search",
-            "read_file", "create_file",
-            "caido_list_requests", "caido_send_request", "caido_sitemap",
+            "execute",
+            "browser_action",
+            "code_analysis",
+            "web_search",
+            "read_file",
+            "create_file",
+            "caido_list_requests",
+            "caido_send_request",
+            "caido_sitemap",
         ],
         transition_criteria=[
             "urls_collected",
@@ -143,13 +154,21 @@ DEFAULT_PHASES: dict[PipelinePhase, PhaseConfig] = {
     ),
     PipelinePhase.EXPLOIT: PhaseConfig(
         phase=PipelinePhase.EXPLOIT,
-        max_iterations=800,
+        max_iterations=_get_config().pipeline_exploit_max_iterations,
         objective="Test and exploit vulnerabilities: fuzzing, injection testing, authentication bypass",
         recommended_tools=[
-            "execute", "quick_fuzz", "advanced_fuzz", "deep_fuzz",
-            "browser_action", "spawn_agent", "caido_send_request",
-            "caido_automate", "caido_list_requests", "caido_get_findings",
-            "schemathesis_fuzz", "create_vulnerability_report",
+            "execute",
+            "quick_fuzz",
+            "advanced_fuzz",
+            "deep_fuzz",
+            "browser_action",
+            "spawn_agent",
+            "caido_send_request",
+            "caido_automate",
+            "caido_list_requests",
+            "caido_get_findings",
+            "schemathesis_fuzz",
+            "create_vulnerability_report",
         ],
         transition_criteria=[
             "vulnerabilities_tested",
@@ -157,10 +176,12 @@ DEFAULT_PHASES: dict[PipelinePhase, PhaseConfig] = {
     ),
     PipelinePhase.REPORT: PhaseConfig(
         phase=PipelinePhase.REPORT,
-        max_iterations=100,
+        max_iterations=_get_config().pipeline_report_max_iterations,
         objective="Generate final report: document all findings with PoC, CVSS, and remediation",
         recommended_tools=[
-            "create_vulnerability_report", "create_file", "read_file",
+            "create_vulnerability_report",
+            "create_file",
+            "read_file",
         ],
         transition_criteria=[
             "reports_generated",
@@ -170,25 +191,25 @@ DEFAULT_PHASES: dict[PipelinePhase, PhaseConfig] = {
 
 _PHASE_TOOL_BUDGETS: dict[str, dict[str, int]] = {
     "RECON": {
-        "quick_fuzz": 10,
+        "quick_fuzz": _get_config().pipeline_recon_budget,
         "advanced_fuzz": 5,
         "deep_fuzz": 0,
         "caido_automate": 5,
         "create_vulnerability_report": 2,
     },
     "ANALYSIS": {
-        "advanced_fuzz": 15,
+        "advanced_fuzz": _get_config().pipeline_analysis_budget,
         "deep_fuzz": 5,
         "create_vulnerability_report": 5,
     },
     "EXPLOIT": {
         "advanced_fuzz": 50,
         "deep_fuzz": 25,
-        "quick_fuzz": 60,
+        "quick_fuzz": _get_config().pipeline_exploit_budget,
         "caido_automate": 40,
     },
     "REPORT": {
-        "execute": 10,
+        "execute": _get_config().pipeline_report_budget,
         "advanced_fuzz": 0,
         "deep_fuzz": 0,
         "quick_fuzz": 0,
@@ -202,8 +223,8 @@ _PHASE_SKILL_HINTS: dict[str, str] = {
     "REPORT": "Phase skills: reporting/, vulnerabilities/, remediation/",
 }
 
-class PipelineEngine:
 
+class PipelineEngine:
     MIN_ITERATIONS_PER_PHASE = 10
 
     def __init__(self, session: Any, config: Any = None) -> None:
@@ -214,13 +235,29 @@ class PipelineEngine:
         self._ctf_mode: bool = False
 
         cfg = config if config is not None else _get_config()
-        self._recon_min_subdomains: int = getattr(cfg, "pipeline_recon_min_subdomains", 3)
+        self._recon_min_subdomains: int = getattr(
+            cfg, "pipeline_recon_min_subdomains", 3
+        )
         self._recon_min_urls: int = getattr(cfg, "pipeline_recon_min_urls", 1)
         self._recon_soft_timeout: int = getattr(cfg, "pipeline_recon_soft_timeout", 30)
 
         self._recon_hard_timeout: int = getattr(
             cfg, "pipeline_recon_hard_timeout", self._recon_soft_timeout * 2
         )
+
+        # Stagnation escape: max iterations per phase before forced transition
+        self._exploit_max_iterations: int = getattr(
+            cfg, "pipeline_exploit_max_iterations", 800
+        )
+        self._analysis_max_iterations: int = getattr(
+            cfg, "pipeline_analysis_max_iterations", 300
+        )
+        self._recon_max_iterations: int = getattr(
+            cfg, "pipeline_recon_max_iterations", 500
+        )
+
+        # Track vuln count at phase entry to detect stagnation (no new vulns)
+        self._phase_vuln_baseline: int = 0
 
         self._load_phase_prompts()
 
@@ -231,8 +268,7 @@ class PipelineEngine:
             prompt_file = _PROMPTS_DIR / f"{phase.value.lower()}.txt"
             try:
                 if prompt_file.exists():
-                    self._phase_prompts[phase] = prompt_file.read_text(
-                        encoding="utf-8")
+                    self._phase_prompts[phase] = prompt_file.read_text(encoding="utf-8")
                 else:
                     self._phase_prompts[phase] = self._default_prompt(phase)
             except Exception as e:
@@ -247,7 +283,7 @@ class PipelineEngine:
             f"[PIPELINE PHASE: {phase.value}]\n"
             f"Objective: {config.objective}\n"
             "Use the most suitable available capabilities for this phase objective.\n"
-            f"Complete this phase thoroughly before moving to the next."
+            "Complete this phase thoroughly before moving to the next."
         )
 
     def get_current_phase(self) -> PipelinePhase:
@@ -265,7 +301,6 @@ class PipelineEngine:
     def set_ctf_mode(self, enabled: bool = True) -> None:
         self._ctf_mode = enabled
         if enabled:
-
             current = self.get_current_phase()
             if current == PipelinePhase.RECON:
                 self.set_phase(PipelinePhase.EXPLOIT)
@@ -273,30 +308,44 @@ class PipelineEngine:
 
     def should_transition(self) -> bool:
         if self._ctf_mode:
+            logger.debug("[Pipeline] CTF mode — blocking transition")
             return False
 
         current = self.get_current_phase()
         if current == PipelinePhase.COMPLETE:
+            logger.debug("[Pipeline] Phase COMPLETE — blocking transition")
             return False
 
         config = DEFAULT_PHASES.get(current)
         if not config:
+            logger.debug(
+                "[Pipeline] No config for phase %s — blocking transition", current.value
+            )
             return False
 
         iterations_in_phase = self._current_iteration - self._phase_entry_iteration
         if iterations_in_phase < self.MIN_ITERATIONS_PER_PHASE:
+            logger.debug(
+                "[Pipeline] Phase %s: %d iterations < min %d — blocking transition",
+                current.value,
+                iterations_in_phase,
+                self.MIN_ITERATIONS_PER_PHASE,
+            )
             return False
 
         MAX_PHASE_ITERATIONS = 300
         if iterations_in_phase > MAX_PHASE_ITERATIONS:
             logger.warning(
                 "Phase %s has run for %d iterations - forcing transition to prevent infinite loop",
-                current.value, iterations_in_phase
+                current.value,
+                iterations_in_phase,
             )
             return True
 
-        if (current == PipelinePhase.RECON
-                and iterations_in_phase >= self._recon_soft_timeout):
+        if (
+            current == PipelinePhase.RECON
+            and iterations_in_phase >= self._recon_soft_timeout
+        ):
             met_criteria = self._evaluate_criteria(current)
             has_live_hosts = "live_hosts_validated" in met_criteria
             has_any_data = bool(
@@ -306,7 +355,6 @@ class PipelineEngine:
                 or getattr(self.session, "live_hosts", [])
             )
             if not has_live_hosts and has_any_data:
-
                 if iterations_in_phase >= self._recon_hard_timeout:
                     logger.warning(
                         "RECON hard timeout (%d iter, limit=%d) — live_hosts_validated "
@@ -315,10 +363,17 @@ class PipelineEngine:
                         iterations_in_phase,
                         self._recon_hard_timeout,
                     )
+                    logger.info(
+                        "[Pipeline] RECON hard timeout — forcing transition to ANALYSIS",
+                    )
                     return True
                 logger.warning(
                     "RECON soft timeout (%d iter) but live_hosts_validated not met — "
                     "agent must validate live hosts before ANALYSIS. Blocking transition.",
+                    iterations_in_phase,
+                )
+                logger.debug(
+                    "[Pipeline] RECON: live_hosts not validated, blocking transition (iter=%d)",
                     iterations_in_phase,
                 )
                 return False
@@ -329,21 +384,68 @@ class PipelineEngine:
                     "anyway; agent will likely produce a low-confidence report.",
                     iterations_in_phase,
                 )
+                logger.info(
+                    "[Pipeline] RECON: no data collected after soft timeout, forcing transition",
+                )
             else:
                 logger.info(
                     "RECON soft timeout reached (%d iterations) — forcing transition to ANALYSIS",
                     iterations_in_phase,
+                )
+                logger.info(
+                    "[Pipeline] RECON soft timeout met — transitioning to ANALYSIS",
                 )
             return True
 
         met_criteria = self._evaluate_criteria(current)
         total = len(config.transition_criteria)
 
-        if current == PipelinePhase.RECON and "live_hosts_validated" not in met_criteria:
-            return False
+        logger.debug(
+            "[Pipeline] Evaluating transition for phase %s: met=%d/%d criteria=%s",
+            current.value,
+            len(met_criteria),
+            total,
+            met_criteria,
+        )
+
+        # RECON→ANALYSIS: live_hosts is a strong signal but not an absolute gate
+        # If we have enough subdomains + URLs + artifacts, allow transition
+        if (
+            current == PipelinePhase.RECON
+            and "live_hosts_validated" not in met_criteria
+        ):
+            # Allow transition if we have strong alternative signals
+            has_subs = "min_subdomains_discovered" in met_criteria
+            has_urls = "min_urls_discovered" in met_criteria
+            has_artifacts = "artifacts_collected" in met_criteria
+            has_tech = "technologies_identified" in met_criteria
+
+            strong_signals = sum([has_subs, has_urls, has_artifacts, has_tech])
+            if strong_signals >= 3:
+                logger.info(
+                    "RECON→ANALYSIS: live_hosts not validated but %d strong signals present "
+                    "(subdomains=%s, urls=%s, artifacts=%s, tech=%s) — allowing transition",
+                    strong_signals,
+                    has_subs,
+                    has_urls,
+                    has_artifacts,
+                    has_tech,
+                )
+            else:
+                logger.debug(
+                    "[Pipeline] RECON: only %d strong signals (need 3) — blocking transition",
+                    strong_signals,
+                )
+                return False
 
         coverage_ok = len(met_criteria) >= max(1, int(total * 0.6))
         if not coverage_ok:
+            logger.debug(
+                "[Pipeline] Phase %s: coverage %d/%d below 60%% threshold — blocking transition",
+                current.value,
+                len(met_criteria),
+                total,
+            )
             return False
         confidence = self._phase_transition_confidence(
             current,
@@ -352,7 +454,17 @@ class PipelineEngine:
             iterations_in_phase=iterations_in_phase,
         )
         threshold = _PHASE_CONFIDENCE_THRESHOLDS.get(current, 0.55)
-        return confidence >= threshold
+        decision = confidence >= threshold
+        logger.info(
+            "[Pipeline] Transition decision for %s: confidence=%.3f threshold=%.2f met=%d/%d → %s",
+            current.value,
+            confidence,
+            threshold,
+            len(met_criteria),
+            total,
+            "ALLOW" if decision else "BLOCK",
+        )
+        return decision
 
     def _phase_transition_confidence(
         self,
@@ -370,18 +482,33 @@ class PipelineEngine:
 
         base = coverage * (0.55 + (0.25 * evidence_quality) + (0.20 * maturity))
         confidence = (
-            base
-            + (evidence_quality * 0.25)
-            + (maturity * 0.08)
-            - consistency_penalty
+            base + (evidence_quality * 0.25) + (maturity * 0.08) - consistency_penalty
         )
-        return round(min(1.0, max(0.0, confidence)), 3)
+        result = round(min(1.0, max(0.0, confidence)), 3)
+        logger.debug(
+            "[Pipeline] Confidence calc: phase=%s coverage=%.2f maturity=%.2f "
+            "evidence_quality=%.2f penalty=%.2f base=%.2f → %.3",
+            phase.value,
+            coverage,
+            maturity,
+            evidence_quality,
+            consistency_penalty,
+            base,
+            result,
+        )
+        return result
 
     @staticmethod
     def _vulnerability_severity(vuln: dict[str, Any]) -> str:
         sev = str(vuln.get("severity", "")).strip().upper()
         if sev in {"1", "2", "3", "4", "5"}:
-            return {"1": "INFO", "2": "LOW", "3": "MEDIUM", "4": "HIGH", "5": "CRITICAL"}[sev]
+            return {
+                "1": "INFO",
+                "2": "LOW",
+                "3": "MEDIUM",
+                "4": "HIGH",
+                "5": "CRITICAL",
+            }[sev]
         if sev in {"CRITICAL", "HIGH", "MEDIUM", "LOW", "INFO"}:
             return sev
         finding = str(vuln.get("finding", "")).upper()
@@ -426,9 +553,13 @@ class PipelineEngine:
             inj_points = len(getattr(s, "injection_points", []))
             vuln_count = len(getattr(s, "vulnerabilities", []))
 
-            injection_density = min(1.0, inj_points / max(1, min(20, urls if urls > 0 else 4)))
+            injection_density = min(
+                1.0, inj_points / max(1, min(20, urls if urls > 0 else 4))
+            )
             tech_context = min(1.0, tech_count / 6)
-            vuln_signal = min(1.0, vuln_count / max(1, inj_points if inj_points > 0 else 3))
+            vuln_signal = min(
+                1.0, vuln_count / max(1, inj_points if inj_points > 0 else 3)
+            )
 
             if inj_points > 0 and urls == 0:
                 penalty += 0.15
@@ -456,9 +587,17 @@ class PipelineEngine:
                 sev = self._vulnerability_severity(vuln)
                 if sev in {"CRITICAL", "HIGH", "MEDIUM"}:
                     severe += 1
-                if bool(vuln.get("report_generated") or vuln.get("replay_verified") or vuln.get("verified")):
+                if bool(
+                    vuln.get("report_generated")
+                    or vuln.get("replay_verified")
+                    or vuln.get("verified")
+                ):
                     confirmed += 1
-                if bool(vuln.get("proof") or vuln.get("evidence") or vuln.get("poc_script_code")):
+                if bool(
+                    vuln.get("proo")
+                    or vuln.get("evidence")
+                    or vuln.get("poc_script_code")
+                ):
                     poc_backed += 1
 
             severe_ratio = severe / len(vulns)
@@ -507,9 +646,7 @@ class PipelineEngine:
                 penalty += 0.08
 
             quality = (
-                (report_ratio * 0.40)
-                + (replay_ratio * 0.40)
-                + (technical_ratio * 0.20)
+                (report_ratio * 0.40) + (replay_ratio * 0.40) + (technical_ratio * 0.20)
             )
             return quality, min(0.35, penalty)
 
@@ -544,11 +681,20 @@ class PipelineEngine:
             if getattr(session, "open_ports", {}):
                 met.append("ports_scanned")
 
-            _recon_extensions = {".txt", ".out", ".nmap",
-                                 ".csv", ".json", ".xml", ".html", ".log"}
+            _recon_extensions = {
+                ".txt",
+                ".out",
+                ".nmap",
+                ".csv",
+                ".json",
+                ".xml",
+                ".html",
+                ".log",
+            }
             _has_output_files = False
             try:
                 from ..config import get_workspace_root
+
                 target = getattr(session, "target", "") or "unknown"
                 output_dir = get_workspace_root() / target / "output"
                 if output_dir.exists():
@@ -563,7 +709,8 @@ class PipelineEngine:
             _scan_count = 0
             try:
                 _scan_count = int(getattr(session, "scan_count", 0) or 0)
-            except Exception:
+            except Exception as e:
+                logger.debug("Exception: %s", e)
                 _scan_count = 0
             _has_recon_signals = bool(
                 getattr(session, "open_ports", {})
@@ -581,22 +728,40 @@ class PipelineEngine:
             if len(getattr(session, "urls", [])) >= self._recon_min_urls:
                 met.append("url_discovery_met")
 
+            logger.debug(
+                "[Pipeline] RECON criteria evaluation: met=%s total=%d",
+                met,
+                len(DEFAULT_PHASES[PipelinePhase.RECON].transition_criteria),
+            )
+
         elif phase == PipelinePhase.ANALYSIS:
             if getattr(session, "urls", []):
                 met.append("urls_collected")
             if getattr(session, "technologies", {}):
                 met.append("technologies_identified")
 
-            _MEANINGFUL_TYPES = frozenset({
-                "IDOR", "SSRF", "PATH_TRAVERSAL", "SQLi",
-                "XSS", "AUTH", "BUSINESS_LOGIC", "RCE",
-            })
-            _ips = getattr(session, "injection_points", [])
-            _has_meaningful = any(
-                p.get("type_hint") in _MEANINGFUL_TYPES for p in _ips
+            _MEANINGFUL_TYPES = frozenset(
+                {
+                    "IDOR",
+                    "SSRF",
+                    "PATH_TRAVERSAL",
+                    "SQLi",
+                    "XSS",
+                    "AUTH",
+                    "BUSINESS_LOGIC",
+                    "RCE",
+                }
             )
+            _ips = getattr(session, "injection_points", [])
+            _has_meaningful = any(p.get("type_hint") in _MEANINGFUL_TYPES for p in _ips)
             if len(_ips) >= 3 or _has_meaningful:
                 met.append("injection_points_found")
+
+            logger.debug(
+                "[Pipeline] ANALYSIS criteria evaluation: met=%s total=%d",
+                met,
+                len(DEFAULT_PHASES[PipelinePhase.ANALYSIS].transition_criteria),
+            )
 
         elif phase == PipelinePhase.EXPLOIT:
             vulns = getattr(session, "vulnerabilities", [])
@@ -606,8 +771,7 @@ class PipelineEngine:
             )
             _confirmed = any(v.get("report_generated") for v in vulns)
             _has_significant = any(
-                _SIGNIFICANT_SEV_RE.match(str(v.get("finding", "")))
-                for v in vulns
+                _SIGNIFICANT_SEV_RE.match(str(v.get("finding", ""))) for v in vulns
             )
             if _confirmed or _has_significant:
                 met.append("vulnerabilities_tested")
@@ -625,17 +789,49 @@ class PipelineEngine:
             return None
 
         iterations_in_phase = self._current_iteration - self._phase_entry_iteration
+        current_vulns = len(getattr(self.session, "vulnerabilities", []))
+
+        # ── Stagnation escape: force transition when iterations exhausted ──
+        _stagnation_max = {
+            PipelinePhase.RECON: self._recon_max_iterations,
+            PipelinePhase.ANALYSIS: self._analysis_max_iterations,
+            PipelinePhase.EXPLOIT: self._exploit_max_iterations,
+        }.get(current, 999999)
+        _stagnation_trigger = iterations_in_phase >= _stagnation_max
+
+        # Also trigger if no new vulns appeared in last 30 iterations
+        if current == PipelinePhase.EXPLOIT and not _stagnation_trigger:
+            _vuln_new = current_vulns - self._phase_vuln_baseline
+            if iterations_in_phase >= 30 and _vuln_new <= 0:
+                _stagnation_trigger = True
+                logger.info(
+                    "[Pipeline] EXPLOIT stagnation: %d iters, no new vulns "
+                    "(baseline=%d, current=%d) — forcing transition",
+                    iterations_in_phase,
+                    self._phase_vuln_baseline,
+                    current_vulns,
+                )
+
         _soft_timeout_bypass = (
             current == PipelinePhase.RECON
             and iterations_in_phase >= self._recon_soft_timeout
         )
 
-        if not _soft_timeout_bypass and not self.should_transition():
+        if not _soft_timeout_bypass and not _stagnation_trigger and not self.should_transition():
             logger.warning(
                 "Attempted transition from %s without meeting confidence/criteria gate",
                 current.value,
             )
             return current
+
+        if _stagnation_trigger and not _soft_timeout_bypass:
+            logger.info(
+                "[Pipeline] Phase %s stagnation escape activated (iters=%d, max=%d) — "
+                "allowing transition despite unmet criteria",
+                current.value,
+                iterations_in_phase,
+                _stagnation_max,
+            )
 
         if current.value not in self.session.completed_phases:
             self.session.completed_phases.append(current.value)
@@ -646,6 +842,7 @@ class PipelineEngine:
             return PipelinePhase.COMPLETE
 
         next_phase = _PHASE_ORDER[idx + 1]
+        self._phase_vuln_baseline = current_vulns
         self.set_phase(next_phase)
 
         self._phase_entry_iteration = self._current_iteration
@@ -678,8 +875,11 @@ class PipelineEngine:
             f" | transition_confidence={confidence:.0%}"
         )
 
-        completed = ", ".join(
-            self.session.completed_phases) if self.session.completed_phases else "none"
+        completed = (
+            ", ".join(self.session.completed_phases)
+            if self.session.completed_phases
+            else "none"
+        )
 
         skill_hint = _PHASE_SKILL_HINTS.get(current.value, "")
         skill_line = f"\n{skill_hint}" if skill_hint else ""
@@ -703,17 +903,25 @@ class PipelineEngine:
             f"{exploration_line}"
         )
 
-    _EXPLOIT_SPECIFIC_TOOLS = frozenset({
-        "quick_fuzz", "advanced_fuzz", "deep_fuzz",
-        "caido_automate", "schemathesis_fuzz",
-        "create_vulnerability_report",
-    })
+    _EXPLOIT_SPECIFIC_TOOLS = frozenset(
+        {
+            "quick_fuzz",
+            "advanced_fuzz",
+            "deep_fuzz",
+            "caido_automate",
+            "schemathesis_fuzz",
+            "create_vulnerability_report",
+        }
+    )
 
     def check_tool_phase_fit(self, tool_name: str) -> str | None:
         current = self.get_current_phase()
 
-        if current in (PipelinePhase.EXPLOIT, PipelinePhase.REPORT,
-                       PipelinePhase.COMPLETE):
+        if current in (
+            PipelinePhase.EXPLOIT,
+            PipelinePhase.REPORT,
+            PipelinePhase.COMPLETE,
+        ):
             return None
 
         config = DEFAULT_PHASES.get(current)
