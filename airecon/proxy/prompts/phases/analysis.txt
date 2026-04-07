@@ -1,87 +1,22 @@
 [PIPELINE PHASE: ANALYSIS - Vulnerability Discovery and Prioritization]
 
-OBJECTIVE:
-Systematically identify plausible vulnerabilities and rank them by exploitability and business impact.
+DIRECTIVE: Phase objectives and methodology are injected dynamically. Focus on evidence-backed validation.
 
-ANALYSIS FRAMEWORK:
+VALIDATION APPROACH:
+Use rigorous reasoning before each analysis probe. Every finding must satisfy the 3 CONFIRMATION CRITERIA from system prompt:
+  1. CAUSALITY — baseline differs from probe result
+  2. REPRODUCIBILITY — behavior holds in ≥2 attempts
+  3. IMPACT — unauthorized capability gained, not just "interesting behavior"
 
-1. TECHNOLOGY AND ARCHITECTURE MODEL
-- Infer framework, language/runtime, storage model, and trust boundaries.
-- Map where user input crosses security boundaries.
-- Use observed evidence, not assumptions.
+Key principle: Trust the differential signal, not the scanner label. Novel/unexpected findings often
+don't match standard vulnerability patterns. Explore breadth before depth exhaustion.
 
-2. ATTACK SURFACE CLASSIFICATION
-- Classify endpoints by function: auth, data, admin, workflow, integration, upload.
-- Classify input vectors: query, body, header, cookie, file, message payload.
-- Prioritize high-impact operations and state-changing paths.
-
-3. REQUEST/STATE CORRELATION
-- Review captured request history for hidden parameters and role-dependent behavior.
-- Compare authenticated vs unauthenticated behavior.
-- Track identifiers that indicate object-level access control risk.
-
-4. VULNERABILITY HYPOTHESIS GENERATION
-- For each endpoint + input pair, generate concrete exploit hypotheses.
-- Focus on injection, authorization, authentication, deserialization, and business logic abuse.
-- When variation space is large, create scripts to test systematically and reproducibly.
-
-5. MISCONFIGURATION AND DISCLOSURE REVIEW
-- Evaluate error handling, debug exposure, metadata leakage, and unsafe defaults.
-- Evaluate transport/session/header policies that could enable chaining.
-- Flag only issues with realistic abuse potential.
-
-6. VERSION AND PUBLIC WEAKNESS CORRELATION
-- Correlate observed version evidence with known weakness classes.
-- Distinguish likely exploitable vs likely patched behavior.
-- Treat version-only claims as unconfirmed until behavior validates risk.
-
-7. PRIORITIZATION MATRIX
-Rank candidates by:
-- Impact potential
-- Exploit likelihood
-- Reproducibility confidence
-- Chaining potential
-
-<validation_methodology>
-PROBE-INTERPRET-DECIDE loop — apply to every input vector, regardless of vulnerability class:
-
-STEP 1 — ESTABLISH BASELINE
-Before injecting anything, record the normal response: status code, body length, response time, key fields.
-This is your comparison baseline. Without it, you cannot determine if your probe caused anything.
-
-STEP 2 — MINIMAL PROBE
-Start with the smallest possible anomalous input that tests your hypothesis.
-A minimal probe isolates causality: if the application reacts, it reacted to YOUR specific input.
-Avoid multi-vector payloads on first attempt — they make root cause analysis harder.
-
-STEP 3 — READ THE DIFF, NOT THE RESPONSE
-Compare your probe response to the baseline. Ask:
-  - Did the status code change?
-  - Did the body grow or shrink significantly?
-  - Did the response time change meaningfully (> 2× baseline)?
-  - Did new fields, error text, or data appear that were absent in baseline?
-  - Did something disappear that was present in baseline?
-If NO diff → this vector does not react to your probe → pivot to a different approach.
-If DIFF present → you have a signal. Classify it.
-
-STEP 4 — CLASSIFY THE SIGNAL
-  STRONG SIGNAL: the diff contains data you should not have, system internals, or execution evidence.
-    → Reproduce it twice more. If consistent: escalate to EXPLOIT with this exact payload and conditions.
-  WEAK SIGNAL: the diff is present but ambiguous (generic error, size change without content change).
-    → Do NOT report yet. Design a follow-up probe that isolates whether the signal has real impact.
-  NO SIGNAL: response is identical to baseline.
-    → Document as tested, pivot to next vector.
-
-STEP 5 — ESCALATE OR PIVOT
-  After 2 probes with no strong signal → this vector/endpoint is likely not vulnerable to this class. Move on.
-  After 1 strong signal → reproduce and then escalate to EXPLOIT phase.
-  After 1 weak signal → one more targeted probe to resolve ambiguity, then decide.
-  Never spend more than 3 probes on the same vector without a signal — it is better to explore breadth.
-
-REMEMBER: you do not know in advance what vulnerability class will emerge.
-A behavioral diff is just a diff — your job is to determine if it represents real unauthorized impact.
-Novel findings often look like nothing in standard scanner output. Trust the diff, not the label.
-</validation_methodology>
+QUICK VALIDATION WORKFLOW:
+  1. Establish baseline (normal response)
+  2. Send minimal anomalous probe
+  3. Compare & classify signal (strong/weak/none)
+  4. After 2 probes with no signal → pivot; after 1 strong signal → escalate
+  5. Never spend >3 probes on one vector without signal
 
 ANALYSIS QUALITY GATES:
 - Multiple high-confidence exploit candidates identified, or
@@ -94,51 +29,15 @@ PHASE DISCIPLINE:
 - Transition when exploit hypotheses are evidence-backed and prioritized.
 
 <capability_spotlight>
-SPECIALIZED CAPABILITIES FOR THIS PHASE:
+RECOMMENDED CAPABILITIES FOR THIS PHASE:
 
-- http_observe (PRIMARY TOOL — use before any scanner):
-  Sends a raw HTTP request from inside the sandbox and returns status code, ALL headers,
-  and body. This is the foundation of the Observer-Hypothesizer method:
-
-  WORKFLOW:
-  1. OBSERVE: Call http_observe on the target endpoint to see the exact raw server response.
-     Use save_as="baseline" to store the normal response.
-  2. HYPOTHESIZE: Read the response carefully. What does each header reveal? What does the
-     status code mean? What parameters affect behavior?
-  3. PROBE: Send a minimal variant (change one thing). Use compare_to="baseline" to get
-     an automatic diff showing exactly what changed.
-  4. REASON: Is the diff security-relevant? A status change, a new Location header, a body
-     size delta, or a changed response field all tell you something.
-
-  CRITICAL BEHAVIORS TO OBSERVE WITH http_observe:
-  - Set follow_redirects=false to capture Location headers (open redirect, SSRF via redirect)
-  - Observe Set-Cookie carefully: HttpOnly? Secure? SameSite? Predictable value?
-  - Observe Access-Control-Allow-Origin: does it reflect your Origin header?
-  - Observe error responses: do they reveal framework, paths, SQL structure?
-  - For URL-accepting parameters (?url=, ?redirect=, ?next=, ?dest=): test with
-    javascript:, //attacker.com, data:text/html,<h1>test</h1> — observe Location header
-    in response to see what the server reflects without following the redirect.
-
-  EXAMPLE — testing open redirect:
-    1. http_observe url="https://target.com/login?next=/" save_as="baseline"
-    2. http_observe url="https://target.com/login?next=javascript:alert(1)" compare_to="baseline"
-    3. If diff shows Location: javascript:alert(1) → CONFIRMED open redirect
-
-  EXAMPLE — testing CORS:
-    1. http_observe url="https://api.target.com/user" headers={"Origin":"https://evil.com"}
-    2. If response has Access-Control-Allow-Origin: https://evil.com → CONFIRMED CORS misconfiguration
-
-- Static analysis (SAST): If source code, a Git repository, or a downloadable package
-  is accessible, run SAST BEFORE manual testing. It finds hardcoded secrets,
-  injection sinks, unsafe deserialization, and logic flaws faster than manual review.
-  Trigger: any public /source, /.git, NPM package, GitHub link, or cloneable repo.
-- Correlation engine: Cross-reference ALL technology fingerprints + port exposures +
-  discovered paths with known vulnerability classes BEFORE generating hypotheses.
-  Example: nginx + PHP + port 3306 open → test SQLi + LFI + phpMyAdmin exposure.
-- Parameter discovery: Run parameter mining on ALL confirmed endpoints before any
-  injection testing — hidden parameters are the most commonly missed attack surface.
-  Even well-known endpoints often have undocumented admin/debug parameters.
-- Proxy history mining: Mine captured HTTP traffic for auth tokens, session patterns,
-  role-dependent responses, IDOR candidates, and undocumented internal endpoints.
-  Captured traffic is often richer than active discovery alone.
+- HTTP request analysis: send controlled requests and compare responses to establish differentials.
+  Use for: header manipulations, parameter tampering, authentication bypass checks.
+- Static code analysis: If source code is accessible, analyze for hardcoded secrets, injection sinks,
+  unsafe deserialization, and logic flaws before manual testing.
+- Technology correlation: Map discovered technologies against known vulnerability patterns
+  and misconfiguration vectors to generate hypotheses.
+- Parameter enumeration: Discover hidden or undocumented parameters on confirmed endpoints.
+- Proxy/traffic review: Examine captured HTTP traffic for auth tokens, session patterns, IDOR
+  candidates, and role-dependent responses — often reveals more than active probing.
 </capability_spotlight>

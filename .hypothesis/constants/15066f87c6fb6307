@@ -1,0 +1,4 @@
+# file: /usr/lib/python3/dist-packages/trio/_highlevel_socket.py
+# hypothesis_version: 6.151.10
+
+[65536, 'ECONNABORTED', 'ECONNRESET', 'EHOSTDOWN', 'EHOSTUNREACH', 'ENETDOWN', 'ENETUNREACH', 'ENONET', 'ENOPROTOOPT', 'ENOSR', 'EOPNOTSUPP', 'EPERM', 'EPROTO', 'EPROTONOSUPPORT', 'ESOCKTNOSUPPORT', 'ETIMEDOUT', 'TCP_NOTSENT_LOWAT']

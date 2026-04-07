@@ -105,7 +105,7 @@ def _coerce_sequence_field(
             if isinstance(parsed, tuple):
                 return BoundedList(list(parsed), maxlen=maxlen)
         except Exception as e:
-            logger.debug("Exception: %s", e)
+            logger.warning("Operation failed: %s", e)
             logger.warning(
                 "Failed to parse legacy %s field value; resetting to empty.",
                 field_name,
@@ -114,7 +114,7 @@ def _coerce_sequence_field(
     try:
         return BoundedList(list(value), maxlen=maxlen)
     except Exception as e:
-        logger.debug("Exception: %s", e)
+        logger.warning("Operation failed: %s", e)
         logger.warning(
             "Unsupported %s field type %s; resetting to empty.",
             field_name,
@@ -346,7 +346,7 @@ def _normalize_url(url: str) -> str:
             )
         )
     except Exception as e:
-        logger.debug("Exception: %s", e)
+        logger.warning("Operation failed: %s", e)
         return url
 
 
@@ -381,7 +381,7 @@ def _is_duplicate_vulnerability(new_vuln: dict, existing_vulns: list[dict]) -> b
 
         threshold = get_config().vuln_similarity_threshold
     except Exception as e:
-        logger.debug("Exception: %s", e)
+        logger.warning("Operation failed: %s", e)
         from ..config import DEFAULT_CONFIG
 
         threshold = DEFAULT_CONFIG["vuln_similarity_threshold"]
@@ -436,7 +436,7 @@ class ApplicationModel:
             parsed = urlparse(url)
             endpoint = parsed.path.rstrip("/") or "/"
         except Exception as e:
-            logger.debug("Exception: %s", e)
+            logger.warning("Operation failed: %s", e)
             endpoint = url
 
         entry = self.resources.setdefault(
@@ -1192,7 +1192,11 @@ def save_session(session: SessionData) -> None:
     if not session.target:
         logger.debug("Skipping save for session %s — no target set", session.session_id)
         return
-    SESSIONS_DIR.mkdir(parents=True, exist_ok=True)
+    try:
+        SESSIONS_DIR.mkdir(parents=True, exist_ok=True)
+    except Exception as e:
+        logger.warning("Failed to create sessions directory: %s, skipping save", e)
+        return
     try:
         session.prune_old_data()
         session.updated_at = datetime.now().isoformat()
@@ -1245,10 +1249,24 @@ def save_session(session: SessionData) -> None:
                 payload[key] = []
 
         temp_filepath = filepath.with_suffix(".tmp")
-        with open(temp_filepath, "w", encoding="utf-8") as f:
-            json.dump(payload, f, indent=2, default=str, ensure_ascii=False)
+        try:
+            with open(temp_filepath, "w", encoding="utf-8") as f:
+                json.dump(payload, f, indent=2, default=str, ensure_ascii=False)
+        except Exception as write_err:
+            logger.error("Failed to write temp file %s: %s", temp_filepath, write_err)
+            raise
 
-        temp_filepath.replace(filepath)
+        try:
+            temp_filepath.replace(filepath)
+        except Exception as replace_err:
+            logger.error(
+                "Failed to replace %s → %s: %s, temp_file_exists=%s",
+                temp_filepath,
+                filepath,
+                replace_err,
+                temp_filepath.exists(),
+            )
+            raise
 
         logger.info(
             "[DEBUG-MEMORY] Saved session %s (target=%s, subdomains=%d, vulns=%d)",

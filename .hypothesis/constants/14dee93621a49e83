@@ -1,0 +1,4 @@
+# file: /home/pikpikcu/Documents/airecon/airecon/proxy/agent/owasp.py
+# hypothesis_version: 6.151.10
+
+[0.6, 120, 'Critical', 'High', 'Info', 'Low', 'Medium', 'airecon.owasp', 'base_severity', 'count', 'cwe', 'data', 'high_or_critical', 'id', 'keywords', 'name', 'negative_keywords', 'owasp:', 'owasp_rules.json', 'remediation', 'rules', 'severity', 'tags', 'top_owasp_categories', 'total_evidence', 'utf-8', '|']

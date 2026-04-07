@@ -1,0 +1,4 @@
+# file: /usr/lib/python3/dist-packages/zipp/__init__.py
+# hypothesis_version: 6.151.10
+
+['/', "Can't listdir a file", 'Path', 'b', 'pypy', 'r', 'rb']

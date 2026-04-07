@@ -1,0 +1,4 @@
+# file: /usr/lib/python3/dist-packages/django/core/cache/backends/filebased.py
+# hypothesis_version: 6.151.10
+
+[448, '*%s', '.djcache', 'r+b', 'rb', 'wb']

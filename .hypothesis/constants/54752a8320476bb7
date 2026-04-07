@@ -1,0 +1,4 @@
+# file: /usr/lib/python3/dist-packages/django/utils/timezone.py
+# hypothesis_version: 6.151.10
+
+['%02d%02d', '+', '-', 'Invalid timezone: %r', 'activate', 'deactivate', 'get_current_timezone', 'get_default_timezone', 'get_fixed_timezone', 'is_aware', 'is_naive', 'localdate', 'localtime', 'make_aware', 'make_naive', 'now', 'override', 'pytz', 'utc', 'value']

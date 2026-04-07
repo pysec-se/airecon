@@ -1,0 +1,4 @@
+# file: /usr/lib/python3/dist-packages/socksio/__init__.py
+# hypothesis_version: 6.151.10
+
+['1.0.0', 'ProtocolError', 'SOCKS4ARequest', 'SOCKS4Command', 'SOCKS4Connection', 'SOCKS4Reply', 'SOCKS4ReplyCode', 'SOCKS4Request', 'SOCKS5AType', 'SOCKS5AuthMethod', 'SOCKS5AuthReply', 'SOCKS5Command', 'SOCKS5CommandRequest', 'SOCKS5Connection', 'SOCKS5Reply', 'SOCKS5ReplyCode', 'SOCKSError']

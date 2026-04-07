@@ -212,7 +212,7 @@ class _LifecycleMixin:
                 if loop.is_running():
                     loop.create_task(self._load_session_persistence())
             except Exception as exc:
-                logger.debug("Operation failed: %s", exc)
+                logger.warning("Operation failed: %s", exc)
 
         self.pipeline = PipelineEngine(self._session)
         if self._ctf_mode and self.pipeline:

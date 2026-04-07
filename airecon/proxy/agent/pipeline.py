@@ -18,11 +18,13 @@ _PROMPTS_DIR = Path(__file__).parent.parent / "prompts" / "phases"
 
 _TOOLS_META = load_tools_meta()
 _RECON_HINTS: dict[str, str] = _TOOLS_META.get("recon_phase_hints", {})
+_ANALYSIS_HINTS: list[str] = _TOOLS_META.get("analysis_phase_hints", [])
 
 _LIVE_HOST_HINT: str = _RECON_HINTS.get(
     "live_host_validation",
     "CRITICAL: After subdomain enumeration, ALWAYS validate which hosts are alive before "
-    "port scanning or directory brute-force. Never scan dead/unresolved hosts.",
+    "port scanning or directory brute-force. Use host probing tools to filter dead/unresolved hosts. "
+    "Never scan dead hosts.",
 )
 
 
@@ -134,23 +136,7 @@ DEFAULT_PHASES: dict[PipelinePhase, PhaseConfig] = {
             "technologies_identified",
             "injection_points_found",
         ],
-        exploration_hints=[
-            "Compare authenticated vs unauthenticated responses — missing access controls often show here",
-            "GraphQL introspection if GraphQL detected — map full schema before testing mutations",
-            "API versioning gaps: if /api/v2 exists, probe /api/v1 and /api/v0 for deprecated endpoints",
-            "Test HTTP method override: X-HTTP-Method-Override: DELETE on read-only endpoints",
-            "Mass assignment: send extra JSON fields (role, admin, is_staff) in POST body",
-            "Error message mining: trigger 400/500 with malformed input to reveal framework/version/paths",
-            "Session token entropy: decode base64 JWTs, check for none-alg, weak secret, or expired tokens",
-            "CORS: does server echo Origin with Access-Control-Allow-Origin: * or reflect arbitrary origins?",
-            "Parameter pollution: supply the same parameter twice — many frameworks use the last/first value",
-            "Check OPTIONS method for allowed verbs — PUT/DELETE on read-only resources is a finding",
-            "Search JS source for hardcoded API keys, tokens, internal URLs, debug flags",
-            "Content-Type confusion: send JSON as form-encoded and vice versa — parser differences matter",
-            "Host header injection: change Host header to internal hostnames or attacker domain",
-            "Cache poisoning indicators: Vary header missing, X-Cache present, user-supplied data in response",
-            "Test second-order issues: input stored now, rendered later — check profile/dashboard pages",
-        ],
+        exploration_hints=_ANALYSIS_HINTS,
     ),
     PipelinePhase.EXPLOIT: PhaseConfig(
         phase=PipelinePhase.EXPLOIT,
@@ -210,9 +196,40 @@ _PHASE_TOOL_BUDGETS: dict[str, dict[str, int]] = {
     },
     "REPORT": {
         "execute": _get_config().pipeline_report_budget,
-        "advanced_fuzz": 0,
-        "deep_fuzz": 0,
-        "quick_fuzz": 0,
+        "advanced_fuzz": 2,
+        "deep_fuzz": 1,
+        "quick_fuzz": 2,
+    },
+}
+
+_TOOL_ADVISORY_LEVELS: dict[str, dict[str, str]] = {
+    "RECON": {
+        "quick_fuzz": "courageous",
+        "advanced_fuzz": "useful",
+        "deep_fuzz": "courageous",
+        "caido_automate": "optional",
+        "create_vulnerability_report": "premature",
+    },
+    "ANALYSIS": {
+        "quick_fuzz": "optional",
+        "advanced_fuzz": "optimal",
+        "deep_fuzz": "useful",
+        "caido_automate": "useful",
+        "create_vulnerability_report": "premature",
+    },
+    "EXPLOIT": {
+        "quick_fuzz": "optimal",
+        "advanced_fuzz": "optimal",
+        "deep_fuzz": "useful",
+        "caido_automate": "useful",
+        "create_vulnerability_report": "optimal",
+    },
+    "REPORT": {
+        "execute": "optimal",
+        "create_vulnerability_report": "optimal",
+        "advanced_fuzz": "validation",
+        "deep_fuzz": "validation",
+        "quick_fuzz": "validation",
     },
 }
 
@@ -307,6 +324,7 @@ class PipelineEngine:
             logger.info("Pipeline CTF mode enabled — skipped to EXPLOIT phase")
 
     def should_transition(self) -> bool:
+        """Determine if phase transition is ready. Uses SOFT gates, not hard blocks."""
         if self._ctf_mode:
             logger.debug("[Pipeline] CTF mode — blocking transition")
             return False
@@ -324,147 +342,150 @@ class PipelineEngine:
             return False
 
         iterations_in_phase = self._current_iteration - self._phase_entry_iteration
-        if iterations_in_phase < self.MIN_ITERATIONS_PER_PHASE:
+
+        # Dynamic minimum: based on evidence collected, not just iteration count
+        min_iterations = self._calculate_dynamic_min_iterations(
+            current, iterations_in_phase
+        )
+        if iterations_in_phase < min_iterations:
             logger.debug(
-                "[Pipeline] Phase %s: %d iterations < min %d — blocking transition",
+                "[Pipeline] Phase %s: %d iterations < dynamic min %d (based on evidence collected) — continue",
                 current.value,
                 iterations_in_phase,
-                self.MIN_ITERATIONS_PER_PHASE,
+                min_iterations,
             )
             return False
 
-        MAX_PHASE_ITERATIONS = 300
+        # Hard cap: prevent infinite loops
+        MAX_PHASE_ITERATIONS = 350
         if iterations_in_phase > MAX_PHASE_ITERATIONS:
             logger.warning(
-                "Phase %s has run for %d iterations - forcing transition to prevent infinite loop",
+                "Phase %s has run for %d iterations (limit=%d) - forcing transition to prevent stagnation",
                 current.value,
                 iterations_in_phase,
+                MAX_PHASE_ITERATIONS,
             )
             return True
 
-        if (
-            current == PipelinePhase.RECON
-            and iterations_in_phase >= self._recon_soft_timeout
-        ):
+        # Phase-specific transition logic (soft gates)
+        if current == PipelinePhase.RECON:
             met_criteria = self._evaluate_criteria(current)
-            has_live_hosts = "live_hosts_validated" in met_criteria
             has_any_data = bool(
                 getattr(self.session, "urls", [])
                 or getattr(self.session, "open_ports", {})
                 or getattr(self.session, "subdomains", [])
                 or getattr(self.session, "live_hosts", [])
             )
-            if not has_live_hosts and has_any_data:
-                if iterations_in_phase >= self._recon_hard_timeout:
-                    logger.warning(
-                        "RECON hard timeout (%d iter, limit=%d) — live_hosts_validated "
-                        "never met but data was collected.  Forcing transition to ANALYSIS "
-                        "with low confidence; manual review recommended.",
-                        iterations_in_phase,
-                        self._recon_hard_timeout,
-                    )
+
+            # Check soft timeout: suggest transition but allow override
+            if iterations_in_phase >= self._recon_soft_timeout:
+                if has_any_data:
+                    # Mandatory check: live_hosts_validated must be met to transition early
+                    if "live_hosts_validated" in met_criteria:
+                        logger.info(
+                            "RECON soft timeout (%d iter) reached with data and mandatory met. Transitioning.",
+                            iterations_in_phase,
+                        )
+                        return True
+                    else:
+                        # Missing mandatory (e.g., live hosts); may continue until hard timeout
+                        if iterations_in_phase >= self._recon_hard_timeout:
+                            logger.warning(
+                                "RECON hard timeout (%d iter) with data but mandatory not met. Forcing transition.",
+                                iterations_in_phase,
+                            )
+                            return True
+                        logger.info(
+                            "RECON soft timeout reached with data but mandatory not met; continuing exploration."
+                        )
+                        return False
+                else:
+                    # No data at all — force transition after soft timeout
                     logger.info(
-                        "[Pipeline] RECON hard timeout — forcing transition to ANALYSIS",
+                        "RECON soft timeout (%d iter) with no data; forcing transition.",
+                        iterations_in_phase,
                     )
                     return True
-                logger.warning(
-                    "RECON soft timeout (%d iter) but live_hosts_validated not met — "
-                    "agent must validate live hosts before ANALYSIS. Blocking transition.",
-                    iterations_in_phase,
-                )
-                logger.debug(
-                    "[Pipeline] RECON: live_hosts not validated, blocking transition (iter=%d)",
-                    iterations_in_phase,
-                )
-                return False
-            if not has_any_data:
-                logger.warning(
-                    "RECON soft timeout (%d iter) with NO data collected — "
-                    "target may be unreachable.  Forcing transition to ANALYSIS "
-                    "anyway; agent will likely produce a low-confidence report.",
-                    iterations_in_phase,
-                )
-                logger.info(
-                    "[Pipeline] RECON: no data collected after soft timeout, forcing transition",
-                )
-            else:
-                logger.info(
-                    "RECON soft timeout reached (%d iterations) — forcing transition to ANALYSIS",
-                    iterations_in_phase,
-                )
-                logger.info(
-                    "[Pipeline] RECON soft timeout met — transitioning to ANALYSIS",
-                )
-            return True
 
-        met_criteria = self._evaluate_criteria(current)
-        total = len(config.transition_criteria)
+            # Flexible criteria: need ANY 2+ strong signals (was: need 3)
+            has_subs = "subdomains_discovered" in met_criteria
+            has_live = "live_hosts_validated" in met_criteria
+            has_urls = "url_discovery_met" in met_criteria
+            has_ports = "ports_scanned" in met_criteria
+            has_artifacts = "recon_artifacts_saved" in met_criteria
 
-        logger.debug(
-            "[Pipeline] Evaluating transition for phase %s: met=%d/%d criteria=%s",
-            current.value,
-            len(met_criteria),
-            total,
-            met_criteria,
-        )
-
-        # RECON→ANALYSIS: live_hosts is a strong signal but not an absolute gate
-        # If we have enough subdomains + URLs + artifacts, allow transition
-        if (
-            current == PipelinePhase.RECON
-            and "live_hosts_validated" not in met_criteria
-        ):
-            # Allow transition if we have strong alternative signals
-            has_subs = "min_subdomains_discovered" in met_criteria
-            has_urls = "min_urls_discovered" in met_criteria
-            has_artifacts = "artifacts_collected" in met_criteria
-            has_tech = "technologies_identified" in met_criteria
-
-            strong_signals = sum([has_subs, has_urls, has_artifacts, has_tech])
-            if strong_signals >= 3:
+            strong_signals = sum(
+                [has_subs, has_live, has_urls, has_ports, has_artifacts]
+            )
+            if strong_signals >= 2:
                 logger.info(
-                    "RECON→ANALYSIS: live_hosts not validated but %d strong signals present "
-                    "(subdomains=%s, urls=%s, artifacts=%s, tech=%s) — allowing transition",
+                    "RECON: %d strong signals found (subdomains=%s, live_hosts=%s, urls=%s, ports=%s, artifacts=%s) — ready to transition",
                     strong_signals,
                     has_subs,
+                    has_live,
                     has_urls,
+                    has_ports,
                     has_artifacts,
-                    has_tech,
                 )
+                return True
             else:
                 logger.debug(
-                    "[Pipeline] RECON: only %d strong signals (need 3) — blocking transition",
+                    "[Pipeline] RECON: only %d strong signals (need ≥2) — continue discovery",
                     strong_signals,
                 )
                 return False
 
-        coverage_ok = len(met_criteria) >= max(1, int(total * 0.6))
-        if not coverage_ok:
-            logger.debug(
-                "[Pipeline] Phase %s: coverage %d/%d below 60%% threshold — blocking transition",
-                current.value,
-                len(met_criteria),
-                total,
-            )
-            return False
+        # For other phases: use confidence threshold (softer than before)
+        met_criteria = self._evaluate_criteria(current)
+        total = len(config.transition_criteria)
+        coverage = len(met_criteria) / max(1, total) if total > 0 else 0
+
+        logger.debug(
+            "[Pipeline] Phase %s evaluation: coverage=%.0%% (met=%d/%d)",
+            current.value,
+            coverage * 100,
+            len(met_criteria),
+            total,
+        )
+
+        # Lower confidence threshold (was 0.55-0.60, now 0.50-0.55)
         confidence = self._phase_transition_confidence(
             current,
             met_criteria=met_criteria,
             total_criteria=total,
             iterations_in_phase=iterations_in_phase,
         )
-        threshold = _PHASE_CONFIDENCE_THRESHOLDS.get(current, 0.55)
+        threshold = _PHASE_CONFIDENCE_THRESHOLDS.get(current, 0.50)
         decision = confidence >= threshold
+
         logger.info(
-            "[Pipeline] Transition decision for %s: confidence=%.3f threshold=%.2f met=%d/%d → %s",
+            "[Pipeline] %s transition: confidence=%.2f threshold=%.2f → %s",
             current.value,
             confidence,
             threshold,
-            len(met_criteria),
-            total,
-            "ALLOW" if decision else "BLOCK",
+            "ALLOW" if decision else "CONTINUE",
         )
         return decision
+
+    def _calculate_dynamic_min_iterations(
+        self, phase: PipelinePhase, current_iterations: int
+    ) -> int:
+        """Calculate minimum iterations based on evidence collected, not just time."""
+        if phase == PipelinePhase.RECON:
+            # If we have some data, min 10 iter (cooldown); if nothing, min 20 iter
+            has_data = bool(
+                getattr(self.session, "urls", [])
+                or getattr(self.session, "open_ports", {})
+                or getattr(self.session, "subdomains", [])
+            )
+            return 10 if has_data else 20
+        elif phase == PipelinePhase.ANALYSIS:
+            # Min 3 iterations to analyze
+            return 3
+        elif phase == PipelinePhase.EXPLOIT:
+            # Min 2 iterations
+            return 2
+        return 5
 
     def _phase_transition_confidence(
         self,
@@ -710,7 +731,7 @@ class PipelineEngine:
             try:
                 _scan_count = int(getattr(session, "scan_count", 0) or 0)
             except Exception as e:
-                logger.debug("Exception: %s", e)
+                logger.warning("Operation failed: %s", e)
                 _scan_count = 0
             _has_recon_signals = bool(
                 getattr(session, "open_ports", {})
@@ -817,7 +838,11 @@ class PipelineEngine:
             and iterations_in_phase >= self._recon_soft_timeout
         )
 
-        if not _soft_timeout_bypass and not _stagnation_trigger and not self.should_transition():
+        if (
+            not _soft_timeout_bypass
+            and not _stagnation_trigger
+            and not self.should_transition()
+        ):
             logger.warning(
                 "Attempted transition from %s without meeting confidence/criteria gate",
                 current.value,
@@ -886,14 +911,11 @@ class PipelineEngine:
 
         exploration_line = ""
         if config and config.exploration_hints:
-            sampled = random.sample(
-                config.exploration_hints,
-                min(2, len(config.exploration_hints)),
-            )
+            # Show up to 5 hints for broader exploration options (was: 2 random)
+            num_hints = min(5, len(config.exploration_hints))
+            sampled = random.sample(config.exploration_hints, num_hints)
             hints_str = "\n".join(f"  • {h}" for h in sampled)
-            exploration_line = (
-                f"\nEXPLORATION ANGLE (try one you haven't used yet):\n{hints_str}"
-            )
+            exploration_line = f"\nEXPLORATION ANGLES (pick one unconventional angle you haven't tried):\n{hints_str}"
 
         return (
             f"{base_prompt}\n\n"
@@ -914,7 +936,16 @@ class PipelineEngine:
         }
     )
 
+    def get_tool_advisory(self, tool_name: str) -> str | None:
+        """Get advisory level for tool in current phase (not blocking, just guidance)."""
+        current = self.get_current_phase()
+        if current == PipelinePhase.COMPLETE:
+            return None
+        advisory_map = _TOOL_ADVISORY_LEVELS.get(current.value, {})
+        return advisory_map.get(tool_name)
+
     def check_tool_phase_fit(self, tool_name: str) -> str | None:
+        """Non-blocking advisory hint — never blocks tool execution."""
         current = self.get_current_phase()
 
         if current in (
@@ -924,20 +955,39 @@ class PipelineEngine:
         ):
             return None
 
-        config = DEFAULT_PHASES.get(current)
-        if config and tool_name in config.recommended_tools:
+        advisory = self.get_tool_advisory(tool_name)
+        if advisory is None or advisory == "optimal":
             return None
 
-        if tool_name in self._EXPLOIT_SPECIFIC_TOOLS:
-            criteria_met = self._evaluate_criteria(current)
-            total = len(config.transition_criteria) if config else 0
-            return (
-                f"[PHASE GUIDANCE] Tool '{tool_name}' is optimised for the EXPLOIT phase. "
-                f"Current phase: {current.value} ({len(criteria_met)}/{total} transition criteria met). "
-                "Proceed only if you have specific evidence justifying early exploitation. "
-                "Otherwise, complete the current phase objectives first."
-            )
-        return None
+        config = DEFAULT_PHASES.get(current)
+        criteria_met = self._evaluate_criteria(current)
+        total = len(config.transition_criteria) if config else 0
+
+        messages = {
+            "courageous": (
+                f"[ADVISORY] Tool '{tool_name}' is unconventional for {current.value} phase "
+                f"({len(criteria_met)}/{total} criteria met). This is **allowed** if you have specific "
+                "evidence justifying it — proceed if you have a hypothesis to test."
+            ),
+            "validation": (
+                f"[ADVISORY] Tool '{tool_name}' is for validation/verification in {current.value} phase. "
+                "Use only if confirming an existing finding, not exploring new areas."
+            ),
+            "premature": (
+                f"[ADVISORY] Tool '{tool_name}' is premature for {current.value} phase. "
+                "Complete current phase discovery first, but override if you must."
+            ),
+            "optional": (
+                f"[ADVISORY] Tool '{tool_name}' is optional context in {current.value} phase. "
+                "Consider more direct tools first, but this is available."
+            ),
+            "useful": (
+                f"[ADVISORY] Tool '{tool_name}' provides useful context in {current.value} phase. "
+                "Worth trying as a secondary option."
+            ),
+        }
+
+        return messages.get(advisory)
 
     def get_tool_budget(self, phase: str, tool_name: str) -> int | None:
         return _PHASE_TOOL_BUDGETS.get(phase, {}).get(tool_name)

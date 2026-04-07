@@ -3,11 +3,7 @@ from __future__ import annotations
 import re
 import shlex
 
-_WRAPPER_TOKENS = {
-    "sudo", "timeout", "stdbuf", "env", "command", "nice", "nohup",
-}
-
-_SHELL_WRAPPERS = {"bash", "sh", "zsh"}
+from .constants import WRAPPER_TOKENS as _WRAPPER_TOKENS, SHELL_WRAPPERS as _SHELL_WRAPPERS
 
 def _basename(token: str) -> str:
     return token.rsplit("/", 1)[-1].lower()

@@ -1,0 +1,4 @@
+# file: /home/pikpikcu/Documents/airecon/airecon/proxy/semgrep.py
+# hypothesis_version: 6.151.10
+
+[100, 1000, ', ', 'MEDIUM', 'No issues found', 'No results', 'Parse error', 'Scan failed', 'Unknown error', 'WARNING', 'airecon.semgrep', 'check_id', 'code_snippet', 'command', 'confidence', 'cwe', 'end', 'end_line', 'error', 'errors', 'execute', 'extra', 'file', 'findings', 'line', 'lines', 'message', 'metadata', 'owasp', 'p/cwe-top-25', 'p/owasp-top-ten', 'p/security-audit', 'path', 'references', 'result', 'results', 'rule_id', 'severity', 'start', 'start_line', 'stderr', 'stdout', 'success', 'summary', 'total', 'type', 'unknown']

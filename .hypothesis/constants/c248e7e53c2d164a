@@ -1,0 +1,4 @@
+# file: /home/pikpikcu/Documents/airecon/airecon/tui/widgets/file_preview.py
+# hypothesis_version: 6.151.10
+
+[1024, 5000, 500000, ' Confirm Delete ', '#preview-content', '#prompt-input', 'Cancel (Esc)', 'Close', 'Close [Esc]', 'Copied!', 'Copy', 'Copy Content', 'Delete', 'Delete File', 'Loading…', 'No (N)', 'Run with Context', 'Yes (Y)', '[N] No, Keep', '[Y] Yes, Delete', 'action-bar', 'active_file_path', 'btn-close', 'btn-copy', 'btn-delete', 'btn-no', 'btn-run', 'btn-yes', 'c', 'cancel', 'close-preview', 'confirm', 'confirm-buttons', 'confirm-path', 'confirm-title', 'copy', 'copy-content', 'd', 'delete', 'delete-file', 'dismiss', 'error', 'escape', 'information', 'n', 'preview-area', 'preview-content', 'preview-dialog', 'preview-footer', 'preview-header', 'primary', 'prompt-input', 'r', 'replace', 'run-context', 'warning', 'y', '…']

@@ -21,17 +21,38 @@ _NEGATIVE_VULN_RE = re.compile(
     re.IGNORECASE,
 )
 _TRIGGER_SYNONYMS: dict[str, tuple[str, ...]] = {
-    "sql injection": ("sqli", "boolean-based", "time-based", "union select", "sql syntax"),
-    "sqli": ("sql injection", "boolean-based", "time-based", "union select", "sql syntax"),
+    "sql injection": (
+        "sqli",
+        "boolean-based",
+        "time-based",
+        "union select",
+        "sql syntax",
+    ),
+    "sqli": (
+        "sql injection",
+        "boolean-based",
+        "time-based",
+        "union select",
+        "sql syntax",
+    ),
     "xss": ("cross site scripting", "cross-site scripting", "script injection"),
     "ssrf": ("server-side request forgery", "internal request", "metadata endpoint"),
-    "idor": ("insecure direct object reference", "object reference", "access control bypass"),
+    "idor": (
+        "insecure direct object reference",
+        "object reference",
+        "access control bypass",
+    ),
     "lfi": ("local file inclusion", "path traversal"),
     "jwt": ("json web token", "alg:none", "token forgery"),
     "rce": ("remote code execution", "command injection", "shell execution"),
     "csrf": ("cross site request forgery", "cross-site request forgery"),
-    "auth bypass": ("authentication bypass", "authorization bypass", "access control bypass"),
+    "auth bypass": (
+        "authentication bypass",
+        "authorization bypass",
+        "access control bypass",
+    ),
 }
+
 _TEMPLATE_SEVERITY_RANK: dict[str, int] = {
     "CRITICAL": 4,
     "HIGH": 3,
@@ -42,29 +63,43 @@ _CONFIRMED_SIGNAL_RE = re.compile(
     r"\b(confirmed|verified|replay_verified|report_generated|exploit(?:ed|ation)?\s+confirmed)\b",
     re.IGNORECASE,
 )
-_CHAIN_MATCH_THRESHOLD = float(
-    get_tuning("chain_planner.match_threshold", 0.45)
-)
+_CHAIN_MATCH_THRESHOLD = float(get_tuning("chain_planner.match_threshold", 0.45))
 _CHAIN_WEIGHTS = {
     "coverage": float(get_tuning("chain_planner.weights.coverage", 0.60)),
     "trigger": float(get_tuning("chain_planner.weights.trigger", 0.25)),
     "evidence": float(get_tuning("chain_planner.weights.evidence", 0.15)),
     "combined_match": float(get_tuning("chain_planner.weights.combined_match", 0.45)),
-    "combined_priority": float(get_tuning("chain_planner.weights.combined_priority", 0.35)),
-    "combined_evidence": float(get_tuning("chain_planner.weights.combined_evidence", 0.20)),
+    "combined_priority": float(
+        get_tuning("chain_planner.weights.combined_priority", 0.35)
+    ),
+    "combined_evidence": float(
+        get_tuning("chain_planner.weights.combined_evidence", 0.20)
+    ),
 }
 _CHAIN_TRIGGER_TUNING = {
-    "phrase_exact_score": float(get_tuning("chain_planner.trigger.phrase_exact_score", 1.0)),
-    "word_exact_score": float(get_tuning("chain_planner.trigger.word_exact_score", 0.90)),
+    "phrase_exact_score": float(
+        get_tuning("chain_planner.trigger.phrase_exact_score", 1.0)
+    ),
+    "word_exact_score": float(
+        get_tuning("chain_planner.trigger.word_exact_score", 0.90)
+    ),
     "overlap_min": float(get_tuning("chain_planner.trigger.overlap_min", 0.60)),
     "overlap_base": float(get_tuning("chain_planner.trigger.overlap_base", 0.65)),
     "overlap_scale": float(get_tuning("chain_planner.trigger.overlap_scale", 0.25)),
-    "accept_threshold": float(get_tuning("chain_planner.trigger.accept_threshold", 0.55)),
+    "accept_threshold": float(
+        get_tuning("chain_planner.trigger.accept_threshold", 0.55)
+    ),
 }
 _CHAIN_EVIDENCE_SUPPORT = {
-    "direct_evidence": float(get_tuning("chain_planner.evidence_support.direct_evidence", 0.55)),
-    "target_context": float(get_tuning("chain_planner.evidence_support.target_context", 0.25)),
-    "confirmation_language": float(get_tuning("chain_planner.evidence_support.confirmation_language", 0.20)),
+    "direct_evidence": float(
+        get_tuning("chain_planner.evidence_support.direct_evidence", 0.55)
+    ),
+    "target_context": float(
+        get_tuning("chain_planner.evidence_support.target_context", 0.25)
+    ),
+    "confirmation_language": float(
+        get_tuning("chain_planner.evidence_support.confirmation_language", 0.20)
+    ),
 }
 _CHAIN_MIN_TRIGGER_WITHOUT_EVIDENCE = float(
     get_tuning("chain_planner.min_trigger_without_evidence", 0.90)
@@ -75,6 +110,7 @@ _CAUSAL_CHAIN_MIN_POSTERIOR = float(
 _CAUSAL_CHAIN_HIGH_POSTERIOR = float(
     get_tuning("causal_reasoning.chain_high_posterior", 0.82)
 )
+
 
 def _load_attack_chains() -> list[dict[str, Any]]:
     try:
@@ -116,7 +152,9 @@ def _load_attack_chains() -> list[dict[str, Any]]:
         logger.debug("Could not load attack_chains.json: %s", exc)
         return []
 
+
 _ATTACK_CHAIN_TEMPLATES: list[dict[str, Any]] = _load_attack_chains()
+
 
 @dataclass
 class ChainStep:
@@ -125,6 +163,7 @@ class ChainStep:
     tool_hint: str = ""
     status: str = "pending"
     evidence: str = ""
+
 
 @dataclass
 class ExploitChain:
@@ -162,6 +201,7 @@ class ExploitChain:
     def pending_steps(self) -> list[ChainStep]:
         return [s for s in self.steps if s.status == "pending"]
 
+
 def _match_template_to_vuln(
     template: dict[str, Any],
     vuln: dict[str, Any],
@@ -193,7 +233,9 @@ def _match_template_to_vuln(
         return 0.0, []
 
     signal_tokens = set(_TRIGGER_TOKEN_RE.findall(signal_text))
-    has_target_context = bool(vuln.get("url") or vuln.get("endpoint") or vuln.get("parameter"))
+    has_target_context = bool(
+        vuln.get("url") or vuln.get("endpoint") or vuln.get("parameter")
+    )
     has_direct_evidence = bool(
         vuln.get("proof")
         or vuln.get("evidence")
@@ -222,10 +264,14 @@ def _match_template_to_vuln(
 
             if " " in c or any(ch in c for ch in ("/", ":", "-", "_")):
                 if c in signal_text:
-                    trigger_score = max(trigger_score, _CHAIN_TRIGGER_TUNING["phrase_exact_score"])
+                    trigger_score = max(
+                        trigger_score, _CHAIN_TRIGGER_TUNING["phrase_exact_score"]
+                    )
                     continue
             elif re.search(r"\b" + re.escape(c) + r"\b", signal_text):
-                trigger_score = max(trigger_score, _CHAIN_TRIGGER_TUNING["word_exact_score"])
+                trigger_score = max(
+                    trigger_score, _CHAIN_TRIGGER_TUNING["word_exact_score"]
+                )
                 continue
 
             trigger_tokens = set(_TRIGGER_TOKEN_RE.findall(c))
@@ -270,19 +316,23 @@ def _match_template_to_vuln(
     )
     return round(score, 3), matched
 
+
 def _vuln_priority_score(vuln: dict[str, Any]) -> int:
-    sev_rank = {"CRITICAL": 5, "HIGH": 4, "MEDIUM": 3, "LOW": 2, "INFO": 1}
+    from .constants import SEVERITY_ORDER
+
+    sev_rank = {s: i for i, s in enumerate(reversed(SEVERITY_ORDER))}
 
     sev_raw = str(vuln.get("severity", "")).strip().upper()
     if sev_raw in {"1", "2", "3", "4", "5"}:
-        sev = {"1": "INFO", "2": "LOW", "3": "MEDIUM", "4": "HIGH", "5": "CRITICAL"}[sev_raw]
+        sev = {"1": "INFO", "2": "LOW", "3": "MEDIUM", "4": "HIGH", "5": "CRITICAL"}[
+            sev_raw
+        ]
     else:
         sev = sev_raw
 
     if sev not in sev_rank:
         blob = " ".join(
-            str(vuln.get(k, ""))
-            for k in ("finding", "title", "description")
+            str(vuln.get(k, "")) for k in ("finding", "title", "description")
         ).upper()
         for candidate in ("CRITICAL", "HIGH", "MEDIUM", "LOW", "INFO"):
             if f"[{candidate}]" in blob or f"{candidate}:" in blob:
@@ -304,24 +354,33 @@ def _vuln_priority_score(vuln: dict[str, Any]) -> int:
     causal_bonus = max(0, min(10, int(causal_posterior * 10)))
     return base + evidence_bonus + causal_bonus
 
+
 def _vuln_chain_evidence_score(vuln: dict[str, Any]) -> float:
     score = 0.0
-    if vuln.get("report_generated") or vuln.get("replay_verified") or vuln.get("verified"):
+    if (
+        vuln.get("report_generated")
+        or vuln.get("replay_verified")
+        or vuln.get("verified")
+    ):
         score += 0.45
     if vuln.get("proof") or vuln.get("evidence") or vuln.get("poc_script_code"):
         score += 0.30
     if vuln.get("url") or vuln.get("endpoint") or vuln.get("parameter"):
         score += 0.15
     finding_blob = " ".join(
-        str(vuln.get(k, "")) for k in ("finding", "title", "description", "poc_description")
+        str(vuln.get(k, ""))
+        for k in ("finding", "title", "description", "poc_description")
     )
     if _CONFIRMED_SIGNAL_RE.search(finding_blob):
         score += 0.10
     try:
-        score += min(0.20, max(0.0, float(vuln.get("causal_posterior", 0.0) or 0.0) * 0.20))
+        score += min(
+            0.20, max(0.0, float(vuln.get("causal_posterior", 0.0) or 0.0) * 0.20)
+        )
     except (TypeError, ValueError):
         pass
     return min(1.0, score)
+
 
 def _causal_hypotheses_to_vulns(
     causal_hypotheses: list[dict[str, Any]] | None,
@@ -350,7 +409,11 @@ def _causal_hypotheses_to_vulns(
         if status == "supported" and posterior >= _CAUSAL_CHAIN_HIGH_POSTERIOR:
             severity = "CRITICAL"
 
-        refs = [str(x).strip() for x in (raw.get("evidence_refs", []) or []) if str(x).strip()]
+        refs = [
+            str(x).strip()
+            for x in (raw.get("evidence_refs", []) or [])
+            if str(x).strip()
+        ]
         fingerprint = statement.lower()[:180]
         if fingerprint in seen:
             continue
@@ -366,6 +429,7 @@ def _causal_hypotheses_to_vulns(
             }
         )
     return converted
+
 
 def plan_chains(
     vulnerabilities: list[dict[str, Any]],
@@ -392,10 +456,7 @@ def plan_chains(
 
     for _, vuln in ranked_vulns:
         finding = str(
-            vuln.get("finding")
-            or vuln.get("title")
-            or vuln.get("description")
-            or ""
+            vuln.get("finding") or vuln.get("title") or vuln.get("description") or ""
         ).strip()
         if not finding:
             continue
@@ -419,12 +480,14 @@ def plan_chains(
 
             steps = []
             for i, step_def in enumerate(template.get("steps", [])):
-                steps.append(ChainStep(
-                    step_id=i,
-                    description=str(step_def.get("description", "")),
-                    tool_hint=str(step_def.get("tool_hint", "")),
-                    status="pending",
-                ))
+                steps.append(
+                    ChainStep(
+                        step_id=i,
+                        description=str(step_def.get("description", "")),
+                        tool_hint=str(step_def.get("tool_hint", "")),
+                        status="pending",
+                    )
+                )
 
             if not steps:
                 continue
@@ -436,7 +499,8 @@ def plan_chains(
                     str(template.get("description", "")).strip()
                     + (
                         f" | matched_triggers={', '.join(matched_triggers[:3])}"
-                        if matched_triggers else ""
+                        if matched_triggers
+                        else ""
                     )
                 ).strip(" |"),
                 steps=steps,
@@ -473,17 +537,16 @@ def plan_chains(
 
     return new_chains
 
+
 def advance_chain(
     chain: ExploitChain,
     evidence: str = "",
 ) -> ChainStep | None:
     return chain.advance(evidence=evidence)
 
+
 def build_chain_context(chains: list[ExploitChain], max_chains: int = 3) -> str:
-    active = [
-        c for c in chains
-        if c.status in ("planning", "active")
-    ][:max_chains]
+    active = [c for c in chains if c.status in ("planning", "active")][:max_chains]
 
     if not active:
         return ""
@@ -510,14 +573,14 @@ def build_chain_context(chains: list[ExploitChain], max_chains: int = 3) -> str:
 
         done = chain.completed_steps()
         if done:
-            lines.append(f"    <completed_steps count=\"{len(done)}\">")
+            lines.append(f'    <completed_steps count="{len(done)}">')
             for s in done[-3:]:
                 lines.append(f"      ✓ Step {s.step_id}: {s.description[:80]}")
             lines.append("    </completed_steps>")
 
         remaining = chain.pending_steps()
         if remaining:
-            lines.append(f"    <remaining_steps count=\"{len(remaining)}\"/>")
+            lines.append(f'    <remaining_steps count="{len(remaining)}"/>')
 
         lines.append("  </chain>")
 

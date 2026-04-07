@@ -1,0 +1,4 @@
+# file: /home/pikpikcu/Documents/airecon/airecon/proxy/caido_client.py
+# hypothesis_version: 6.151.10
+
+[0.0, 5.0, 30.0, 60.0, 120.0, -300, 401, 403, 'Authorization', 'Caido GQL error: %s', 'Caido token acquired', 'Content-Type', 'accessToken', 'airecon.caido', 'application/json', 'bash', 'caido-setup', 'connection', 'containers', 'data', 'end', 'errors', 'loginAsGuest', 'message', 'null', 'query', 'refused', 'start', 'token', 'variables', '§FUZZ§']

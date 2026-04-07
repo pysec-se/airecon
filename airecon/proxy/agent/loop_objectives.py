@@ -31,37 +31,75 @@ _ANALYSIS_VULN_TOOLS: frozenset[str] = frozenset(
     _TOOLS_META_OBJ.get("analysis_phase_vuln_tools", [])
 )
 
+
+def _build_vuln_hypo_index() -> list[dict[str, Any]]:
+    """Build hypothesis index from data/patterns.json at module import time."""
+    _patterns_path = Path(__file__).parent.parent / "data" / "patterns.json"
+    if not _patterns_path.exists():
+        return []
+    try:
+        with open(_patterns_path) as _pf:
+            _raw: dict[str, dict[str, Any]] = json.load(_pf)
+    except (json.JSONDecodeError, OSError):
+        return []
+
+    index: list[dict[str, Any]] = []
+    for key, entry in _raw.items():
+        indicators = {
+            str(ind).strip().lower()
+            for ind in (entry.get("indicators") or [])
+            if str(ind).strip()
+        }
+        if not indicators:
+            continue
+        index.append(
+            {
+                "key": key,
+                "indicators": indicators,
+                "description": str(entry.get("description", "")),
+                "suggested_actions": entry.get("suggested_actions", []),
+            }
+        )
+    return index
+
+
 class _ObjectivesMixin:
+    _vuln_hypo_index: list[dict[str, Any]] = _build_vuln_hypo_index()
+
     _PHASE_OBJECTIVES: dict[str, list[str]] = {
         "RECON": [
-            "Enumerate subdomains/hosts (passive sources first, then active validation)",
-            "Filter to LIVE hosts only — validate with HTTP probing before any scanning",
-            "Port scan and fingerprint ONLY the validated live hosts (two-pass: discover ports, then enrich with service detection)",
-            "Crawl and map all endpoints, routes, and parameters on confirmed live services",
-            "Persist all recon artifacts to output/ files for downstream tools to consume",
+            "Perform passive/active subdomain enumeration followed by multi-protocol live-host validation.",
+            "Execute two-pass port scanning (Discovery > Service Fingerprinting) exclusively on verified targets.",
+            "Map the attack surface by crawling endpoints, routes, and parameters across all live services.",
+            "Archive all discovery artifacts in /output for seamless downstream integration.",
         ],
         "ANALYSIS": [
-            "Map technologies, endpoints, and parameters",
-            "Identify meaningful injection points or misconfigurations",
-            "Correlate findings into exploit candidates",
+            "Analyze the technology stack and fingerprint specific versions to identify known CVEs.",
+            "Perform contextual mapping of injection points, logic flows, and potential misconfigurations.",
+            "Prioritize findings into high-probability exploit candidates based on threat vectors.",
         ],
         "EXPLOIT": [
-            "Enumerate all application routes: /, /login, /api, /admin, /register, /dashboard, /api/v1/",
-            "Test authentication: try default/common credentials, enumerate valid usernames",
-            "Test authorization: modify session cookies, tokens, or IDs to access other accounts (IDOR)",
-            "Test injection vectors: SQLi, XSS, SSTI, command injection on ALL discovered inputs",
-            "Extract flags, sensitive data, or unauthorized capability from confirmed vulnerabilities",
+            "Audit core application pathways (Auth, API, Admin) for broken access control and IDOR.",
+            "Stress-test authentication mechanisms via credential stuffing and session manipulation.",
+            "Execute targeted payloads (SQLi, XSS, SSTI, RCE) across all identified input vectors.",
+            "Demonstrate impact through sensitive data exfiltration or privilege escalation (Flag Capture).",
+            "Harvest credentials, secrets, or flags as proof of successful exploitation.",
         ],
         "REPORT": [
-            "Create vulnerability reports for confirmed findings",
-            "Document impact and remediation guidance",
-            "Mark task complete when evidence is sufficient",
+            "Synthesize confirmed vulnerabilities into structured reports with technical evidence.",
+            "Define business impact and provide actionable, risk-based remediation strategies.",
+            "Finalize documentation once proof-of-concept (PoC) and logs meet compliance standards.",
         ],
     }
-    _EXPLOIT_HEAVY_TOOLS: frozenset[str] = frozenset({
-        "quick_fuzz", "advanced_fuzz", "deep_fuzz",
-        "schemathesis_fuzz", "create_vulnerability_report",
-    })
+    _EXPLOIT_HEAVY_TOOLS: frozenset[str] = frozenset(
+        {
+            "quick_fuzz",
+            "advanced_fuzz",
+            "deep_fuzz",
+            "schemathesis_fuzz",
+            "create_vulnerability_report",
+        }
+    )
 
     def _get_current_phase(self) -> PipelinePhase:
         if self.pipeline:
@@ -80,12 +118,14 @@ class _ObjectivesMixin:
                     "Validate liveness for newly discovered subdomains before deeper scans"
                 )
             if s.open_ports:
-                high_value_ports = sorted({
-                    int(p)
-                    for ports in s.open_ports.values()
-                    for p in ports
-                    if isinstance(p, int) and p not in (80, 443)
-                })[:4]
+                high_value_ports = sorted(
+                    {
+                        int(p)
+                        for ports in s.open_ports.values()
+                        for p in ports
+                        if isinstance(p, int) and p not in (80, 443)
+                    }
+                )[:4]
                 if high_value_ports:
                     dynamic.append(
                         f"Map HTTP/services on non-standard ports: {', '.join(str(p) for p in high_value_ports)}"
@@ -98,14 +138,22 @@ class _ObjectivesMixin:
                 if pt.get("type_hint")
             }
             if "IDOR" in hints:
-                dynamic.append("Correlate object IDs across endpoints for horizontal/vertical privilege abuse")
+                dynamic.append(
+                    "Correlate object IDs across endpoints for horizontal/vertical privilege abuse"
+                )
             if "SSRF" in hints:
-                dynamic.append("Validate SSRF impact against internal metadata and localhost surfaces")
+                dynamic.append(
+                    "Validate SSRF impact against internal metadata and localhost surfaces"
+                )
             if "OPEN_REDIRECT" in hints:
-                dynamic.append("Differentiate open redirect from SSRF and confirm redirect-chain impact")
+                dynamic.append(
+                    "Differentiate open redirect from SSRF and confirm redirect-chain impact"
+                )
             if s.technologies:
                 top_techs = ", ".join(list(s.technologies.keys())[:3])
-                dynamic.append(f"Prioritize stack-specific checks for detected technologies: {top_techs}")
+                dynamic.append(
+                    f"Prioritize stack-specific checks for detected technologies: {top_techs}"
+                )
 
         elif phase == PipelinePhase.EXPLOIT:
             if s.waf_profiles:
@@ -118,8 +166,12 @@ class _ObjectivesMixin:
                 dynamic.append(
                     f"Resolve top hypothesis [{hyp.get('id', 'h')}] with a concrete confirm/refute test"
                 )
-            if s.vulnerabilities and not any(v.get("report_generated") for v in s.vulnerabilities):
-                dynamic.append("Convert highest-severity confirmed exploit into reproducible PoC evidence")
+            if s.vulnerabilities and not any(
+                v.get("report_generated") for v in s.vulnerabilities
+            ):
+                dynamic.append(
+                    "Convert highest-severity confirmed exploit into reproducible PoC evidence"
+                )
 
         elif phase == PipelinePhase.REPORT:
             unreported = [v for v in s.vulnerabilities if not v.get("report_generated")]
@@ -145,7 +197,6 @@ class _ObjectivesMixin:
 
         s = self._session
         if phase == PipelinePhase.RECON:
-
             if s.subdomains or s.live_hosts:
                 self.state.mark_objective(phase.value, defaults[0], "done")
 
@@ -181,27 +232,56 @@ class _ObjectivesMixin:
                 )
                 for v in s.vulnerabilities
             )
-            _ev_blob = " ".join(str(e.get("summary", "")) for e in self.state.evidence_log)
+            _ev_blob = " ".join(
+                str(e.get("summary", "")) for e in self.state.evidence_log
+            )
             _combined = f"{_vuln_blob}\n{_ev_blob}"
 
             def _has(pat: str) -> bool:
                 return bool(re.search(pat, _combined, re.IGNORECASE))
 
-            if (s.urls or s.tested_endpoints or _has(r"https?://|/(api|admin|login|dashboard|register)\b")) and len(defaults) > 0:
+            if (
+                s.urls
+                or s.tested_endpoints
+                or _has(r"https?://|/(api|admin|login|dashboard|register)\b")
+            ) and len(defaults) > 0:
                 self.state.mark_objective(phase.value, defaults[0], "done")
 
-            if _has(r"\b(login\s+success|authenticated|401|403|token|session|cookie|default\s+cred|weak\s+pass|brute)\b") and len(defaults) > 1:
+            if (
+                _has(
+                    r"\b(login\s+success|authenticated|401|403|token|session|cookie|default\s+cred|weak\s+pass|brute)\b"
+                )
+                and len(defaults) > 1
+            ):
                 self.state.mark_objective(phase.value, defaults[1], "done")
 
-            if _has(r"\b(idor|bola|broken\s+access|access\s+control|forbidden|unauthorized|privilege\s+escalation|horizontal|vertical)\b") and len(defaults) > 2:
+            if (
+                _has(
+                    r"\b(idor|bola|broken\s+access|access\s+control|forbidden|unauthorized|privilege\s+escalation|horizontal|vertical)\b"
+                )
+                and len(defaults) > 2
+            ):
                 self.state.mark_objective(phase.value, defaults[2], "done")
 
-            if _has(r"\b(sqli|sql\s+injection|xss|ssti|ssrf|xxe|rce|command\s+injection|lfi|rfi|union\s+select|sleep\s*\(|<script|onerror=)\b") and len(defaults) > 3:
+            if (
+                _has(
+                    r"\b(sqli|sql\s+injection|xss|ssti|ssrf|xxe|rce|command\s+injection|lfi|rfi|union\s+select|sleep\s*\(|<script|onerror=)\b"
+                )
+                and len(defaults) > 3
+            ):
                 self.state.mark_objective(phase.value, defaults[3], "done")
 
             if (
-                any(v.get("flag") or v.get("proo") or v.get("evidence") or v.get("poc_script_code") for v in s.vulnerabilities)
-                or _has(r"\b(flag\{[^}\n]+\}|credential|secret|token|api[_-]?key|database\s+dump|exfiltrat|unauthorized\s+data|admin\s+access|read\s+/etc/passwd)\b")
+                any(
+                    v.get("flag")
+                    or v.get("proo")
+                    or v.get("evidence")
+                    or v.get("poc_script_code")
+                    for v in s.vulnerabilities
+                )
+                or _has(
+                    r"\b(flag\{[^}\n]+\}|credential|secret|token|api[_-]?key|database\s+dump|exfiltrat|unauthorized\s+data|admin\s+access|read\s+/etc/passwd)\b"
+                )
             ) and len(defaults) > 4:
                 self.state.mark_objective(phase.value, defaults[4], "done")
         elif phase == PipelinePhase.REPORT:
@@ -232,17 +312,24 @@ class _ObjectivesMixin:
             cmd = str(arguments.get("command", "")).lower()
 
         if phase == PipelinePhase.RECON:
-
             _subdomain_hit = (
                 cmd and any(b in cmd for b in _RECON_SUBDOMAIN_BINS)
             ) or tool_name in ("web_search", "browser_action")
             if _subdomain_hit:
                 self.state.mark_objective(phase.value, defaults[0], "done")
 
-            if cmd and any(b in cmd for b in _RECON_LIVE_HOST_BINS) and len(defaults) > 1:
+            if (
+                cmd
+                and any(b in cmd for b in _RECON_LIVE_HOST_BINS)
+                and len(defaults) > 1
+            ):
                 self.state.mark_objective(phase.value, defaults[1], "done")
 
-            if cmd and any(b in cmd for b in _RECON_PORT_SCAN_BINS) and len(defaults) > 2:
+            if (
+                cmd
+                and any(b in cmd for b in _RECON_PORT_SCAN_BINS)
+                and len(defaults) > 2
+            ):
                 self.state.mark_objective(phase.value, defaults[2], "done")
 
             _crawl_hit = (
@@ -259,20 +346,20 @@ class _ObjectivesMixin:
                 self.state.mark_objective(phase.value, defaults[4], "done")
 
         elif phase == PipelinePhase.ANALYSIS:
-
             _result_text = self._extract_result_text(result)
-            _has_tech_evidence = bool(re.search(
-                r"\b(apache|nginx|iis|php|python|django|flask|express|rails|laravel|"
-                r"wordpress|drupal|joomla|jquery|react|angular|vue|spring|struts|"
-                r"server:|x-powered-by|content-type:|location:|set-cookie:)\b",
-                _result_text,
-                re.IGNORECASE,
-            )) or bool(
+            _has_tech_evidence = bool(
+                re.search(
+                    r"\b(apache|nginx|iis|php|python|django|flask|express|rails|laravel|"
+                    r"wordpress|drupal|joomla|jquery|react|angular|vue|spring|struts|"
+                    r"server:|x-powered-by|content-type:|location:|set-cookie:)\b",
+                    _result_text,
+                    re.IGNORECASE,
+                )
+            ) or bool(
                 self._session and (self._session.technologies or self._session.urls)
             )
-            if (
-                tool_name in ("read_file", "browser_action", "web_search")
-                or (tool_name == "execute" and _has_tech_evidence)
+            if tool_name in ("read_file", "browser_action", "web_search") or (
+                tool_name == "execute" and _has_tech_evidence
             ):
                 self.state.mark_objective(phase.value, defaults[0], "done")
 
@@ -280,7 +367,8 @@ class _ObjectivesMixin:
                 self.state.mark_objective(phase.value, defaults[1], "done")
 
             meaningful_ev = [
-                e for e in self.state.evidence_log
+                e
+                for e in self.state.evidence_log
                 if float(e.get("confidence", 0)) >= 0.65
             ]
             if len(meaningful_ev) >= 2:
@@ -291,51 +379,69 @@ class _ObjectivesMixin:
 
             _enum_hit = tool_name in self._EXPLOIT_HEAVY_TOOLS or (
                 tool_name == "execute"
-                and bool(re.search(
-                    r"(GET|POST|PUT|DELETE|PATCH)\s+/|status[:\s]+\d{3}|https?://",
-                    result_text,
-                    re.IGNORECASE,
-                ))
+                and bool(
+                    re.search(
+                        r"(GET|POST|PUT|DELETE|PATCH)\s+/|status[:\s]+\d{3}|https?://",
+                        result_text,
+                        re.IGNORECASE,
+                    )
+                )
             )
             if _enum_hit:
                 self.state.mark_objective(phase.value, defaults[0], "done")
 
-            _auth_hit = bool(re.search(
-                r"(FLAG\{[^}\n]+\}|CVE-\d{4}-\d+|"
-                r"login\s+success|authenticated|access\s+denied|"
-                r"401|403|session\s+creat|token\s+issued|cookie)",
-                result_text,
-                re.IGNORECASE,
-            ))
+            _auth_hit = bool(
+                re.search(
+                    r"(FLAG\{[^}\n]+\}|CVE-\d{4}-\d+|"
+                    r"login\s+success|authenticated|access\s+denied|"
+                    r"401|403|session\s+creat|token\s+issued|cookie)",
+                    result_text,
+                    re.IGNORECASE,
+                )
+            )
             if _auth_hit and len(defaults) > 1:
                 self.state.mark_objective(phase.value, defaults[1], "done")
 
-            _authz_hit = bool(re.search(
-                r"(idor|bola|broken\s+access|access\s+control|forbidden|unauthorized|"
-                r"privilege\s+escalation|horizontal|vertical)",
-                result_text,
-                re.IGNORECASE,
-            ))
+            _authz_hit = bool(
+                re.search(
+                    r"(idor|bola|broken\s+access|access\s+control|forbidden|unauthorized|"
+                    r"privilege\s+escalation|horizontal|vertical)",
+                    result_text,
+                    re.IGNORECASE,
+                )
+            )
             if _authz_hit and len(defaults) > 2:
                 self.state.mark_objective(phase.value, defaults[2], "done")
 
-            _inject_hit = bool(re.search(
-                r"(sqli|sql\s+injection|xss|ssti|command\s+injection|"
-                r"ssrf|xxe|lfi|rfi|union\s+select|sleep\s*\(|"
-                r"<script|onerror=|alert\s*\(|\{\{.*\}\}|%27|'--)",
-                result_text,
-                re.IGNORECASE,
-            )) or tool_name in self._EXPLOIT_HEAVY_TOOLS
+            _inject_hit = (
+                bool(
+                    re.search(
+                        r"(sqli|sql\s+injection|xss|ssti|command\s+injection|"
+                        r"ssrf|xxe|lfi|rfi|union\s+select|sleep\s*\(|"
+                        r"<script|onerror=|alert\s*\(|\{\{.*\}\}|%27|'--)",
+                        result_text,
+                        re.IGNORECASE,
+                    )
+                )
+                or tool_name in self._EXPLOIT_HEAVY_TOOLS
+            )
             if _inject_hit and len(defaults) > 3:
                 self.state.mark_objective(phase.value, defaults[3], "done")
 
-            _impact_hit = bool(re.search(
-                r"(FLAG\{[^}\n]+\}|credential|secret|api[_-]?key|database\s+dump|"
-                r"exfiltrat|unauthorized\s+data|admin\s+access|read\s+/etc/passwd)",
-                result_text,
-                re.IGNORECASE,
-            )) or bool(
-                output_file and re.search(r"(proof|poc|dump|credential|secret|flag)", output_file, re.IGNORECASE)
+            _impact_hit = bool(
+                re.search(
+                    r"(FLAG\{[^}\n]+\}|credential|secret|api[_-]?key|database\s+dump|"
+                    r"exfiltrat|unauthorized\s+data|admin\s+access|read\s+/etc/passwd)",
+                    result_text,
+                    re.IGNORECASE,
+                )
+            ) or bool(
+                output_file
+                and re.search(
+                    r"(proof|poc|dump|credential|secret|flag)",
+                    output_file,
+                    re.IGNORECASE,
+                )
             )
             if _impact_hit and len(defaults) > 4:
                 self.state.mark_objective(phase.value, defaults[4], "done")
@@ -343,13 +449,15 @@ class _ObjectivesMixin:
         elif phase == PipelinePhase.REPORT:
             result_text = self._extract_result_text(result)
             _is_report_tool = tool_name == "create_vulnerability_report"
-            _has_report_content = bool(re.search(
-                r"\b(vulnerability report|executive summary|CVSS|severity[:\s]|"
-                r"remediation|proof.of.concept|PoC|report generated|report written|"
-                r"risk rating|findings? documented)\b",
-                result_text,
-                re.IGNORECASE,
-            ))
+            _has_report_content = bool(
+                re.search(
+                    r"\b(vulnerability report|executive summary|CVSS|severity[:\s]|"
+                    r"remediation|proof.of.concept|PoC|report generated|report written|"
+                    r"risk rating|findings? documented)\b",
+                    result_text,
+                    re.IGNORECASE,
+                )
+            )
             _is_report_output = bool(
                 output_file
                 and re.search(r"report|finding|vuln", output_file, re.IGNORECASE)
@@ -370,8 +478,14 @@ class _ObjectivesMixin:
 
         parts: list[str] = []
         for key in (
-            "stdout", "stderr", "result", "summary", "error", "message",
-            "note", "findings",
+            "stdout",
+            "stderr",
+            "result",
+            "summary",
+            "error",
+            "message",
+            "note",
+            "findings",
         ):
             value = result.get(key)
             if isinstance(value, str):
@@ -410,7 +524,9 @@ class _ObjectivesMixin:
         output_file: str | None,
     ) -> None:
         if output_file:
-            _t, _s = self._enrich_evidence(f"Artifact saved to {output_file}", ["artifact", "file"], 0.9, tool_name)
+            _t, _s = self._enrich_evidence(
+                f"Artifact saved to {output_file}", ["artifact", "file"], 0.9, tool_name
+            )
             self.state.add_evidence(
                 phase=phase,
                 source_tool=tool_name,
@@ -426,7 +542,9 @@ class _ObjectivesMixin:
             return
 
         if not success:
-            err = str(result.get("error", "")).strip() if isinstance(result, dict) else ""
+            err = (
+                str(result.get("error", "")).strip() if isinstance(result, dict) else ""
+            )
             if err:
                 _summary = f"Execution error observed: {err[:240]}"
                 _t, _s = self._enrich_evidence(_summary, ["error"], 0.4, tool_name)
@@ -454,7 +572,9 @@ class _ObjectivesMixin:
 
         for cve in re.findall(r"CVE-\d{4}-\d{4,7}", blob, re.IGNORECASE):
             _summary = f"CVE reference discovered: {cve.upper()}"
-            _t, _s = self._enrich_evidence(_summary, ["cve", "vulnerability"], 0.75, tool_name)
+            _t, _s = self._enrich_evidence(
+                _summary, ["cve", "vulnerability"], 0.75, tool_name
+            )
             self.state.add_evidence(
                 phase=phase,
                 source_tool=tool_name,
@@ -465,14 +585,13 @@ class _ObjectivesMixin:
             )
 
         url_matches = list(
-            dict.fromkeys(
-                re.findall(r"https?://[^\s\"'<>]+", blob, re.IGNORECASE)
-            )
+            dict.fromkeys(re.findall(r"https?://[^\s\"'<>]+", blob, re.IGNORECASE))
         )
 
         _target_domain: str = ""
         if self._session and self._session.target:
             import urllib.parse as _up
+
             _parsed = _up.urlparse(
                 self._session.target
                 if "://" in self._session.target
@@ -486,18 +605,21 @@ class _ObjectivesMixin:
         in_scope_urls: list[str] = []
         if _target_domain:
             import urllib.parse as _up2
+
             for _u in url_matches:
                 try:
                     _h = _up2.urlparse(_u).hostname or ""
-                except Exception as e:
-                    logger.debug("Exception in %s: %s", __name__, e)
+                except Exception as _e:
+                    logger.warning("Operation failed: %s", _e)
                     continue
                 if _h.endswith(_target_domain):
                     in_scope_urls.append(_u)
 
         for url in in_scope_urls[:4]:
             _summary = f"Interesting URL collected: {url}"
-            _t, _s = self._enrich_evidence(_summary, ["url", "endpoint"], 0.65, tool_name)
+            _t, _s = self._enrich_evidence(
+                _summary, ["url", "endpoint"], 0.65, tool_name
+            )
             self.state.add_evidence(
                 phase=phase,
                 source_tool=tool_name,
@@ -518,7 +640,9 @@ class _ObjectivesMixin:
         )
         for hit in port_hits[:4]:
             _summary = f"Service/port evidence: {hit}"
-            _t, _s = self._enrich_evidence(_summary, ["network", "recon"], 0.7, tool_name)
+            _t, _s = self._enrich_evidence(
+                _summary, ["network", "recon"], 0.7, tool_name
+            )
             self.state.add_evidence(
                 phase=phase,
                 source_tool=tool_name,
@@ -568,7 +692,9 @@ class _ObjectivesMixin:
             cmd = str(arguments.get("command", "")).strip()
             if cmd:
                 _summary = f"Executed command: {cmd[:220]}"
-                _t, _s = self._enrich_evidence(_summary, ["execution", "trace"], 0.55, tool_name)
+                _t, _s = self._enrich_evidence(
+                    _summary, ["execution", "trace"], 0.55, tool_name
+                )
                 self.state.add_evidence(
                     phase=phase,
                     source_tool=tool_name,
@@ -581,47 +707,48 @@ class _ObjectivesMixin:
         if success:
             self._auto_form_hypotheses(phase, tool_name, arguments, blob)
 
-    _VULN_HYPO_PATTERNS: list[tuple[re.Pattern, str, str]] = [
-        (re.compile(
-            r"\b(sql\s*i(?:njection)?|sqli|union\s+select|error.based\s+sql|"
-            r"boolean.based|time.based\s+blind)\b", re.IGNORECASE),
-         "sql_injection", "sqlmap"),
-        (re.compile(
-            r"\b(xss|cross.site\s+script|reflected|stored\s+xss|dom.based)\b",
-            re.IGNORECASE),
-         "xss", "dalfox"),
-        (re.compile(
-            r"\b(ssrf|server.side\s+request|internal\s+host|metadata\s+endpoint|"
-            r"169\.254\.169\.254)\b", re.IGNORECASE),
-         "ssr", "ffu"),
-        (re.compile(
-            r"\b(idor|insecure\s+direct|object\s+reference|bola|broken\s+access\s+control)\b",
-            re.IGNORECASE),
-         "idor", "curl"),
-        (re.compile(
-            r"\b(rce|remote\s+code\s+exec|command\s+exec|os\s+command\s+inject)\b",
-            re.IGNORECASE),
-         "rce", "curl"),
-        (re.compile(
-            r"\b(ssti|server.side\s+template|template\s+inject)\b", re.IGNORECASE),
-         "ssti", "tplmap"),
-        (re.compile(
-            r"\b(lfi|local\s+file\s+inclus|path\s+travers|directory\s+travers|"
-            r"\.\./|etc/passwd)\b", re.IGNORECASE),
-         "lfi", "ffu"),
-        (re.compile(
-            r"\b(auth\s+bypass|broken\s+auth|default\s+cred|weak\s+pass|"
-            r"admin:admin|password123)\b", re.IGNORECASE),
-         "auth_bypass", "hydra"),
-        (re.compile(
-            r"\b(jwt|json\s+web\s+token|hs256|alg.none|secret\s+key\s+exposed)\b",
-            re.IGNORECASE),
-         "jwt_weakness", "jwt_tool"),
-        (re.compile(
-            r"\b(open\s+redirect|location\s+header\s+inject|redirect\s+to)\b",
-            re.IGNORECASE),
-         "open_redirect", "curl"),
-    ]
+    # ── Dynamic hypothesis index loaded from data/patterns.json ──────────
+    # Data-driven, NOT hardcoded. Each entry: (indicators_set, key, description, suggested_actions)
+    # Built at class-init time from the authoritative patterns JSON.
+
+    @staticmethod
+    def _load_vuln_hypo_index() -> list[dict[str, Any]]:
+        """Build hypothesis index from data/patterns.json.
+
+        Returns a list of dicts keyed by pattern name, each with:
+        - indicators: set of lowercase indicator words/phrases
+        - description: human-readable description
+        - suggested_actions: list of recommended test actions
+        """
+        _patterns_path = Path(__file__).parent.parent / "data" / "patterns.json"
+        if not _patterns_path.exists():
+            return []
+        try:
+            with open(_patterns_path) as _pf:
+                _raw: dict[str, dict[str, Any]] = json.load(_pf)
+        except (json.JSONDecodeError, OSError):
+            return []
+
+        index: list[dict[str, Any]] = []
+        for key, entry in _raw.items():
+            indicators = {
+                str(ind).strip().lower()
+                for ind in (entry.get("indicators") or [])
+                if str(ind).strip()
+            }
+            if not indicators:
+                continue
+            index.append(
+                {
+                    "key": key,
+                    "indicators": indicators,
+                    "description": str(entry.get("description", "")),
+                    "suggested_actions": entry.get("suggested_actions", []),
+                }
+            )
+        return index
+
+    _vuln_hypo_index: list[dict[str, Any]] = []
 
     _HYPO_FALSE_SIGNAL_RE = re.compile(
         r"(?i)\b("
@@ -632,6 +759,174 @@ class _ObjectivesMixin:
         r"nothing\s+found|no\s+result|0\s+result"
         r")\b"
     )
+
+    @staticmethod
+    def _load_vuln_hypo_patterns() -> list[tuple[re.Pattern, str, str]]:
+        """Load vuln hypothesis patterns dynamically from data sources.
+
+        Patterns are derived from:
+        1. tools_meta.json — tool descriptions and categories
+        2. system.txt §11 — vulnerability priority terms
+        3. skills/vulnerabilities/ — skill file names as indicators
+        """
+        patterns: list[tuple[re.Pattern, str, str]] = []
+
+        # Source 1: tools_meta.json specific_vulnerabilities subcategories
+        try:
+            meta_path = Path(__file__).parent.parent / "data" / "tools_meta.json"
+            if meta_path.exists():
+                with open(meta_path) as _mf:
+                    _meta = json.load(_mf)
+                categories = _meta.get("categories", {})
+                for group in categories.values():
+                    if isinstance(group, dict):
+                        for subcat_name, tool_list in group.items():
+                            if (
+                                "vulnerab" in subcat_name.lower()
+                                or "specific" in subcat_name.lower()
+                                or "injection" in subcat_name.lower()
+                            ):
+                                if isinstance(tool_list, list) and tool_list:
+                                    vuln_type = subcat_name.lower().replace("-", "_")
+                                    # Build regex from tool names in this category
+                                    tool_names = [
+                                        str(t).lower()
+                                        for t in tool_list
+                                        if isinstance(t, str)
+                                    ]
+                                    if tool_names:
+                                        # Filter generic words (attack, advanced, specific, etc.)
+                                        # that would match ANY tool output containing them.
+                                        _GENERIC_WORDS = frozenset(
+                                            [
+                                                "attack",
+                                                "advanced",
+                                                "specific",
+                                                "tools",
+                                                "utilities",
+                                                "general",
+                                                "basic",
+                                                "common",
+                                                "injection",
+                                                "vulnerabilities",
+                                                "vulnerability",
+                                                "bypass",
+                                                "testing",
+                                                "discovery",
+                                                "detection",
+                                            ]
+                                        )
+                                        vuln_words = [
+                                            w
+                                            for w in vuln_type.replace("_", " ").split()
+                                            if len(w) > 3 and w not in _GENERIC_WORDS
+                                        ]
+                                        # Only match tool names OR specific vuln type words
+                                        _terms = tool_names[:5] + vuln_words
+                                        if not _terms:
+                                            continue
+                                        _pat_str = (
+                                            r"(?i)\b("
+                                            + "|".join(re.escape(t) for t in _terms)
+                                            + r")\b"
+                                        )
+                                        try:
+                                            _pat = re.compile(_pat_str)
+                                            # Use first tool as confirm tool
+                                            _confirm = tool_names[0]
+                                            patterns.append((_pat, vuln_type, _confirm))
+                                        except re.error:
+                                            pass
+        except Exception as _e:
+            pass
+
+        # Source 2: system.txt §12 VULNERABILITY PRIORITY terms
+        try:
+            prompt_path = Path(__file__).parent.parent / "prompts" / "system.txt"
+            if prompt_path.exists():
+                content = prompt_path.read_text(encoding="utf-8")
+                in_section = False
+                for line in content.splitlines():
+                    if "§12" in line or "VULNERABILITY PRIORITY" in line:
+                        in_section = True
+                        continue
+                    if in_section:
+                        if line.startswith("━") or (
+                            line.strip().startswith("§") and "§12" not in line
+                        ):
+                            break
+                        if (
+                            "P1" in line
+                            or "P2" in line
+                            or "P3" in line
+                            or "P4" in line
+                            or "P5" in line
+                        ):
+                            parts = line.split("  ", 1)
+                            if len(parts) > 1:
+                                raw_terms = parts[1]
+                                for term in raw_terms.split(","):
+                                    term = term.strip().split("(")[0].strip()
+                                    if (
+                                        term
+                                        and len(term) >= 3
+                                        and term.lower()
+                                        not in (
+                                            "and",
+                                            "or",
+                                            "the",
+                                        )
+                                    ):
+                                        vuln_type = term.lower().replace(" ", "_")
+                                        # Match BOTH underscore and space variants:
+                                        # \bsql[_ ]injection\b matches "sql_injection"
+                                        # and "sql injection" in natural text
+                                        _lower_term = term.lower()
+                                        _pat_str = (
+                                            r"(?i)\b"
+                                            + _lower_term.replace(" ", "[_ ]")
+                                            + r"\b"
+                                        )
+                                        try:
+                                            _pat = re.compile(_pat_str)
+                                            patterns.append(
+                                                (_pat, vuln_type, "manual_probe")
+                                            )
+                                        except re.error:
+                                            pass
+        except Exception as _e:
+            pass
+
+        # Source 3: skills catalog — vulnerability skill file names
+        try:
+            skills_dir = Path(__file__).parent.parent / "skills" / "vulnerabilities"
+            if skills_dir.is_dir():
+                for md_file in skills_dir.iterdir():
+                    if md_file.suffix == ".md":
+                        vuln_type = md_file.stem.lower().replace("-", "_")
+                        # Replace both underscores and spaces with [_ ] regex
+                        # so "sql_injection.md" matches both "SQL injection"
+                        # and "sql_injection" in tool output
+                        _term = md_file.stem.replace("-", " ").replace("_", " ")
+                        _pat_str = r"(?i)\b" + _term.replace(" ", "[_ ]") + r"\b"
+                        try:
+                            _pat = re.compile(_pat_str)
+                            patterns.append((_pat, vuln_type, "manual_probe"))
+                        except re.error:
+                            pass
+        except Exception as _e:
+            pass
+
+        return patterns
+
+    # Lazy-loaded — built on first access from data sources
+    _cached_vuln_hypo_patterns: list[tuple[re.Pattern, str, str]] | None = None
+
+    @property
+    def _VULN_HYPO_PATTERNS(self) -> list[tuple[re.Pattern, str, str]]:
+        if self.__class__._cached_vuln_hypo_patterns is None:
+            self.__class__._cached_vuln_hypo_patterns = self._load_vuln_hypo_patterns()
+        return self.__class__._cached_vuln_hypo_patterns
 
     def _auto_form_hypotheses(
         self,
@@ -673,9 +968,7 @@ class _ObjectivesMixin:
                 continue
             _label = _vuln_type.replace("_", " ").upper()
             self.state.add_hypothesis(
-                claim=(
-                    f"Potential {_label} vulnerability detected near {_endpoint}"
-                ),
+                claim=(f"Potential {_label} vulnerability detected near {_endpoint}"),
                 test_plan=(
                     f"Use {_confirm_tool} to confirm. "
                     "Test all input parameters on the endpoint. "
@@ -687,30 +980,33 @@ class _ObjectivesMixin:
             )
             formed += 1
 
-        if phase == "RECON" and formed < _MAX_HYPO_PER_CALL:
-            _port_hits = list(dict.fromkeys(
-                re.findall(r"\b(\d{1,5})/open\b", result_text, re.IGNORECASE)
-            ))
-            if _port_hits:
-                _ports_str = ", ".join(_port_hits[:3])
-                self.state.add_hypothesis(
-                    claim=(
-                        f"Open port(s) {_ports_str} may expose exploitable services"
-                    ),
-                    test_plan=(
-                        f"Run: nmap -sV -sC -p {','.join(_port_hits[:3])} <target>. "
-                        "Check service versions against CVE databases. "
-                        "Test for default credentials and known exploits."
-                    ),
-                    phase=phase,
-                    tags=["network", "service"],
+            if phase == "RECON" and formed < _MAX_HYPO_PER_CALL:
+                _port_hits = list(
+                    dict.fromkeys(
+                        re.findall(r"\b(\d{1,5})/open\b", result_text, re.IGNORECASE)
+                    )
                 )
+                if _port_hits:
+                    _ports_str = ", ".join(_port_hits[:3])
+                    self.state.add_hypothesis(
+                        claim=(
+                            f"Open port(s) {_ports_str} may expose exploitable services"
+                        ),
+                        test_plan=(
+                            f"Run: nmap -sV -sC -p {','.join(_port_hits[:3])} <target>. "
+                            "Check service versions against CVE databases. "
+                            "Test for default credentials and known exploits."
+                        ),
+                        phase=phase,
+                        tags=["network", "service"],
+                    )
 
     def _build_phase_gate_note(self, tool_name: str, success: bool) -> str:
         phase = self._get_current_phase()
         phase_name = phase.value
         phase_evidence = [
-            e for e in self.state.evidence_log
+            e
+            for e in self.state.evidence_log
             if str(e.get("phase", "")).upper() == phase_name
         ]
         cfg = get_config()
@@ -748,7 +1044,6 @@ class _ObjectivesMixin:
     def _check_tool_budget(self, tool_name: str, phase: str) -> str:
         budget = _PHASE_TOOL_BUDGETS.get(phase, {}).get(tool_name)
         if budget is None:
-
             eff = self.state.get_tool_effectiveness(phase, tool_name)
             calls = int(eff.get("calls", 0.0))
             hit_rate = float(eff.get("hit_rate", 0.0))

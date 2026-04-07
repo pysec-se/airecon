@@ -1,0 +1,4 @@
+# file: /home/pikpikcu/Documents/airecon/airecon/proxy/agent/command_parse.py
+# hypothesis_version: 6.151.10
+
+['-', '--', '--unset', '-u', '/', '=', '^\\d+[smhd]?$', 'env', 'stdbuf', 'timeout']

@@ -1,0 +1,4 @@
+# file: /usr/lib/python3/dist-packages/requests_toolbelt/multipart/encoder.py
+# hypothesis_version: 6.151.10
+
+[b'\r\n', b'--\r\n', '--{}', '__len__', 'content-length', 'fileno', 'getvalue', 'items', 'len', 'read', 'utf-8']

@@ -1,26 +1,77 @@
-[PIPELINE PHASE: REPORT - Final Report Generation]
+[PIPELINE PHASE: REPORT - Decision-Grade Report Generation]
 
 OBJECTIVE:
-Produce complete, reproducible, decision-grade reports for every confirmed vulnerability.
+Transform evidence_log into decision-grade reports: every confirmed finding reproducible, severity evidence-grounded, remediation actionable. Link findings to validation chain (Causality + Reproducibility + Impact).
 
 MANDATORY TASKS:
-1. Review all confirmed vulnerabilities from exploit validation.
-2. Ensure each finding has:
-   - Accurate severity and scoring rationale
-   - Technical root cause analysis
-   - Reproducible PoC steps and payload/requests
-   - Impact narrative grounded in observed evidence
-   - Practical remediation guidance
-3. Build an engagement summary covering scope, methods, confidence, and residual risk.
-4. Verify no confirmed finding is undocumented.
+1. **Validate Evidence Integrity**: Cross-check each finding against evidence_log:
+   - Source tool + phase when evidence was collected
+   - Confidence score (0.0-1.0) — only report ≥0.70
+   - Artifact (curl command, request, screenshot) for reproduction
+   - How confidence was calculated (automatic or manual boost)
+
+2. **Confirmation Criteria (3-point check)**:
+   - **Causality**: Can you trace tool output → finding claim? (evidence → payload → response)
+   - **Reproducibility**: Can same steps repeat finding consistently? (document exact steps, inputs, environment constraints)
+   - **Impact**: What business/technical impact if unpatched? (data exposure, auth bypass, RCE scope, etc.)
+   All three REQUIRED. If any absent, mark as "SUSPECTED" not "CONFIRMED".
+
+3. **Severity Rationale**:
+   Build severity using these signals (NOT just CVSS):
+   - Confidence (evidence quality, reproducibility validation count)
+   - Access requirement (unauthenticated, low-priv auth, admin-only)
+   - Impact scope (single user, all users, system compromise, data exfil volume)
+   - Easy of exploitation (point-and-click, scripted exploit, local access only)
+   - Chaining potential (can this enable further attacks? e.g., SQLi → RCE)
+   Document your reasoning transparently.
+
+4. **Structured PoC** (reproduction section):
+   ```
+   Prerequisites: [target state, tools needed, special config]
+   Steps:
+     1. [exact command or HTTP request with parameter values]
+     2. [specific payload that triggers the vulnerability]
+     3. [exact expected response/behavior that proves vulnerability]
+   Expected Output: [screenshot/command output/response body snippet]
+   Variations: [other injection vectors, parameters, encodings tested and failed → proves specific bypass]
+   ```
+   Each PoC MUST reference evidence_log source tool and discovery phase.
+
+5. **Root Cause Write-up** (why vulnerable):
+   - Input flow: where does user input enter? (URL param, form field, header, cookie?)
+   - Validation gap: what should have been validated but wasn't? (whitelist missing, regex bypassable, encoding not normalized)
+   - Execution context: where does input execute? (SQL query, HTML context, JavaScript eval, OS command?)
+   - Why standard defenses failed (if applicable): WAF bypass? Input encoding trick? Language-specific quirk?
+
+6. **Executive Summary** (per engagement):
+   - Scope: [target domains/IPs, services tested, tools deployed]
+   - Confirmed findings: [COUNT by severity: CRITICAL x2, HIGH x5, MEDIUM x8, etc.]
+   - Test methodology: [phases run: RECON/ANALYSIS/EXPLOIT/REPORT, iteration count, tool budget utilization]
+   - Confidence level: [HIGH/MEDIUM/LOW based on evidence quality and iteration depth]
+   - Residual risk: [what was NOT tested? false negatives? time constraints? tool limitations?]
+   - Remediation priority: [link findings to business impact]
 
 REPORT QUALITY STANDARDS:
-- Professional and concise language
-- Evidence-first structure
-- No speculative claims
-- Clear reproduction path
-- Actionable remediation
-- Consistent severity logic
+✓ Evidence-first: Every claim traceable to tool output + evidence_log entry
+✓ Confidence transparency: Document how 0.70+ confidence was achieved
+✓ Reproducibility-driven: PoC steps repeatable by any engineer with stated prerequisites
+✓ No speculation: "This MIGHT be vulnerable" → flag as SUSPECTED not CONFIRMED
+✓ Tool traceability: Each finding tagged with [source_tool] + [confidence] + [evidence_id]
+✓ Consistent severity: Two CRITICAL findings should have comparable impact/exploitability
+✓ Context over label: "XSS detected by tool X" is weak; "Reflected XSS in param foo, bypasses HTML encoding" is strong
+✓ Actionable remediation: Not just "use parameterized queries" but "WHERE user_id=$1 with typed binding"
+
+FALSE POSITIVE PREVENTION:
+- If tool_confidence < 0.70, do NOT report as confirmed
+- If you cannot reproduce manually (or via second tool), mark as SUSPECTED
+- If "reproducible once but not consistently," document what changed between runs
+- Cross-validate: SQLi via manual SQLMap? Response time test? Error-based extraction?
+- Document tool limitations: "Tool X flags but output inconclusive — manual testing recommended"
 
 CLOSURE RULE:
-When all confirmed findings are documented with complete evidence, output [TASK_COMPLETE].
+Only output [TASK_COMPLETE] when:
+1. All evidence_log entries reviewed for reportability
+2. Each confirmed finding has Causality + Reproducibility + Impact validation
+3. Each finding PoC is independently reviewable (not just tool output)
+4. Executive summary includes scope, methodology, confidence, residual risk
+5. No CONFIRMED finding contradicts another (resolve contradictions or flag as SUSPECTED)

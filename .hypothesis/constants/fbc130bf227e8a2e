@@ -1,0 +1,4 @@
+# file: /usr/lib/python3/dist-packages/django/forms/formsets.py
+# hypothesis_version: 6.151.10
+
+[1000, '%s-%s', ', ', 'BaseFormSet', 'DELETE', 'Delete', 'FormSet', 'INITIAL_FORMS', 'MAX_NUM_FORMS', 'MIN_NUM_FORMS', 'ORDER', 'Order', 'TOTAL_FORMS', 'Unknown', '__prefix__', '_ordering', 'absolute_max', 'all_valid', 'auto_id', 'can_delete', 'can_delete_extra', 'can_order', 'data', 'empty_permitted', 'error_class', 'extra', 'field_names', 'files', 'form', 'formset', 'formset_factory', 'id_%s', 'initial', 'max_num', 'min_num', 'nonform', 'num', 'prefix', 'renderer', 'too_few_forms', 'too_many_forms', 'validate_max', 'validate_min']

@@ -195,6 +195,51 @@ class FalsePositiveDetector:
 
         return False, ""
 
+    def detect_header_only_reflection(
+        self, status_code: int, headers: dict, body: str, payload: str
+    ) -> tuple[bool, str]:
+        """Detect vulnerabilities reported solely from HTTP header reflection.
+
+        Catches false positives where 'reflected XSS' is claimed based on
+        Location/redirect headers with no HTML body — classic feedly.com scenario.
+        """
+        if not body or len(body.strip()) == 0:
+            if 300 <= status_code < 400:
+                location = headers.get("location", "")
+                if location and payload.lower() in location.lower():
+                    is_encoded = any(
+                        enc in location
+                        for enc in ("%3C", "%3c", "%3E", "%3e")
+                    )
+                    encoding_note = (
+                        " Payload is URL-encoded in the header, so it will NOT execute."
+                        if is_encoded
+                        else ""
+                    )
+                    return (
+                        True,
+                        f"Payload only reflected in {status_code} redirect Location header with empty body.{encoding_note}"
+                        " HTTP headers are not an executable JavaScript context — XSS is impossible here.",
+                    )
+            return (
+                True,
+                "Response body is empty — no HTML/DOM execution context exists for XSS.",
+            )
+
+        # Check 3xx redirect where destination is same-origin
+        if 300 <= status_code < 400 and headers.get("location"):
+            try:
+                if len(body.strip()) == 0:
+                    return (
+                        True,
+                        "Redirect response with empty body — no execution context. "
+                        "The Location header is not a JavaScript execution target.",
+                    )
+            except Exception as _e:
+                pass
+
+        return False, ""
+
 
 class ReplayVerifier:
     """Re-tests findings with independent payloads to confirm vulnerabilities."""
@@ -611,6 +656,22 @@ class VerificationEngine:
                     logger.debug(
                         f"[Zero-FP] FP Detection: dynamic content detected — {dyn_reasons}"
                     )
+
+            # ── Header-only reflection check (e.g. 301 Location with no body) ──
+            if response_headers is not None:
+                is_header_only, hdr_reason = self.fp_detector.detect_header_only_reflection(
+                    response_status, response_headers, fuzz_body, original_payload
+                )
+                if is_header_only:
+                    result.is_false_positive = True
+                    result.fp_reason = f"Header-only reflection: {hdr_reason}"
+                    result.verified_confidence = max(0.05, original_confidence * 0.2)
+                    result.verification_time_ms = (time.monotonic() - start_time) * 1000
+                    logger.warning(
+                        f"[Zero-FP] FILTERED (header-only reflection): {param}={original_payload} "
+                        f"status={response_status} confidence {original_confidence:.2f} → {result.verified_confidence:.2f}"
+                    )
+                    return result
 
             if response_headers:
                 is_waf, waf_name = self.fp_detector.detect_waf_cdn(

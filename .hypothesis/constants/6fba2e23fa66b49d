@@ -1,0 +1,4 @@
+# file: /home/pikpikcu/Documents/airecon/airecon/proxy/filesystem.py
+# hypothesis_version: 6.151.10
+
+[500, 1024, 5000, 1048576, 5000000, '  (empty)', '.', '.csv', '.htm', '.html', '.json', '.log', '.md', '.nmap', '.out', '.py', '.sh', '.txt', '.xml', '/', 'error', 'has_more', 'ignore', 'limit', 'offset', 'path', 'r', 'replace', 'result', 'success', 'total_lines', 'utf-8', 'w', 'workspace/', '│   ', '└── ', '├── ']

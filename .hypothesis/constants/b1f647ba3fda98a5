@@ -1,0 +1,4 @@
+# file: /usr/lib/python3/dist-packages/trio/_highlevel_open_tcp_listeners.py
+# hypothesis_version: 6.151.10
+
+[65535, 'win32']

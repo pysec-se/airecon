@@ -1,0 +1,4 @@
+# file: /usr/lib/python3/dist-packages/django/utils/translation/trans_real.py
+# hypothesis_version: 6.151.10
+
+[1.0, 500, 1000, '\x04', '%s%s%s', '*', ',', '-', 'HTTP_ACCEPT_LANGUAGE', 'LANGUAGES', 'LANGUAGE_CODE', '_catalog', 'django', 'en', 'fallback', 'locale', 'ngettext', 'value']

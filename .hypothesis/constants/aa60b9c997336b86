@@ -1,0 +1,4 @@
+# file: /usr/lib/python3/dist-packages/django/core/exceptions.py
+# hypothesis_version: 6.151.10
+
+['ValidationError(%s)', '__all__', 'error_dict', 'message']

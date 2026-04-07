@@ -1,0 +1,4 @@
+# file: /usr/lib/python3/dist-packages/django/db/models/functions/comparison.py
+# hypothesis_version: 6.151.10
+
+[' VALUE ', '%H:%M:%f', '%Y-%m-%d %H:%M:%f', ', ', 'CAST', 'COALESCE', 'COLLATE', 'FloatField', 'GREATEST', 'JSONB_BUILD_OBJECT', 'JSONField', 'JSON_OBJECT', 'LEAST', 'MAX', 'MIN', 'NULLIF', 'TO_NCLOB', 'TextField', '^[\\w\\-]+$', 'collation', 'date', 'datetime', 'db_type', 'time']

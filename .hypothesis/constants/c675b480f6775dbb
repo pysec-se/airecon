@@ -1,0 +1,4 @@
+# file: /usr/lib/python3/dist-packages/django/db/models/fields/proxy.py
+# hypothesis_version: 6.151.10
+
+['_order', 'editable', 'name']

@@ -534,6 +534,31 @@ class OllamaClient:
                     _next_fut.cancel()
                 raise
 
+            except httpx.ReadError as e:
+                # Stream-level read error (connection reset by peer,
+                # dropped TLS, etc.) — always transient, retry safely.
+                if attempt < max_retries:
+                    wait = 2 ** (attempt + 1)
+                    logger.warning(
+                        "Ollama stream read error (attempt %d/%d), "
+                        "retrying in %ds: %s",
+                        attempt + 1,
+                        max_retries + 1,
+                        wait,
+                        e,
+                    )
+                    await asyncio.sleep(wait)
+                    continue
+                logger.error(
+                    "Ollama stream read error after %d attempts: %s",
+                    max_retries + 1,
+                    e,
+                )
+                raise TimeoutError(
+                    f"Ollama stream disconnected after "
+                    f"{max_retries + 1} retries: {e}"
+                ) from e
+
             except httpx.HTTPStatusError as e:
                 err_msg = str(e).lower()
 

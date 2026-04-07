@@ -1,0 +1,4 @@
+# file: /usr/lib/python3/dist-packages/django/core/files/storage/handler.py
+# hypothesis_version: 6.151.10
+
+['BACKEND', 'DEFAULT_FILE_STORAGE', 'OPTIONS', 'STATICFILES_STORAGE']

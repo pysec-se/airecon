@@ -1,0 +1,4 @@
+# file: /usr/lib/python3/dist-packages/django/db/models/lookups.py
+# hypothesis_version: 6.151.10
+
+[' OR ', '%%%s', '%%%s%%', '%s', '%s %s', '%s %s %s', '%s IN (', '%s IS NOT NULL', '%s IS NULL', '%s%%', '(', '(%s)', ')', ', ', '-', 'BETWEEN %s AND %s', 'IN %s', 'NOT %s', '_db', 'as_sql', 'conditional', 'contains', 'endswith', 'exact', 'get_db_prep_value', 'get_prep_value', 'gt', 'gte', 'icontains', 'iendswith', 'iexact', 'in', 'iregex', 'isnull', 'istartswith', 'lt', 'lte', 'output_field', 'pk', 'range', 'regex', 'resolve_expression', 'startswith', 'target_field']

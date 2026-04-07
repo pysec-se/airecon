@@ -1,0 +1,4 @@
+# file: /usr/lib/python3/dist-packages/django/db/models/utils.py
+# hypothesis_version: 6.151.10
+
+['.', 'Row', '__reduce__', '__slots__', 'alters_data']

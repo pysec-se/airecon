@@ -1,0 +1,4 @@
+# file: /home/pikpikcu/Documents/airecon/airecon/proxy/agent/generative_fuzzing.py
+# hypothesis_version: 6.151.10
+
+[0.0, 0.2, 0.3, 0.5, '"', '#', '%00', '%09', '%0a', '%0d', '%20', '%22', '%23', '%26', '%27', '%28', '%29', '%2B', '%2F', '%3B', '%3C', '%3D', '%3E', '%5C', '&', '&amp;', '&apos;', '&gt;', '&lt;', '&quot;', "'", '(', ')', '+', '/', ';', '<', '<script', '=', '>', '\\', 'avg_fitness', 'backtick', 'case_toggle', 'command_injection', 'comment_injection', 'concat', 'count', 'double_url_encode', 'fitness', 'generation', 'html_entity', 'max_fitness', 'min_fitness', 'nested_tags', 'null_byte', 'path_traversal', 'payload', 'sql_injection', 'ssti', 'test', 'top_payloads', 'unicode', 'url_encode', 'waf', 'whitespace', 'xss', 'ʼ', '“', '⁄', '∖', '﹤', '﹥']

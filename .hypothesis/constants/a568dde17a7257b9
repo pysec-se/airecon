@@ -1,0 +1,4 @@
+# file: /usr/lib/python3/dist-packages/django/db/models/sql/where.py
+# hypothesis_version: 6.151.10
+
+[' %s ', ' AND ', '(%s)', 'AND', 'NOT (%s)', 'OR', 'XOR', 'children', 'clone', 'lhs', 'relabel_aliases', 'relabeled_clone', 'resolve_expression', 'rhs', 'split_having_qualify']

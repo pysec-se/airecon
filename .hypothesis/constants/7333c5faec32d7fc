@@ -1,0 +1,4 @@
+# file: /home/pikpikcu/Documents/airecon/airecon/proxy/searxng.py
+# hypothesis_version: 6.151.10
+
+[60.0, 300.0, 200, 404, 405, 500, 1000, 8080, '--filter', '--format', '--name', '--network', '--restart', '--tail', '-a', '-d', '-e', '-f', '-p', '-q', '-v', '.airecon', '20', 'OK', 'SearXNG is ready', 'airecon-searxng', 'airecon.searxng', 'bridge', 'containers', 'data', 'docker', 'images', 'inspect', 'logs', 'no stderr', 'permission denied', 'ps', 'pull', 'rm', 'run', 'searxng', 'settings.yml', 'status=running', 'true', 'unknown', 'unless-stopped', '{{.Names}}', '{{.State.Running}}']

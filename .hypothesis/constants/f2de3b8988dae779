@@ -1,0 +1,4 @@
+# file: /usr/lib/python3/dist-packages/django/utils/regex_helper.py
+# hypothesis_version: 6.151.10
+
+['!', '!=<', '$', '%%(%s)s', '(', ')', '*?+', '*?+{', '+', ',', '.', '0', ':', '<', '=', '>', '?', 'A', 'B', 'D', 'P', 'S', 'W', 'Z', '[', '\\', ']', '^', '_%d', 'b', 'd', 's', 'w', 'x', '|', '}']

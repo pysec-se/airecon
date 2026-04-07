@@ -1,0 +1,4 @@
+# file: /home/pikpikcu/Documents/airecon/airecon/proxy/agent/target_profiler.py
+# hypothesis_version: 6.151.10
+
+[0.0, 0.1, 0.15, 0.2, 0.25, 0.6, 0.7, 0.85, 100.0, 400, 500, 10000, '*', '/', '; secure', 'Server', 'Wildcard CORS policy', 'X-Generator', 'X-Powered-By', 'airecon_request_ms', 'attack_vectors', 'auth bypass', 'authorization bypass', 'cache-control', 'category', 'cdn_waf', 'cloud', 'cloud_provider', 'cms', 'command execution', 'critical', 'database', 'debug', 'default credential', 'deserialization', 'error details', 'exception', 'exposed_services', 'file disclosure', 'file read', 'framework', 'high', 'info', 'known_vuln_tech', 'lfi', 'low', 'medium', 'outdated_technology', 'paths', 'permissions-policy', 'rce', 'referrer-policy', 'session', 'set-cookie', 'sql injection', 'sqli', 'ssrf', 'stack trace', 'token', 'tools', 'traceback', 'unauthenticated', 'unknown', 'vulns', 'weak_auth_indicators', 'web_framework', 'x-frame-options', 'x-xss-protection', 'xss']

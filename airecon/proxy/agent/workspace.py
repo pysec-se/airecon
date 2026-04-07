@@ -201,7 +201,7 @@ class _WorkspaceMixin:
             try:
                 arguments = json.loads(arguments)
             except Exception as e:
-                logger.debug("Exception: %s", e)
+                logger.warning("Operation failed: %s", e)
                 arguments = {}
         if not isinstance(arguments, dict):
             return {}

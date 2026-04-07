@@ -1,0 +1,4 @@
+# file: /usr/lib/python3/dist-packages/django/db/models/functions/mixins.py
+# hypothesis_version: 6.151.10
+
+[1000, 'CAST(%s AS SIGNED)', 'DurationField']

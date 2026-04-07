@@ -1,0 +1,4 @@
+# file: /home/pikpikcu/Documents/airecon/airecon/proxy/data_loader.py
+# hypothesis_version: 6.151.10
+
+['BYPASS_STRATEGIES', 'CRITICAL', 'HIGH', 'INFO', 'LOW', 'MEDIUM', '_', 'attack_chains.json', 'browser_action', 'categories', 'chains', 'data', 'description', 'detection_risk', 'estimated_time', 'execute', 'file_extensions.json', 'fuzzer_data.json', 'id', 'name', 'post_exploitation', 'prerequisites', 'reconnaissance', 'required_findings', 'severity', 'steps', 'tool_hint', 'tools.json', 'tools_meta.json', 'triggers', 'utf-8', 'waf_signatures.json', 'waff_bypass.json']

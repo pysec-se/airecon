@@ -1,0 +1,4 @@
+# file: /usr/lib/python3/dist-packages/django/utils/module_loading.py
+# hypothesis_version: 6.151.10
+
+['%s.%s', '.', '__file__', '__path__', '__spec__', '_initializing', 'register_to']

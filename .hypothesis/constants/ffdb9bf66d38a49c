@@ -1,0 +1,4 @@
+# file: /usr/lib/python3/dist-packages/h2/frame_buffer.py
+# hypothesis_version: 6.151.10
+
+[b'PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n', 'END_HEADERS']

@@ -1,0 +1,4 @@
+# file: /usr/lib/python3/dist-packages/django/template/context.py
+# hypothesis_version: 6.151.10
+
+['False', 'None', 'True', '__getitem__', '_processors_index', 'unknown']

@@ -1,0 +1,4 @@
+# file: /usr/lib/python3/dist-packages/django/db/models/sql/subqueries.py
+# hypothesis_version: 6.151.10
+
+['AggregateQuery', 'DeleteQuery', 'InsertQuery', 'SQLAggregateCompiler', 'SQLDeleteCompiler', 'SQLInsertCompiler', 'SQLUpdateCompiler', 'UpdateQuery', 'pk__in', 'resolve_expression']

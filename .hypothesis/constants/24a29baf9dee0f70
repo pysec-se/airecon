@@ -1,0 +1,4 @@
+# file: /usr/lib/python3/dist-packages/trio/_subprocess.py
+# hypothesis_version: 6.151.10
+
+[434, 'bufsize', 'encoding', 'errors', 'linux', 'nt', 'open_process', 'posix', 'run_process', 'shell', 'stderr', 'stdin', 'stdout', 'text', 'universal_newlines', 'win32']

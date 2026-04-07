@@ -622,6 +622,23 @@
   "recon_phase_hints": {
     "live_host_validation": "CRITICAL: After subdomain enumeration, ALWAYS validate which hosts are alive before port scanning or directory brute-force. Use host probing tools to filter dead/unresolved hosts. Never scan dead hosts."
   },
+  "analysis_phase_hints": [
+    "Compare authenticated vs unauthenticated responses — missing access controls often show here",
+    "HTTP method override: check for _method, X-HTTP-Method-Override, X-Method-Override headers",
+    "Mass assignment: submit extra parameters that should be admin-only (role=admin, is_admin=true, privilege_level=9)",
+    "Cache poisoning: modify X-Forwarded-For, Origin, Host headers to poison cached responses",
+    "Parameter pollution: submit duplicate parameters (a=safe&a=dangerous) to confuse validators",
+    "JWT claims manipulation: if JWT visible, inspect claims in base64 — modify exp, role, user_id offline",
+    "CORS misconfiguration: check if Access-Control-Allow-Origin reflects your origin or is wildcard",
+    "Content-Type confusion: change Content-Type to application/json while sending form data or vice versa",
+    "Data type confusion: submit strings where integers expected (e.g., amount=1e5 instead of 100000)",
+    "Business logic flaws: race conditions in transfers, order/payment confirmations, or approval workflows",
+    "Session fixation: check if Set-Cookie lacks secure/HttpOnly/SameSite flags",
+    "Account enumeration: profile registration/password-reset responses for timing or content differences",
+    "Insecure deserialization: if app accepts serialized objects (PHP, Java, Python pickle), probe for gadgets",
+    "IDOR via pattern: increment numeric IDs (user_id=1, 2, 3) or test predictable identifiers (usernames)",
+    "Template injection: if user input reaches template engines, test {{ }}, <% %>, ${} syntax for execution"
+  ],
   "specialist_prompts": {
     "sqli": "Focus EXCLUSIVELY on SQL injection. Test all input parameters for error-based, blind time-based, and UNION-based SQLi. Use manual payloads first, then confirm with automated tooling.",
     "xss": "Focus EXCLUSIVELY on Cross-Site Scripting (XSS). Test all input reflection points for stored, reflected, and DOM-based XSS. Use manual confirmation first, then automated scanning to verify findings.",
@@ -977,6 +994,36 @@
       "websocket": "Exploitation techniques for WebSockets including CSWSH, Smuggling, Auth bypass, and Injection attacks.",
       "xss": "XSS testing covering reflected, stored, and DOM-based vectors with CSP bypass techniques",
       "xxe": "XXE testing for external entity injection, file disclosure, and SSRF via XML parsers"
+    }
+  },
+  "browser_config": {
+    "tracking_url_patterns": [
+      "/api/count", "/api/analytics", "/analytics/", "/track/", "/tracking/",
+      "/pixel", "/beacon", "/collect", "/_track", "/_analytics",
+      "/ga\\.", "/gtag", "/google-analytics", "/matomo\\.", "/piwik\\.", "/hotjar",
+      "/mixpanel", "/segment\\.", "/telemetry", "/metrics",
+      "/ad(s)?/", "/banner", "/campaign", "/click-through", "/impression",
+      "/cdn-cgi/", "/cdn\\.cgi", "/\\.well-known/cf-", "/__cf", "/_next/static", "/_nuxt/",
+      "/webpack", "/hot-update", "/share\\?", "/embed\\?", "/oembed", "/widget", "/iframe",
+      "/favicon\\.", "/apple-touch-icon", "/manifest\\.json", "/robots\\.txt", "/sitemap\\.xml",
+      "/\\.ico\\b", "/\\.png\\b", "/\\.jpg\\b", "/\\.jpeg\\b", "/\\.gif\\b", "/\\.svg\\b",
+      "/\\.woff", "/\\.ttf\\b", "/\\.eot\\b"
+    ],
+    "tracking_query_params": [
+      "utm_", "fbclid", "gclid", "ref", "source", "medium", "campaign",
+      "cid", "sid", "tid", "uuid", "session_id", "visitor_id", "client_id",
+      "rand", "r=", "t=", "v=", "cb=", "cache", "bust", "width=", "height="
+    ],
+    "guidance_messages": {
+      "tracking_url_blocked": "URL blocked: tracking pixel, analytics endpoint, or static asset. Browser navigation to these is not useful for vulnerability testing. Use curl or httpx for HTTP-level analysis instead.",
+      "tracking_url_suggestion": "Do NOT use browser_action for this URL. If you need to analyze it, use: execute(command='curl -sI {url}') for headers. Focus browser_action on interactive pages: login forms, dashboards, multi-step workflows.",
+      "redirect_loop_detected": "The page redirect chain exceeded 10 hops. This is usually caused by tracking pixels, ad blockers, or SSO redirect chains — not a real page.",
+      "redirect_loop_suggestion": "Do NOT retry the same URL. This URL has been registered as dead. If it redirected to a third-party domain (ads, analytics, SSO, or CDN), skip it and test the next endpoint.",
+      "domain_dead": "Unreachable. Remove from target list and proceed to next subdomain.",
+      "timeout_error": "Browser action timed out. Browser close requested.",
+      "js_extraction_note": "Auto-saved full page source. Analyze JS files for API endpoints, secrets, and vulnerabilities.",
+      "console_logs_note": "Auto-saved console logs. Check for errors, debug info, and leaked sensitive data.",
+      "network_logs_note": "Auto-saved network entries. Review for API endpoints, auth tokens, and sensitive data in responses."
     }
   }
 }

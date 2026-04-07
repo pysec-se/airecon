@@ -43,8 +43,7 @@ def _load_port_hints() -> dict[int, str]:
             hints[port] = " | ".join(parts)
         return hints
     except Exception as e:
-        logger.debug("Exception: %s", e)
-        logger.debug("Operation failed")
+        logger.warning("Failed to load resource hints: %s", e)
         return {}
 
 def _load_tech_hints() -> dict[str, str]:
@@ -65,8 +64,7 @@ def _load_tech_hints() -> dict[str, str]:
             hints[tech.lower()] = " | ".join(parts)
         return hints
     except Exception as e:
-        logger.debug("Exception: %s", e)
-        logger.debug("Operation failed")
+        logger.warning("Failed to load resource hints: %s", e)
         return {}
 
 _PORT_HINTS: dict[int, str] = _load_port_hints()
@@ -500,7 +498,7 @@ class _FormatterMixin:
                 return f"Result too large ({len(text)} chars). Check output file."
             return text
         except Exception as e:
-            logger.debug("Exception: %s", e)
+            logger.warning("Failed: %s", e)
             return "Result (unserializable). Check output file."
 
     def _auto_help_lookup(self, tool_binary: str) -> str | None:
@@ -530,14 +528,14 @@ class _FormatterMixin:
                         finally:
                             loop.close()
                     except Exception as e:
-                        logger.debug("Exception: %s", e)
+                        logger.warning("Helper lookup failed: %s", e)
                         return None
 
                 with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
                     future = pool.submit(_run_help)
                     result = future.result(timeout=15)
             except Exception as e:
-                logger.debug("Exception: %s", e)
+                logger.warning("Helper lookup failed: %s", e)
                 return None
 
             if result is None:
@@ -592,7 +590,7 @@ class _FormatterMixin:
                         compact = await asyncio.to_thread(_blocking_lookup)
                         _help_cache[tool_binary] = compact or ""
                     except Exception as e:
-                        logger.debug("Exception: %s", e)
+                        logger.warning("Helper lookup failed: %s", e)
                         _help_cache[tool_binary] = ""
                     finally:
                         _help_lookup_inflight.discard(tool_binary)

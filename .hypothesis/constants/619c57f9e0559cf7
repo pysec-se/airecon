@@ -1,0 +1,4 @@
+# file: /usr/lib/python3/dist-packages/django/core/checks/compatibility/django_4_0.py
+# hypothesis_version: 6.151.10
+
+['4_0.E001', '://']

@@ -33,7 +33,7 @@ def _derive_core_tools() -> frozenset[str]:
                 if name:
                     core.add(name)
     except Exception as exc:
-        logger.debug("Operation failed: %s", exc)
+        logger.warning("Operation failed: %s", exc)
     # Remove tools that belong to specific categories in tools_meta.json
     categories = _TOOLS_META.get("categories", {})
     categorized: set[str] = set()
@@ -151,19 +151,34 @@ _KNOWN_TOOL_BINARIES: set[str] = _collect_all_known_tools()
 # Map phases to relevant shell binary subcategory names from tools_meta.json
 _PHASE_SHELL_CATEGORIES = {
     "RECON": {
-        "subdomain_enum", "port_scan", "web_probing", "fingerprinting",
-        "crawling", "live_host_probe", "directory_bruteforce",
-        "parameter_discovery", "extraction",
+        "subdomain_enum",
+        "port_scan",
+        "web_probing",
+        "fingerprinting",
+        "crawling",
+        "live_host_probe",
+        "directory_bruteforce",
+        "parameter_discovery",
+        "extraction",
     },
     "ANALYSIS": {
-        "generic_scanners", "cms_scanners", "fuzzing",
-        "specific_vulnerabilities", "evasion_and_waf",
-        "analysis", "code_analysis",
+        "generic_scanners",
+        "cms_scanners",
+        "fuzzing",
+        "specific_vulnerabilities",
+        "evasion_and_waf",
+        "analysis",
+        "code_analysis",
     },
     "EXPLOIT": {
-        "specific_vulnerabilities", "advanced_injection", "evasion_and_waf",
-        "network_pivoting", "networking", "bruteforce",
-        "priv_esc", "cloud_exploitation",
+        "specific_vulnerabilities",
+        "advanced_injection",
+        "evasion_and_waf",
+        "network_pivoting",
+        "networking",
+        "bruteforce",
+        "priv_esc",
+        "cloud_exploitation",
     },
     "REPORT": set(),
 }
@@ -272,6 +287,8 @@ def score_tool(
     chain_step_hint: str = "",
     session_evidence_count: int = 0,
     consecutive_failures: int = 0,
+    recent_tool_names: list[str] | None = None,
+    tested_vuln_classes: set[str] | None = None,
 ) -> dict[str, Any]:
     """Score a single tool for relevance."""
     reasons: list[str] = []
@@ -284,19 +301,30 @@ def score_tool(
     is_blocked = tool_name.lower() in {t.lower() for t in blocked_tools}
     is_appropriate = tool_name.lower() in {t.lower() for t in appropriate_tools}
 
-    if is_blocked:
+    # FLEXIBILITY: Tool phase blocking is now ADVISORY not HARD.
+    # Novel discoveries can override phase restrictions.
+    # If session has many unconfirmed hypotheses (discovery mode), allow cross-phase tools.
+    discovery_exception = False
+    if is_blocked and session_evidence_count >= 3:
+        discovery_exception = True
+        reasons.append(
+            f"[DISCOVERY OVERRIDE] '{tool_name}' normally blocked in {phase_upper}, but enabled due to active investigation"
+        )
+
+    if is_blocked and not discovery_exception:
+        # Hard block for tools inappropriate for this phase
         score = 0.0
         reasons.append(
-            f"BLOCKED: '{tool_name}' is not appropriate for {phase_upper} phase"
+            f"[PHASE BLOCKED] '{tool_name}' is not allowed in {phase_upper} phase"
         )
-        return {
-            "score": 0.0,
-            "phase_appropriate": False,
-            "phase_blocked": True,
-            "reasons": reasons,
-        }
-
-    if is_appropriate:
+        # Don't return yet - continue scoring
+    elif is_blocked and discovery_exception:
+        # Boost score when discovery exception applies
+        score = 0.6
+        reasons.append(
+            f"[CROSS-PHASE ALLOWED] Research mode active - using {tool_name} despite phase"
+        )
+    elif is_appropriate:
         score += 0.15
         reasons.append(f"Phase-appropriate for {phase_upper}")
 
@@ -326,6 +354,70 @@ def score_tool(
         elif use_count == 0 and is_appropriate:
             score += 0.05
             reasons.append("Not yet used this session — worth trying")
+
+    # ── Diversity penalty: penalize tools used recently ──────────────
+    if recent_tool_names:
+        recent_count = recent_tool_names.count(tool_name)
+        window_size = len(recent_tool_names)
+        if recent_count > 0:
+            frequency = recent_count / max(window_size, 1)
+            penalty = min(0.4, frequency * 0.5)
+            score -= penalty
+            reasons.append(
+                f"DIVERSITY PENALTY: used {recent_count}/{window_size} recent calls ({frequency:.0%}) — score -{penalty:.2f}"
+            )
+            # Hard block if tool dominates the window
+            if frequency >= 0.6:
+                score = max(0.0, score - 0.3)
+                reasons.append(
+                    "HEAVY PENALTY: tool dominates recent window — strongly prefer alternatives"
+                )
+        # Bonus for tools NOT yet used recently
+        if (
+            recent_count == 0
+            and is_appropriate
+            and tool_name
+            not in (
+                "execute",
+                "browser_action",
+                "create_file",
+                "read_file",
+                "list_files",
+            )
+        ):
+            score += 0.1
+            reasons.append("DIVERSITY BONUS: not used recently — fresh approach")
+
+    # ── Vuln class coverage bonus: boost tools for untested vuln classes ──
+    if tested_vuln_classes:
+        tool_lower = tool_name.lower()
+        # Dynamically map tools to vuln classes from tools_meta.json categories
+        tool_vuln_map: dict[str, set[str]] = {}
+        try:
+            meta_path = Path(__file__).parent.parent / "data" / "tools_meta.json"
+            if meta_path.exists():
+                with open(meta_path) as _mf:
+                    _meta = json.load(_mf)
+                categories = _meta.get("categories", {})
+                for group_name, group in categories.items():
+                    if isinstance(group, dict):
+                        for subcat_name, tool_list in group.items():
+                            if isinstance(tool_list, list):
+                                for tool in tool_list:
+                                    if isinstance(tool, str):
+                                        tool_vuln_map.setdefault(tool.lower(), set())
+                                        tool_vuln_map[tool.lower()].add(
+                                            subcat_name.lower().replace("-", "_")
+                                        )
+        except (OSError, json.JSONDecodeError, AttributeError):
+            pass
+        tool_classes = tool_vuln_map.get(tool_lower, set())
+        untested_by_tool = tool_classes - tested_vuln_classes
+        if untested_by_tool:
+            score += 0.1 * len(untested_by_tool)
+            reasons.append(
+                f"COVERAGE BONUS: can test untested classes: {', '.join(untested_by_tool)}"
+            )
 
     if budget_remaining:
         remaining = budget_remaining.get(tool_name, 999)
@@ -501,7 +593,7 @@ def build_tool_recommendation_context(
 
         parts.append(
             '<tool_guidance phase="' + phase_upper + '">\n'
-            '  Recommended tools for this phase (with descriptions):\n'
+            "  Recommended tools for this phase (with descriptions):\n"
             + "\n".join(tool_lines)
             + "\n  Prioritize tools that advance your current objective.\n"
             "</tool_guidance>"
@@ -550,8 +642,16 @@ def build_tool_recommendation_context(
             "RECON": {"subdomain_enum", "full_recon", "dorking", "asn_whois_osint"},
             "ANALYSIS": {"javascript_analysis", "waf_detection", "cors", "idor"},
             "EXPLOIT": {
-                "xss", "sql_injection", "ssrf", "lfi", "ssti", "command_injection",
-                "xxe", "deserialization", "auth_workflow", "business_logic",
+                "xss",
+                "sql_injection",
+                "ssrf",
+                "lfi",
+                "ssti",
+                "command_injection",
+                "xxe",
+                "deserialization",
+                "auth_workflow",
+                "business_logic",
             },
             "REPORT": {"information_disclosure", "web_cache_poisoning"},
         }
@@ -569,10 +669,17 @@ def build_tool_recommendation_context(
             if isinstance(skills, dict):
                 for sname, sdesc in skills.items():
                     if sname in relevant_skill_names:
-                        skill_entries.append(f"    - skills/{cat}/{sname}.md: {sdesc[:180]}")
+                        skill_entries.append(
+                            f"    - skills/{cat}/{sname}.md: {sdesc[:180]}"
+                        )
                     # Match if skill name is also a known tool/binary
-                    if sname.lower() in _skill_tool_names and sname not in relevant_skill_names:
-                        skill_entries.append(f"    - skills/{cat}/{sname}.md: {sdesc[:180]}")
+                    if (
+                        sname.lower() in _skill_tool_names
+                        and sname not in relevant_skill_names
+                    ):
+                        skill_entries.append(
+                            f"    - skills/{cat}/{sname}.md: {sdesc[:180]}"
+                        )
         if skill_entries:
             # Deduplicate
             seen = set()
@@ -582,7 +689,7 @@ def build_tool_recommendation_context(
                     seen.add(line)
                     unique_skills.append(line)
             parts.append(
-                '<skills_catalog>\n'
+                "<skills_catalog>\n"
                 '  Available knowledge modules. Load with read_file(path="skills/<cat>/<name>.md"):\n'
                 + "\n".join(unique_skills)
                 + "\n  Use these modules to guide your approach and avoid common pitfalls.\n"

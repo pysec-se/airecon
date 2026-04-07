@@ -1,0 +1,4 @@
+# file: /usr/lib/python3/dist-packages/django/core/files/storage/filesystem.py
+# hypothesis_version: 6.151.10
+
+[438, 511, '/', 'O_BINARY', '\\', 'posix', 'rb', 'temporary_file_path', 'wb', 'wt']

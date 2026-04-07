@@ -1,0 +1,4 @@
+# file: /home/pikpikcu/Documents/airecon/airecon/tui/widgets/workspace.py
+# hypothesis_version: 6.151.10
+
+[500, '#vuln-header', '#vuln-placeholder', '#vuln-section', '#vuln-tree', '#workspace-tree', '.', 's', 'vuln-header', 'vuln-placeholder', 'vuln-section', 'vuln-tree', 'vulnerabilities', 'workspace-header', 'workspace-section', 'workspace-tree', '🐞 VULNERABILITIES', '📂 WORKSPACE']

@@ -1,0 +1,4 @@
+# file: /usr/lib/python3/dist-packages/faker/__init__.py
+# hypothesis_version: 6.151.10
+
+['39.0.0', 'Factory', 'Faker', 'Generator']

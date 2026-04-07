@@ -16,7 +16,7 @@ _ENDPOINT_PATTERNS_PATH = (
 try:
     _ENDPOINT_DATA = json.loads(_ENDPOINT_PATTERNS_PATH.read_text(encoding="utf-8"))
 except Exception as e:
-    logger.debug("Exception: %s", e)
+    logger.warning("Operation failed: %s", e)
     _ENDPOINT_DATA = {}
 
 # Build compiled regex lists from data file
@@ -58,7 +58,7 @@ try:
     for tech, info in _TECH_CORR.get("technologies", {}).items():
         _TECH_RISK[tech.lower()] = info.get("risk_score", 0.5)
 except Exception as e:
-    logger.debug("Exception: %s", e)
+    logger.warning("Operation failed: %s", e)
     # Minimal fallback
     _TECH_RISK = {
         "wordpress": 0.75,

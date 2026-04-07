@@ -29,25 +29,27 @@ class _FilesystemExecutorMixin:
         self._last_output_file = None
         start_time = time.time()
 
+        def _strip_workspace_prefix(p: str) -> str:
+            p = p.removeprefix("workspace/")
+            return p.removeprefix("/workspace/")
+
+        def _resolve_workspace_path(p: str) -> Path | None:
+            ws = get_workspace_root()
+            resolved = (ws / p).resolve()
+            try:
+                resolved.relative_to(ws.resolve())
+                return resolved
+            except ValueError:
+                return None
+
         try:
-            path_arg = arguments.get("path", "")
-            if path_arg.startswith("workspace/"):
-                path_arg = path_arg[10:]
-            elif path_arg.startswith("/workspace/"):
-                path_arg = path_arg[11:]
+            path_arg = _strip_workspace_prefix(arguments.get("path", ""))
 
             if self.state.active_target:
-                if not path_arg.startswith(self.state.active_target) and not os.path.isabs(
-                        path_arg):
-                    path_arg = os.path.join(
-                        self.state.active_target,
-                        path_arg)
+                if not path_arg.startswith(self.state.active_target) and not os.path.isabs(path_arg):
+                    path_arg = os.path.join(self.state.active_target, path_arg)
 
-            workspace_root = get_workspace_root()
-            resolved = (workspace_root / path_arg).resolve()
-            try:
-                resolved.relative_to(workspace_root.resolve())
-            except ValueError:
+            if _resolve_workspace_path(path_arg) is None:
                 return False, 0.0, {
                     "success": False,
                     "error": f"Path traversal attempt blocked: '{path_arg}' resolves outside workspace.",

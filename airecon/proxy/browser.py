@@ -155,6 +155,7 @@ BrowserAction = Literal[
     "oauth_authorize",
     "check_auth_status",
     "wait_for_element",
+    "solve_captcha",
 ]
 
 _DEFAULT_USERNAME_SEL: str = (
@@ -719,6 +720,8 @@ class BrowserInstance:
         page = self.pages[tab_id]
         try:
             await self._navigate_with_fallback(page, url)
+            state = await self._get_page_state(tab_id)
+            return state
         except DeadHostError as e:
             logger.warning(
                 "Dead host detected via goto: %s (%s)", e.host, e.original_error
@@ -736,7 +739,36 @@ class BrowserInstance:
                     "Mark this host as dead and move on to the next target."
                 ),
             }
-        return await self._get_page_state(tab_id)
+        except RuntimeError as e:
+            # Handle redirect loops consistently with _safe_action pattern
+            err_str = str(e)
+            if "Too many redirects" in err_str or "redirect loop" in err_str.lower():
+                redirected_url = ""
+                m = re.search(r"final URL:\s*(\S+)", err_str)
+                if m:
+                    redirected_url = m.group(1)
+                logger.warning(
+                    "Browser redirect loop on %s — final: %s",
+                    url[:120],
+                    redirected_url[:120] if redirected_url else "unknown",
+                )
+                return {
+                    "success": False,
+                    "redirect_loop": True,
+                    "error": err_str[:500],
+                    "message": (
+                        "The page redirect chain exceeded 10 hops. This is usually caused by "
+                        "tracking pixels, ad blockers, or SSO redirect chains — not a real page."
+                    ),
+                    "final_url": redirected_url[:200],
+                    "next_action": (
+                        "Do NOT retry the same URL. If it redirected to a third-party domain "
+                        "(ads, analytics, SSO, or CDN), skip it and test the next endpoint. "
+                        "If you need to see this page, try with JavaScript disabled or "
+                        "use curl --head to inspect redirects manually."
+                    ),
+                }
+            raise
 
     def click(self, coordinate: str, tab_id: str | None = None) -> dict[str, Any]:
         with self._execution_lock:

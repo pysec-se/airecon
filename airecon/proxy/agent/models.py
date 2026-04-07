@@ -5,6 +5,7 @@ from pathlib import Path
 import heapq
 import logging
 import re
+from collections import deque
 from typing import Any
 import os
 import uuid
@@ -14,6 +15,7 @@ from time import monotonic
 from urllib.parse import urlparse
 
 from ..config import get_config
+from .constants import SEVERITY_MULTIPLIER as _SEVERITY_MULTIPLIER
 
 logger = logging.getLogger("airecon.agent")
 
@@ -26,8 +28,10 @@ FLAG_PATTERN = re.compile(r"flag\{[^}]+\}", re.IGNORECASE)
 
 _THINK_BLOCK_RE = re.compile(r"<think>.*?</think>", re.DOTALL | re.IGNORECASE)
 _THINK_OPEN_RE = re.compile(r"<think>(?!</think>).*$", re.DOTALL | re.IGNORECASE)
-_SEVERITY_MULTIPLIER: dict[int, float] = {5: 2.0, 4: 1.5, 3: 1.0, 2: 0.7, 1: 0.5}
 _MIN_SEVERITY_FOR_PRESERVATION = 4
+# FLEXIBILITY: Lower confidence floor to 0.30 to capture emerging/novel patterns
+# Novel discoveries often start with low confidence before validation
+_CONF_FLOOR = 0.30
 
 
 def _get_model_limits() -> dict[str, Any]:
@@ -45,7 +49,7 @@ def _get_model_limits() -> dict[str, Any]:
             ),
         }
     except Exception as e:
-        logger.debug("Exception: %s", e)
+        logger.warning("Operation failed: %s", e)
         return {
             "max_tool_iterations": 50,
             "max_tool_history": 100,
@@ -117,7 +121,7 @@ def _get_context_limits():
             "llm_compression_num_predict": config.agent_llm_compression_num_predict,
         }
     except Exception as e:
-        logger.debug("Exception: %s", e)
+        logger.warning("Operation failed: %s", e)
         return {
             "max_conversation_messages": 1024,
             "compression_trigger": 819,
@@ -412,6 +416,112 @@ class CausalState:
                 if str(k).strip()
             }
         return state
+
+
+# ── Runtime state grouping (replaces 50+ bare instance vars in loop.py) ──
+
+
+@dataclass
+class AntiLoopState:
+    """Tracks tool/command diversity to prevent LLM from getting stuck in loops."""
+
+    no_tool_iterations: int = 0
+    stagnation_iterations: int = 0
+    consecutive_same_approach: int = 0
+    recent_tool_names: list[str] = field(default_factory=lambda: [])
+    last_evidence_count: int = 0
+    watchdog_forced_calls: int = 0
+    empty_response_retry_count: int = 0
+    consecutive_failures: int = 0
+    mentor_tool_call_count: int = 0
+    recent_tool_queue: deque[str] = field(default_factory=lambda: deque(maxlen=8))
+
+    def record_tool_use(self, tool_name: str) -> None:
+        self.recent_tool_queue.append(tool_name)
+        self.recent_tool_names = list(self.recent_tool_queue)
+        if len(self.recent_tool_names) > 8:
+            self.recent_tool_names = self.recent_tool_names[-8:]
+
+    def get_same_tool_streak(self) -> int:
+        if len(self.recent_tool_names) < 2:
+            return 0
+        last = self.recent_tool_names[-1]
+        streak = 1
+        for name in reversed(self.recent_tool_names[:-1]):
+            if name == last:
+                streak += 1
+            else:
+                break
+        return streak
+
+    def reset_stagnation(self) -> None:
+        self.stagnation_iterations = 0
+        self.consecutive_same_approach = 0
+
+    def has_stagnated(self, threshold: int = 3) -> bool:
+        return self.stagnation_iterations >= threshold
+
+
+@dataclass
+class SessionLifecycleState:
+    """Session timing, token tracking, and save intervals."""
+
+    last_session_save_iteration: int = 0
+    session_save_interval: int = 10
+    last_conversation_save_iteration: int = 0
+    conversation_save_interval: int = 10
+    last_memory_save_iteration: int = 0
+    memory_save_interval: int = 5
+    last_memory_health_check_iteration: int = -1
+    memory_health_interval: int = 10
+    last_request_time: float = 0.0
+    last_token_snapshot_time: float = 0.0
+    last_context_validation: int = 0
+    user_input_cooldown: float = 30.0
+    last_user_input_time: float = 0.0
+
+
+@dataclass
+class RecoveryState:
+    """Tracks recovery attempts and context management state."""
+
+    recovery_force_tool_calls: int = 0
+    adaptive_num_ctx: int = 0
+    adaptive_num_predict_cap: int = 0
+    vram_crash_count: int = 0
+    token_snapshot_resave_requested: bool = False
+    compression_summary: str = ""
+    budget_pressure_level: int = 0
+    loaded_skill_hashes: set[int] = field(default_factory=set)
+    loaded_tech_skill_paths: set[str] = field(default_factory=set)
+
+    def record_vram_crash(self) -> None:
+        self.vram_crash_count += 1
+        self.adaptive_num_ctx = max(4096, self.adaptive_num_ctx - 8192)
+        self.adaptive_num_predict_cap = max(2048, self.adaptive_num_predict_cap - 1024)
+
+
+@dataclass
+class ScopeTrackingState:
+    """Tracks visited URLs, scope locks, and browser visit limits."""
+
+    visited_browser_urls: set[str] = field(default_factory=set)
+    max_browser_visits_per_domain: int = 5
+    scope_lock_active: bool = False
+    scope_lock_brief: str = ""
+    scope_anchor_target: str = ""
+
+
+@dataclass
+class UserInputState:
+    """Interactive user input handling state."""
+
+    user_input_event: asyncio.Event | None = None
+    user_input_value: str = ""
+    user_input_cancelled: bool = False
+    user_input_request_id: str = ""
+    user_input_prompt: str = ""
+    user_input_type: str = "text"
 
 
 @dataclass
@@ -1172,7 +1282,6 @@ class AgentState:
             and str(o.get("status", "")).lower() == "done"
         ][:max_objectives]
 
-        _CONF_FLOOR = 0.65
         if filter_evidence_by_phase:
             evidence = [
                 e
@@ -1748,7 +1857,7 @@ class AgentState:
         if not hasattr(AgentState._extract_tools, "_tool_names"):
             try:
                 import json
-                
+
                 tools_path = Path(__file__).parent.parent / "data" / "tools_meta.json"
                 with open(tools_path) as f:
                     meta = json.load(f)

@@ -1,13 +1,13 @@
 from __future__ import annotations
 
 import json
-from pathlib import Path
-from typing import Any
 import logging
 import time
+from pathlib import Path
+from typing import Any
 
 logger = logging.getLogger("airecon.agent.session_persistence")
-
+_VERSION = "1.0.0"
 
 class SessionPersistenceEngine:
     def __init__(self, workspace_root: str | Path | None = None):
@@ -21,78 +21,50 @@ class SessionPersistenceEngine:
         session_dir.mkdir(parents=True, exist_ok=True)
         return session_dir
 
-    def save_session_state(self, target: str, state: dict[str, Any]) -> Path:
+    # Internal generic helpers
+    def _save_json(self, target: str, filename: str, payload: Any) -> Path:
         session_dir = self._get_session_dir(target)
-        state_file = session_dir / "session_state.json"
-        data = {
-            "version": "1.0.0",
-            "saved_at": time.time(),
-            "target": target,
-            "state": state,
-        }
-        state_file.write_text(json.dumps(data, indent=2, default=str), encoding="utf-8")
+        fpath = session_dir / filename
+        data = {"version": _VERSION, "saved_at": time.time(), "target": target, "payload": payload}
+        fpath.write_text(json.dumps(data, indent=2, default=str), encoding="utf-8")
+        return fpath
+
+    def _load_json(self, target: str, filename: str) -> Any | None:
+        try:
+            session_dir = self._get_session_dir(target)
+            fpath = session_dir / filename
+            if not fpath.exists():
+                return None
+            data = json.loads(fpath.read_text(encoding="utf-8"))
+            if data.get("version") != _VERSION:
+                return None
+            return data.get("payload")
+        except Exception as e:
+            logger.debug("Failed to load %s for %s: %s", filename, target, e)
+            return None
+
+    # Session state
+    def save_session_state(self, target: str, state: dict[str, Any]) -> Path:
         logger.info("Session state saved for %s", target)
-        return state_file
+        return self._save_json(target, "session_state.json", state)
 
     def load_session_state(self, target: str) -> dict[str, Any] | None:
-        try:
-            session_dir = self._get_session_dir(target)
-            state_file = session_dir / "session_state.json"
-            if not state_file.exists():
-                return None
-            data = json.loads(state_file.read_text(encoding="utf-8"))
-            if data.get("version") != "1.0.0":
-                return None
+        result = self._load_json(target, "session_state.json")
+        if result is not None:
             logger.info("Session state loaded for %s", target)
-            return data.get("state", {})
-        except Exception as e:
-            logger.debug("Failed to load session state for %s: %s", target, e)
-            return None
+        return result
 
+    # Payload memory
     def save_payload_memory(self, target: str, records: list[dict[str, Any]]) -> Path:
-        session_dir = self._get_session_dir(target)
-        payload_file = session_dir / "payload_memory.json"
-        data = {
-            "version": "1.0.0",
-            "saved_at": time.time(),
-            "target": target,
-            "records": records,
-        }
-        payload_file.write_text(json.dumps(data, indent=2), encoding="utf-8")
-        return payload_file
+        return self._save_json(target, "payload_memory.json", records)
 
     def load_payload_memory(self, target: str) -> list[dict[str, Any]]:
-        try:
-            session_dir = self._get_session_dir(target)
-            payload_file = session_dir / "payload_memory.json"
-            if not payload_file.exists():
-                return []
-            data = json.loads(payload_file.read_text(encoding="utf-8"))
-            return data.get("records", [])
-        except Exception as e:
-            logger.debug("Failed to load payload memory for %s: %s", target, e)
-            return []
+        result = self._load_json(target, "payload_memory.json")
+        return result if isinstance(result, list) else []
 
+    # Adaptive state
     def save_adaptive_state(self, target: str, state: dict[str, Any]) -> Path:
-        session_dir = self._get_session_dir(target)
-        adaptive_file = session_dir / "adaptive_state.json"
-        data = {
-            "version": "1.0.0",
-            "saved_at": time.time(),
-            "target": target,
-            "state": state,
-        }
-        adaptive_file.write_text(json.dumps(data, indent=2), encoding="utf-8")
-        return adaptive_file
+        return self._save_json(target, "adaptive_state.json", state)
 
     def load_adaptive_state(self, target: str) -> dict[str, Any] | None:
-        try:
-            session_dir = self._get_session_dir(target)
-            adaptive_file = session_dir / "adaptive_state.json"
-            if not adaptive_file.exists():
-                return None
-            data = json.loads(adaptive_file.read_text(encoding="utf-8"))
-            return data.get("state")
-        except Exception as e:
-            logger.debug("Failed to load adaptive state for %s: %s", target, e)
-            return None
+        return self._load_json(target, "adaptive_state.json")

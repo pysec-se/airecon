@@ -2,22 +2,14 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass, field
-from enum import Enum
 from typing import Any, AsyncIterator
 
 from .models import AgentEvent
 from .pipeline import PipelineEngine
 from .session import session_to_context
+from .constants import AgentRole
 
 logger = logging.getLogger("airecon.agent.graph")
-
-
-class AgentRole(Enum):
-    RECON = "recon"
-    ANALYZER = "analyzer"
-    EXPLOITER = "exploit"
-    REPORTER = "reporter"
-    SPECIALIST = "specialist"
 
 
 @dataclass
@@ -81,7 +73,9 @@ class AgentGraph:
 
         return order
 
-    async def execute(self, shared_session: Any, parent_context: str = "") -> AsyncIterator[AgentEvent]:
+    async def execute(
+        self, shared_session: Any, parent_context: str = ""
+    ) -> AsyncIterator[AgentEvent]:
         from .loop import AgentLoop
 
         order = self.execution_order()
@@ -132,7 +126,9 @@ class AgentGraph:
                 yield event
 
 
-def create_default_graph(target: str, prompt: str = "", recon_mode: str = "full") -> AgentGraph:
+def create_default_graph(
+    target: str, prompt: str = "", recon_mode: str = "full"
+) -> AgentGraph:
 
     g = AgentGraph(target, ollama=None, engine=None)
     if recon_mode == "full":

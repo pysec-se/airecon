@@ -1,0 +1,4 @@
+# file: /home/pikpikcu/Documents/airecon/airecon/logger.py
+# hypothesis_version: 6.151.10
+
+[448, '%Y-%m-%d %H:%M:%S', 'AIRECON_LOG_DIR', 'a', 'ai_log_reasoning.log', 'airecon', 'airecon.agent', 'airecon.logger', 'airecon.proxy.agent', 'airecon.server', 'asyncio', 'debug.log', 'error.log', 'http_proxy.log', 'httpcore', 'httpx', 'markdown_it', 'multipart', 'utf-8', 'uvicorn', 'uvicorn.access', 'uvicorn.error', 'watchfiles']

@@ -1,0 +1,4 @@
+# file: /usr/lib/python3/dist-packages/django/core/checks/caches.py
+# hypothesis_version: 6.151.10
+
+['LOCATION', 'MEDIA_ROOT', 'STATICFILES_DIRS', 'STATIC_ROOT', 'caches.E001', 'caches.W002', 'caches.W003', 'contains', 'is inside', 'matches']

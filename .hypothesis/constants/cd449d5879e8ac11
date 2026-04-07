@@ -1,0 +1,4 @@
+# file: /usr/lib/python3/dist-packages/trio/_core/_generated_io_epoll.py
+# hypothesis_version: 6.151.10
+
+['linux', 'notify_closing', 'wait_readable', 'wait_writable']

@@ -1,0 +1,4 @@
+# file: /usr/lib/python3/dist-packages/django/utils/version.py
+# hypothesis_version: 6.151.10
+
+['%Y%m%d%H%M%S', '%d.%d', '(\\d+|[a-z]+|\\.)', '.', '.dev%s', '__file__', 'a', 'alpha', 'b', 'beta', 'dev', 'final', 'rc']

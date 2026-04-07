@@ -1,0 +1,4 @@
+# file: /home/pikpikcu/Documents/airecon/airecon/proxy/ollama.py
+# hypothesis_version: 6.151.10
+
+[0.0, 2.0, 10.0, 30.0, 180.0, 100, 200, 400, 500, 600, 65536, '/', '/api/chat', '/api/generate', '/api/show', '<think>', '<thinking>', 'Content-Type', 'POST', 'Unexpected error: %s', '_max_response_times', '_response_times', 'airecon.ollama', 'application/json', 'avg', 'broken pipe', 'capabilities', 'compression', 'connection error', 'connection refused', 'connection reset', 'content', 'count', 'done', 'eof', 'function-calling', 'inference', 'keep_alive', 'max', 'message', 'messages', 'min', 'model', 'model is not loaded', 'model not found', 'modelfile', 'name', 'network', 'no gpu', 'num_predict', 'options', 'out of memory', 'prompt', 'role', 'stream', 'stream ended', 'system', 'template', 'think', 'thinking', 'timed out', 'timeout', 'tool-calling', 'tools', 'unsupported model']

@@ -1,0 +1,4 @@
+# file: /usr/lib/python3/dist-packages/aiomcache/client.py
+# hypothesis_version: 6.151.10
+
+[b'\r\n', b' ', b'END\r\n', b'STAT', b'VALUE', b'add', b'append', b'cas', b'decr', b'delete ', b'flush_all\r\n', b'get ', b'gets ', b'incr', b'prepend', b'replace', b'set', b'stats ', b'touch', b'version\r\n', 11211, 'Client', 'FlagClient[Any]', '^[^\\s\x00-\x1f\x7f-\x9f]{1,250}$', '_Client', '_P', '_T', '_U', 'exptime negative', 'exptime not int', 'get failed', 'invalid key', 'key must be bytes', 'stats failed', 'stats {} failed', 'trailing newline', 'utf-8']

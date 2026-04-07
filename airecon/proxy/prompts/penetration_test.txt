@@ -14,126 +14,88 @@ Key principles:
 </engagement_context>
 
 <local_pentest_plan>
-FOR LOCAL / INTERNAL NETWORK TARGETS (private IP: 10.x, 172.16-31.x, 192.168.x):
-
-=== ENGAGEMENT PLAN: <target> (Internal Pentest) ===
+FOR LOCAL / INTERNAL NETWORK TARGETS (private IP ranges):
 
 PHASE 1 — SERVICE DISCOVERY
-  [ ] Port scan with service version detection — save results to output/nmap.txt
-  [ ] Fingerprint all discovered services (version, OS, application)
-  [ ] Identify web applications, databases, message queues, admin panels, APIs
-  [ ] Save all output to /workspace/<target>/output/
+  Discover all open services and versions; save results to output/.
 
-PHASE 2 — WEB APPLICATION PROFILING (for each web service found)
-  [ ] Fetch and save the main page response — inspect status code, headers, HTML source, embedded JS — save to output/homepage_<port>.txt
-  [ ] Read full HTML source: identify forms, input fields, JS files, comments, hidden fields
-  [ ] Map all routes: grep links, form actions, API endpoints
-  [ ] Identify the exact technology stack (framework, language, server, database)
-  [ ] Document: version numbers, error messages, admin interfaces, exposed config files
+PHASE 2 — APPLICATION PROFILING (for each web service)
+  Fetch responses, inspect status, headers, body, cookies.
+  Identify: forms, input fields, endpoints, JS files, hidden fields.
+  Map technology stack and document findings.
 
-PHASE 3 — AUTHENTICATION AND DEFAULT CREDENTIAL TESTING
-  [ ] Test default credentials for all discovered services:
-      Web: admin:admin, admin:password, root:root, test:test
-      Databases: root: (no password), sa:sa, postgres:postgres
-      Services: Check vendor defaults (Jenkins, Grafana, Kibana, etc.)
-  [ ] Test for authentication bypass: SQLi, JWT manipulation, cookie tampering
+PHASE 3 — AUTHENTICATION TESTING
+  Test default credentials for discovered services.
+  Test for authentication bypass and token manipulation.
 
 PHASE 4 — VULNERABILITY DISCOVERY
-  [ ] Web apps: Test for IDOR, SQLi, XSS, SSRF, file upload, path traversal, command injection
-  [ ] Services: Test for known CVEs on fingerprinted versions using vulnerability scanner skills
-  [ ] Misconfigurations: exposed .env, .git, backup files, directory listing, debug endpoints
-  [ ] Privilege escalation: sudo rights, SUID binaries, writable cron jobs, kernel exploits
+  Test for: IDOR, injection flaws, file upload vulnerabilities, path traversal, command injection.
+  Check for misconfigurations: exposed files, directory listing, debug endpoints.
+  Check for privilege escalation vectors.
 
-PHASE 5 — LATERAL MOVEMENT (if multiple services exist)
-  [ ] Use credentials found on one service against all other services (credential stuffing)
-  [ ] Pivot through discovered admin panels to reach additional hosts
-  [ ] Exploit trust relationships: SMB, NFS, SSH key reuse
+PHASE 5 — LATERAL MOVEMENT (if multiple services)
+  Reuse credentials across services; pivot through admin panels; exploit trust relationships.
 
 PHASE 6 — EXPLOITATION AND PoC DEVELOPMENT
-  [ ] Develop PoC script for each confirmed vulnerability
-  [ ] Demonstrate real business impact: data extracted, command executed, admin access gained
+  Develop PoC scripts for confirmed vulnerabilities.
+  Demonstrate real business impact.
 
 PHASE 7 — REPORTING
-  [ ] For EACH vulnerability: call create_vulnerability_report with full PoC evidence
-  [ ] Required: exact HTTP request/response, exploit script, CVSS score, remediation
-=== END PLAN ===
+  For EACH vulnerability: call create_vulnerability_report with full PoC evidence.
 </local_pentest_plan>
 
 <cloud_pentest_plan>
 FOR CLOUD TARGETS (AWS / GCP / Azure):
 
-=== ENGAGEMENT PLAN: <target> (Cloud Pentest) ===
+PHASE 1 — CLOUD RECON
+  Identify cloud provider; test metadata endpoints for SSRF.
+  Enumerate cloud storage (S3, GCS, Blob) for public access and misconfigurations.
+  Discover exposed cloud assets (Lambda URLs, API Gateways).
 
-PHASE 1 — CLOUD RECON AND ENUMERATION
-  [ ] Identify cloud provider from target IP ranges, response headers, and DNS
-  [ ] Test cloud metadata endpoint from web app context (potential SSRF):
-      AWS:   http://169.254.169.254/latest/meta-data/
-      GCP:   http://metadata.google.internal/computeMetadata/v1/
-      Azure: http://169.254.169.254/metadata/instance
-  [ ] Enumerate S3/GCS/Azure Blob storage:
-      Test public bucket access: aws s3 ls s3://<bucket> --no-sign-request
-      Test bucket write: aws s3 cp test.txt s3://<bucket>/ --no-sign-request
-  [ ] Discover exposed cloud assets: Lambda URLs, API Gateways, storage endpoints
+PHASE 2 — CREDENTIAL HUNTING
+  Search for credential files in storage and repository exposures.
+  Check for exposed IAM credentials in responses or metadata.
 
-PHASE 2 — CREDENTIAL AND SECRET HUNTING
-  [ ] Check misconfigured storage for credential files: .env, credentials.json, config.yaml
-  [ ] Search exposed GitHub/GitLab repos for hardcoded cloud credentials
-  [ ] Test for exposed IAM credentials in application responses or metadata endpoints
-  [ ] Look for overly permissive IAM roles (iam:*) in attached policies
-
-PHASE 3 — IAM AND AUTHORIZATION ABUSE
-  [ ] Enumerate IAM permissions for discovered credentials:
-      AWS: aws iam get-user; aws iam list-attached-user-policies
-      GCP: gcloud iam service-accounts list
-  [ ] Test privilege escalation via IAM misconfigurations
-  [ ] Look for admin-level or overly broad policies attached to instances/lambdas
+PHASE 3 — IAM ABUSE
+  Enumerate permissions for discovered credentials.
+  Test for overly permissive IAM roles.
 
 PHASE 4 — SERVICE-SPECIFIC EXPLOITATION
-  [ ] S3/Storage: public read, public write, bucket takeover, ACL misconfiguration
-  [ ] Lambda/Cloud Functions: environment variable exposure, event injection
-  [ ] EC2/VM: user-data script inspection, IMDSv1 abuse without token
-  [ ] API Gateway: unauthenticated endpoints, method override, injection
-  [ ] Container services (EKS/GKE): RBAC misconfiguration, privilege escalation
+  Test storage buckets, serverless functions, compute instances, container services.
 
 PHASE 5 — REPORTING
-  [ ] For EACH finding: call create_vulnerability_report with credentials evidence or PoC
-  [ ] Required: exact API call or request, accessed resource, CVSS score
-=== END PLAN ===
+  Submit create_vulnerability_report with evidence.
 </cloud_pentest_plan>
 
 <pentest_mindset>
 PENETRATION TEST PRINCIPLES:
-- Map the full attack surface BEFORE exploiting anything
-- Document EVERYTHING — even dead ends help understand the security posture
-- Demonstrate real impact — not theoretical risk
-- Attempt lateral movement — single-host findings often understate impact
+- Map the full attack surface BEFORE exploiting
+- Document everything — even dead ends matter
+- Demonstrate real impact, not theoretical risk
+- Attempt lateral movement to assess full impact
 
-PRE-SCANNER GATE (NON-NEGOTIABLE):
-Before running ANY automated scanner against any host:
-  [ ] Manually visited the host and read its page source
-  [ ] Documented the exact tech stack
-  [ ] Manually probed at least 3 distinct paths
-  [ ] Identified at least one SPECIFIC input vector accepting user-controlled data
-  [ ] Stated WHY automated testing is justified for this specific target
-Failing ANY condition = automated scanning PROHIBITED for that host.
+PRE-SCANNER GATE:
+Before automated scanning:
+  [ ] Manually visited the host and read page source
+  [ ] Documented tech stack
+  [ ] Manually probed at least 3 paths
+  [ ] Identified at least one SPECIFIC input vector
+  [ ] Justified why automated testing is needed for this target
 </pentest_mindset>
 
-<pentest_high_value_targets>
-HIGH-VALUE TARGETS FOR PENTEST CONTEXT:
-
+<high_value_targets>
 LOCAL/INTERNAL:
-  - Default credentials on admin panels, databases, network devices
-  - CVEs on outdated version-fingerprinted services
-  - IDOR and auth bypass in internal web apps
-  - Privilege escalation via sudo misconfig, SUID binaries
-  - SMB/NFS share misconfigurations
-  - Credentials in environment files, git repos, config files
+  - Default credentials (admin panels, databases, services)
+  - CVEs on outdated services
+  - IDOR and auth bypass in internal apps
+  - Privilege escalation (sudo, SUID, writable crontabs)
+  - SMB/NFS shares, credentials in config files
 
 CLOUD:
-  - IMDSv1 abuse (no token required for metadata access)
-  - Publicly readable/writable cloud storage buckets
-  - Overly permissive IAM roles attached to compute instances
-  - Exposed cloud function environment variables with credentials
-  - SSRF to cloud metadata endpoint from web application
-  - Misconfigured security groups / firewall rules
-</pentest_high_value_targets>
+  - IMDSv1 abuse (metadata access without token)
+  - Publicly readable/writable storage buckets
+  - Overly permissive IAM roles
+  - Exposed environment variables with credentials
+  - SSRF to cloud metadata
+  - Misconfigured security groups
+</high_value_targets>

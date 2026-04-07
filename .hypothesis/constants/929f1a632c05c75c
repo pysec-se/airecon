@@ -1,0 +1,4 @@
+# file: /usr/lib/python3/dist-packages/django/templatetags/static.py
+# hypothesis_version: 6.151.10
+
+['<PrefixNode for %r>', 'MEDIA_URL', 'STATIC_URL', 'as', 'static']

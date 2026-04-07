@@ -1,0 +1,4 @@
+# file: /home/pikpikcu/Documents/airecon/airecon/proxy/web_search.py
+# hypothesis_version: 6.151.10
+
+[0.0, 2.0, 3.0, 5.0, 60.0, 200, 3600, '.airecon', '0', 'Cannot connect', 'Connection', 'No title', '\\bsite:\\S+\\b', 'airecon.web_search', 'body', 'cache', 'content', 'en', 'engine', 'engines', 'error', 'ext:', 'format', 'from_cache', 'href', 'json', 'language', 'q', 'result', 'results', 'rt', 'safesearch', 'search', 'site:*.', 'success', 'threading', 'timed out', 'title', 'url', 'wt']

@@ -1,0 +1,4 @@
+# file: /home/pikpikcu/Documents/airecon/airecon/tui/widgets/status.py
+# hypothesis_version: 6.151.10
+
+[1000, 65536, 1000000, 5000000, 1000000000, '#00d4aa', '#22c55e', '#6b7280', '#ef4444', '#f59e0b', '#status-caido-exec', '#status-metrics', '#status-skills', 'Close', 'OFF', 'ON', 'Ollama', 'Ollama (degraded)', 'offline', 'online', 'primary', 'skills-close-btn', 'skills-content', 'skills-dialog', 'skills-title', 'status-caido-exec', 'status-metrics', 'status-skills', '—', '○', '●']

@@ -1,0 +1,4 @@
+# file: /usr/lib/python3/dist-packages/django/db/models/constraints.py
+# hypothesis_version: 6.151.10
+
+[' condition=%s', ' deferrable=%r', ' expressions=%s', ' fields=%s', ' include=%s', ' name=%s', ' opclasses=%s', '%s.%s', '<%s:%s%s%s%s%s%s%s>', 'BaseConstraint', 'CheckConstraint', 'Deferrable', 'UniqueConstraint', 'check', 'condition', 'conditional', 'deferrable', 'deferred', 'django.db.models', 'fields', 'flatten', 'immediate', 'include', 'name', 'opclasses']

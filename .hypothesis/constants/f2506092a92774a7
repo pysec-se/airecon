@@ -1,0 +1,4 @@
+# file: /usr/lib/python3/dist-packages/requests_toolbelt/auth/http_proxy_digest.py
+# hypothesis_version: 6.151.10
+
+[407, 'Proxy-Authorization', '_thread_local', 'digest ', 'false', 'proxy-authenticate', 'response', 'stale', 'true']

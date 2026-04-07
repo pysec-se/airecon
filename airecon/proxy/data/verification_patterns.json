@@ -25,5 +25,16 @@
     ],
     "sql_error_patterns": [
         "sql syntax", "mysql_fetch", "ora-", "sqlite3::", "pg::", "unclosed quotation", "boolean expression"
+    ],
+    "false_positive_indicators": [
+        "location header.*(?:<script|alert%3[ce]|%3[cC]script)",
+        "(?:301|302).*redirect.*location.*(?:<script|alert|%3[cC])",
+        "redirects to.*test=<script>",
+        "reflects.*(?:user-controlled|user-supplied).*(?:input|parameter).*(?:verbatim|unmodified|unchanged).*(?:location|url|destination).*(?:header|301|302|redirect)",
+        "redirect.*verif(?:i|y|ication).*location.*header",
+        "payload.*verbatim.*location.*header"
+    ],
+    "url_encoding_checks": [
+        "%3C", "%3c", "%3E", "%3e", "%27", "%22", "%3C%2F", "%3c%2f"
     ]
 }

@@ -1,0 +1,4 @@
+# file: /home/pikpikcu/Documents/airecon/airecon/proxy/agent/rate_limiter.py
+# hypothesis_version: 6.151.10
+
+[0.0, 0.15, 0.3, 0.4, 0.5, 0.8, 1.0, 1.4, 1.5, 2.0, 3.0, 100.0, 200.0, 1000.0, 200, 400, 429, 503, 1000, 'AdaptiveRateLimiter', 'GET', 'POST', 'Proxy configured: %s', 'Request error: %s', 'Retry-After', 'aborted', 'airecon_request_ms', 'baseline_latency_ms', 'congestion_signal', 'current_delay', 'domain', 'ewma_latency_ms', 'inf', 'rate_limit_hits', 'success_rate', 'total_requests']

@@ -1,0 +1,4 @@
+# file: /usr/lib/python3/dist-packages/django/utils/text.py
+# hypothesis_version: 6.151.10
+
+[b'\x00', b'a', 5000000, ' \\1', '"\'', '%(truncated_text)s', '%(truncated_text)s…', '%s %s %s', '%s%s', '(?u)[^-\\w.]', '([^<>\\s]+)', ', ', '-', '-_', '.', '..', '2', '3', '4', '5', '6', '7', '8', '9', '</%s>', '<[^>]+?>|(.)', '<|([^<>\\s]+)', '>', 'NFC', 'NFKC', 'NFKD', '[-\\s]+', '[^\\w\\s-]', '\\', '\\%s', '\\\\', '\\r\\n|\\r', '_', '_end', '_text', 'a', 'area', 'ascii', 'b', 'base', 'br', 'c', 'col', 'd', 'e', 'f', 'g', 'h', 'hr', 'i', 'ignore', 'img', 'input', 'j', 'k', 'l', 'link', 'm', 'n', 'o', 'or', 'p', 'param', 'q', 'r', 's', 't', 'truncated_text', 'u', 'v', 'w', 'wb', 'x', 'y', 'z']

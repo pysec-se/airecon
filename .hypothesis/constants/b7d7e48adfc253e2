@@ -1,0 +1,4 @@
+# file: /home/pikpikcu/Documents/airecon/airecon/tui/widgets/path_completer.py
+# hypothesis_version: 6.151.10
+
+['#path-list', '.', '/', 'path-list', '▸']

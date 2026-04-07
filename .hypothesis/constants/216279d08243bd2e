@@ -1,0 +1,4 @@
+# file: /usr/lib/python3/dist-packages/django/forms/forms.py
+# hypothesis_version: 6.151.10
+
+[' class="%s"', '%s-%s', ', ', ':', ';', 'BaseForm', 'Form', 'Unknown', 'bound', 'clean_%s', 'cls', 'css_classes', 'declared_fields', 'django/forms/p.html', 'django/forms/ul.html', 'error', 'error_dict', 'errors', 'field', 'field_name', 'fields', 'form', 'help_text', 'hidden_fields', 'html_class_attr', 'id_%s', 'initial-%s', 'label', 'name', 'nonfield', 'valid']

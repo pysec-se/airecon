@@ -403,7 +403,7 @@ def _docker_path_for(path: Path, fallback: Path) -> Path:
         return fallback
     except Exception as e:
 
-        logger.debug("Exception: %s", e)
+        logger.warning("Operation failed: %s", e)
 
         logger.debug("_docker_path_for: unexpected error for %s, using fallback", path)
         return fallback

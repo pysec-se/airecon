@@ -1,0 +1,4 @@
+# file: /usr/lib/python3/dist-packages/trio/_core/_thread_cache.py
+# hypothesis_version: 6.151.10
+
+['RetT', '_default_name', '_idle_workers', '_job', '_thread', '_thread_cache', '_worker_lock', 'ascii', 'darwin', 'libc.so', 'pthread', 'pthread_setname_np', 'register_at_fork', 'replace']

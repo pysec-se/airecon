@@ -1,0 +1,4 @@
+# file: /home/pikpikcu/Documents/airecon/airecon/tui/widgets/input.py
+# hypothesis_version: 6.151.10
+
+[500, '#slash-list', '.airecon', '/', '/clear', '/help', '/info', '/mcp', '/reset', '/shell', '/skills', '/status', '/tools', '@', 'History Down', 'History Up', 'Select All', 'Submit Command', 'a', 'airecon.tui.input', 'ctrl+a', 'ctrl+enter', 'down', 'enter', 'escape', 'history.log', 'history_down', 'history_up', 'prompt', 'r', 'select_all_text', 'shift+enter', 'slash-list', 'submit', 'tab', 'up', 'utf-8']

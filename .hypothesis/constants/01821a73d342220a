@@ -1,0 +1,4 @@
+# file: /usr/lib/python3/dist-packages/django/db/models/sql/datastructures.py
+# hypothesis_version: 6.151.10
+
+[' %s', ' AND ', '%s %s%s ON (%s)', '%s.%s = %s.%s', '(%s)', 'field']

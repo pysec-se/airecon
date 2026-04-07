@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import json
 import logging
 import re
+from pathlib import Path
 from typing import Any
 
 from ..config import get_config
@@ -49,13 +51,7 @@ class _ExplorationMixin:
         duration: float = 0.0,
         output_size: int = 0,
     ) -> None:
-        """Record tool usage to cross-session memory for learning.
-
-        This enables the agent to learn from experience across sessions:
-        - Which tools work best for which targets
-        - Historical success/failure rates
-        - Average execution times
-        """
+        """Record tool usage to cross-session memory for learning."""
         try:
             from ..memory import get_memory_manager
 
@@ -100,8 +96,31 @@ class _ExplorationMixin:
         )
         if meaningful_now > self._last_evidence_count:
             self._stagnation_iterations = 0
+            self._consecutive_same_approach = 0
         else:
             self._stagnation_iterations += 1
+            if not self._recent_tool_names:
+                self._consecutive_same_approach = (
+                    getattr(self, "_consecutive_same_approach", 0) + 1
+                )
+            else:
+                last_tool = self._recent_tool_names[-1]
+                last_cmd = ""
+                if hasattr(self, "state") and self.state.tool_history:
+                    for te in reversed(self.state.tool_history):
+                        if getattr(te, "tool_name", "") == last_tool:
+                            last_cmd = str(
+                                (te.arguments or {}).get("command", te.arguments or {})
+                            )[:120]
+                            break
+                if last_cmd and hasattr(self, "_last_approach_signature"):
+                    if last_cmd[:80] == self._last_approach_signature[:80]:
+                        self._consecutive_same_approach = (
+                            getattr(self, "_consecutive_same_approach", 0) + 1
+                        )
+                    else:
+                        self._consecutive_same_approach = 0
+                self._last_approach_signature = last_cmd
         self._last_evidence_count = meaningful_now
 
     def _build_exploration_directive(self, phase: PipelinePhase) -> str:
@@ -116,18 +135,20 @@ class _ExplorationMixin:
             return ""
 
         intensity = self._cfg_float(cfg, "agent_exploration_intensity", 0.8)
-        stagnation_threshold = self._cfg_int(cfg, "agent_stagnation_threshold", 2)
-        max_same_streak = self._cfg_int(cfg, "agent_max_same_tool_streak", 3)
+        stagnation_threshold = 1
+        max_same_streak = 2
         same_tool_streak = self._get_same_tool_streak()
         window = max(3, self._cfg_int(cfg, "agent_tool_diversity_window", 8))
         recent = self._recent_tool_names[-window:]
         unique_recent = len(set(recent)) if recent else 0
+        consecutive_same = getattr(self, "_consecutive_same_approach", 0)
 
         is_stagnating = (
             self._stagnation_iterations >= stagnation_threshold
             or self._consecutive_failures >= 2
             or self._no_tool_iterations >= 1
             or same_tool_streak >= max_same_streak
+            or consecutive_same >= 2
         )
 
         is_creative_phase = phase in (PipelinePhase.ANALYSIS, PipelinePhase.EXPLOIT)
@@ -135,79 +156,59 @@ class _ExplorationMixin:
         if not is_stagnating and not is_creative_phase:
             return ""
 
-        tactic_map: dict[PipelinePhase, list[str]] = {
-            PipelinePhase.RECON: [
-                "Breadth-first: map the FULL attack surface before going deep — subdomains, vhosts, port scan, then content discovery.",
-                "Switch discovery families when stalled: passive OSINT → certificate transparency (crt.sh) → web archives → active probing → parameter mining.",
-                "Certificate transparency logs reveal subdomains missed by brute-force. Check crt.sh or similar for '%.<target>' before active enumeration.",
-                "Validate every discovered subdomain/host as live (httpx probe) before enumerating further — dead hosts waste iterations.",
-                "No passive intelligence yet? Dork: site:<target> filetype:env OR inurl:config OR inurl:.git to find exposed configs.",
-                "Crawl discovered endpoints for hidden paths, JS files, and API routes — automated crawlers find what directory brute-force misses.",
-                "Check archived URLs (wayback, gau) for historical endpoints and parameters that may still be live.",
-                "Fingerprint technologies precisely (headers, cookies, error pages, JS libs) — each tech narrows which exploit paths are viable.",
-                "Enumerate ALL HTTP methods on interesting endpoints (OPTIONS, PUT, PATCH, DELETE) — unexpected methods are common misconfigs.",
-                "Find API docs (swagger.json, openapi.yaml, /api/docs) — they reveal hidden endpoints and parameter names instantly.",
-            ],
-            PipelinePhase.ANALYSIS: [
-                "MANUAL-FIRST: Do NOT start analysis with nuclei/nikto/sqlmap — these produce noise. "
-                "Build one specific hypothesis first, then craft a targeted curl/python probe to test it.",
-                "Think like an attacker, not a scanner: what does THIS application's unique logic enable? "
-                "Misused trust, unexpected state transitions, privilege boundary leaks — these won't appear in scanner output.",
-                "Baseline vs probe: send a benign request first, record the response, then send your mutated probe. "
-                "The DIFF is the finding — not the response alone.",
-                "Mutate parameters aggressively: encoding variants (URL, HTML, unicode), type confusion (string→int→array), boundary values.",
-                "Correlate endpoints, auth flows, and object IDs for IDOR and privilege escalation — test same action with different user roles.",
-                "Run parameter discovery on ALL confirmed endpoints — hidden params (X-Forwarded-For, debug=1, admin=true) are high-value.",
-                "Mine proxy HTTP history for undocumented endpoints, auth token patterns, and IDOR candidates in response bodies.",
-                "Test for reflected and stored XSS on every input field: HTML context, JS context, attribute context require different payloads.",
-                "Check for SQL injection on every parameter: error-based first (quick confirmation), then blind boolean/time-based.",
-                "Test SSRF on any URL-accepting parameter: internal metadata (169.254.169.254), localhost services, file:// protocol.",
-                "Source code or repository accessible? Run static analysis — finds injection sinks and hardcoded secrets faster than manual testing.",
-                "Generate at least one non-obvious hypothesis and test it — e.g., can parameter X influence server-side file path?",
-                "If testing many variants (IDs/roles/encodings), write a script in tools/ to automate and log all results.",
-            ],
-            PipelinePhase.EXPLOIT: [
-                "PROOF-OF-CONCEPT FIRST: do not rely on scanner output to confirm exploitability. "
-                "Write a minimal Python/curl PoC that demonstrates the exact impact — data access, privilege change, or state modification.",
-                "Rotate payload families every failed attempt — change the attack CLASS, not just the payload string.",
-                "XSS: test all 3 contexts separately — HTML body (<img onerror>), attribute (\" onmouseover=), JavaScript (';alert//1).",
-                "XSS: if WAF is blocking, try: case variation, HTML entity encoding, SVG vectors, DOM-based (location.hash, document.write).",
-                "SQLi: if quotes are filtered, try: numeric injection, LIKE operator, comment variants (/**/, /*!...*/, %23 for #).",
-                "SSRF: if direct IPs are blocked, try: decimal encoding (2130706433), octal (0177.0.0.1), IPv6 (::1), DNS rebinding.",
-                "Auth bypass: try JWT alg:none, expired tokens, token for wrong user, admin=true hidden param, role ID manipulation.",
-                "Chain medium findings: XSS + CSRF = account takeover; IDOR + info disclosure = full data breach.",
-                "Prefer impact PROOF over scanner output: demonstrate state change, data access, or privilege escalation with concrete evidence.",
-                "JavaScript-heavy target? Switch to browser automation for DOM-based XSS, OAuth flows, and client-side logic testing.",
-                "When exploitation is multi-step, write a PoC script in tools/ instead of manual repetition.",
-                "High-value complex finding? Spawn a specialist subagent for focused iterations.",
-            ],
-            PipelinePhase.REPORT: [
-                "Convert strongest evidence into reproducible PoC steps with exact inputs, HTTP request/response, and expected output.",
-                "Document what failed and why to avoid false positives in the report.",
-            ],
-            PipelinePhase.COMPLETE: [],
-        }
+        # ── Dynamic context from data sources ──────────────────────────
+        tested_vuln_classes = self._get_tested_vuln_classes()
+        untested_classes = self._get_untested_vuln_classes(tested_vuln_classes)
+        session_techs = (
+            getattr(self._session, "technologies", {}) if self._session else {}
+        )
+        session_urls = getattr(self._session, "urls", []) if self._session else []
+        session_injection_points = (
+            getattr(self._session, "injection_points", []) if self._session else []
+        )
 
-        all_tactics = tactic_map.get(phase, [])
-        if not all_tactics:
+        # Build dynamic tactics from session context — no hardcoded lists
+        tactics = self._generate_dynamic_tactics(
+            phase=phase,
+            tested_classes=tested_vuln_classes,
+            untested_classes=untested_classes,
+            technologies=session_techs,
+            urls=session_urls,
+            injection_points=session_injection_points,
+            iteration=self.state.iteration,
+        )
+
+        if not tactics:
             return ""
 
         if is_stagnating:
-            tactics = all_tactics[:7]
             pressure = "HIGH" if intensity >= 0.75 else "MEDIUM"
             lines = [
                 f"[SYSTEM: AGGRESSIVE EXPLORATION MODE — {pressure}]",
                 f"Phase={phase.value} | stagnation={self._stagnation_iterations} | "
-                f"same_tool_streak={same_tool_streak} | diversity={unique_recent}/{max(1, len(recent))}",
-                "You must avoid rigid repetitive behavior. Execute a novel, high-value next action now.",
-                "Exploration tactics:",
+                f"same_tool_streak={same_tool_streak} | diversity={unique_recent}/{max(1, len(recent))} | "
+                f"same_approach={consecutive_same}",
+                "CRITICAL: Your current approach is not producing results. You MUST pivot NOW.",
+                "MANDATORY RULES:",
+                "1. Do NOT use the same tool or approach as your last iteration",
+                "2. Do NOT test a vulnerability class already tested on this endpoint",
+                "3. Pick the highest-value UNTESTED attack vector from the tactics below",
+                "4. If exploitation is failing, switch to a completely different vuln class",
+                "",
+                f"VULN CLASSES ALREADY TESTED: {', '.join(sorted(tested_vuln_classes)) if tested_vuln_classes else 'none yet'}",
+                f"UNTESTED CLASSES TO PRIORITIZE: {', '.join(sorted(untested_classes)[:6]) if untested_classes else 'all tested — chain findings instead'}",
+                "",
+                "Exploration tactics (pick the MOST NOVEL one):",
             ]
         else:
-            tactics = all_tactics[:3]
             lines = [
-                f"[ANALYSIS GUIDANCE — Phase={phase.value}]",
-                "Creative reasoning required. Prefer manual hypothesis testing over automated scanners.",
-                "Tactics:",
+                f"[VISIONARY ANALYSIS — Phase={phase.value}]",
+                "Think like an advanced attacker — go beyond standard vulnerability classes.",
+                "Consider the FULL attack surface: trust boundaries, state machines, data flows, and component interactions.",
+                f"Vuln classes tested so far: {', '.join(sorted(tested_vuln_classes)) if tested_vuln_classes else 'none — start broad'}",
+                f"Untested classes available: {', '.join(sorted(untested_classes)[:8]) if untested_classes else 'all covered — focus on chaining'}",
+                "",
+                "Tactics (prioritize untested classes):",
             ]
 
         for tactic in tactics:
@@ -216,7 +217,13 @@ class _ExplorationMixin:
         if is_stagnating:
             if same_tool_streak >= max_same_streak:
                 lines.append(
-                    "[Suggestion]: Consider switching to a different tool family to break the current pattern."
+                    f"\n[TOOL BLOCK] You used '{recent[-1] if recent else 'unknown'}' {same_tool_streak}x consecutively. "
+                    f"You are BLOCKED from using this tool family this iteration. Pick a completely different approach."
+                )
+            if consecutive_same >= 2:
+                lines.append(
+                    "\n[APPROACH BLOCK] Your last 2+ iterations used the same approach pattern. "
+                    "You MUST switch to a fundamentally different attack class now."
                 )
             if self._no_tool_iterations >= 1:
                 lines.append("MANDATORY: reply with tool_call, not planning text.")
@@ -224,18 +231,513 @@ class _ExplorationMixin:
                 "Keep tests in-scope and non-destructive unless explicitly authorized."
             )
 
-        # ── Self-Correcting Strategy Injection ─────────────────────────────
         strategy_hint = self._self_correcting_strategy(phase, recent, same_tool_streak)
         if strategy_hint:
             lines.append(f"\n[STRATEGY ADJUSTMENT] {strategy_hint}")
 
         return "\n".join(lines)
 
+    # ── Dynamic vuln class tracking from data sources ──────────────────
+
+    def _get_tested_vuln_classes(self) -> set[str]:
+        """Extract vulnerability classes already tested — all sources dynamic."""
+        tested: set[str] = set()
+
+        # 1. From evidence log tags
+        for ev in self.state.evidence_log:
+            tags = ev.get("tags", [])
+            for tag in tags:
+                if tag and isinstance(tag, str):
+                    tested.add(tag.lower().replace(" ", "_"))
+
+        # 2. From session vulnerability types (actual findings)
+        if self._session:
+            for v in getattr(self._session, "vulnerabilities", []):
+                vtype = str(v.get("type", v.get("finding", ""))).lower()
+                if vtype:
+                    tested.add(vtype.replace(" ", "_"))
+
+        # 3. From evidence summaries — match against system.txt §11 terms
+        system_vuln_terms = self._get_vuln_terms_from_system_prompt()
+        for ev in self.state.evidence_log:
+            summary = str(ev.get("summary", "")).lower()
+            for term in system_vuln_terms:
+                if term.lower() in summary:
+                    tested.add(term.lower().replace(" ", "_"))
+
+        # 4. From skills catalog — check which skill-based vuln classes have been loaded
+        try:
+            skills_index = self._load_skills_index()
+            for skill_path in skills_index:
+                if "vulnerabilities" in skill_path.lower():
+                    skill_lower = skill_path.lower()
+                    if (
+                        hasattr(self, "state")
+                        and skill_lower.replace("/", "_")
+                        in str(self.state.skills_used).lower()
+                    ):
+                        vuln_class = (
+                            skill_path.split("/")[-1].lower().replace(".md", "")
+                        )
+                        if vuln_class:
+                            tested.add(vuln_class)
+        except Exception as _e:
+            pass
+
+        return tested
+
+    def _get_vuln_terms_from_system_prompt(self) -> list[str]:
+        """Parse vulnerability terms from system.txt §11 dynamically."""
+        if hasattr(self, "_cached_vuln_terms"):
+            return self._cached_vuln_terms
+
+        terms: list[str] = []
+        try:
+            prompt_path = Path(__file__).parent.parent / "prompts" / "system.txt"
+            if prompt_path.exists():
+                content = prompt_path.read_text(encoding="utf-8")
+                in_section = False
+                for line in content.splitlines():
+                    if "§11" in line or "VULNERABILITY PRIORITY" in line:
+                        in_section = True
+                        continue
+                    if in_section:
+                        if line.startswith("━") or (
+                            line.strip().startswith("§") and "§11" not in line
+                        ):
+                            break
+                        if (
+                            "P1" in line
+                            or "P2" in line
+                            or "P3" in line
+                            or "P4" in line
+                            or "P5" in line
+                        ):
+                            parts = line.split("  ", 1)
+                            if len(parts) > 1:
+                                raw_terms = parts[1]
+                                for term in raw_terms.split(","):
+                                    term = term.strip()
+                                    term = term.split("(")[0].strip()
+                                    if term.lower() in (
+                                        "and",
+                                        "or",
+                                        "the",
+                                        "a",
+                                        "an",
+                                    ):
+                                        continue
+                                    if term and len(term) >= 2:
+                                        terms.append(term)
+        except Exception as _e:
+            pass
+
+        # Fallback: derive from skills catalog
+        if not terms:
+            try:
+                skills_index = self._load_skills_index()
+                for skill_path in skills_index:
+                    if "vulnerabilities" in skill_path.lower():
+                        vuln_name = (
+                            skill_path.split("/")[-1]
+                            .replace(".md", "")
+                            .replace("_", " ")
+                        )
+                        if vuln_name:
+                            terms.append(vuln_name)
+            except Exception as _e:
+                pass
+
+        self._cached_vuln_terms = terms
+        return terms
+
+    def _get_untested_vuln_classes(self, tested: set[str]) -> set[str]:
+        """Return vuln classes not yet tested — sourced from data files only."""
+        all_classes = set()
+
+        # Source 1: system.txt §11 terms
+        system_terms = self._get_vuln_terms_from_system_prompt()
+        for term in system_terms:
+            normalized = term.lower().replace(" ", "_").replace("/", "_")
+            if normalized:
+                all_classes.add(normalized)
+
+        # Source 2: skills catalog (vulnerabilities/ category)
+        try:
+            skills_index = self._load_skills_index()
+            for skill_path in skills_index:
+                if "vulnerabilities" in skill_path.lower():
+                    vuln_name = (
+                        skill_path.split("/")[-1].replace(".md", "").replace("-", "_")
+                    )
+                    if vuln_name:
+                        all_classes.add(vuln_name.lower())
+        except Exception as _e:
+            pass
+
+        # Source 3: tools_meta.json specific_vulnerabilities
+        try:
+            meta_path = Path(__file__).parent.parent / "data" / "tools_meta.json"
+            if meta_path.exists():
+                with open(meta_path) as f:
+                    meta = json.load(f)
+                categories = meta.get("categories", {})
+                for group in categories.values():
+                    if isinstance(group, dict):
+                        for subcat_name, tool_list in group.items():
+                            if (
+                                "vulnerab" in subcat_name.lower()
+                                or "specific" in subcat_name.lower()
+                            ):
+                                if isinstance(tool_list, list):
+                                    for tool in tool_list:
+                                        if isinstance(tool, str):
+                                            all_classes.add(
+                                                tool.lower().replace("-", "_")
+                                            )
+        except Exception as _e:
+            pass
+
+        return all_classes - tested
+
+    # ── Dynamic tactic generation — ZERO hardcoded lists ───────────────
+
+    def _generate_dynamic_tactics(
+        self,
+        phase: PipelinePhase,
+        tested_classes: set[str],
+        untested_classes: set[str],
+        technologies: dict,
+        urls: list,
+        injection_points: list,
+        iteration: int,
+    ) -> list[str]:
+        """Generate tactics dynamically from session context and data sources.
+
+        No hardcoded vuln lists, tech stacks, URL patterns, or attack vectors.
+        All tactics are derived from:
+        - system.txt §11 (vuln priorities)
+        - skills catalog (vuln skills, tech skills, methodology skills)
+        - tools_meta.json (tool descriptions, categories)
+        - Session context (tech stack, URLs, injection points)
+        - What has already been tested vs what remains
+        """
+        tactics: list[str] = []
+        tech_names = list(technologies.keys()) if technologies else []
+
+        # Priority 1: Untested vuln classes from data sources
+        # Pick from untested_classes (dynamically computed), not a hardcoded list
+        priority_untested = sorted(untested_classes)[:5]
+
+        for vuln_class in priority_untested:
+            tactic = self._tactic_for_vuln_class(
+                vuln_class, tech_names, urls, injection_points
+            )
+            if tactic:
+                tactics.append(tactic)
+
+        # Priority 2: Phase-specific guidance from skills catalog
+        phase_skill_tactics = self._tactics_from_phase_skills(phase, tested_classes)
+        tactics.extend(phase_skill_tactics[:2])
+
+        # Priority 3: Tech-stack tactics from skills catalog
+        if tech_names:
+            tech_tactics = self._tactics_for_tech_stack(tech_names, tested_classes)
+            tactics.extend(tech_tactics[:2])
+
+        # Priority 4: URL-pattern tactics from session data
+        if urls:
+            url_tactics = self._tactics_for_url_patterns(urls, tested_classes)
+            tactics.extend(url_tactics[:2])
+
+        # Priority 5: Novel vectors from skills catalog methodology skills
+        novel = self._novel_attack_vectors(tested_classes, iteration)
+        tactics.extend(novel[:2])
+
+        return tactics[:8]
+
+    def _tactic_for_vuln_class(
+        self, vuln_class: str, tech_names: list, urls: list, injection_points: list
+    ) -> str | None:
+        """Generate tactic for a vuln class — sourced from skills catalog, not hardcoded."""
+        tech_context = (
+            f" (target uses: {', '.join(tech_names[:3])})" if tech_names else ""
+        )
+        param_context = ""
+        if injection_points:
+            sample = [
+                str(p.get("parameter", p.get("name", "")))
+                for p in injection_points[:3]
+                if isinstance(p, dict)
+            ]
+            if sample:
+                param_context = f" Test on params: {', '.join(sample)}."
+
+        # Try to load skill file for this vuln class
+        skill_content = self._load_vuln_skill_content(vuln_class)
+        if skill_content:
+            return f"{vuln_class.upper()}{tech_context}: {skill_content}{param_context}"
+
+        # Fallback: generate from vuln class name + session context
+        # The LLM knows what each vuln class means from system.txt — we just prompt it
+        return (
+            f"Test for {vuln_class.replace('_', ' ').upper()}{tech_context}. "
+            f"Review your loaded skills for this vulnerability class for specific techniques. "
+            f"Consider how this applies to the current target's architecture and technology stack.{param_context}"
+        )
+
+    def _load_vuln_skill_content(self, vuln_class: str) -> str | None:
+        """Load skill file content for a vulnerability class if available."""
+        try:
+            skills_dir = Path(__file__).parent.parent / "skills" / "vulnerabilities"
+            if not skills_dir.is_dir():
+                return None
+
+            # Try exact match first
+            skill_file = skills_dir / f"{vuln_class}.md"
+            if skill_file.exists():
+                content = skill_file.read_text(encoding="utf-8")
+                # Extract just the first ~200 chars as a hint
+                lines = content.splitlines()
+                # Skip YAML frontmatter
+                in_content = False
+                hint_lines = []
+                for line in lines:
+                    if line.strip() == "---":
+                        if in_content:
+                            break
+                        in_content = True
+                        continue
+                    if in_content and line.strip() and not line.startswith("#"):
+                        hint_lines.append(line.strip())
+                        if len(hint_lines) >= 3:
+                            break
+                return " ".join(hint_lines)[:300] if hint_lines else None
+
+            # Try fuzzy match (replace underscores with hyphens, etc.)
+            for alt_name in [
+                vuln_class.replace("_", "-"),
+                vuln_class.replace("_", " "),
+            ]:
+                for f in skills_dir.iterdir():
+                    if f.stem.lower() == alt_name.lower():
+                        content = f.read_text(encoding="utf-8")
+                        lines = content.splitlines()
+                        in_content = False
+                        hint_lines = []
+                        for line in lines:
+                            if line.strip() == "---":
+                                if in_content:
+                                    break
+                                in_content = True
+                                continue
+                            if in_content and line.strip() and not line.startswith("#"):
+                                hint_lines.append(line.strip())
+                                if len(hint_lines) >= 3:
+                                    break
+                        return " ".join(hint_lines)[:300] if hint_lines else None
+        except Exception as _e:
+            pass
+        return None
+
+    def _tactics_from_phase_skills(
+        self, phase: PipelinePhase, tested_classes: set[str]
+    ) -> list[str]:
+        """Generate tactics from skills catalog relevant to this phase."""
+        tactics = []
+        try:
+            skills_index = self._load_skills_index()
+            # Map phases to skill categories dynamically
+            phase_skill_dirs = {
+                PipelinePhase.RECON: ["reconnaissance", "protocols", "tools"],
+                PipelinePhase.ANALYSIS: [
+                    "vulnerabilities",
+                    "frameworks",
+                    "technologies",
+                    "protocols",
+                ],
+                PipelinePhase.EXPLOIT: [
+                    "payloads",
+                    "vulnerabilities",
+                    "postexploit",
+                    "frameworks",
+                ],
+            }
+            relevant_dirs = phase_skill_dirs.get(phase, [])
+
+            for skill_path in skills_index:
+                # Check if skill is in a relevant directory for this phase
+                if any(d in skill_path.lower() for d in relevant_dirs):
+                    skill_name = skill_path.split("/")[-1].replace(".md", "")
+                    # Skip if already tested
+                    if skill_name.lower() in tested_classes:
+                        continue
+                    tactics.append(
+                        f"Load skill: {skill_path} — it contains techniques for this phase that may not have been tried yet."
+                    )
+                    if len(tactics) >= 3:
+                        break
+        except Exception as _e:
+            pass
+        return tactics
+
+    def _tactics_for_tech_stack(
+        self, tech_names: list, tested_classes: set[str]
+    ) -> list[str]:
+        """Generate tactics based on detected tech — from skills catalog, not hardcoded."""
+        tactics = []
+        try:
+            skills_index = self._load_skills_index()
+            for tech in tech_names:
+                tech_lower = tech.lower()
+                # Find skills related to this technology
+                for skill_path in skills_index:
+                    if (
+                        "technologies" in skill_path.lower()
+                        or tech_lower in skill_path.lower()
+                    ):
+                        skill_name = skill_path.split("/")[-1].replace(".md", "")
+                        if skill_name.lower() not in tested_classes:
+                            tactics.append(
+                                f"Load skill: {skill_path} — specific techniques for {tech}."
+                            )
+                            if len(tactics) >= 2:
+                                break
+                if len(tactics) >= 2:
+                    break
+        except Exception as _e:
+            pass
+
+        # If no skills found, generate generic tech-aware guidance
+        if not tactics and tech_names:
+            tactics.append(
+                f"Target technologies detected: {', '.join(tech_names[:5])}. "
+                f"Research known vulnerability patterns for these technologies. "
+                f"Check skills/technologies/ and skills/vulnerabilities/ for relevant guidance."
+            )
+        return tactics
+
+    def _tactics_for_url_patterns(
+        self, urls: list, tested_classes: set[str]
+    ) -> list[str]:
+        """Generate tactics based on URL patterns — derived from session data, not hardcoded."""
+        tactics = []
+
+        # Dynamically detect patterns from URL content
+        # Instead of hardcoded keyword lists, analyze URL structure
+        path_segments = set()
+        for url in urls:
+            try:
+                from urllib.parse import urlparse
+
+                parsed = urlparse(url)
+                for segment in parsed.path.strip("/").split("/"):
+                    if segment:
+                        path_segments.add(segment.lower())
+            except Exception as _e:
+                pass
+
+        # Generate tactics based on discovered path patterns
+        interesting_paths = path_segments - {
+            "index",
+            "html",
+            "css",
+            "js",
+            "img",
+            "assets",
+            "static",
+        }
+
+        if interesting_paths:
+            sample = sorted(interesting_paths)[:5]
+            tactics.append(
+                f"Interesting path segments discovered: {', '.join(sample)}. "
+                f"Test each for: access control bypass, parameter injection, "
+                f"path traversal, and unexpected behavior. "
+                f"Check skills/vulnerabilities/ for testing methodologies."
+            )
+
+        # Check for API-like patterns
+        if any("api" in seg for seg in path_segments):
+            tactics.append(
+                "API endpoints detected — test for BOLA, mass assignment, "
+                "improper asset management, and rate limit bypass. "
+                "Load skills/vulnerabilities/ for API-specific techniques."
+            )
+
+        return tactics
+
+    def _novel_attack_vectors(
+        self, tested_classes: set[str], iteration: int
+    ) -> list[str]:
+        """Generate novel attack vectors from skills catalog methodology skills."""
+        vectors = []
+        try:
+            skills_index = self._load_skills_index()
+            # Look for methodology/framework skills that suggest novel approaches
+            for skill_path in skills_index:
+                if any(
+                    kw in skill_path.lower()
+                    for kw in ["methodology", "framework", "technique", "advanced"]
+                ):
+                    skill_name = skill_path.split("/")[-1].replace(".md", "")
+                    if skill_name.lower() not in tested_classes:
+                        vectors.append(
+                            f"Load methodology skill: {skill_path} — "
+                            f"advanced techniques that may reveal unique vulnerabilities."
+                        )
+                        if len(vectors) >= 2:
+                            break
+        except Exception as _e:
+            pass
+
+        # If no methodology skills found, inject rotating guidance
+        if not vectors:
+            rotation = iteration % 4
+            guidance_pool = [
+                "Think about trust boundaries in this application — where do components trust each other? "
+                "Test what happens when that trust is violated.",
+                "Consider the data flow: where does user input enter, how is it processed, where is it stored? "
+                "Test each transformation point for weakness.",
+                "Look for state machine flaws: can you skip steps, replay old states, or trigger operations out of order? "
+                "Developers rarely test edge-case state transitions.",
+                "Think about what the developer assumed would never happen — "
+                "then test exactly that assumption. The most critical bugs are often the ones nobody thought to test.",
+            ]
+            vectors.append(guidance_pool[rotation])
+
+        return vectors
+
+    def _load_skills_index(self) -> dict[str, str]:
+        """Load skills catalog index dynamically."""
+        if hasattr(self, "_cached_skills_index"):
+            return self._cached_skills_index
+
+        index: dict[str, str] = {}
+        try:
+            skills_dir = Path(__file__).parent.parent / "skills"
+            if skills_dir.is_dir():
+                for md_file in skills_dir.rglob("*.md"):
+                    rel_path = str(md_file.relative_to(skills_dir))
+                    # Read first line as description
+                    try:
+                        content = md_file.read_text(encoding="utf-8")
+                        first_line = content.splitlines()[0].strip().lstrip("#").strip()
+                        index[rel_path] = first_line
+                    except Exception as _e:
+                        index[rel_path] = ""
+        except Exception as _e:
+            pass
+
+        self._cached_skills_index = index
+        return index
+
     @staticmethod
     def _load_recon_tools_from_meta() -> set[str]:
         """Load reconnaissance tool names from tools_meta.json data file."""
         import json
         from pathlib import Path
+
         try:
             meta_path = Path(__file__).parent.parent / "data" / "tools_meta.json"
             if meta_path.exists():
@@ -246,12 +748,10 @@ class _ExplorationMixin:
                 for subcat in recon.values():
                     if isinstance(subcat, list):
                         tools.update(subcat)
-                # Agent-level recon tools (execute + browser are the wrappers)
                 tools |= {"execute", "browser_action"}
                 return tools
         except Exception as exc:
-            logger.debug("Operation failed: %s", exc)
-        # Fallback — minimal set
+            logger.warning("Operation failed: %s", exc)
         return {
             "execute",
             "browser_action",
@@ -275,7 +775,7 @@ class _ExplorationMixin:
         if phase == PipelinePhase.RECON:
             recon_tools = self._load_recon_tools_from_meta()
             recon_count = sum(1 for t in recent_tools if t in recon_tools)
-            if recon_count >= len(recent_tools) * 0.8 and len(recent_tools) >= 5:
+            if recon_count >= len(recent_tools) * 0.6 and len(recent_tools) >= 3:
                 hint = (
                     "You have been doing RECON for too long without transitioning. "
                     "You should have enough data now. Focus on ANALYSIS: pick the highest-value "
@@ -291,7 +791,7 @@ class _ExplorationMixin:
 
         # Detect: browser redirect loop trap
         browser_errors = sum(1 for t in recent_tools if t == "browser_action")
-        if browser_errors >= 3 and same_tool_streak >= 2:
+        if browser_errors >= 2 and same_tool_streak >= 2:
             hint = (
                 "Browser actions are failing repeatedly — likely hitting tracking pixels or redirect loops. "
                 "STOP using browser_action. Switch to command-line tools (curl, httpx, ffuf) for HTTP testing. "
@@ -304,10 +804,10 @@ class _ExplorationMixin:
             )
             return hint
 
-        # Detect: fuzzing blog/content pages instead of real targets
+        # Detect: fuzzing without findings
         if phase in (PipelinePhase.RECON, PipelinePhase.ANALYSIS):
             fuzz_count = sum(1 for t in recent_tools if "fuzz" in t)
-            if fuzz_count >= 3:
+            if fuzz_count >= 2:
                 hint = (
                     "Multiple fuzzing attempts with no findings — you may be fuzzing the wrong targets. "
                     "Stop fuzzing blog URLs, tracking pixels, or content pages. "
@@ -320,16 +820,18 @@ class _ExplorationMixin:
                 )
                 return hint
 
-        # Detect: tool repetition without progress
-        if same_tool_streak >= 3:
+        # Detect: tool repetition without progress — lowered from 3 to 2
+        if same_tool_streak >= 2:
             hint = (
                 f"You've used the same tool {same_tool_streak} times in a row without new findings. "
-                "This pattern is not working. Switch to a completely different approach: "
+                "BLOCKED: Do NOT use this tool again this iteration. "
+                "Switch to a completely different approach: "
                 "if you were using scanners, switch to manual testing. If manual, try automation. "
-                "If HTTP testing, try source code analysis. If passive, try active."
+                "If HTTP testing, try source code analysis. If passive, try active. "
+                "If injection testing, try logic flaws. If logic, try crypto."
             )
             logger.info(
-                "[Strategy] Tool repetition detected: same tool used %d times consecutively",
+                "[Strategy] Tool repetition detected: same tool used %d times consecutively — BLOCKING",
                 same_tool_streak,
             )
             return hint
@@ -354,7 +856,6 @@ class _ExplorationMixin:
             ):
                 return
 
-            # Determine session context
             session_target = ""
             session_id = ""
             session_techs: dict[str, str] = {}
@@ -365,7 +866,6 @@ class _ExplorationMixin:
                 session_techs = getattr(self._session, "technologies", {})
                 session_vulns = getattr(self._session, "vulnerabilities", [])
 
-            # Lazy init the learning engine — persistent across sessions
             if not hasattr(self, "_adaptive_learning_engine"):
                 from .adaptive_learning import AdaptiveLearningEngine
 
@@ -381,10 +881,8 @@ class _ExplorationMixin:
 
             engine = self._adaptive_learning_engine
 
-            # Record per-target intelligence (endpoints, vulns, params, bypasses)
             self._record_target_memory(tool_name, arguments, result, success)
 
-            # Extract confidence from result
             confidence = 0.0
             if isinstance(result, dict):
                 confidence = float(result.get("confidence", 0.0))
@@ -393,10 +891,8 @@ class _ExplorationMixin:
                     if isinstance(findings, list) and findings:
                         confidence = float(findings[0].get("confidence", 0.0))
 
-            # Determine target type from tech stack
             tech_summary = ", ".join(session_techs.keys()) if session_techs else ""
 
-            # Build context
             context = {"phase": phase}
             for tech_name in session_techs:
                 context[f"tech={tech_name}"] = "detected"
@@ -412,31 +908,33 @@ class _ExplorationMixin:
                 target_type=tech_summary or session_target,
             )
 
-            # Also log observation for LLM abstraction layer
             result_summary = ""
             if isinstance(result, dict):
-                # Compress findings to a short summary
                 findings = result.get("findings", result.get("output", ""))
                 if isinstance(findings, list) and findings:
                     result_summary = str(findings[0])[:300]
                 elif findings:
                     result_summary = str(findings)[:300]
-                # Check for discovered vulnerabilities
                 vuln_found = None
-                if success and isinstance(result.get("findings"), list) and result["findings"]:
+                if (
+                    success
+                    and isinstance(result.get("findings"), list)
+                    and result["findings"]
+                ):
                     for f in result["findings"]:
                         if isinstance(f, dict) and f.get("finding"):
                             vuln_found = str(f["finding"])[:200]
                             break
                 if not vuln_found and hasattr(self, "_session") and self._session:
-                    # Check if a new vuln was added this iteration
                     cur_count = len(session_vulns)
                     prev_count = getattr(self, "_vuln_count_last_learn", 0)
                     if cur_count > prev_count:
                         self._vuln_count_last_learn = cur_count
                         last_vuln = session_vulns[-1]
                         if isinstance(last_vuln, dict):
-                            vuln_found = last_vuln.get("title", last_vuln.get("finding", ""))[:200]
+                            vuln_found = last_vuln.get(
+                                "title", last_vuln.get("finding", "")
+                            )[:200]
             engine.record_observation(
                 tool_name=tool_name,
                 arguments=arguments,
@@ -448,12 +946,13 @@ class _ExplorationMixin:
                 vuln_found=vuln_found,
             )
 
-            # Periodic save (every 10 observations)
             if len(engine.observation_log) % 10 == 0:
                 engine.save_state()
 
-            # Periodic insight distillation every 30 observations
-            if len(engine.observation_log) > 0 and len(engine.observation_log) % 30 == 0:
+            if (
+                len(engine.observation_log) > 0
+                and len(engine.observation_log) % 30 == 0
+            ):
                 insights = engine.distill_insights(
                     ollama_url=cfg.ollama_url,
                     model=cfg.ollama_model,
@@ -474,7 +973,7 @@ class _ExplorationMixin:
                 len(engine.observation_log),
             )
         except Exception as exc:
-            logger.debug("Operation failed: %s", exc)
+            logger.warning("Operation failed: %s", exc)
 
     def _record_target_memory(
         self,
@@ -483,45 +982,37 @@ class _ExplorationMixin:
         result: dict,
         success: bool,
     ) -> None:
-        """Record actionable intelligence to per-target memory.
-
-        Captures: endpoints, vulns, WAF bypasses, sensitive params.
-        """
+        """Record actionable intelligence to per-target memory."""
         target = ""
         if self._session:
             target = getattr(self._session, "target", "")
         if not target:
             return
 
-        # Lazy-init target memory store
         if not hasattr(self, "_target_memory_store"):
             from .adaptive_learning import TargetMemoryStore
+
             self._target_memory_store = TargetMemoryStore()
 
         store = self._target_memory_store
 
-        # Record tech stack
         if self._session:
             techs = getattr(self._session, "technologies", {})
             for tech_name in techs:
                 store.record_tech(target, tech_name)
 
-        # Record endpoints from tool output
         if isinstance(result, dict):
-            # Endpoints from httpx, katana, nmap, etc.
             for key in ("endpoints", "urls", "paths", "routes"):
                 endpoints = result.get(key, [])
                 if isinstance(endpoints, list):
                     for ep in endpoints[:50]:
                         store.record_endpoint(target, str(ep))
 
-            # Sensitive parameters from results
             params = result.get("parameters", result.get("params", []))
             if isinstance(params, list):
                 for p in params:
                     store.record_param(target, str(p))
 
-        # Record vulns with payloads
         if self._session:
             cur_count = len(getattr(self._session, "vulnerabilities", []))
             prev_count = getattr(self, "_vuln_count_last_target_mem", 0)
@@ -529,9 +1020,10 @@ class _ExplorationMixin:
                 self._vuln_count_last_target_mem = cur_count
                 last_vuln = self._session.vulnerabilities[-1]
                 if isinstance(last_vuln, dict):
-
                     vuln_entry = {
-                        "type": last_vuln.get("type", last_vuln.get("finding", "unknown")),
+                        "type": last_vuln.get(
+                            "type", last_vuln.get("finding", "unknown")
+                        ),
                         "path": last_vuln.get("endpoint", last_vuln.get("url", "")),
                         "param": last_vuln.get("parameter", ""),
                         "payload": last_vuln.get("payload", ""),
@@ -540,17 +1032,17 @@ class _ExplorationMixin:
                     }
                     store.record_vulnerability(target, vuln_entry)
 
-        # Record auth endpoints
         if tool_name in ("browser_action", "http_observe", "execute"):
             cmd_or_url = str(arguments.get("command", arguments.get("url", ""))).lower()
-            if any(kw in cmd_or_url for kw in ("login", "auth", "token", "session", "register", "password")):
+            if any(
+                kw in cmd_or_url
+                for kw in ("login", "auth", "token", "session", "register", "password")
+            ):
                 path = arguments.get("url", "")
                 if path:
                     store.record_auth_endpoint(target, str(path))
 
-        # Save periodically (not every call — too expensive)
         if getattr(self, "_target_mem_save_counter", 0) % 15 == 0:
-            # Save all loaded target memories
             for norm, tm in store._cache.items():
                 store.save(norm, tm)
         self._target_mem_save_counter = getattr(self, "_target_mem_save_counter", 0) + 1

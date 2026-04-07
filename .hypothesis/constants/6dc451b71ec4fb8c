@@ -1,0 +1,4 @@
+# file: /usr/lib/python3/dist-packages/django/core/checks/security/csrf.py
+# hypothesis_version: 6.151.10
+
+['security.E101', 'security.E102', 'security.W003', 'security.W016']

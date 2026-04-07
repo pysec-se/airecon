@@ -51,7 +51,7 @@ async def test_agent_duplicate_command(agent_loop):
 
     is_dup, msg = agent_loop._is_duplicate_command("execute", {"command": "ls -la"})
     assert is_dup
-    assert "[ANTI-REPEAT]" in msg
+    assert "[NO NEW EVIDENCE]" in msg
 
 
 def test_agent_state_reset(agent_loop):

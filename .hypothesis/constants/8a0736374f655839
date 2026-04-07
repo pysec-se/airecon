@@ -1,0 +1,4 @@
+# file: /usr/lib/python3/dist-packages/django/db/models/query_utils.py
+# hypothesis_version: 6.151.10
+
+['%s.%s', ', ', 'AND', 'OR', 'PathInfo', 'XOR', '_check', '_connector', '_negated', 'class_lookups', 'conditional', 'django.db.models', 'flatten', 'instance_lookups', 'output_field', 'primary_key', 'resolve_expression']

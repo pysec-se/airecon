@@ -1,0 +1,4 @@
+# file: /usr/lib/python3/dist-packages/django/core/checks/security/sessions.py
+# hypothesis_version: 6.151.10
+
+['security.W010', 'security.W011', 'security.W012', 'security.W013', 'security.W014', 'security.W015']

@@ -1,0 +1,4 @@
+# file: /usr/lib/python3/dist-packages/trio/_core/_local.py
+# hypothesis_version: 6.151.10
+
+['T', 'default', 'name', 'token is not for us']

@@ -261,7 +261,13 @@ async def test_execute_report_tool(agent, mocker):
     )
 
     success, duration, result, out_file = await agent._execute_report_tool(
-        "create_vulnerability_report", {"title": "Test Vuln"}
+        "create_vulnerability_report", {
+            "title": "Test Vuln",
+            "description": "Test XSS found",
+            "target": "http://test.local",
+            "poc_description": "GET /?q=%3Cscript%3Ealert(1)%3C/script%3E returned 200 with body reflection",
+            "poc_script_code": "print(result)",
+        }
     )
 
     assert success
@@ -281,7 +287,14 @@ async def test_execute_report_tool_marks_existing_vulnerability(agent, mocker):
 
     success, _, _, _ = await agent._execute_report_tool(
         "create_vulnerability_report",
-        {"title": "SQL injection in /login endpoint", "endpoint": "/login"},
+        {
+            "title": "SQL injection in /login endpoint",
+            "endpoint": "/login",
+            "description": "SQLi at /login",
+            "target": "http://example.com",
+            "poc_description": "' OR 1=1 -- returned admin profile",
+            "poc_script_code": "print(result)",
+        },
     )
 
     assert success
@@ -301,7 +314,14 @@ async def test_execute_report_tool_does_not_append_unmatched_title(agent, mocker
 
     success, _, _, _ = await agent._execute_report_tool(
         "create_vulnerability_report",
-        {"title": "Remote code execution in admin panel", "endpoint": "/admin"},
+        {
+            "title": "Remote code execution in admin panel",
+            "endpoint": "/admin",
+            "description": "RCE in admin panel",
+            "target": "http://example.com",
+            "poc_description": "POST /admin returned root shell",
+            "poc_script_code": "print(result)",
+        },
     )
 
     assert success

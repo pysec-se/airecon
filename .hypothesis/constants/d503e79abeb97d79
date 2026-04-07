@@ -1,0 +1,4 @@
+# file: /home/pikpikcu/Documents/airecon/airecon/proxy/agent/auth_manager.py
+# hypothesis_version: 6.151.10
+
+[301, 302, 303, 307, 308, 401, 403, '/', '401_unauthorized', '403_forbidden', '://', 'AuthManager', 'User-Agent', '_safe_target_host', '_token', 'asp.net_sessionid', 'auth', 'authenticity_token', 'authorization_url', 'client_id', 'code', 'csrf', 'csrf_token', 'dashboard', 'domain', 'error', 'incorrect password', 'invalid credentials', 'jar', 'jsessionid', 'jwt', 'location', 'logged in', 'login', 'login failed', 'login required', 'login_required', 'logout', 'message', 'name', 'password', 'path', 'phpsessid', 'please sign in', 'redirect_uri', 'remember', 'response_type', 'sess', 'session', 'session_expired', 'sessionid', 'sign in', 'sign-in', 'signin', 'success', 'token', 'username', 'value', 'welcome', 'wrong username']

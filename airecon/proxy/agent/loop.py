@@ -27,12 +27,68 @@ from .loop_policy import is_simple_target_kickoff
 from .loop_process import _ProcessMessageMixin
 from .loop_state import _StateMixin
 from .loop_supervision import _SupervisionMixin
-from .models import AgentState
+from .models import (
+    AgentState,
+    AntiLoopState,
+    RecoveryState,
+    ScopeTrackingState,
+    SessionLifecycleState,
+    UserInputState,
+)
 from .pipeline import PipelineEngine, PipelinePhase
 from .session import SessionData, load_session, record_tested_endpoint  # noqa: F401
 from .validators import _ValidatorMixin
 from .workspace import _WorkspaceMixin
 
+# ── Compatibility aliases: map old bare attr names to structured state ──
+# All 200+ references across mixin files resolve through these properties.
+_ANTI_LOOP_ATTRS = {
+    "_no_tool_iterations",
+    "_stagnation_iterations",
+    "_consecutive_same_approach",
+    "_recent_tool_names",
+    "_last_evidence_count",
+    "_watchdog_forced_calls",
+    "_empty_response_retry_count",
+    "_consecutive_failures",
+    "_mentor_tool_call_count",
+}
+_RECOVERY_ATTRS = {
+    "_recovery_force_tool_calls",
+    "_adaptive_num_ctx",
+    "_adaptive_num_predict_cap",
+    "_vram_crash_count",
+    "_token_snapshot_resave_requested",
+    "_compression_summary",
+    "_budget_pressure_level",
+    "_loaded_skill_hashes",
+    "_loaded_tech_skill_paths",
+}
+_LIFECYCLE_ATTRS = {
+    "_last_session_save_iteration",
+    "_last_conversation_save_iteration",
+    "_last_memory_save_iteration",
+    "_last_request_time",
+    "_last_token_snapshot_time",
+    "_last_context_validation",
+    "_last_memory_health_check_iteration",
+    "_last_user_input_time",
+}
+_SCOPE_ATTRS = {
+    "_visited_browser_urls",
+    "_max_browser_visits_per_domain",
+    "_scope_lock_active",
+    "_scope_lock_brief",
+    "_scope_anchor_target",
+}
+_USER_INPUT_ATTRS = {
+    "_user_input_event",
+    "_user_input_value",
+    "_user_input_cancelled",
+    "_user_input_request_id",
+    "_user_input_prompt",
+    "_user_input_type",
+}
 
 _tools_meta_path = Path(__file__).parent.parent / "data" / "tools_meta.json"
 try:
@@ -121,22 +177,12 @@ class AgentLoop(
 
         self._executed_cmd_hashes: set[str] = set()
         self._executed_cmd_order: deque[str] = deque()
+        self._cmd_execution_context: dict[str, dict[str, Any]] = {}
         self._initial_messages: list[dict[str, Any]] = []
         self._stop_requested: bool = False
-        self._consecutive_failures: int = 0
-
-        self._no_tool_iterations: int = 0
-        self._stagnation_iterations: int = 0
-        self._recent_tool_names: list[str] = []
-        self._last_evidence_count: int = 0
-        self._watchdog_forced_calls: int = 0
-        self._empty_response_retry_count: int = 0
 
         self._prev_phase: PipelinePhase | None = None
 
-        self._mentor_tool_call_count: int = 0
-
-        self._recovery_force_tool_calls: int = 0
         self._session: SessionData | None = None
         self._blocked_tools: set[str] = set()
         self._session_lock = asyncio.Lock()
@@ -147,64 +193,122 @@ class AgentLoop(
         self._is_subagent: bool = False
         self.pipeline: PipelineEngine | None = None
 
-        self._loaded_tech_skill_paths: set[str] = set()
-
         # Session persistence
         self._session_persistence = None
-        self._last_session_save_iteration = 0
-        self._session_save_interval = 10
 
-        self._loaded_skill_hashes: set[int] = set()
+        # ── Structured runtime state (replaces 50+ bare instance variables) ──
+        self._anti_loop = AntiLoopState()
+        self._lifecycle = SessionLifecycleState()
+        self._recovery = RecoveryState()
+        self._scope = ScopeTrackingState()
+        self._user_input = UserInputState()
 
-        self._adaptive_num_ctx: int = 0
-
-        self._vram_crash_count: int = 0
-
-        self._adaptive_num_predict_cap: int = 0
-
-        self._token_snapshot_task: asyncio.Task[None] | None = None
-        self._token_snapshot_resave_requested: bool = False
-
-        self._compression_summary: str = ""
-
-        self._budget_pressure_level: int = 0
-
-        self._last_token_snapshot_time: float = 0.0
-
-        self._last_user_input_time: float = 0.0
-        self._user_input_cooldown: float = 30.0
-
-        self._last_conversation_save_iteration: int = 0
-        self._conversation_save_interval: int = 10
-
-        self._last_memory_save_iteration: int = 0
-        self._memory_save_interval: int = 5
-        self._memory_manager = None
-
-        self._request_times = deque(maxlen=10)
-        self._last_request_time = 0.0
-        self._last_context_validation = 0
-        self._last_saved_cumulative: int = 0
-
-        self._user_input_event: asyncio.Event | None = None
-        self._user_input_value: str = ""
-        self._user_input_cancelled: bool = False
-        self._user_input_request_id: str = ""
-        self._user_input_prompt: str = ""
-        self._user_input_type: str = "text"
-
-        self._scope_lock_active: bool = False
-        self._scope_lock_brief: str = ""
-        self._scope_anchor_target: str = ""
-
-        self._memory_health_status: dict[str, Any] = {}
-        self._last_memory_health_check_iteration: int = -1
-        self._memory_health_interval: int = 10
-
-        self._visited_browser_urls: set[str] = set()
-        self._max_browser_visits_per_domain: int = (
+        # Config-driven defaults
+        self._scope.max_browser_visits_per_domain = (
             get_config().agent_max_browser_visits_per_domain
         )
+        self._lifecycle.session_save_interval = 10
+        self._lifecycle.conversation_save_interval = 10
+        self._lifecycle.memory_save_interval = 5
+        self._lifecycle.memory_health_interval = 10
+        self._lifecycle.user_input_cooldown = 30.0
+
+        # Non-grouped lifecycle (has unique usage patterns)
+        self._token_snapshot_task: asyncio.Task[None] | None = None
+        self._request_times: deque[float] = deque(maxlen=10)
+        self._last_saved_cumulative: int = 0
+        self._memory_manager = None
+        self._memory_health_status: dict[str, Any] = {}
+
+        # Attack surface coverage tracker — prevents repetitive testing
+        self._surface_tracker: Any = None
+        try:
+            from .attack_surface import AttackSurfaceTracker
+
+            self._surface_tracker = AttackSurfaceTracker()
+        except Exception as _e:
+            pass
+
+    # ── Transparent compatibility layer: map old bare attrs to structured state ──
+    # All 200+ references across mixin files (loop_cycle_llm.py, loop_exploration.py,
+    # loop_tool_cycle.py, loop_cycle_prelude.py, etc.) resolve through these proxies
+    # so that no edits to mixin files are needed.
+
+    _ATTR_MAPS: dict[str, tuple[str, str]] = {
+        # old_attr: (state_name, field_name)
+        "_no_tool_iterations": ("_anti_loop", "no_tool_iterations"),
+        "_stagnation_iterations": ("_anti_loop", "stagnation_iterations"),
+        "_consecutive_same_approach": ("_anti_loop", "consecutive_same_approach"),
+        "_recent_tool_names": ("_anti_loop", "recent_tool_names"),
+        "_recent_tool_queue": ("_anti_loop", "recent_tool_queue"),
+        "_last_evidence_count": ("_anti_loop", "last_evidence_count"),
+        "_watchdog_forced_calls": ("_anti_loop", "watchdog_forced_calls"),
+        "_empty_response_retry_count": ("_anti_loop", "empty_response_retry_count"),
+        "_consecutive_failures": ("_anti_loop", "consecutive_failures"),
+        "_mentor_tool_call_count": ("_anti_loop", "mentor_tool_call_count"),
+        "_recovery_force_tool_calls": ("_recovery", "recovery_force_tool_calls"),
+        "_adaptive_num_ctx": ("_recovery", "adaptive_num_ctx"),
+        "_adaptive_num_predict_cap": ("_recovery", "adaptive_num_predict_cap"),
+        "_vram_crash_count": ("_recovery", "vram_crash_count"),
+        "_token_snapshot_resave_requested": (
+            "_recovery",
+            "token_snapshot_resave_requested",
+        ),
+        "_compression_summary": ("_recovery", "compression_summary"),
+        "_budget_pressure_level": ("_recovery", "budget_pressure_level"),
+        "_loaded_skill_hashes": ("_recovery", "loaded_skill_hashes"),
+        "_loaded_tech_skill_paths": ("_recovery", "loaded_tech_skill_paths"),
+        "_last_session_save_iteration": ("_lifecycle", "last_session_save_iteration"),
+        "_session_save_interval": ("_lifecycle", "session_save_interval"),
+        "_last_conversation_save_iteration": (
+            "_lifecycle",
+            "last_conversation_save_iteration",
+        ),
+        "_conversation_save_interval": ("_lifecycle", "conversation_save_interval"),
+        "_last_memory_save_iteration": ("_lifecycle", "last_memory_save_iteration"),
+        "_memory_save_interval": ("_lifecycle", "memory_save_interval"),
+        "_last_request_time": ("_lifecycle", "last_request_time"),
+        "_last_token_snapshot_time": ("_lifecycle", "last_token_snapshot_time"),
+        "_last_context_validation": ("_lifecycle", "last_context_validation"),
+        "_last_memory_health_check_iteration": (
+            "_lifecycle",
+            "last_memory_health_check_iteration",
+        ),
+        "_last_user_input_time": ("_lifecycle", "last_user_input_time"),
+        "_user_input_cooldown": ("_lifecycle", "user_input_cooldown"),
+        "_visited_browser_urls": ("_scope", "visited_browser_urls"),
+        "_max_browser_visits_per_domain": ("_scope", "max_browser_visits_per_domain"),
+        "_scope_lock_active": ("_scope", "scope_lock_active"),
+        "_scope_lock_brief": ("_scope", "scope_lock_brief"),
+        "_scope_anchor_target": ("_scope", "scope_anchor_target"),
+        "_user_input_event": ("_user_input", "user_input_event"),
+        "_user_input_value": ("_user_input", "user_input_value"),
+        "_user_input_cancelled": ("_user_input", "user_input_cancelled"),
+        "_user_input_request_id": ("_user_input", "user_input_request_id"),
+        "_user_input_prompt": ("_user_input", "user_input_prompt"),
+        "_user_input_type": ("_user_input", "user_input_type"),
+    }
+
+    def __getattr__(self, name: str) -> Any:
+        if name in self._ATTR_MAPS:
+            state_name, field_name = self._ATTR_MAPS[name]
+            state_obj = object.__getattribute__(self, state_name)
+            return getattr(state_obj, field_name)
+        raise AttributeError(
+            f"'{type(self).__name__}' object has no attribute '{name}'"
+        )
+
+    def __setattr__(self, name: str, value: Any) -> None:
+        if name in self._ATTR_MAPS:
+            state_name, field_name = self._ATTR_MAPS[name]
+            # If state object doesn't exist yet (e.g. test mocks), fall back
+            try:
+                state_obj = object.__getattribute__(self, state_name)
+                setattr(state_obj, field_name, value)
+            except AttributeError:
+                object.__setattr__(self, name, value)
+        else:
+            object.__setattr__(self, name, value)
 
     def _is_simple_target_kickoff(
         self,
@@ -220,7 +324,7 @@ class AgentLoop(
         if self._session and self._session.target:
             try:
                 logger.info(
-                    "Saving session data (subdomains: %d, live_hosts: %d, vulns: %d, conversation: %d msgs)...",
+                    "Saving session (subdomains: %d, hosts: %d, vulns: %d, msgs: %d)",
                     len(self._session.subdomains),
                     len(self._session.live_hosts),
                     len(self._session.vulnerabilities),
@@ -296,7 +400,7 @@ class AgentLoop(
                 except (asyncio.CancelledError, Exception):
                     pass
             except Exception as e:
-                logger.debug("Exception in %s: %s", __name__, e)
+                logger.warning("Operation failed: %s", e)
                 logger.debug("Token snapshot flush skipped during stop.")
 
     async def _save_session_persistence(self) -> None:
@@ -358,8 +462,7 @@ class AgentLoop(
 
             self._last_session_save_iteration = self.state.iteration
         except Exception as e:
-            logger.debug("Exception in %s: %s", __name__, e)
-            logger.debug("Operation failed")
+            logger.warning("Operation failed: %s", e)
 
     async def _load_session_persistence(self) -> None:
         """Load payload memory and adaptive learning state from workspace."""
@@ -409,8 +512,7 @@ class AgentLoop(
                     "Adaptive learning state loaded for %s", self._session.target
                 )
         except Exception as e:
-            logger.debug("Exception in %s: %s", __name__, e)
-            logger.debug("Operation failed")
+            logger.warning("Operation failed: %s", e)
 
     def _is_duplicate_browser_url(self, url: str, action: str) -> bool:
         if action not in ("goto", "new_tab"):
@@ -424,7 +526,7 @@ class AgentLoop(
             normalized = re.sub(r"^https?://", "", normalized)
             normalized = re.sub(r"/+$", "", normalized)
         except Exception as e:
-            logger.debug("Exception in %s: %s", __name__, e)
+            logger.warning("Operation failed: %s", e)
             return False
 
         count = sum(
@@ -450,9 +552,9 @@ class AgentLoop(
                 url = args.get("url", "")
                 if self._is_duplicate_browser_url(url, action):
                     msg = (
-                        f"[BROWSER URL LIMIT] URL '{url[:50]}...' has been visited "
-                        f"too many times ({self._max_browser_visits_per_domain}). "
-                        "Proceed without browser testing for now and focus on other methods."
+                        f"[BROWSER URL LIMIT] URL '{url[:50]}...' visited too many "
+                        f"times ({self._max_browser_visits_per_domain}). "
+                        "Try other methods."
                     )
                     return True, msg
 
@@ -479,12 +581,45 @@ class AgentLoop(
         ).hexdigest()
 
         if cmd_hash in self._executed_cmd_hashes:
-            msg = (
-                f"[ANTI-REPEAT] Command '{tool_name}' with identical arguments was already "
-                "executed. The result is already in your tool history. "
-                "Do NOT repeat it — use the existing result and proceed to the next step."
-            )
-            return True, msg
+            ctx = self._cmd_execution_context.get(cmd_hash, {})
+            prev_evidence_count = ctx.get("evidence_count", 0)
+            current_evidence_count = len(self.state.evidence_log)
+            evidence_grown = current_evidence_count > prev_evidence_count
+            repeat_count = ctx.get("repeat_count", 0)
+            max_repeats = ctx.get("max_repeats", 2)
+
+            if evidence_grown and repeat_count < max_repeats:
+                logger.info(
+                    "[CONTEXT-AWARE RERUN] '%s' can re-run: evidence growth "
+                    "(prev=%d, now=%d), repeat=%d/%d",
+                    tool_name,
+                    prev_evidence_count,
+                    current_evidence_count,
+                    repeat_count,
+                    max_repeats,
+                )
+                msg = (
+                    f"[EVIDENCE-DRIVEN RERUN] '{tool_name}' can re-run: "
+                    f"evidence {prev_evidence_count}→{current_evidence_count}. "
+                    f"Validation {repeat_count + 1}/{max_repeats}."
+                )
+                self._cmd_execution_context[cmd_hash]["repeat_count"] = repeat_count + 1
+                self._cmd_execution_context[cmd_hash]["evidence_count"] = (
+                    current_evidence_count
+                )
+                return False, msg
+            else:
+                if not evidence_grown:
+                    msg = (
+                        f"[NO NEW EVIDENCE] '{tool_name}' already executed "
+                        "with no new evidence. Use existing results."
+                    )
+                else:
+                    msg = (
+                        f"[MAX REVALIDATION] '{tool_name}' reached max re-attempts "
+                        f"({max_repeats}x). Explore alternative approaches."
+                    )
+                return True, msg
 
         if tool_name == "browser_action":
             action = args.get("action", "")
@@ -507,6 +642,14 @@ class AgentLoop(
 
         self._executed_cmd_hashes.add(cmd_hash)
         self._executed_cmd_order.append(cmd_hash)
+        self._cmd_execution_context[cmd_hash] = {
+            "tool_name": tool_name,
+            "args": canonical,
+            "phase": _phase_ctx,
+            "evidence_count": len(self.state.evidence_log),
+            "repeat_count": 0,
+            "max_repeats": 2,
+        }
 
         if len(self._executed_cmd_hashes) > get_config().agent_command_hash_cache_limit:
             before = len(self._executed_cmd_hashes)
@@ -516,12 +659,14 @@ class AgentLoop(
             ):
                 oldest = self._executed_cmd_order.popleft()
                 self._executed_cmd_hashes.discard(oldest)
+                self._cmd_execution_context.pop(oldest, None)
             while len(self._executed_cmd_order) > len(self._executed_cmd_hashes):
-                self._executed_cmd_order.popleft()
+                oldest = self._executed_cmd_order.popleft()
+                self._cmd_execution_context.pop(oldest, None)
             after = len(self._executed_cmd_hashes)
             if after != before:
                 logger.debug(
-                    "_executed_cmd_hashes incrementally pruned: %d → %d entries (kept newest 2500)",
+                    "_executed_cmd_hashes pruned: %d → %d (kept 2500)",
                     before,
                     after,
                 )

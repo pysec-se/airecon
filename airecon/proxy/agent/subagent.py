@@ -4,20 +4,15 @@ import asyncio
 import inspect
 import logging
 from dataclasses import dataclass
-from enum import Enum
 from typing import Any, AsyncIterator, Callable
 
 from ..config import get_config
 from ..ollama import OllamaClient
+from .constants import AgentRole
 from .models import AgentEvent
 from .session import SessionData, save_session
 
 logger = logging.getLogger("airecon.subagent")
-
-
-class AgentRole(Enum):
-    SCOUT = "scout"
-    EXPLOIT = "exploit"
 
 
 @dataclass
@@ -28,7 +23,6 @@ class SubagentConfig:
 
 
 class SubagentCoordinator:
-
     def __init__(
         self,
         ollama: OllamaClient,
@@ -46,7 +40,13 @@ class SubagentCoordinator:
         self._exploit_active = False
         self._stop_requested = False
 
-    async def start_recon(self, target: str, prompt: str, parent_context: str = "", recon_mode: str = "standard") -> AsyncIterator[AgentEvent]:
+    async def start_recon(
+        self,
+        target: str,
+        prompt: str,
+        parent_context: str = "",
+        recon_mode: str = "standard",
+    ) -> AsyncIterator[AgentEvent]:
         from .agent_graph import create_default_graph
 
         self.session.target = target
@@ -74,7 +74,7 @@ class SubagentCoordinator:
         )
 
     async def _stream_graph_events(self, graph: Any) -> AsyncIterator[Any]:
-        parent_context = getattr(self, '_parent_context', '')
+        parent_context = getattr(self, "_parent_context", "")
         result = graph.execute(self.session, parent_context=parent_context)
         if inspect.isawaitable(result):
             result = await result
@@ -94,7 +94,6 @@ class SubagentCoordinator:
 
 
 class ParallelAgentRunner:
-
     def __init__(
         self,
         max_concurrent: int = 3,
@@ -128,7 +127,9 @@ class ParallelAgentRunner:
     def _forward_event(self, target: str, event: AgentEvent) -> None:
         if self._event_callback:
             try:
-                logger.debug("SubAgent _forward_event: target=%s, type=%s", target, event.type)
+                logger.debug(
+                    "SubAgent _forward_event: target=%s, type=%s", target, event.type
+                )
                 self._event_callback(target, event)
             except Exception as _e:
                 logger.error("SubAgent _forward_event failed: %s", _e)
@@ -140,7 +141,11 @@ class ParallelAgentRunner:
         logger.info("Cancelled %d active agent tasks", len(self._active_tasks))
 
     async def run_parallel(
-        self, targets: list[str], prompt_template: str, parent_context: str = "", recon_mode: str = "standard"
+        self,
+        targets: list[str],
+        prompt_template: str,
+        parent_context: str = "",
+        recon_mode: str = "standard",
     ) -> dict[str, SessionData]:
         self._cancel_event.clear()
         self._results = {}
@@ -154,7 +159,10 @@ class ParallelAgentRunner:
         semaphore = asyncio.Semaphore(self.max_concurrent)
         total = len(targets)
 
-        self._report_progress("orchestrator", f"🚀 Launching {total} parallel agent{'s' if total != 1 else ''}...")
+        self._report_progress(
+            "orchestrator",
+            f"🚀 Launching {total} parallel agent{'s' if total != 1 else ''}...",
+        )
 
         async def run_single(
             target: str, coordinator: SubagentCoordinator
@@ -163,7 +171,12 @@ class ParallelAgentRunner:
             event_count = 0
             tool_event_count = 0
 
-            async for event in coordinator.start_recon(target, prompt_template, parent_context=parent_context, recon_mode=recon_mode):
+            async for event in coordinator.start_recon(
+                target,
+                prompt_template,
+                parent_context=parent_context,
+                recon_mode=recon_mode,
+            ):
                 if self._cancel_event.is_set():
                     coordinator.stop()
                     break
@@ -184,13 +197,19 @@ class ParallelAgentRunner:
                     self._forward_event(target, event)
 
                 # Periodic heartbeat (every 15 events)
-                #if event_count % 15 == 0:
+                # if event_count % 15 == 0:
                 #    self._report_progress(target)
 
-            vuln_count = len(coordinator.session.vulnerabilities) if coordinator.session else 0
-            subdomain_count = len(coordinator.session.subdomains) if coordinator.session else 0
+            vuln_count = (
+                len(coordinator.session.vulnerabilities) if coordinator.session else 0
+            )
+            subdomain_count = (
+                len(coordinator.session.subdomains) if coordinator.session else 0
+            )
             url_count = len(coordinator.session.urls) if coordinator.session else 0
-            tech_count = len(coordinator.session.technologies) if coordinator.session else 0
+            tech_count = (
+                len(coordinator.session.technologies) if coordinator.session else 0
+            )
             summary_parts = []
             if subdomain_count:
                 summary_parts.append(f"{subdomain_count} subdomains")
@@ -201,17 +220,22 @@ class ParallelAgentRunner:
             if vuln_count:
                 summary_parts.append(f"{vuln_count} vulns")
             summary = ", ".join(summary_parts) if summary_parts else "no new findings"
-            self._report_progress(
-                target,
-                f"✅ Done — {summary}"
-            )
-            
+            self._report_progress(target, f"✅ Done — {summary}")
+
             from .models import AgentEvent
-            self._forward_event(target, AgentEvent(
-                type="task_complete",
-                data={"session": coordinator.session.__dict__ if coordinator.session else {}},
-            ))
-            
+
+            self._forward_event(
+                target,
+                AgentEvent(
+                    type="task_complete",
+                    data={
+                        "session": coordinator.session.__dict__
+                        if coordinator.session
+                        else {}
+                    },
+                ),
+            )
+
             return (target, coordinator.session)
 
         async def bounded_run(target: str) -> tuple[str, SessionData]:
@@ -268,7 +292,6 @@ class ParallelAgentRunner:
             summary_parts.append(f"{total_vulns} vulns")
         total_summary = ", ".join(summary_parts) if summary_parts else "done"
         self._report_progress(
-            "orchestrator",
-            f"🏁 {completed}/{total} agents finished — {total_summary}"
+            "orchestrator", f"🏁 {completed}/{total} agents finished — {total_summary}"
         )
         return dict(self._results)
