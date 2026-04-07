@@ -222,7 +222,7 @@ class _UtilsExecutorMixin:
 
     # === Python Session ===
     async def _execute_python_session_tool(
-        self, arguments: dict[str, Any]
+        self, tool_name: str, arguments: dict[str, Any]
     ) -> tuple[bool, float, dict[str, Any], str | None]:
         start_time = time.time()
         code = arguments.get("code", "").strip()
@@ -264,7 +264,7 @@ class _UtilsExecutorMixin:
 
     # === Edit File ===
     async def _execute_edit_file_tool(
-        self, arguments: dict[str, Any]
+        self, tool_name: str, arguments: dict[str, Any]
     ) -> tuple[bool, float, dict[str, Any], str | None]:
         start_time = time.time()
         path = arguments.get("path", "")
@@ -348,7 +348,7 @@ class _UtilsExecutorMixin:
 
     # === Think ===
     async def _execute_think_tool(
-        self, arguments: dict[str, Any]
+        self, tool_name: str, arguments: dict[str, Any]
     ) -> tuple[bool, float, dict[str, Any], str | None]:
         start_time = time.time()
         thought = arguments.get("thought", "").strip()
@@ -400,7 +400,7 @@ class _UtilsExecutorMixin:
 
     # === Notes ===
     async def _execute_create_note_tool(
-        self, arguments: dict[str, Any]
+        self, tool_name: str, arguments: dict[str, Any]
     ) -> tuple[bool, float, dict[str, Any], str | None]:
         start_time = time.time()
         category = arguments.get("category")
@@ -436,7 +436,7 @@ class _UtilsExecutorMixin:
         return True, time.time() - start_time, result, None
 
     async def _execute_list_notes_tool(
-        self, arguments: dict[str, Any]
+        self, tool_name: str, arguments: dict[str, Any]
     ) -> tuple[bool, float, dict[str, Any], str | None]:
         start_time = time.time()
         category = arguments.get("category")
@@ -456,7 +456,7 @@ class _UtilsExecutorMixin:
         )
 
     async def _execute_search_notes_tool(
-        self, arguments: dict[str, Any]
+        self, tool_name: str, arguments: dict[str, Any]
     ) -> tuple[bool, float, dict[str, Any], str | None]:
         start_time = time.time()
         query = arguments.get("query", "").strip()
@@ -479,7 +479,7 @@ class _UtilsExecutorMixin:
         )
 
     async def _execute_read_note_tool(
-        self, arguments: dict[str, Any]
+        self, tool_name: str, arguments: dict[str, Any]
     ) -> tuple[bool, float, dict[str, Any], str | None]:
         start_time = time.time()
         note_id = arguments.get("note_id", "")
@@ -507,7 +507,7 @@ class _UtilsExecutorMixin:
         )
 
     async def _execute_export_notes_wiki_tool(
-        self, arguments: dict[str, Any]
+        self, tool_name: str, arguments: dict[str, Any]
     ) -> tuple[bool, float, dict[str, Any], str | None]:
         start_time = time.time()
         output_path = arguments.get("output_path", "notes/wiki.md")
