@@ -124,7 +124,7 @@ class OllamaClient:
             if OllamaClient._httpx_client is None:
                 _cfg = get_config()
                 _http_timeout = _cfg.ollama_timeout
-                OllamaClient._httpx_client = httpx.AsyncClient(
+                OllamaClient._httpx_client = httpx.AsyncClient(  # nosec B113: timeout configured below
                     timeout=httpx.Timeout(
                         _http_timeout, connect=10.0, read=_http_timeout, write=10.0
                     ),
@@ -540,8 +540,7 @@ class OllamaClient:
                 if attempt < max_retries:
                     wait = 2 ** (attempt + 1)
                     logger.warning(
-                        "Ollama stream read error (attempt %d/%d), "
-                        "retrying in %ds: %s",
+                        "Ollama stream read error (attempt %d/%d), retrying in %ds: %s",
                         attempt + 1,
                         max_retries + 1,
                         wait,
@@ -555,8 +554,7 @@ class OllamaClient:
                     e,
                 )
                 raise TimeoutError(
-                    f"Ollama stream disconnected after "
-                    f"{max_retries + 1} retries: {e}"
+                    f"Ollama stream disconnected after {max_retries + 1} retries: {e}"
                 ) from e
 
             except httpx.HTTPStatusError as e:

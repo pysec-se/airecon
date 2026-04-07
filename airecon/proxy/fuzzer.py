@@ -374,7 +374,7 @@ class Fuzzer:
         if self._direct_client is None:
             self._direct_client = httpx.AsyncClient(
                 timeout=self.timeout,
-                verify=False,  # nosec B501 - intentional for fuzzing; targets may have self-signed certs
+                verify=False,
                 follow_redirects=True,
                 headers=self.headers,
             )

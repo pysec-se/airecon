@@ -208,8 +208,7 @@ class FalsePositiveDetector:
                 location = headers.get("location", "")
                 if location and payload.lower() in location.lower():
                     is_encoded = any(
-                        enc in location
-                        for enc in ("%3C", "%3c", "%3E", "%3e")
+                        enc in location for enc in ("%3C", "%3c", "%3E", "%3e")
                     )
                     encoding_note = (
                         " Payload is URL-encoded in the header, so it will NOT execute."
@@ -458,7 +457,7 @@ class NegativeTester:
         async with httpx.AsyncClient(
             timeout=self.timeout,
             follow_redirects=False,
-            verify=False,  # nosec B501
+            verify=False,
         ) as client:
             for clean_payload in _CLEAN_PAYLOADS:
                 try:
@@ -659,8 +658,10 @@ class VerificationEngine:
 
             # ── Header-only reflection check (e.g. 301 Location with no body) ──
             if response_headers is not None:
-                is_header_only, hdr_reason = self.fp_detector.detect_header_only_reflection(
-                    response_status, response_headers, fuzz_body, original_payload
+                is_header_only, hdr_reason = (
+                    self.fp_detector.detect_header_only_reflection(
+                        response_status, response_headers, fuzz_body, original_payload
+                    )
                 )
                 if is_header_only:
                     result.is_false_positive = True

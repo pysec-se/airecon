@@ -222,7 +222,7 @@ _CONFIG_SCHEMA: dict[str, tuple[Any, str]] = {
         "Chrome DevTools Protocol debug port. Default 9222.",
     ),
     "browser_cdp_bind_address": (
-        "0.0.0.0",  # nosec B104: Security testing tool binds to all interfaces for Docker/containerized deployments
+        "0.0.0.0",  # nosec B104: Security testing tool intentionally binds to all interfaces
         "Chrome remote debugging bind address. 0.0.0.0 = all interfaces, 127.0.0.1 = localhost only.",
     ),
     "browser_connect_timeout_ms": (
