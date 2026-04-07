@@ -88,15 +88,15 @@ except ImportError:
             try:
                 # If it's a print statement, we'll exec and capture output
                 if code.strip().startswith(("print(", "print ")):
-                    exec(code, self._namespace)
+                    exec(code, self._namespace)  # nosec B102 -- intentional for Python REPL
                 else:
                     # Try eval first to capture result of expression
                     try:
-                        result_value = eval(code, self._namespace)
+                        result_value = eval(code, self._namespace)  # nosec B307 -- intentional for Python REPL
                         self._namespace["_"] = result_value
                     except (SyntaxError, NameError):
                         # Not an expression or undefined, use exec
-                        exec(code, self._namespace)
+                        exec(code, self._namespace)  # nosec B102 -- intentional for Python REPL
             except Exception as e:
                 tb = traceback.format_exc()
                 return {
