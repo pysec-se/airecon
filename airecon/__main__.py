@@ -126,7 +126,7 @@ def main() -> None:
     elif args.command == "clean":
         _run_clean(args)
     else:
-        parser.print_help()
+        _print_banner()
         sys.exit(1)
 
 

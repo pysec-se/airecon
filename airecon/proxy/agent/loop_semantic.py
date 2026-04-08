@@ -53,22 +53,26 @@ class SemanticDeduplicator:
     @classmethod
     def _get_command_patterns(cls, vuln_class: str) -> list[str]:
         cls._ensure_patterns_loaded()
-        return cls._vuln_patterns.get("command_patterns", {}).get(vuln_class, [])
+        patterns = cls._vuln_patterns or {}
+        return patterns.get("command_patterns", {}).get(vuln_class, [])
 
     @classmethod
     def _get_result_keywords(cls, vuln_class: str) -> list[str]:
         cls._ensure_patterns_loaded()
-        return cls._vuln_patterns.get("result_keywords", {}).get(vuln_class, [])
+        patterns = cls._vuln_patterns or {}
+        return patterns.get("result_keywords", {}).get(vuln_class, [])
 
     @classmethod
     def _get_tool_vuln_map(cls) -> dict[str, str]:
         cls._ensure_patterns_loaded()
-        return cls._vuln_patterns.get("tool_vuln_map", {})
+        patterns = cls._vuln_patterns or {}
+        return patterns.get("tool_vuln_map", {})
 
     @classmethod
     def _get_test_variants(cls, vuln_class: str) -> dict[str, str]:
         cls._ensure_patterns_loaded()
-        return cls._vuln_patterns.get("test_variants", {}).get(vuln_class, {})
+        patterns = cls._vuln_patterns or {}
+        return patterns.get("test_variants", {}).get(vuln_class, {})
 
     def __init__(self, max_history: int = 500):
         self._tested_intents: dict[str, VulnIntent] = {}

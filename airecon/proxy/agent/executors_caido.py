@@ -93,11 +93,18 @@ def _gql_err(data: dict[str, Any]) -> str | None:
 def _parse_gql_response(
     data: dict[str, Any],
     *key_path: str,
-) -> Any | None:
-    result = data.get("data", {})
+    default: Any | None = None,
+) -> Any:
+    result: Any = data.get("data", {})
     for key in key_path:
-        result = (result or {}).get(key, {})
-    return result or {}
+        if isinstance(result, dict):
+            result = result.get(key)
+        else:
+            result = None
+            break
+    if result is None:
+        return {} if default is None else default
+    return result
 
 
 def _host_tuple(host: str, is_tls: bool, port_arg: Any) -> tuple[str, bool, int]:
@@ -148,7 +155,9 @@ class _CaidoExecutorMixin:
                     RuntimeError(err),
                     "list_requests",
                 )
-            edges = _parse_gql_response(data, "requests", "edges")
+            edges = _parse_gql_response(data, "requests", "edges", default=[])
+            if not isinstance(edges, list):
+                edges = []
             requests = [
                 {
                     "id": e["node"]["id"],
@@ -429,7 +438,9 @@ class _CaidoExecutorMixin:
                     RuntimeError(err),
                     "get_findings",
                 )
-            edges = _parse_gql_response(data, "findings", "edges")
+            edges = _parse_gql_response(data, "findings", "edges", default=[])
+            if not isinstance(edges, list):
+                edges = []
             findings = [
                 {
                     "id": e["node"]["id"],
@@ -505,7 +516,9 @@ class _CaidoExecutorMixin:
             if err := _gql_err(data):
                 res_dict = {"success": False, "error": err}
             else:
-                scope = _parse_gql_response(data, scope_key, "scope")
+                scope = _parse_gql_response(data, scope_key, "scope", default={})
+                if not isinstance(scope, dict):
+                    scope = {}
                 res_dict = {
                     "success": True,
                     "scope_id": scope.get("id"),
@@ -591,7 +604,11 @@ class _CaidoExecutorMixin:
             data = await CaidoClient.gql(_INTERCEPT_MESSAGES_GQL)
             if err := _gql_err(data):
                 return {"success": False, "error": err}
-            edges = _parse_gql_response(data, "interceptMessages", "edges")
+            edges = _parse_gql_response(
+                data, "interceptMessages", "edges", default=[]
+            )
+            if not isinstance(edges, list):
+                edges = []
             messages = [
                 {
                     "id": e["node"]["id"],
@@ -630,7 +647,11 @@ class _CaidoExecutorMixin:
             )
             if err := _gql_err(data):
                 return {"success": False, "error": err}
-            payload = _parse_gql_response(data, "forwardInterceptMessage")
+            payload = _parse_gql_response(
+                data, "forwardInterceptMessage", default={}
+            )
+            if not isinstance(payload, dict):
+                payload = {}
             if "code" in payload:
                 return {"success": False, "error": payload.get("message")}
             return {
@@ -658,7 +679,9 @@ class _CaidoExecutorMixin:
             )
             if err := _gql_err(data):
                 return {"success": False, "error": err}
-            payload = _parse_gql_response(data, "dropInterceptMessage")
+            payload = _parse_gql_response(data, "dropInterceptMessage", default={})
+            if not isinstance(payload, dict):
+                payload = {}
             if "code" in payload:
                 return {"success": False, "error": payload.get("message")}
             return {
@@ -694,7 +717,9 @@ class _CaidoExecutorMixin:
                 return _tool_err(
                     self, tool_name, arguments, start_time, RuntimeError(err), "sitemap"
                 )
-            edges = _parse_gql_response(data, key, "edges")
+            edges = _parse_gql_response(data, key, "edges", default=[])
+            if not isinstance(edges, list):
+                edges = []
             entries = [
                 {
                     "id": e["node"]["id"],

@@ -35,7 +35,8 @@ def _load_unified_patterns() -> dict[str, Any]:
     unified_path = _DATA_DIR / "unified_patterns.json"
     if unified_path.exists():
         try:
-            _UNIFIED_PATTERNS = json.loads(unified_path.read_text(encoding="utf-8"))
+            loaded = json.loads(unified_path.read_text(encoding="utf-8"))
+            _UNIFIED_PATTERNS = loaded if isinstance(loaded, dict) else {}
             return _UNIFIED_PATTERNS
         except Exception as exc:
             logger.warning("Failed to load unified_patterns.json: %s", exc)
