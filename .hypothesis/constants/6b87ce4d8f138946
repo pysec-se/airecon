@@ -1,4 +1,0 @@
-# file: /usr/lib/python3/dist-packages/django/db/models/sql/query.py
-# hypothesis_version: 6.151.10
-
-[' or ', '%', '%s', '%s%d', '%s__isnull', '(%s)', '*', ', ', '-', '--', '.', '<%s: %s>', '?', 'ASC', 'ExplainInfo', 'JoinInfo', 'Query', 'RawQuery', 'SQLCompiler', 'T', '[\\w\\-]+', '__count', '__iter__', '_make', '_meta', '_setup_query', 'a', 'base_table', 'conditional', 'contains_aggregate', 'contains_over_clause', 'contains_subquery', 'exact', 'external_aliases', 'field', 'filterable', 'final_field', 'format', 'get_external_cols', 'iexact', 'isnull', 'joins', 'options', 'opts', 'path', 'path_infos', 'pk', 'resolve_expression', 'subq_aliases', 'target', 'targets', 'transform_function', 'union']

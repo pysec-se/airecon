@@ -1,4 +1,0 @@
-# file: /usr/lib/python3/dist-packages/django/core/files/storage/memory.py
-# hypothesis_version: 6.151.10
-
-['/', 'InMemoryStorage', '\\', 'b', 'rb', 'temporary_file_path', 'w', 'wb', 'wt']

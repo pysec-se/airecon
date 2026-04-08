@@ -1,4 +1,0 @@
-# file: /home/pikpikcu/Documents/airecon/airecon/proxy/agent/url_intelligence.py
-# hypothesis_version: 6.151.10
-
-[100, ' [path params]', '.', '/', '/\\d{3,}(?:/|$)', '</url_intelligence>', '<url_intelligence>', '=', 'Operation failed: %s', '\\{[^}]+\\}', 'api', 'asp', 'aspx', 'backend', 'category', 'cjs', 'css', 'description', 'directory_url', 'doc', 'document', 'docx', 'extension', 'graphql', 'guidance', 'has_path_params', 'has_query_params', 'high_value', 'informational', 'is_informational', 'is_pure_static', 'is_testable', 'js', 'js_file', 'json', 'jsp', 'jsx', 'less', 'log', 'map', 'matched_pattern', 'md', 'mjs', 'param_names', 'pattern', 'pdf', 'php', 'priority', 'scss', 'static', 'static_asset', 'static_dir_patterns', 'testable_endpoint', 'ts', 'tsx', 'txt', 'unknown', 'url_patterns', 'xls', 'xlsx', 'xml', 'yaml', 'yml']

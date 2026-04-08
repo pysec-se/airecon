@@ -1,4 +1,0 @@
-# file: /usr/lib/python3/dist-packages/asgiref/sync.py
-# hypothesis_version: 6.151.10
-
-['Future[_R]', 'Local', 'OptExcInfo', 'ThreadPoolExecutor', '_F', '_P', '_R', '__call__', 'current', 'deadlock_context', 'main_event_loop', 'main_event_loop_pid', 'task_context']

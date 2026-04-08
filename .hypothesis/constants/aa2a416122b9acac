@@ -1,4 +1,0 @@
-# file: /usr/lib/python3/dist-packages/trio/_subprocess_platform/__init__.py
-# hypothesis_version: 6.151.10
-
-['linux', 'nt', 'posix', 'wait_kevent', 'win32']

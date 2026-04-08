@@ -1,4 +1,0 @@
-# file: /usr/lib/python3/dist-packages/django/template/autoreload.py
-# hypothesis_version: 6.151.10
-
-['**/*', '.py', 'get_dirs']

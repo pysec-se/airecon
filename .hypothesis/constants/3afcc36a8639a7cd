@@ -1,4 +1,0 @@
-# file: /usr/lib/python3/dist-packages/backports/zstd/__init__.py
-# hypothesis_version: 6.151.10
-
-[100, 'CompressionParameter', 'Strategy', 'ZstdCompressor', 'ZstdDecompressor', 'ZstdDict', 'ZstdError', 'ZstdFile', 'compress', 'decompress', 'decompressed_size', 'dictionary_id', 'finalize_dict', 'get_frame_info', 'get_frame_size', 'open', 'register_shutil', 'train_dict', 'zstd_version', 'zstd_version_info']

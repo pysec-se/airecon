@@ -1,4 +1,0 @@
-# file: /usr/lib/python3/dist-packages/django/core/files/base.py
-# hypothesis_version: 6.151.10
-
-[b'\n', b'\r', '<%s: %s>', 'None', 'Raw content', 'mode', 'name', 'seek', 'size', 'tell']

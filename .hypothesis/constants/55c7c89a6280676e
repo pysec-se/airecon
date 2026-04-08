@@ -1,4 +1,0 @@
-# file: /usr/lib/python3/dist-packages/django/apps/config.py
-# hypothesis_version: 6.151.10
-
-[' Choices are: %s.', '%s.%s', ', ', '.', '<%s: %s>', '__file__', '__path__', 'apps', 'default', 'label', 'models', 'path', 'verbose_name']

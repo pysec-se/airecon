@@ -1,4 +1,0 @@
-# file: /usr/lib/python3/dist-packages/django/db/models/fields/related_lookups.py
-# hypothesis_version: 6.151.10
-
-['exact', 'has_select_fields', 'path_infos', 'primary_key', 'resolve_expression', '{}({}, {})']

@@ -1,4 +1,0 @@
-# file: /home/pikpikcu/Documents/airecon/airecon/proxy/agent/payload_memory.py
-# hypothesis_version: 6.151.10
-
-[0.0, 0.3, 1.1, 1.2, 1.3, 5000, 10000, 86400, '1.0.0', 'failed_payloads', 'overall_success_rate', 'records', 'saved_at', 'successful_payloads', 'timestamp', 'total_records', 'unique_targets', 'utf-8', 'version']

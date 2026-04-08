@@ -1,4 +1,0 @@
-# file: /home/pikpikcu/Documents/airecon/airecon/proxy/agent/subagent.py
-# hypothesis_version: 6.151.10
-
-[100, ', ', '__aiter__', '_parent_context', 'airecon.subagent', 'done', 'no new findings', 'orchestrator', 'session', 'source', 'standard', 'task_complete', 'text', 'tool_end', 'tool_output', 'tool_start', 'type', '⏳ Waiting...', '❌ Cancelled']

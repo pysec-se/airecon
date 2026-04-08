@@ -1,4 +1,0 @@
-# file: /usr/lib/python3/dist-packages/django/db/__init__.py
-# hypothesis_version: 6.151.10
-
-['DEFAULT_DB_ALIAS', 'DataError', 'DatabaseError', 'Error', 'IntegrityError', 'InterfaceError', 'InternalError', 'NotSupportedError', 'OperationalError', 'ProgrammingError', 'connection', 'connections', 'router']

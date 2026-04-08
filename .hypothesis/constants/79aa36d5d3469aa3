@@ -1,4 +1,0 @@
-# file: /home/pikpikcu/Documents/airecon/airecon/proxy/agent/waf_detector.py
-# hypothesis_version: 6.151.10
-
-[0.0, 0.05, 0.1, 0.15, 0.25, 0.3, 0.35, 0.4, 0.5, 0.55, 0.75, 0.8, 0.98, 1.0, 403, 406, 429, 501, 999, 3000, '  <evidence>', '; ', '</evidence>', '</waf_bypass>', 'Generic WAF', 'Unknown', '_', 'akamai', 'attempts', 'aws', 'block_status_codes', 'body_signatures', 'case variation', 'chunked', 'cloudflare', 'comment', 'confidence', 'data', 'detected_at', 'encoding', 'evidence', 'generic', 'generic waf', 'header', 'header_signatures', 'host', 'modsecurity', 'pattern', 'patterns.json', 'successes', 'utf-8', 'verb', 'waf', 'waf_name', 'waf_signatures.json', 'whitespace']

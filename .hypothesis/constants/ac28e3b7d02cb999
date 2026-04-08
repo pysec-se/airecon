@@ -1,4 +1,0 @@
-# file: /home/pikpikcu/Documents/airecon/airecon/proxy/reporting.py
-# hypothesis_version: 6.151.10
-
-[0.0, 1.0, '.', '../', './', '._-', '/', '/workspace/', ':', '://', '@', '@/', 'A', 'C', 'H', 'L', 'N', 'P', 'R', 'U', 'Validation failed', '[^a-zA-Z0-9._-]+', '[^a-zA-Z0-9]+', '[a-zA-Z0-9.-]+', '[file:', ']', '_', 'attack_complexity', 'attack_vector', 'availability', 'confidence', 'confidentiality', 'cvss_score', 'description', 'duplicate_of', 'duplicate_title', 'errors', 'flag', 'integrity', 'message', 'n/a', 'poc_description', 'poc_script_code', 'privileges_required', 'reason', 'report', 'report_id', 'report_path', 'scope', 'severity', 'success', 'target', 'title', 'unknown', 'unknown_target', 'user_interaction', 'utf-8', 'vulnerabilities', 'x']

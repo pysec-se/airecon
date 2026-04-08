@@ -1,4 +1,0 @@
-# file: /usr/lib/python3/dist-packages/django/conf/__init__.py
-# hypothesis_version: 6.151.10
-
-['%s%s', '/', '/usr/share/zoneinfo', '<%(cls)s>', 'ALLOWED_HOSTS', 'BACKEND', 'CSRF_COOKIE_MASKED', 'DEFAULT_FILE_STORAGE', 'INSTALLED_APPS', 'LOCALE_PATHS', 'MEDIA_URL', 'SECRET_KEY', 'SECRET_KEY_FALLBACKS', 'STATICFILES_STORAGE', 'STATIC_URL', 'STORAGES', 'TEMPLATE_DIRS', 'TZ', 'USE_DEPRECATED_PYTZ', 'USE_L10N', 'USE_TZ', '_deleted', '_wrapped', 'cls', 'default', 'http://', 'https://', 'is_overridden', 'setting %s', 'settings', 'settings_module', 'staticfiles', 'tzset']

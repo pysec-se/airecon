@@ -1,4 +1,0 @@
-# file: /usr/lib/python3/dist-packages/trio/_path.py
-# hypothesis_version: 6.151.10
-
-[' `..` ', ' ``..`` ', 'P', 'Path', 'PathBase', 'PathT', 'T', 'nt', 'pathlib', 'pathlib._abc', 'pathlib._local', 'r', 'win32']

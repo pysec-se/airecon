@@ -1,4 +1,0 @@
-# file: /home/pikpikcu/Documents/airecon/airecon/proxy/agent/loop_inference.py
-# hypothesis_version: 6.151.10
-
-[0.15, 0.2, 0.35, 0.4, 0.5, 0.65, 0.75, 256, 512, 1024, 2048, 4096, 8192, 16384, 32768, '1', 'ANALYSIS', 'EXPLOIT', 'RECON', 'REPORT', 'UNKNOWN', 'adaptive', 'high', 'low', 'medium', 'none', 'ollama_num_predict', 'ollama_temperature', 'ollama_thinking_mode', 'on', 'true', 'used', 'yes']

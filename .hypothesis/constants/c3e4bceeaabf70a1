@@ -1,4 +1,0 @@
-# file: /usr/lib/python3/dist-packages/django/db/models/sql/__init__.py
-# hypothesis_version: 6.151.10
-
-['AND', 'OR', 'Query', 'XOR']

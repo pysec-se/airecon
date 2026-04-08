@@ -1,4 +1,0 @@
-# file: /home/pikpikcu/Documents/airecon/airecon/proxy/agent/attack_surface.py
-# hypothesis_version: 6.151.10
-
-[0.0, ', ', '/', '<root>', 'airecon.agent', 'attempts', 'findings', 'http://', 'https://', 'vuln_types_tested']

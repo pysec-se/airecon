@@ -1,4 +1,0 @@
-# file: /usr/lib/python3/dist-packages/aiomcache/constants.py
-# hypothesis_version: 6.151.10
-
-[b'DELETED', b'EXISTS', b'NOT_FOUND', b'NOT_STORED', b'OK', b'STORED', b'TOUCHED', b'VERSION']

@@ -1,4 +1,0 @@
-# file: /usr/lib/python3/dist-packages/socksio/compat.py
-# hypothesis_version: 6.151.10
-
-['__get__', '__isabstractmethod__', 'singledispatchmethod']

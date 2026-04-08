@@ -1,4 +1,0 @@
-# file: /usr/lib/python3/dist-packages/django/utils/functional.py
-# hypothesis_version: 6.151.10
-
-['<%s: %r>', '__class__', '__doc__', '_mask_wrapped', '_setupfunc', '_wrapped']

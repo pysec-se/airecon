@@ -1,4 +1,0 @@
-# file: /usr/lib/python3/dist-packages/backports/zstd/_zstdfile.py
-# hypothesis_version: 6.151.10
-
-['ZstdFile', '_buffer', 'a', 'b', 'flush', 'mode must be a str', 'open', 'r', 'rb', 'read', 't', 'w', 'wb', 'write', 'x']

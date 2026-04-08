@@ -1,4 +1,0 @@
-# file: /usr/lib/python3/dist-packages/django/db/models/fields/json.py
-# hypothesis_version: 6.151.10
-
-[' AND ', ' OR ', '#>', '#>>', '$', '%', '%%', '%s', '%s AND %s', '(%s %s %%s)', '(%s ->> %%s)', '(%s)', ',', '->', '->>', '.', '.%s', '<@', '?', '?&', '?|', '@>', 'A JSON object', 'JSONField', 'JSON_QUERY', 'JSON_UNQUOTE(%s)', 'JSON_VALUE', 'LOWER(%s)', '[%s]', 'as_sql', 'contained_by', 'contains', 'databases', 'decoder', 'dict', 'encoder', 'fields.E180', 'form_class', 'has_any_keys', 'has_key', 'has_keys', 'invalid', 'isnull', 'mysql', 'null', 'oracle', 'sqlite', 'supports_json_field', 'value', '{}']

@@ -1,4 +1,0 @@
-# file: /home/pikpikcu/Documents/airecon/airecon/proxy/agent/target_prioritizer.py
-# hypothesis_version: 6.151.10
-
-[0.0, 0.03, 0.05, 0.1, 0.15, 0.3, 0.5, 0.55, 0.6, 0.65, 0.7, 0.75, 1.0, 100, 200, 301, 302, 307, 401, 403, 404, 500, ' (', '&', '.', ': ', 'HTTP 404 (not found)', 'Operation failed: %s', 'attack_vectors', 'category', 'cloudflare_internal', 'content_page', 'data', 'elasticsearch', 'feed_endpoint', 'grafana', 'jenkins', 'kibana', 'mongodb', 'n8n', 'pattern', 'php', 'redis', 'risk_score', 'score', 'subdomain_patterns', 'technologies', 'tracking_pixel', 'unknown', 'url_patterns', 'utf-8', 'wordpress']

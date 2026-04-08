@@ -1,4 +1,0 @@
-# file: /usr/lib/python3/dist-packages/faker/contrib/pytest/plugin.py
-# hypothesis_version: 6.151.10
-
-['_session_faker', 'faker_locale', 'faker_seed', 'faker_session_locale', 'session']

@@ -1,4 +1,0 @@
-# file: /usr/lib/python3/dist-packages/outcome/__init__.py
-# hypothesis_version: 6.151.10
-
-['AlreadyUsedError', 'Error', 'Outcome', 'Value', 'acapture', 'capture']

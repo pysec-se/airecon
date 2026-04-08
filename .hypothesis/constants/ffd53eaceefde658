@@ -1,4 +1,0 @@
-# file: /usr/lib/python3/dist-packages/socksio/utils.py
-# hypothesis_version: 6.151.10
-
-[':', 'AddressType', 'DN', 'IPV4', 'IPV6', 'SOCKS5AType', 'address', 'port']

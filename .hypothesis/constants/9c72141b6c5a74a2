@@ -1,4 +1,0 @@
-# file: /usr/lib/python3/dist-packages/django/db/models/fields/files.py
-# hypothesis_version: 6.151.10
-
-[100, '/', 'File', 'FileField', 'Image', '_committed', '_dimensions_cache', '_file', '_storage_callable', 'closed', 'field', 'fields.E201', 'fields.E202', 'fields.E210', 'form_class', 'height_field', 'instance', 'max_length', 'name', 'primary_key', 'rb', 'storage', 'upload_to', 'width_field']

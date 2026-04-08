@@ -1,4 +1,0 @@
-# file: /home/pikpikcu/Documents/airecon/airecon/proxy/agent/loop_message_entry.py
-# hypothesis_version: 6.151.10
-
-[0.2, 0.5, 0.65, 0.8, 500, ', ', 'COMPLETE', 'Operation failed: %s', '_memory_manager', '_prior_merged', '_session_lock', 'agent_recon_mode', 'airecon.agent', 'confidence', 'content', 'current_phase', 'iteration', 'ollama_num_ctx', 'role', 'standard', 'system', 'uploads', 'used', 'user']

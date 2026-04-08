@@ -1,4 +1,0 @@
-# file: /usr/lib/python3/dist-packages/django/core/checks/registry.py
-# hypothesis_version: 6.151.10
-
-['admin', 'async_support', 'caches', 'compatibility', 'database', 'deploy', 'files', 'models', 'security', 'signals', 'sites', 'staticfiles', 'templates', 'translation', 'urls']

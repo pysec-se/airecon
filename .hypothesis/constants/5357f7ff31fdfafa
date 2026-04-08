@@ -1,4 +1,0 @@
-# file: /usr/lib/python3/dist-packages/django/core/checks/translation.py
-# hypothesis_version: 6.151.10
-
-['translation.E001', 'translation.E002', 'translation.E003', 'translation.E004']

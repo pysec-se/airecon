@@ -1,4 +1,0 @@
-# file: /usr/lib/python3/dist-packages/django/core/checks/templates.py
-# hypothesis_version: 6.151.10
-
-[', ', 'APP_DIRS', 'OPTIONS', 'libraries', 'loaders', 'string_if_invalid', 'templates.E001', 'templates.E002', 'templates.E003']

@@ -1,4 +1,0 @@
-# file: /usr/lib/python3/dist-packages/django/db/utils.py
-# hypothesis_version: 6.151.10
-
-['%s.base', ', ', 'ATOMIC_REQUESTS', 'AUTOCOMMIT', 'CHARSET', 'COLLATION', 'CONN_HEALTH_CHECKS', 'CONN_MAX_AGE', 'DATABASES', 'ENGINE', 'HOST', 'MIGRATE', 'MIRROR', 'NAME', 'OPTIONS', 'PASSWORD', 'PORT', 'TEST', 'TIME_ZONE', 'USER', '_django_version', 'base', 'db_for_read', 'db_for_write', 'default', 'django.db.backends.', 'dummy', 'instance']

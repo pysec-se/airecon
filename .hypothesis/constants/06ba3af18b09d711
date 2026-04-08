@@ -1,4 +1,0 @@
-# file: /usr/lib/python3/dist-packages/trio/_core/_io_epoll.py
-# hypothesis_version: 6.151.10
-
-['epoll', 'linux', 'read_task', 'write_task']

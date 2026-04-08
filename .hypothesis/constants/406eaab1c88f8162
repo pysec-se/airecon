@@ -1,4 +1,0 @@
-# file: /usr/lib/python3/dist-packages/django/utils/autoreload.py
-# hypothesis_version: 6.151.10
-
-[0.1, '%s-script.py', '%s/%s', '%s:%s', '-W%s', '-m', '.__main__', '.exe', ':', 'RUN_MAIN', 'SIGTTOU', 'Watching %s files', 'Watchman version %s', 'Watchman warning: %s', '__file__', '__main__', '__mp_main__', '__spec__', 'allof', 'anyof', 'clock', 'cpython', 'dedup_results', 'django-main-thread', 'django.', 'expression', 'f', 'fields', 'filename', 'files', 'files-parent-%s', 'glob', 'glob-parent-%s', 'l', 'match', 'name', 'relative_path', 'relative_root', 'since', 'subscribe', 'subscription', 'true', 'type', 'version', 'warning', 'watch', 'watch-project', 'wholename']

@@ -5,5 +5,11 @@ workspace/
 TODO.md
 .pytest_cache/
 .claude/
+.hypothesis/
+.coverage
+coverage.xml
+junit/
+*.log
+*.tmp
 coming_soon/
 benchmark/

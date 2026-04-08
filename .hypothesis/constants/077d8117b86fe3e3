@@ -1,4 +1,0 @@
-# file: /usr/lib/python3/dist-packages/django/forms/boundfield.py
-# hypothesis_version: 6.151.10
-
-['%s', ':?.!', 'BoundField', 'attrs', 'class', 'disabled', 'error_css_class', 'field', 'for', 'id', 'label', 'legend', 'require_all_fields', 'required', 'required_css_class', 'split', 'tag', 'template_name', 'use_tag', 'widget', 'widget$|input$', 'wrap_label', '{}{}']

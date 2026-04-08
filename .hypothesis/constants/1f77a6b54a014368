@@ -1,4 +1,0 @@
-# file: /usr/lib/python3/dist-packages/django/db/models/functions/window.py
-# hypothesis_version: 6.151.10
-
-['CUME_DIST', 'CumeDist', 'DENSE_RANK', 'DenseRank', 'FIRST_VALUE', 'FirstValue', 'LAG', 'LAST_VALUE', 'LEAD', 'Lag', 'LastValue', 'Lead', 'NTH_VALUE', 'NTILE', 'NthValue', 'Ntile', 'PERCENT_RANK', 'PercentRank', 'RANK', 'ROW_NUMBER', 'Rank', 'RowNumber']

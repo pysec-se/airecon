@@ -1,4 +1,0 @@
-# file: /home/pikpikcu/Documents/airecon/airecon/proxy/agent/executors_reporting.py
-# hypothesis_version: 6.151.10
-
-[0.0, 0.75, 0.9, 120, ' | ', '[a-z0-9]{4,}', '_active_target', '_surface_tracker', 'affected_endpoint', 'airecon.agent', 'attack_complexity', 'attack_vector', 'availability', 'blocked_by_verifier', 'confidentiality', 'cve', 'description', 'endpoint', 'error', 'exec', 'finding', 'flag', 'impact', 'integrity', 'issue', 'method', 'parameter', 'poc_description', 'poc_script_code', 'privileges_required', 'reason', 'remediation_steps', 'report', 'report_generated', 'scope', 'success', 'suggested_fix', 'target', 'technical_analysis', 'title', 'total', 'url', 'user_interaction', 'vulnerability']

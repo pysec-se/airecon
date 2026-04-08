@@ -1,4 +1,0 @@
-# file: /home/pikpikcu/Documents/airecon/airecon/proxy/agent/loop_lifecycle.py
-# hypothesis_version: 6.151.10
-
-[0.0, 0.25, 0.45, 0.5, 0.7, 5.0, 60.0, 100, 200, 300, 2000, 65536, '--- DISCOVERIES ---', '--- TOOLS RUN ---', ':', 'AIRECON_SESSION_ID', 'Operation failed: %s', 'RECON', '_context_check_task', '_ctf_mode', '_last_context_check', 'airecon.agent', 'content', 'context_length', 'failure_count', 'function', 'models', 'name', 'no-reason', 'ollama', 'ollama reset failed', 'ollama_num_ctx_small', 'role', 'status code: 500', 'success_count', 'system', 'used']

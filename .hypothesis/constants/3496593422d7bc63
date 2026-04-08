@@ -1,4 +1,0 @@
-# file: /usr/lib/python3/dist-packages/django/db/backends/utils.py
-# hypothesis_version: 6.151.10
-
-['"', '"."', '%.3f', '%s', '%s times: %s', '%s"."', '%s%s%s', '+', '-', '.', '0', '000000', ':', '?', 'alias', 'connection', 'cursor', 'django.db.backends', 'duration', 'fetchall', 'fetchmany', 'fetchone', 'nextset', 'params', 'sql', 'time', '{:f}']

@@ -1,4 +1,0 @@
-# file: /usr/lib/python3/dist-packages/django/utils/numberformat.py
-# hypothesis_version: 6.151.10
-
-[200, '-', '.', '0', '0.', '1', 'e', '{:e}', '{:f}', '{}e{}']

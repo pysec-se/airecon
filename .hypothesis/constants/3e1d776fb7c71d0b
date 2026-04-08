@@ -1,4 +1,0 @@
-# file: /usr/lib/python3/dist-packages/django/core/checks/urls.py
-# hypothesis_version: 6.151.10
-
-['/', ':', 'MEDIA_URL', 'ROOT_URLCONF', 'STATIC_URL', 'check', 'namespace', 'resolve', 'url_patterns', 'urls.E004', 'urls.E006', 'urls.W005']

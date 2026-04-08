@@ -1,4 +1,0 @@
-# file: /usr/lib/python3/dist-packages/django/forms/utils.py
-# hypothesis_version: 6.151.10
-
-[' {}', ' {}="{}"', '_', 'ambiguous_timezone', 'code', 'current_timezone', 'datetime', 'error_class', 'errorlist', 'errorlist {}', 'errors', 'message']
