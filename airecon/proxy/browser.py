@@ -50,6 +50,17 @@ _DEAD_HOST_MARKERS: tuple[str, ...] = (
     "failed to resolve",
 )
 
+_AUTH_ERROR_MARKERS: tuple[str, ...] = (
+    "err_invalid_auth_credentials",
+    "invalid auth credentials",
+    "authentication required",
+)
+
+_BROWSER_ERROR_PAGE_MARKERS: tuple[str, ...] = (
+    "chrome-error://chromewebdata/",
+    "chromewebdata",
+)
+
 
 def _classify_dead_reason(err: str) -> str:
     e = err.lower()
@@ -71,6 +82,14 @@ def _classify_dead_reason(err: str) -> str:
 
 def _is_dead_host_error(err_lower: str) -> bool:
     return any(m in err_lower for m in _DEAD_HOST_MARKERS)
+
+
+def _is_auth_error(err_lower: str) -> bool:
+    return any(m in err_lower for m in _AUTH_ERROR_MARKERS)
+
+
+def _is_browser_error_page(err_lower: str) -> bool:
+    return any(m in err_lower for m in _BROWSER_ERROR_PAGE_MARKERS)
 
 
 _TRACKING_PATTERNS: tuple[str, ...] = (
@@ -2044,7 +2063,6 @@ class BrowserTabManager:
         "navigation failed",
         "session closed",
         "browser instance is not running",
-        "invalid auth credentials",
     )
 
     def _safe_action(self, action_name: str, fn, *args, **kwargs) -> dict[str, Any]:
@@ -2070,6 +2088,25 @@ class BrowserTabManager:
         except Exception as e:
             error_str = str(e)
             error_lower = error_str.lower()
+
+            # Auth errors should not trigger a browser restart; return guidance.
+            if _is_auth_error(error_lower):
+                logger.info("Browser auth error during %s: %s", action_name, error_str)
+                return {
+                    "success": False,
+                    "auth_required": True,
+                    "auth_error": True,
+                    "error": error_str[:500],
+                    "message": (
+                        "Authentication required or invalid credentials. "
+                        "This is often HTTP Basic/Auth or a protected gateway."
+                    ),
+                    "next_action": (
+                        "Provide valid credentials or switch to a different auth flow. "
+                        "If this is HTTP Basic/Auth, try `curl -u user:pass <url>` or "
+                        "use browser_action login_form only if a login page exists."
+                    ),
+                }
 
             # Redirect loops are server-side — restarting the browser never helps.
             # Return a structured result immediately so the AI can pivot.
@@ -2105,6 +2142,24 @@ class BrowserTabManager:
                     ),
                 }
                 return result
+
+            if _is_browser_error_page(error_lower):
+                logger.info(
+                    "Browser error page during %s: %s", action_name, error_str[:200]
+                )
+                return {
+                    "success": False,
+                    "browser_error_page": True,
+                    "error": error_str[:500],
+                    "message": (
+                        "Navigation failed and Chromium showed an internal error page."
+                    ),
+                    "next_action": (
+                        "Check for auth requirements, TLS/SSL issues, or proxy restrictions. "
+                        "Try http_observe/curl to see the raw HTTP response, or retry after "
+                        "setting valid credentials."
+                    ),
+                }
 
             is_crash = any(
                 k in error_lower

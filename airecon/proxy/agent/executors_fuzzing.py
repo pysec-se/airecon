@@ -399,14 +399,14 @@ class _FuzzingExecutorMixin:
                 f.write("\n".join(wordlist))
 
             saved_path = f"output/{output_file}"
+            fuzzer_instance = getattr(self, "_fuzzer_instance", None)
+            model_used = getattr(fuzzer_instance, "model", None)
             res_dict = {
                 "success": True,
                 "result": f"Generated {len(wordlist)} entries saved to {saved_path}.",
                 "saved_to": saved_path,
                 "total_entries": len(wordlist),
-                "model_used": getattr(self, "_fuzzer_instance", None).model
-                if hasattr(self, "_fuzzer_instance")
-                else None,
+                "model_used": model_used,
             }
             _record_tool_completion(
                 self, tool_name, arguments, res_dict, start_time, success=True

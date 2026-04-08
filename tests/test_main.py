@@ -88,15 +88,16 @@ class TestMainCLI:
             args = mock_clean.call_args[0][0]
             assert args.command == "clean"
 
-    def test_no_command_shows_help(self) -> None:
-        """Test no command shows help and exits with code 1."""
-        with patch("argparse.ArgumentParser.print_help") as mock_help:
-            sys.argv = ["airecon"]
-            with pytest.raises(SystemExit) as exc_info:
-                main()
+    def test_no_command_shows_help(self, capsys: pytest.CaptureFixture[str]) -> None:
+        """Test no command shows banner hint and exits with code 1."""
+        sys.argv = ["airecon"]
+        with pytest.raises(SystemExit) as exc_info:
+            main()
 
-            mock_help.assert_called_once()
-            assert exc_info.value.code == 1
+        captured = capsys.readouterr()
+        assert "see all options:" in captured.out.lower()
+        assert "airecon -h" in captured.out.lower()
+        assert exc_info.value.code == 1
 
     def test_custom_config_flag(self) -> None:
         """Test --config flag is accepted."""
