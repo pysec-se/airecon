@@ -3,17 +3,17 @@
         "type": "function",
         "function": {
             "name": "execute",
-            "description": "Execute a shell command inside the Kali Linux sandbox. All recon tools are pre-installed.",
+            "description": "Execute a shell command inside the Kali Linux sandbox. All recon tools are pre-installed (nmap, sqlmap, nuclei, ffuf, subfinder, httpx, etc.). Use this for any external binary. Examples: {\"command\": \"subfinder -d example.com -o output/subdomains.txt\"} or {\"command\": \"nmap -sV -p 1-1000 target\"}. Avoid interactive tools; prefer one-shot commands. Long-running tools may be terminated if they exceed per_tool_timeout_seconds.",
             "parameters": {
                 "type": "object",
                 "properties": {
                     "command": {
                         "type": "string",
-                        "description": "Shell command to run inside sandbox."
+                        "description": "Shell command to run inside sandbox. Must be a single command or piped sequence."
                     },
                     "timeout": {
                         "type": "number",
-                        "description": "Optional timeout in seconds."
+                        "description": "Optional timeout in seconds (default 600). Maximum allowed is 3600."
                     }
                 },
                 "required": [
@@ -26,7 +26,7 @@
         "type": "function",
         "function": {
             "name": "advanced_fuzz",
-            "description": "Run advanced heuristics and intelligent fuzzing for Zero-Days. Uses fuzzer.py internally.",
+            "description": "Intelligent parameter fuzzing for web vulnerabilities. Tests for SQL injection, XSS, SSRF, IDOR, SSTI, mass assignment, and more. Automatically runs Phase 2 advanced tests (SSRF to cloud metadata, GraphQL introspection, race conditions) if enabled. Requires a specific target URL and a list of parameter names. Example: target=\"https://api.example.com/v1/users\", parameters=[\"id\",\"user_id\"], vuln_types=[\"sql_injection\",\"xss\"], method=\"GET\". Uses AI-powered payload generation and confidence scoring. Returns findings with severity, confidence, and evidence.",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -50,7 +50,30 @@
                         "items": {
                             "type": "string"
                         },
-                        "description": "Types of vulnerabilities to fuzz (e.g. ['sql_injection', 'xss', 'idor', 'ssti', 'mass_assignment'])"
+                        "description": "Vuln classes: sql_injection, xss, ssrf,idor,ssti,mass_assignment,lfi,rfi,command_injection,xpath_injection,ldap_injection,log_injection,response_splitting,host_header_injection,cached_objects,csrf"
+                    },
+                    "phase2": {
+                        "type": "boolean",
+                        "description": "Enable Phase 2 advanced tests (default true). Includes SSRF to 169.254.169.254, GraphQL introspection, race condition probing."
+                    },
+                    "phase3": {
+                        "type": "boolean",
+                        "description": "Enable Phase 3 (deep fuzzing) - experimental."
+                    },
+                    "ssrf_params": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "List of parameters to test for SSRF with cloud metadata probes."
+                    },
+                    "graphql_endpoints": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "GraphQL endpoint paths to test (e.g., ['/graphql', '/api/graphql'])."
+                    },
+                    "race_params": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "Parameters to test for race conditions."
                     }
                 },
                 "required": [
@@ -91,7 +114,7 @@
         "type": "function",
         "function": {
             "name": "browser_action",
-            "description": "Control a headless browser to navigate, interact, or extract data from websites.",
+            "description": "Control a Playwright-powered headless Chromium browser for recon, auth, and exploitation. 29 actions: navigate/goto, click, type, execute_js (with parallel mode across ALL tabs), double_click, hover, scroll, press_key, back/forward, multi-tab management (new_tab/switch_tab/close_tab/list_tabs), save_pdf for evidence, screenshot, view_source, get_console_logs, get_network_logs (XHR/Fetch API discovery), wait, wait_for_element. Auth: login_form (multi-step SSO support), handle_totp (RFC 6238 TOTP auto-generation), save_auth_state, inject_cookies, oauth_authorize, check_auth_status, solve_captcha (reCAPTCHA/hCaptcha/Cloudflare). ALWAYS use browser for SPA/modern apps — execute_js can extract localStorage tokens, dump JS config objects, enumerate SPA routes, bypass client-side auth. view_source → find form selectors, hidden inputs, inline JS. get_console_logs → find JS errors, leaked API keys. get_network_logs → discover hidden API endpoints, auth tokens in headers.",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -127,9 +150,10 @@
                             "inject_cookies",
                             "oauth_authorize",
                             "check_auth_status",
-                            "wait_for_element"
+                            "wait_for_element",
+                            "solve_captcha"
                         ],
-                        "description": "The action to perform. SCREENSHOT — screenshot: take a screenshot of the current page; returns screenshot_path (saved to workspace/output/). Use to visually inspect a page, verify login state, or capture CAPTCHA images manually. AUTH WORKFLOW — always read 'next_action' field in every response for guidance: (1) login_form → response has: login_success, captcha_detected, captcha_type, captcha_screenshot (auto-taken), mfa_required, login_error, next_action. (2) If captcha_detected=true: CAPTCHA screenshot already taken automatically (see captcha_screenshot path) → call request_user_input(input_type='captcha', prompt='Solve CAPTCHA in <path>'). (3) If mfa_required=true AND you have secret: handle_totp(totp_secret=BASE32SECRET) → check totp_success. If no secret: request_user_input(input_type='totp'). (4) For username-first flows (Google/GitHub/Microsoft): login_form(multi_step=true). (5) After success: save_auth_state. (6) Restore session: inject_cookies → goto URL. (7) OAuth/SSO: oauth_authorize(url=..., callback_prefix=...). (8) check_auth_status: verify if currently logged in (returns is_authenticated, confidence, username_display). (9) wait_for_element: wait for CSS selector to appear/disappear (use after SPA transitions or login redirects)."
+                        "description": "The action to perform. Key actions: execute_js — run JS in page; use js_code; returns result + state; parallel=true runs across all tabs. save_pdf — export page as PDF to file_path (workspace-relative). screenshot — capture PNG to screenshots/ subdirectory; returns screenshot_path. login_form — authenticate; handle_totp — TOTP; solve_captcha — auto-solve (captcha_type + sitekey). wait_for_element — dynamic wait. get_console_logs / get_network_logs — fetch logs. Full list: launch, goto, click, type, scroll_*, navigation, tab management (new_tab/switch_tab/close_tab/list_tabs), execute_js, save_pdf, screenshot, view_source, console/network logs, auth actions, wait_for_element, solve_captcha."
                     },
                     "url": {
                         "type": "string",
@@ -149,11 +173,11 @@
                     },
                     "js_code": {
                         "type": "string",
-                        "description": "JavaScript code to execute."
+                        "description": "JavaScript code to execute (REQUIRED for execute_js action). Returns result as string (truncated if >1MB). Use for: extract data from page (localStorage, sessionStorage, cookies, DOM), analyze structure, read JS variables/config, scrape dynamic content. Examples: 'document.querySelectorAll(\"a\").length', 'localStorage.getItem(\"token\")', 'JSON.stringify(performance.getEntries())'. For complex scripts, use multi-line template literals. Result includes page state (url, title) and js_result field."
                     },
                     "parallel": {
                         "type": "boolean",
-                        "description": "For action=execute_js only: when true, run JS concurrently across all open tabs (do not set tab_id)."
+                        "description": "For execute_js only: when true, run the same JS code concurrently across ALL open tabs. Useful for gathering comparative data or extracting same info from multiple pages. Do not set tab_id when using parallel=true. Returns parallel_results dict mapping tab_id to individual results."
                     },
                     "duration": {
                         "type": "number",
@@ -165,7 +189,7 @@
                     },
                     "file_path": {
                         "type": "string",
-                        "description": "Path to save PDF."
+                        "description": "Path to save PDF (REQUIRED for save_pdf action, must end with .pdf). Path is relative to workspace root. Saves complete rendered page including CSS and embedded images. Use for: preserving evidence, capturing sensitive data exposures, documenting login screens, saving reports. Returns pdf_saved path in response state."
                     },
                     "clear": {
                         "type": "boolean",
@@ -224,6 +248,20 @@
                             "detached"
                         ],
                         "description": "For wait_for_element: element state to wait for. Default: 'visible'."
+                    },
+                    "captcha_type": {
+                        "type": "string",
+                        "enum": [
+                            "recaptcha",
+                            "hcaptcha",
+                            "cloudflare_turnstile",
+                            "unknown"
+                        ],
+                        "description": "For solve_captcha: type of CAPTCHA. Choose 'recaptcha' for Google reCAPTCHA, 'hcaptcha' for hCaptcha, 'cloudflare_turnstile' for Cloudflare Turnstile, or 'unknown' if undetermined."
+                    },
+                    "sitekey": {
+                        "type": "string",
+                        "description": "For solve_captcha: the sitekey (public key) identifier for the CAPTCHA challenge. Usually found in data-sitekey attribute or challenge parameters."
                     },
                     "cookies": {
                         "type": "array",
@@ -376,143 +414,106 @@
         "type": "function",
         "function": {
             "name": "create_vulnerability_report",
-            "description": "Create a vulnerability report. Enforces duplicate-title checks; include required PoC fields for valid submissions.",
+            "description": "Create a FINAL confirmed vulnerability report under the active target's vulnerabilities/ directory. Call this only after you have reproducible PoC evidence and concrete impact. Never use it for hypotheses, raw observations, methodology, or todo items; use create_note for those. Required fields are: title, description, target, poc_description, and poc_script_code. The target can be a URL/host or a local file/folder reference tied to the active workspace target. Optional fields include impact, technical_analysis, remediation_steps, endpoint, method, flag, cve, suggested_fix, and the 8 CVSS base metrics.",
             "parameters": {
                 "type": "object",
                 "properties": {
                     "title": {
                         "type": "string",
-                        "description": "Clear, specific title (e.g., \"SQL Injection in /api/users Login Parameter\"). But not too long. Don't mention CVE number in the title."
-                    },
-                    "description": {
-                        "type": "string",
-                        "description": "Comprehensive description of the vulnerability and how it was discovered"
-                    },
-                    "impact": {
-                        "type": "string",
-                        "description": "Impact assessment: what attacker can do, business risk, data at risk"
+                        "description": "Concise finding title, e.g. 'SQL Injection in /login' or 'Path Traversal in archive extractor'."
                     },
                     "target": {
                         "type": "string",
-                        "description": "Affected target: URL, domain, or Git repository"
+                        "description": "Affected target. Use URL/host for remote findings, or a local file/folder/workspace path when analyzing code or uploaded artifacts."
                     },
-                    "technical_analysis": {
+                    "description": {
                         "type": "string",
-                        "description": "Technical explanation of the vulnerability mechanism and root cause"
+                        "description": "Clear vulnerability summary tied to observed behavior and evidence."
                     },
                     "poc_description": {
                         "type": "string",
-                        "description": "Step-by-step instructions to reproduce the vulnerability"
+                        "description": "How the proof of concept works and what behavior confirmed the issue."
                     },
                     "poc_script_code": {
                         "type": "string",
-                        "description": "Actual proof of concept code, exploit, payload, or script that demonstrates the vulnerability. Python code."
+                        "description": "Actual exploit, payload, code snippet, or reproduction command. This is mandatory."
+                    },
+                    "impact": {
+                        "type": "string",
+                        "description": "Concrete attacker outcome: unauthorized data access, privilege change, code execution, service impact, etc."
+                    },
+                    "technical_analysis": {
+                        "type": "string",
+                        "description": "Deeper root-cause or exploitability analysis."
                     },
                     "remediation_steps": {
                         "type": "string",
-                        "description": "Specific, actionable steps to fix the vulnerability"
+                        "description": "Specific remediation guidance."
                     },
                     "attack_vector": {
                         "type": "string",
-                        "enum": [
-                            "N",
-                            "A",
-                            "L",
-                            "P"
-                        ],
-                        "description": "CVSS Attack Vector — how the attacker reaches the vulnerability.\nN=Network: exploitable remotely over the internet (SQLi, XSS, SSRF, IDOR, open redirect, API vuln).\nA=Adjacent: requires attacker on same local network/VLAN (ARP spoofing, internal-only API).\nL=Local: requires local OS access/shell (privilege escalation, local file read).\nP=Physical: requires physical device access.\nMost web vulnerabilities = N."
+                        "description": "Optional CVSS AV metric: N, A, L, or P."
                     },
                     "attack_complexity": {
                         "type": "string",
-                        "enum": [
-                            "L",
-                            "H"
-                        ],
-                        "description": "CVSS Attack Complexity — how reliably the attack can be repeated.\nL=Low: attack works consistently with no special conditions (SQLi, IDOR, open redirect, auth bypass, XSS, path traversal, most web vulns).\nH=High: requires specific conditions outside attacker control (race condition with narrow window, MitM required, target must have specific non-default config).\nDefault for most web vulns = L."
+                        "description": "Optional CVSS AC metric: L or H."
                     },
                     "privileges_required": {
                         "type": "string",
-                        "enum": [
-                            "N",
-                            "L",
-                            "H"
-                        ],
-                        "description": "CVSS Privileges Required — authentication level needed BEFORE exploiting.\nN=None: no login required (unauthenticated endpoint, public API, login-page SQLi).\nL=Low: any authenticated user can exploit (IDOR between regular users, stored XSS by normal user).\nH=High: only admin/privileged role can exploit (admin panel XSS, admin-only IDOR)."
+                        "description": "Optional CVSS PR metric: N, L, or H."
                     },
                     "user_interaction": {
                         "type": "string",
-                        "enum": [
-                            "N",
-                            "R"
-                        ],
-                        "description": "CVSS User Interaction — must a VICTIM perform an action for the exploit to work?\nN=None: attacker exploits directly with no victim interaction (SQLi, SSRF, IDOR, path traversal, auth bypass, server-side injection, unauthenticated RCE).\nR=Required: victim must click a link, visit a page, or take an action (reflected XSS, CSRF, open redirect, phishing-based attacks, DOM XSS via crafted URL).\nIMPORTANT: SQLi/SSRF/IDOR = N. Reflected XSS/CSRF/open redirect = R."
+                        "description": "Optional CVSS UI metric: N or R."
                     },
                     "scope": {
                         "type": "string",
-                        "enum": [
-                            "U",
-                            "C"
-                        ],
-                        "description": "CVSS Scope — does the vulnerability's impact extend beyond the vulnerable component?\nU=Unchanged: impact stays within the vulnerable component/service (SQLi, IDOR, path traversal, auth bypass, reflected XSS same-session, open redirect, most web vulns). DEFAULT for most findings.\nC=Changed: attacker can impact OTHER components or OTHER users beyond the vulnerable service (stored XSS that steals cookies of OTHER users in their sessions, SSRF that reaches internal network services, XXE with OOB that contacts external systems, privilege escalation to OS level).\nWARNING: Do NOT use C just because the vuln is serious. Reflected XSS = U. Stored XSS affecting other users = C. Open redirect = U. SSRF to cloud metadata = C."
+                        "description": "Optional CVSS S metric: U or C."
                     },
                     "confidentiality": {
                         "type": "string",
-                        "enum": [
-                            "N",
-                            "L",
-                            "H"
-                        ],
-                        "description": "CVSS Confidentiality Impact — what sensitive data can be read?\nN=None: no data read (pure injection with no data leak, availability-only impact).\nL=Low: some non-critical info exposed. Use L for: username enumeration, version disclosure, error stack traces, path disclosure, email addresses, public user metadata, wp-json user listing, HTTP headers leaking framework info.\nH=High: sensitive/private data compromised. Use H for: password/credential theft, session token theft, full database dump via SQLi, private user data (SSN, payment info), source code disclosure, admin data access via IDOR.\nDO NOT use H for username enumeration or version disclosure — these are L."
+                        "description": "Optional CVSS C metric: N, L, or H."
                     },
                     "integrity": {
                         "type": "string",
-                        "enum": [
-                            "N",
-                            "L",
-                            "H"
-                        ],
-                        "description": "CVSS Integrity Impact — what data can be modified?\nN=None: attacker cannot modify any data (read-only IDOR, info disclosure, open redirect).\nL=Low: limited data modification (minor stored XSS affecting only attacker's own account, parameter tampering with bounded effect).\nH=High: critical data/config can be modified or created (admin account creation, password change of any user, RCE writing files, mass data modification, SQLi UPDATE/DELETE, CSRF changing sensitive settings)."
+                        "description": "Optional CVSS I metric: N, L, or H."
                     },
                     "availability": {
                         "type": "string",
-                        "enum": [
-                            "N",
-                            "L",
-                            "H"
-                        ],
-                        "description": "CVSS Availability Impact — can the attacker disrupt service?\nN=None: no availability impact (information disclosure, redirect, read-only IDOR — the vast majority of web vulns).\nL=Low: degraded performance or intermittent service interruption.\nH=High: full service crash or DoS (RCE killing the process, ReDoS causing 100% CPU, billion laugh XML, GraphQL DoS query).\nMost web vulnerabilities = N for availability."
+                        "description": "Optional CVSS A metric: N, L, or H."
                     },
                     "endpoint": {
                         "type": "string",
-                        "description": "API endpoint(s) or URL path(s) — for web vulns, or repo path — for code vulns"
+                        "description": "Optional affected endpoint, route, or file path."
                     },
                     "method": {
                         "type": "string",
-                        "description": "HTTP method(s) (GET, POST, etc.) — for web vulnerabilities."
+                        "description": "Optional HTTP method or protocol used in the PoC."
                     },
                     "cve": {
                         "type": "string",
-                        "description": "CVE identifier (e.g., \"CVE-2024-1234\"). Verify it's valid via web_search before using."
+                        "description": "Optional CVE ID if directly applicable."
                     },
                     "suggested_fix": {
                         "type": "string",
-                        "description": "Optional: A concrete code snippet or configuration change showing how to fix the vulnerability."
+                        "description": "Optional code/config patch or exact fix snippet."
                     },
                     "flag": {
                         "type": "string",
-                        "description": "CTF flag value (e.g., FLAG{example}). Use this field when reporting a CTF challenge flag."
+                        "description": "Optional flag value if captured during CTF/exercise."
                     }
                 },
                 "required": [
                     "title",
-                    "description",
                     "target",
+                    "description",
                     "poc_description",
                     "poc_script_code"
                 ]
             }
         }
     },
+
     {
         "type": "function",
         "function": {
@@ -1003,6 +1004,247 @@
                 "required": [
                     "claim",
                     "status"
+                ]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "load_skill",
+            "description": "Dynamically load a skill file (vulnerability methodology, technology guide, or protocol deep-dive) into the current session. Skills enhance analysis capabilities for specific contexts. Use when you discover a new technology or vulnerability type that requires specialized knowledge.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "skills": {
+                        "type": "string",
+                        "description": "Comma-separated list of skill file paths relative to the skills/ directory. Examples: 'vulnerabilities/sql_injection.md', 'technologies/react.md', 'vulnerabilities/xss.md'. Use read_file to explore available skills if uncertain. Paths are case-sensitive."
+                    },
+                    "replace_skills": {
+                        "type": "boolean",
+                        "description": "If true, replace currently loaded skills with these ones. If false (default), add to existing skills. Use replace=true when switching to a completely different assessment type."
+                    }
+                },
+                "required": [
+                    "skills"
+                ]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "python_session",
+            "description": "Start or continue an interactive Python session with state persistence. Uses IPython kernel under the hood. Variables, functions, and imports persist across calls. Perfect for iterative exploit development, data analysis, and script prototyping. Pre-imported modules: os, sys, json, re, base64, hashlib, random, datetime, pathlib, urllib.parse. Use `pip` to install packages on the fly (limited). Session auto-terminates after 300s of inactivity. Parameters: session_id (optional, defaults to 'default'), code (required) - Python code to execute. Returns: output (stdout/stderr), result (last expression if any), session_state (variables dict), error (if any). Example: {\"code\": \"import requests; r = requests.get('https://example.com')\", \"session_id\": \"exploit_dev\"}",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "session_id": {
+                        "type": "string",
+                        "description": "Optional session identifier. Use named sessions to maintain separate contexts. Default: 'default'."
+                    },
+                    "code": {
+                        "type": "string",
+                        "description": "Python code to execute. Can be multiple lines. Use print() for output. Last expression's value is returned in 'result'. Example: \"import requests; resp = requests.get('https://example.com'); print(resp.status_code); resp.text[:200]\""
+                    }
+                },
+                "required": [
+                    "code"
+                ]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "edit_file",
+            "description": "Perform a surgical text replacement in a file using exact string matching. More precise than create_file for code modifications. Specify old_str to replace exactly that content with new_str. The match must be exact (including whitespace). If multiple matches exist, only the first is replaced. Returns: success, lines_modified, new_content (snippet). Use read_file first to get exact content. Parameters: path (required, workspace-relative), old_str (required), new_str (required). Example: {\"path\": \"output/exploit.py\", \"old_str\": \"def exploit():\\n    return 0\", \"new_str\": \"def exploit():\\n    # Fixed\\n    return 1\"}",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "path": {
+                        "type": "string",
+                        "description": "Path to file (workspace-relative, e.g., \"output/script.py\"). Must exist."
+                    },
+                    "old_str": {
+                        "type": "string",
+                        "description": "Exact text to find and replace. Must match exactly including newlines and indentation. Get the exact string by reading the file first."
+                    },
+                    "new_str": {
+                        "type": "string",
+                        "description": "Replacement text. Should maintain consistent formatting."
+                    }
+                },
+                "required": [
+                    "path",
+                    "old_str",
+                    "new_str"
+                ]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "think",
+            "description": "Explicitly record a reasoning step, hypothesis, or analytical thought. This captures your thinking process for later review, debugging, and transparency. Thoughts are saved to the session and written to output/thoughts_<phase>.log. Use this before critical decisions, when forming hypotheses, or when analyzing complex evidence. Parameters: thought (required) - your reasoning, hypothesis, or analysis. Optional: category (\"hypothesis\", \"analysis\", \"decision\", \"question\", \"insight\"), confidence (0.0-1.0 if supported). Example: {\"thought\": \"The SQL error suggests a MySQL backend. Union-based injection likely works. Testing with '1' UNION SELECT NULL--\"}",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "thought": {
+                        "type": "string",
+                        "description": "Your reasoning, hypothesis, or analytical observation. Be specific and actionable."
+                    },
+                    "category": {
+                        "type": "string",
+                        "enum": [
+                            "hypothesis",
+                            "analysis",
+                            "decision",
+                            "question",
+                            "insight",
+                            "observation"
+                        ],
+                        "description": "Type of thought. Helps organize thinking trace."
+                    },
+                    "confidence": {
+                        "type": "number",
+                        "description": "Confidence level 0.0-1.0 if your thought is a hypothesis or analysis. Optional."
+                    }
+                },
+                "required": [
+                    "thought"
+                ]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "create_note",
+            "description": "Create a structured WORKING note with category, tags, and optional metadata. Notes persist across the session and can be searched later. Categories: vulnerability, methodology, finding, question, plan, observation, todo. Use notes for hypotheses, raw observations, task tracking, methodology, and draft evidence. Notes are NOT final vulnerability reports and do NOT write to vulnerabilities/; use create_vulnerability_report for confirmed findings. Parameters: category (required), title (required), content (required), tags (optional array). Returns note_id and status. Example: {\"category\": \"vulnerability\", \"title\": \"SQL Injection in login\", \"content\": \"Union-based SQLi on username field...\", \"tags\": [\"sqli\", \"critical\", \"auth\"]}",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "category": {
+                        "type": "string",
+                        "enum": [
+                            "vulnerability",
+                            "methodology",
+                            "finding",
+                            "question",
+                            "plan",
+                            "observation",
+                            "todo"
+                        ],
+                        "description": "Note category for organization."
+                    },
+                    "title": {
+                        "type": "string",
+                        "description": "Concise title summarizing the note."
+                    },
+                    "content": {
+                        "type": "string",
+                        "description": "Full note content. Supports markdown formatting."
+                    },
+                    "tags": {
+                        "type": "array",
+                        "items": {
+                            "type": "string"
+                        },
+                        "description": "Optional tags for filtering (e.g., [\"sqli\", \"critical\", \"auth\"])."
+                    }
+                },
+                "required": [
+                    "category",
+                    "title",
+                    "content"
+                ]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "list_notes",
+            "description": "List all notes with optional filtering by category or tag. Returns note metadata (id, title, category, tags, created_at) without full content. Use to browse or find notes. Parameters: category (optional filter), tag (optional filter), limit (default 50). Example: {\"category\": \"vulnerability\"} or {\"tag\": \"critical\"}",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "category": {
+                        "type": "string",
+                        "description": "Filter by category."
+                    },
+                    "tag": {
+                        "type": "string",
+                        "description": "Filter by tag."
+                    },
+                    "limit": {
+                        "type": "integer",
+                        "description": "Maximum number of notes to return (default 50)."
+                    }
+                }
+           }
+       }
+   },
+    {
+        "type": "function",
+        "function": {
+            "name": "export_notes_wiki",
+            "description": "Export all notes to a single wiki markdown file for documentation. Useful at the end of engagement to generate organized report appendix. Parameters: output_path (optional, default: current target's \"notes/wiki.md\"). Returns export status and path. Example: {\"output_path\": \"output/wiki_notes.md\"}",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "output_path": {
+                        "type": "string",
+                        "description": "Output file path (workspace-relative). Default: current target's notes/wiki.md"
+                    }
+                }
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "search_notes",
+            "description": "Full-text search across all notes. Returns matching notes with snippets showing context. Parameters: query (required string), category (optional filter), limit (default 20). Use to find specific information previously documented. Example: {\"query\": \"SQL injection\", \"category\": \"vulnerability\"}",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "query": {
+                        "type": "string",
+                        "description": "Search query (case-insensitive substring match)."
+                    },
+                    "category": {
+                        "type": "string",
+                        "description": "Optional category filter."
+                    },
+                    "limit": {
+                        "type": "integer",
+                        "description": "Maximum results (default 20)."
+                    }
+                },
+                "required": [
+                    "query"
+                ]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "read_note",
+            "description": "Retrieve the full content of a specific note by ID. Use after listing or searching notes to view complete details. Parameters: note_id (required). Returns the full note object with title, category, content, tags, timestamps. Example: {\"note_id\": \"note_20260406_143022_a1b2c3d4\"}",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "note_id": {
+                        "type": "string",
+                        "description": "Unique note identifier (from create_note, list_notes, or search_notes results)."
+                    }
+                },
+                "required": [
+                    "note_id"
                 ]
             }
         }

@@ -64,7 +64,7 @@ def _get_url_extension(url: str) -> str:
             ext = last_segment.rsplit(".", 1)[-1].lower()
             return ext
     except Exception as exc:
-        logger.debug("Operation failed: %s", exc)
+        logger.warning("Operation failed: %s", exc)
     return ""
 
 
@@ -109,7 +109,7 @@ def has_path_parameters(url: str) -> bool:
         ):
             return True
     except Exception as exc:
-        logger.debug("Operation failed: %s", exc)
+        logger.warning("Operation failed: %s", exc)
     return False
 
 

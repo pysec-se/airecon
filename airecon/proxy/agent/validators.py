@@ -51,8 +51,7 @@ def _load_known_tools() -> frozenset[str]:
                 tools.update(t.lower() for t in category if t)
         return frozenset(tools)
     except Exception as e:
-        logger.debug("Exception: %s", e)
-        logger.debug("Operation failed")
+        logger.warning("Operation failed: %s", e)
         return frozenset()
 
 
@@ -494,7 +493,7 @@ class _ValidatorMixin:
                 if merged:
                     chunks.append(merged)
             except Exception as e:
-                logger.debug("Exception: %s", e)
+                logger.warning("Operation failed: %s", e)
                 continue
 
         evidence_log = list(getattr(state, "evidence_log", []) or [])[-max_entries:]
@@ -507,7 +506,7 @@ class _ValidatorMixin:
                 if summary:
                     chunks.append(f"{summary} {artifact}".strip())
             except Exception as e:
-                logger.debug("Exception: %s", e)
+                logger.warning("Operation failed: %s", e)
                 continue
         return chunks
 
@@ -557,7 +556,7 @@ class _ValidatorMixin:
                 str(getattr(state, "active_target", "") or "").strip().lower()
             )
         except Exception as e:
-            logger.debug("Exception: %s", e)
+            logger.warning("Operation failed: %s", e)
             active_target = ""
 
         host_candidates = {
@@ -1348,8 +1347,7 @@ class _ValidatorMixin:
                                 f"verification confidence too low ({_v_conf:.2f} < {_v_cfg.verification_min_report_confidence:.2f})"
                             )
                 except Exception as e:
-                    logger.debug("Exception: %s", e)
-                    logger.debug("Operation failed")
+                    logger.warning("Operation failed: %s", e)
 
             if (
                 is_strict_phase

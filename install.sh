@@ -1,25 +1,114 @@
-#!/bin/bash
-set -e
+#!/usr/bin/env bash
+set -euo pipefail
 
-# Colors
 GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
 RED='\033[0;31m'
+ORANGE='\033[38;5;214m'
 CYAN='\033[0;36m'
 BOLD='\033[1m'
-NC='\033[0m' # No Color
+MUTED='\033[0;2m'
+NC='\033[0m'
 
 REPO_URL="https://github.com/pikpikcu/airecon"
 BRANCH="main"
 
+# ── Print helpers ────────────────────────────────────────────────────────────
+print_progress() {
+    local bytes="$1"
+    local length="$2"
+    [ "$length" -gt 0 ] || return 0
+
+    local width=50
+    local percent=$(( bytes * 100 / length ))
+    [ "$percent" -gt 100 ] && percent=100
+    local on=$(( percent * width / 100 ))
+    local off=$(( width - on ))
+
+    local filled=$(printf "%*s" "$on" "")
+    filled=${filled// /■}
+    local empty=$(printf "%*s" "$off" "")
+    empty=${empty// /·}
+
+    printf "\r${ORANGE}%s%s %3d%%${NC}" "$filled" "$empty" "$percent" >&4
+}
+
+unbuffered_sed() {
+    if echo | sed -u -e "" >/dev/null 2>&1; then
+        sed -nu "$@"
+    elif echo | sed -l -e "" >/dev/null 2>&1; then
+        sed -nl "$@"
+    else
+        local pad="$(printf "\n%512s" "")"
+        sed -ne "s/$/\\${pad}/" "$@"
+    fi
+}
+
+download_with_progress() {
+    local url="$1"
+    local output="$2"
+
+    if [ -t 2 ]; then
+        exec 4>&2
+    else
+        exec 4>/dev/null
+    fi
+
+    local tmp_dir=${TMPDIR:-/tmp}
+    local tracebase="${tmp_dir}/airecon_install_$$"
+    local tracefile="${tracebase}.trace"
+
+    rm -f "$tracefile"
+    mkfifo "$tracefile"
+
+    printf "\033[?25l" >&4
+
+    trap "trap - RETURN; rm -f \"$tracefile\"; printf '\033[?25h' >&4; exec 4>&-" RETURN
+
+    (
+        curl --trace-ascii "$tracefile" -s -L -o "$output" "$url"
+    ) &
+    local curl_pid=$!
+
+    unbuffered_sed \
+        -e 'y/ACDEGHLNORTV/acdeghlnortv/' \
+        -e '/^0000: content-length:/p' \
+        -e '/^<= recv data/p' \
+        "$tracefile" | \
+    {
+        local length=0
+        local bytes=0
+
+        while IFS=" " read -r -a line; do
+            [ "${#line[@]}" -lt 2 ] && continue
+            local tag="${line[0]} ${line[1]}"
+
+            if [ "$tag" = "0000: content-length:" ]; then
+                length="${line[2]}"
+                length=$(echo "$length" | tr -d '\r')
+                bytes=0
+            elif [ "$tag" = "<= recv" ]; then
+                local size="${line[3]}"
+                bytes=$(( bytes + size ))
+                if [ "$length" -gt 0 ]; then
+                    print_progress "$bytes" "$length"
+                fi
+            fi
+        done
+    }
+
+    wait "$curl_pid"
+    local exit_code=$?
+    echo "" >&4
+    rm -f "$tracefile"
+    return "$exit_code"
+}
+
 # ── Detect local vs remote (curl|bash) mode ─────────────────────────────────
-# When piped via curl, BASH_SOURCE[0] is empty/stdin and pyproject.toml won't exist
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]:-/tmp}")" && pwd 2>/dev/null || echo /tmp)"
 PYPROJECT="$SCRIPT_DIR/pyproject.toml"
 
 if [ ! -f "$PYPROJECT" ]; then
-    echo -e "${CYAN}[*] Remote install detected — cloning repository...${NC}"
-
     if ! command -v git &> /dev/null; then
         echo -e "${RED}[!] git is required but not installed.${NC}"
         exit 1
@@ -28,7 +117,9 @@ if [ ! -f "$PYPROJECT" ]; then
     TMP_DIR=$(mktemp -d)
     trap 'rm -rf "$TMP_DIR"' EXIT
 
-    git clone --depth=1 --branch "$BRANCH" "$REPO_URL" "$TMP_DIR" 2>&1 \
+    echo -e "${MUTED}[*] Cloning repository...${NC}"
+
+    git clone --quiet --depth=1 --branch "$BRANCH" "$REPO_URL" "$TMP_DIR" 2>&1 \
         || { echo -e "${RED}[!] Failed to clone repository.${NC}"; exit 1; }
 
     SCRIPT_DIR="$TMP_DIR"
@@ -37,102 +128,61 @@ fi
 
 cd "$SCRIPT_DIR"
 
-# ── Detect version from pyproject.toml ──────────────────────────────────────
-if [ -f "$PYPROJECT" ]; then
-    NEW_VERSION=$(grep -m1 '^version' "$PYPROJECT" | sed 's/version = "\(.*\)"/\1/')
-else
-    NEW_VERSION="unknown"
-fi
+# ── Detect version ──────────────────────────────────────────────────────────
+NEW_VERSION=$(grep -m1 '^version' "$PYPROJECT" | sed 's/version = "\(.*\)"/\1/')
 
-echo -e ""
-echo -e "${CYAN}${BOLD}  ▄▖▄▖▄▖${NC}"
-echo -e "${CYAN}${BOLD}  ▌▌▐ ▙▘█▌▛▘▛▌▛▌${NC}"
-echo -e "${CYAN}${BOLD}  ▛▌▟▖▌▌▙▖▙▖▙▌▌▌${NC}"
-echo -e "${CYAN}  v${NEW_VERSION} — AI-Powered Security Reconnaissance${NC}"
-echo -e ""
-
-# Normalize PEP 440 version: "0.1.6-beta" → "0.1.6b0", "0.1.6-alpha" → "0.1.6a0"
 normalize_ver() {
     echo "$1" | sed 's/-beta$/b0/; s/-alpha$/a0/; s/-rc\([0-9]*\)$/rc\1/'
 }
 
-# ── Check Python >= 3.12 ─────────────────────────────────────────────────────
 PYTHON_CMD="python3"
-if [ -f "/usr/bin/python3" ]; then
-    PYTHON_CMD="/usr/bin/python3"
-fi
+[ -f "/usr/bin/python3" ] && PYTHON_CMD="/usr/bin/python3"
 
-PY_VERSION=$($PYTHON_CMD -c "import sys; print(f'{sys.version_info.major}.{sys.version_info.minor}')" 2>/dev/null || echo "0.0")
-PY_OK=$($PYTHON_CMD -c "import sys; print('yes' if sys.version_info >= (3,12) else 'no')" 2>/dev/null || echo "no")
-if [ "$PY_OK" != "yes" ]; then
-    echo -e "${RED}[!] Python >= 3.12 required, found $PY_VERSION${NC}"
-    exit 1
-fi
-
-echo -e "${GREEN}[+] Using Python $PY_VERSION ($PYTHON_CMD)${NC}"
-
-# ── Check currently installed version ───────────────────────────────────────
+# ── Show currently installed version ───────────────────────────────────────
 CURRENT_VERSION=""
 if command -v airecon &> /dev/null; then
     CURRENT_VERSION=$(airecon --version 2>/dev/null | awk '{print $NF}' || true)
 fi
-
 if [ -n "$CURRENT_VERSION" ]; then
-    if [ "$(normalize_ver "$CURRENT_VERSION")" = "$(normalize_ver "$NEW_VERSION")" ]; then
-        echo -e "${YELLOW}[!] v${CURRENT_VERSION} is already installed. Reinstalling...${NC}"
-    else
-        echo -e "${YELLOW}[!] Upgrading: v${CURRENT_VERSION} → v${NEW_VERSION}${NC}"
-    fi
-else
-    echo -e "${GREEN}[+] Installing AIRecon v${NEW_VERSION}...${NC}"
+    echo -e "Installed AIRecon version: ${BOLD}v${CURRENT_VERSION}${NC}"
+fi
+echo -e "Installing airecon version: ${BOLD}${NEW_VERSION}${NC}"
+
+# ── Check Python >= 3.12 ─────────────────────────────────────────────────────
+PY_OK=$($PYTHON_CMD -c "import sys; print('yes' if sys.version_info >= (3,12) else 'no')" 2>/dev/null || echo "no")
+if [ "$PY_OK" != "yes" ]; then
+    PY_VERSION=$($PYTHON_CMD -c "import sys; print(f'{sys.version_info.major}.{sys.version_info.minor}')" 2>/dev/null || echo "0.0")
+    echo -e "${RED}[!] Python >= 3.12 required, found $PY_VERSION${NC}"
+    exit 1
 fi
 
-# Function to uninstall airecon completely
-uninstall_airecon() {
-    echo -e "${YELLOW}[!] Cleaning previous installations...${NC}"
-
-    if pip show airecon &> /dev/null 2>&1; then
-        echo -e "${YELLOW}[!] Found existing AIRecon in current environment. Removing...${NC}"
-        pip uninstall -y airecon --break-system-packages 2>/dev/null || pip uninstall -y airecon 2>/dev/null || true
+# ── Version comparison ───────────────────────────────────────────────────
+if [ -n "$CURRENT_VERSION" ]; then
+    if [ "$(normalize_ver "$CURRENT_VERSION")" = "$(normalize_ver "$NEW_VERSION")" ]; then
+        echo -e "${MUTED}  Already installed, reinstalling...${NC}"
+    else
+        echo -e "${MUTED}  Upgrading v${CURRENT_VERSION} → v${NEW_VERSION}${NC}"
     fi
-
-    if $PYTHON_CMD -m pip show airecon &> /dev/null 2>&1; then
-        echo -e "${YELLOW}[!] Found existing AIRecon in user site. Removing...${NC}"
-        $PYTHON_CMD -m pip uninstall -y airecon --break-system-packages 2>/dev/null || true
-    fi
-
-    pip cache remove airecon &> /dev/null 2>&1 || true
-    $PYTHON_CMD -m pip cache remove airecon &> /dev/null 2>&1 || true
-    rm -rf dist/ build/ *.egg-info
-}
+fi
 
 # ── Check Poetry ─────────────────────────────────────────────────────────────
 if ! command -v poetry &> /dev/null; then
-    echo -e "${YELLOW}[!] Poetry not found. Installing via official installer...${NC}"
     if ! command -v curl &> /dev/null; then
         echo -e "${RED}[!] curl is required to install Poetry.${NC}"
         exit 1
     fi
-    curl -sSL https://install.python-poetry.org | python3 -
-    # Make poetry available for the rest of this script
+    curl -sSL https://install.python-poetry.org | python3 - > /dev/null 2>&1
     export PATH="$HOME/.local/bin:$PATH"
-    if ! command -v poetry &> /dev/null; then
-        echo -e "${RED}[!] Poetry installation failed.${NC}"
-        exit 1
-    fi
-    echo -e "${GREEN}[+] Poetry installed successfully.${NC}"
-else
-    echo -e "${GREEN}[+] Poetry is already installed.${NC}"
 fi
 
-# Clean previous installs
-uninstall_airecon
+# ── Uninstall previous (quiet) ───────────────────────────────────────────────
+pip uninstall -y airecon > /dev/null 2>&1 || true
+rm -rf dist/ build/ *.egg-info
 
-# ── Build wheel (no venv needed — Poetry just packages the source) ───────────
-echo -e "${GREEN}[+] Building package...${NC}"
-POETRY_VIRTUALENVS_CREATE=false poetry build
+# ── Build wheel (quiet) ──────────────────────────────────────────────────────
+POETRY_VIRTUALENVS_CREATE=false poetry build > /dev/null 2>&1
 
-# ── Install wheel to user site ───────────────────────────────────────────────
+# ── Install wheel to user site with real download progress ──────────────────
 mkdir -p "$HOME/.local/bin"
 
 WHEEL_FILE=$(find dist -name "airecon-*.whl" | head -n 1)
@@ -141,41 +191,69 @@ if [ -z "$WHEEL_FILE" ]; then
     exit 1
 fi
 
-echo -e "${GREEN}[+] Installing to user site (~/.local)...${NC}"
-if $PYTHON_CMD -m pip install "$WHEEL_FILE" \
-    --user --no-cache-dir --force-reinstall --break-system-packages; then
-    echo -e "${GREEN}[+] Package installed successfully.${NC}"
-else
-    echo -e "${RED}[!] Installation failed.${NC}"
-    exit 1
-fi
+echo -e "${MUTED}Installing...${NC}"
 
-# ── Install Playwright browser (after pip install, uses installed package) ───
-echo -e "${GREEN}[+] Installing Playwright browsers...${NC}"
-$PYTHON_CMD -m playwright install chromium 2>/dev/null \
-    || echo -e "${YELLOW}[!] Playwright browser install failed (optional — browser features may not work).${NC}"
+# Run pip in background, show animated progress bar
+$PYTHON_CMD -m pip install "$WHEEL_FILE" --user --no-cache-dir --force-reinstall --break-system-packages --quiet > /dev/null 2>&1 &
+_PIP_PID=$!
 
-echo -e "${GREEN}[+] Done!${NC}"
+_width=50
+_i=0
+while kill -0 "$_PIP_PID" 2>/dev/null; do
+    _i=$(( _i + 1 ))
+    [ "$_i" -gt "$_width" ] && _i=$_width
+    _pct=$(( (_i * 100) / _width ))
+    _f=$(printf "%${_i}s" "")
+    _f=${_f// /■}
+    _e=$(printf "%$(( _width - _i ))s" "")
+    _e=${_e// /·}
+    printf "\r${BOLD}%s%s %3d%%${NC}" "$_f" "$_e" "$_pct"
+    sleep 0.15
+done
+wait "$_PIP_PID"
+_PIP_RC=$?
+
+# Clear progress line
+printf '\r\033[K'
+echo ""
+
+echo -e "${GREEN}Installing Complete!${NC}"
 echo -e ""
 
-# ── Verify installation ───────────────────────────────────────────────────────
-INSTALLED_BIN="$HOME/.local/bin/airecon"
-if [ ! -f "$INSTALLED_BIN" ]; then
-    echo -e "${YELLOW}[!] 'airecon' binary not found at $INSTALLED_BIN.${NC}"
-    $PYTHON_CMD -m pip show -f airecon 2>/dev/null | grep "bin/airecon" || true
-else
-    INSTALLED_VERSION=$($INSTALLED_BIN --version 2>/dev/null | awk '{print $NF}' || true)
-    if [ "$(normalize_ver "$INSTALLED_VERSION")" = "$(normalize_ver "$NEW_VERSION")" ]; then
-        echo -e "${GREEN}[+] Version: ${BOLD}v${INSTALLED_VERSION}${NC}${GREEN} ✓${NC}"
-    else
-        echo -e "${YELLOW}[!] Version mismatch — expected v${NEW_VERSION}, got v${INSTALLED_VERSION}${NC}"
-    fi
+# ── Install Playwright (quiet) ──────────────────────────────────────────────
+$PYTHON_CMD -m playwright install chromium > /dev/null 2>&1 || true
 
-    if command -v airecon &> /dev/null; then
-        echo -e "${GREEN}[+] 'airecon' is in your PATH. Run: airecon${NC}"
-    else
-        echo -e "${YELLOW}[!] 'airecon' is installed but NOT in your PATH.${NC}"
-        echo -e "    Add this to your .bashrc or .zshrc:"
-        echo -e "    ${BOLD}export PATH=\"\$HOME/.local/bin:\$PATH\"${NC}"
-    fi
+# ── Print banner ───────────────────────────────────────────────────────────
+INSTALLED_VERSION=$($PYTHON_CMD -c "
+try:
+    from airecon._version import __version__
+    print(__version__)
+except:
+    print('${NEW_VERSION}')
+" 2>/dev/null || echo "$NEW_VERSION")
+
+echo -e "     █████████   █████ ███████████"
+echo -e "    ███▒▒▒▒▒███ ▒▒███ ▒▒███▒▒▒▒▒███"
+echo -e "   ▒███    ▒███  ▒███  ▒███    ▒███   ██████   ██████   ██████  ████████"
+echo -e "   ▒███████████  ▒███  ▒██████████   ███▒▒███ ███▒▒███ ███▒▒███▒▒███▒▒███"
+echo -e "   ▒███▒▒▒▒▒███  ▒███  ▒███▒▒▒▒▒███ ▒███████ ▒███ ▒▒▒ ▒███ ▒███ ▒███ ▒███"
+echo -e "   ▒███    ▒███  ▒███  ▒███    ▒███ ▒███▒▒▒  ▒███  ███▒███ ▒███ ▒███ ▒███"
+echo -e "   █████   █████ █████ █████   █████▒▒██████ ▒▒██████ ▒▒██████  ████ █████"
+echo -e "   ▒▒▒▒▒   ▒▒▒▒▒ ▒▒▒▒▒ ▒▒▒▒▒   ▒▒▒▒▒  ▒▒▒▒▒▒   ▒▒▒▒▒▒   ▒▒▒▒▒▒  ▒▒▒▒ ▒▒▒▒▒"
+echo -e ""
+echo -e "${MUTED}            v${INSTALLED_VERSION} — AI-Powered Security Reconnaissance${NC}"
+echo -e ""
+echo -e "  ${MUTED}Quick start:${NC} ${CYAN}airecon start${NC}"
+echo -e "  ${MUTED}See all options:${NC} ${CYAN}airecon -h${NC}"
+echo -e ""
+echo -e "  ${MUTED}For more information visit ${CYAN}https://pikpikcu.github.io/airecon/${NC}"
+echo -e ""
+
+# ── Verify PATH ───────────────────────────────────────────────────────────
+if command -v airecon &> /dev/null; then
+    echo -e "${GREEN}[+] airecon is in your PATH. Run: airecon start${NC}"
+else
+    echo -e "${MUTED}Add to your .bashrc/.zshrc:${NC}"
+    echo -e "    ${BOLD}export PATH=\"\$HOME/.local/bin:\$PATH\"${NC}"
 fi
+echo -e ""

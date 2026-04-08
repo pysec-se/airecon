@@ -414,7 +414,6 @@ def _build_dom_bypass(
     selectors = analysis.get("bypass_selectors", [])
     input_names = analysis.get("input_names", [])
 
-    # If LLM didn't provide selectors, try common ones
     if not selectors:
         selectors = [
             'iframe[src*="captcha"]',

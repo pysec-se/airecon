@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from unittest.mock import AsyncMock, MagicMock
 
+import pytest
+
 from airecon.proxy.agent.models import AgentState
 
 
@@ -118,6 +120,91 @@ class TestBuildCompressedFindingsSummary:
         result = loop._build_compressed_findings_summary()
         assert "MEMORY BRAIN: OK" in result
         assert "target_sessions=2" in result
+
+    def test_pinned_summary_includes_failure_and_execution_memory(self) -> None:
+        loop = _make_loop()
+        loop._compression_summary = "[ANALYSIS_COMP] Investigated /checkout and saw tenant-state anomaly."
+        loop.state.failure_log = [
+            {
+                "name": "ffuf",
+                "error_type": "auth",
+                "target": "/admin",
+                "suggested_action": "Retry with authenticated role context.",
+            }
+        ]
+        loop.state.tool_history = [
+            MagicMock(
+                tool_name="execute",
+                arguments={"command": "ffuf -u https://example.com/FUZZ"},
+                status="error",
+            ),
+            MagicMock(
+                tool_name="browser_action",
+                arguments={"action": "goto", "url": "https://example.com/checkout"},
+                status="success",
+            ),
+        ]
+        loop.state.add_evidence(
+            phase="ANALYSIS",
+            source_tool="browser_action",
+            summary="Workflow signal: tenant checkout approved refund without owner role",
+            confidence=0.92,
+            tags=["workflow", "tenant", "authorization"],
+            severity=4,
+        )
+
+        result = loop._build_compressed_findings_summary()
+        assert "ITERATIVE MEMORY HANDOFF" in result
+        assert "FAILURE MEMORY (DO NOT REPEAT)" in result
+        assert "RECENT EXECUTION MEMORY" in result
+        assert "UNUSUAL SIGNALS / ANOMALIES" in result
+
+
+class TestAgentStateCompressionMemory:
+    @pytest.mark.asyncio
+    async def test_compress_with_llm_carries_prior_summary_and_updates_state(self) -> None:
+        state = AgentState()
+        state.compression_summary = "[RECON_COMP] api.example.com discovered; /admin pending auth validation."
+        state.add_hypothesis(
+            "Tenant isolation may fail on /checkout",
+            "Replay checkout as member vs owner",
+        )
+        state.add_failure(
+            "ffuf",
+            "403 Forbidden on /admin",
+            target="/admin",
+            error_type="auth",
+        )
+        state.conversation = [
+            {"role": "user", "content": "scan example.com"},
+            {"role": "assistant", "content": "Running recon."},
+            {"role": "user", "content": "Found /admin and /checkout."},
+            {"role": "assistant", "content": "Need to compare tenant behavior."},
+            {"role": "user", "content": "Try authenticated path next."},
+            {"role": "assistant", "content": "ffuf failed due to auth; browser path looks better."},
+            {"role": "user", "content": "The refund workflow looks stateful."},
+            {"role": "assistant", "content": "Need to verify owner vs member behavior on refund approval."},
+            {"role": "user", "content": "Continue."},
+        ]
+
+        ollama = AsyncMock()
+        ollama.model = "qwen3.5:122b"
+        ollama.complete = AsyncMock(
+            return_value="Preserved api.example.com, /admin auth gate, pending tenant checkout comparison, ffuf auth failure noted."
+        )
+
+        await state.compress_with_llm(
+            ollama,
+            keep_recent=2,
+            phase="ANALYSIS",
+        )
+
+        call = ollama.complete.await_args.kwargs
+        user_prompt = call["messages"][1]["content"]
+        assert "PREVIOUS SUMMARY TO PRESERVE" in user_prompt
+        assert "RECENT MISTAKES / FAILURES TO REMEMBER" in user_prompt
+        assert "OPEN HYPOTHESES / WORK IN PROGRESS" in user_prompt
+        assert state.compression_summary.startswith("[ANALYSIS_COMP]")
 
 
 class TestCompressOldToolOutputs:

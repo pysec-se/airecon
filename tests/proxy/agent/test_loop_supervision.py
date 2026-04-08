@@ -140,6 +140,29 @@ class TestComputeQualityScores:
         assert scores["overall"] == 0.0
 
 
+class TestMentorAnalysisSeverityNormalization:
+    def test_build_mentor_analysis_handles_string_severity(self):
+        agent = _make_agent()
+        agent.state.evidence_log = [
+            {
+                "phase": "ANALYSIS",
+                "severity": "HIGH",
+                "summary": "JWT alg:none accepted by API",
+                "confidence": 0.9,
+                "source_tool": "execute",
+            }
+        ]
+
+        analysis = agent._build_mentor_analysis(
+            PipelinePhase.ANALYSIS,
+            tool_name="execute",
+            evidence_added=True,
+        )
+
+        assert "HIGH/CRITICAL finding(s) confirmed" in analysis
+        assert "Latest: [HIGH]" in analysis
+
+
 class TestPruneStaleSkills:
     def test_returns_zero_when_conversation_too_short(self):
         from airecon.proxy.agent.loop_supervision import _SupervisionMixin

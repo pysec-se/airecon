@@ -124,7 +124,7 @@ class OllamaClient:
             if OllamaClient._httpx_client is None:
                 _cfg = get_config()
                 _http_timeout = _cfg.ollama_timeout
-                OllamaClient._httpx_client = httpx.AsyncClient(
+                OllamaClient._httpx_client = httpx.AsyncClient(  # nosec B113: timeout configured below
                     timeout=httpx.Timeout(
                         _http_timeout, connect=10.0, read=_http_timeout, write=10.0
                     ),
@@ -477,7 +477,10 @@ class OllamaClient:
                             )
 
                             try:
-                                assert _next_fut is not None
+                                if _next_fut is None:
+                                    raise RuntimeError(
+                                        "Ollama stream state error: next future is None"
+                                    )
                                 line = await asyncio.wait_for(
                                     asyncio.shield(_next_fut),
                                     timeout=wait,
@@ -533,6 +536,29 @@ class OllamaClient:
                 if _next_fut is not None and not _next_fut.done():
                     _next_fut.cancel()
                 raise
+
+            except httpx.ReadError as e:
+                # Stream-level read error (connection reset by peer,
+                # dropped TLS, etc.) — always transient, retry safely.
+                if attempt < max_retries:
+                    wait = 2 ** (attempt + 1)
+                    logger.warning(
+                        "Ollama stream read error (attempt %d/%d), retrying in %ds: %s",
+                        attempt + 1,
+                        max_retries + 1,
+                        wait,
+                        e,
+                    )
+                    await asyncio.sleep(wait)
+                    continue
+                logger.error(
+                    "Ollama stream read error after %d attempts: %s",
+                    max_retries + 1,
+                    e,
+                )
+                raise TimeoutError(
+                    f"Ollama stream disconnected after {max_retries + 1} retries: {e}"
+                ) from e
 
             except httpx.HTTPStatusError as e:
                 err_msg = str(e).lower()

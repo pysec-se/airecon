@@ -114,6 +114,11 @@ class TestBuildSemgrepCommand:
         cmd = semgrep.build_semgrep_command("/workspace/src")
         assert "--json" in cmd
 
+    def test_does_not_suppress_stderr(self):
+        """Command should preserve stderr for troubleshooting."""
+        cmd = semgrep.build_semgrep_command("/workspace/src")
+        assert "2>/dev/null" not in cmd
+
 
 class TestParseSemgrepResults:
     """Test parse_semgrep_results() function."""
@@ -409,6 +414,22 @@ class TestRunCodeAnalysis:
         assert len(result["findings"]) == 0
         assert len(result["errors"]) > 0
         assert "Semgrep execution failed" in result["errors"][0]
+
+    @pytest.mark.asyncio
+    async def test_scan_execution_failure_uses_stderr_details(self):
+        """Should preserve stderr details from the engine."""
+        mock_engine = AsyncMock()
+        mock_engine.execute_tool = AsyncMock()
+
+        mock_engine.execute_tool.side_effect = [
+            {"success": True},
+            {"success": False, "stderr": "invalid YAML rule syntax"},
+        ]
+
+        result = await semgrep.run_code_analysis(mock_engine, "/workspace/src")
+
+        assert result["total"] == 0
+        assert "invalid YAML rule syntax" in result["errors"][0]
 
     @pytest.mark.asyncio
     async def test_no_output_from_semgrep(self):

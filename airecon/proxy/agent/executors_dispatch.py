@@ -24,6 +24,53 @@ logger = logging.getLogger("airecon.agent")
 
 
 class _DispatchExecutorMixin:
+    # tool_name -> (method_name, needs_on_output)
+    _TOOL_DISPATCH_MAP: dict[str, tuple[str, bool]] = {
+        "advanced_fuzz": ("_execute_advanced_fuzz_tool", False),
+        "quick_fuzz": ("_execute_quick_fuzz_tool", False),
+        "deep_fuzz": ("_execute_deep_fuzz_tool", False),
+        "generate_wordlist": ("_execute_generate_wordlist_tool", False),
+        "run_parallel_agents": ("_execute_run_parallel_agents_tool", True),
+        "caido_list_requests": ("_execute_caido_list_requests_tool", False),
+        "caido_send_request": ("_execute_caido_send_request_tool", False),
+        "caido_automate": ("_execute_caido_automate_tool", False),
+        "caido_get_findings": ("_execute_caido_get_findings_tool", False),
+        "caido_set_scope": ("_execute_caido_set_scope_tool", False),
+        "caido_intercept": ("_execute_caido_intercept_tool", False),
+        "caido_sitemap": ("_execute_caido_sitemap_tool", False),
+        "spawn_agent": ("_execute_spawn_agent_tool", False),
+        "code_analysis": ("_execute_code_analysis_tool", False),
+        "http_observe": ("_execute_http_observe_tool", False),
+        "record_hypothesis": ("_exec_record_hypothesis", False),
+        "schemathesis_fuzz": ("_execute_schemathesis_tool", False),
+        "request_user_input": ("_execute_request_user_input", False),
+        "load_skill": ("_exec_load_skill", False),
+        # Utility tools
+        "python_session": ("_execute_python_session_tool", False),
+        "edit_file": ("_execute_edit_file_tool", False),
+        "think": ("_execute_think_tool", False),
+        "create_note": ("_execute_create_note_tool", False),
+        "list_notes": ("_execute_list_notes_tool", False),
+        "search_notes": ("_execute_search_notes_tool", False),
+        "read_note": ("_execute_read_note_tool", False),
+        "export_notes_wiki": ("_execute_export_notes_wiki_tool", False),
+    }
+
+    async def _dispatch_tool(
+        self,
+        tool_name: str,
+        arguments: dict[str, Any],
+        on_output: Callable | None = None,
+    ):
+        entry = self._TOOL_DISPATCH_MAP.get(tool_name)
+        if entry is None:
+            return None  # not a dispatched tool
+        method_name, needs_on_output = entry
+        method = getattr(self, method_name)
+        if needs_on_output:
+            return await method(tool_name, arguments, on_output=on_output)
+        return await method(tool_name, arguments)
+
     async def _execute_run_parallel_agents_tool(
         self,
         tool_name: str,
@@ -492,61 +539,13 @@ class _DispatchExecutorMixin:
             self._executed_tool_counts[args_key] = count + 1
             return success, duration, result, None
 
-        if tool_name == "advanced_fuzz":
-            return await self._execute_advanced_fuzz_tool(tool_name, arguments)
-
-        if tool_name == "quick_fuzz":
-            return await self._execute_quick_fuzz_tool(tool_name, arguments)
-
-        if tool_name == "deep_fuzz":
-            return await self._execute_deep_fuzz_tool(tool_name, arguments)
-
-        if tool_name == "generate_wordlist":
-            return await self._execute_generate_wordlist_tool(tool_name, arguments)
-
-        if tool_name == "run_parallel_agents":
-            return await self._execute_run_parallel_agents_tool(
-                tool_name, arguments, on_output=on_output
-            )
-
-        if tool_name == "caido_list_requests":
-            return await self._execute_caido_list_requests_tool(tool_name, arguments)
-
-        if tool_name == "caido_send_request":
-            return await self._execute_caido_send_request_tool(tool_name, arguments)
-
-        if tool_name == "caido_automate":
-            return await self._execute_caido_automate_tool(tool_name, arguments)
-
-        if tool_name == "caido_get_findings":
-            return await self._execute_caido_get_findings_tool(tool_name, arguments)
-
-        if tool_name == "caido_set_scope":
-            return await self._execute_caido_set_scope_tool(tool_name, arguments)
-
-        if tool_name == "caido_intercept":
-            return await self._execute_caido_intercept_tool(tool_name, arguments)
-
-        if tool_name == "caido_sitemap":
-            return await self._execute_caido_sitemap_tool(tool_name, arguments)
-
-        if tool_name == "spawn_agent":
-            return await self._execute_spawn_agent_tool(tool_name, arguments)
-
-        if tool_name == "code_analysis":
-            return await self._execute_code_analysis_tool(tool_name, arguments)
-
-        if tool_name == "http_observe":
-            return await self._execute_http_observe_tool(tool_name, arguments)
-
-        if tool_name == "record_hypothesis":
-            return await self._exec_record_hypothesis(tool_name, arguments)
-
-        if tool_name == "schemathesis_fuzz":
-            return await self._execute_schemathesis_tool(tool_name, arguments)
-
-        if tool_name == "request_user_input":
-            return await self._execute_request_user_input(tool_name, arguments)
+        handler_entry = self._TOOL_DISPATCH_MAP.get(tool_name)
+        if handler_entry is not None:
+            method_name, needs_on_output = handler_entry
+            method = getattr(self, method_name)
+            if needs_on_output:
+                return await method(tool_name, arguments, on_output=on_output)
+            return await method(tool_name, arguments)
 
         if tool_name == "execute":
             cmd = arguments.get("command", "")
@@ -624,7 +623,7 @@ class _DispatchExecutorMixin:
             _cmd_stripped = cmd.strip()
             _first_token = _cmd_stripped.split()[0] if _cmd_stripped.split() else ""
 
-            if _first_token in _AIRECON_TOOL_NAMES and _first_token != "execute":
+            if _first_token in _AIRECON_TOOL_NAMES and _first_token != "execute":  # nosec B105
                 return (
                     False,
                     0.0,
@@ -933,3 +932,50 @@ class _DispatchExecutorMixin:
                 self._executed_tool_counts.get(args_key, 0) + 1
             )
         return success, duration, result, output_file
+
+    async def _exec_load_skill(
+        self, tool_name: str, arguments: dict[str, Any]
+    ) -> tuple[bool, float, dict[str, Any], str | None]:
+        """Execute load_skill tool — dynamically load skill files into session."""
+        start_time = time.time()
+
+        try:
+            from .executors_skill_loader import load_skill
+
+            current_target = self.state.active_target or (
+                self._session.target if self._session else ""
+            )
+            current_phase = self._get_current_phase().value
+            result = load_skill(
+                self.state,
+                arguments.get("skills", ""),
+                arguments.get("replace_skills", False),
+                memory_manager=getattr(self, "_memory_manager", None),
+                current_target=current_target,
+                current_phase=current_phase,
+            )
+            success = result.get("success", False)
+            if success and self._session:
+                for skill_rel in result.get("loaded_skills", []):
+                    if skill_rel not in self._session.loaded_skills:
+                        self._session.loaded_skills.append(skill_rel)
+        except Exception as e:
+            logger.error("load_skill error: %s", e)
+            result = {"success": False, "error": str(e)}
+            success = False
+
+        duration = time.time() - start_time
+
+        self.state.tool_history.append(
+            ToolExecution(
+                tool_name=tool_name,
+                arguments=arguments,
+                result=result,
+                duration=duration,
+                status="success" if success else "error",
+            )
+        )
+        self.state.tool_counts["exec"] += 1
+        self.state.tool_counts["total"] += 1
+
+        return success, duration, result, None

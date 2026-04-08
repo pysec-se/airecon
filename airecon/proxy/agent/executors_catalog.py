@@ -39,7 +39,12 @@ def _safe_non_negative_int(value: Any) -> int:
     return parsed if parsed >= 0 else 0
 
 
-def _load_recon_bins(category: str, fallback: frozenset[str]) -> frozenset[str]:
+def _load_recon_bins(category: str) -> frozenset[str]:
+    """Load recon tool names for a category from tools_meta.json.
+
+    Source: categories.reconnaissance.<category> in tools_meta.json.
+    Returns empty frozenset on failure (caller should handle gracefully).
+    """
     try:
         path = Path(__file__).resolve().parent.parent / "data" / "tools_meta.json"
         data = json.loads(path.read_text(encoding="utf-8"))
@@ -52,31 +57,22 @@ def _load_recon_bins(category: str, fallback: frozenset[str]) -> frozenset[str]:
     except Exception as exc:
         logger.warning(
             "Could not load recon bins (category=%r) from tools_meta.json: %s — "
-            "falling back to built-in list. Check that data/tools_meta.json exists.",
+            "returning empty set. Check that data/tools_meta.json exists.",
             category,
             exc,
         )
-        return fallback
+        return frozenset()
 
 
-_RECON_SUBDOMAIN_BINS: frozenset[str] = _load_recon_bins(
-    "subdomain_enum",
-    frozenset({"subfinder", "amass", "assetfinder", "findomain", "dnsx"}),
-)
+_RECON_SUBDOMAIN_BINS: frozenset[str] = _load_recon_bins("subdomain_enum")
 
-_RECON_PORT_SCAN_BINS: frozenset[str] = _load_recon_bins(
-    "port_scan",
-    frozenset({"nmap", "masscan", "naabu", "rustscan"}),
-)
+_RECON_PORT_SCAN_BINS: frozenset[str] = _load_recon_bins("port_scan")
 
-_RECON_LIVE_HOST_BINS: frozenset[str] = _load_recon_bins(
-    "live_host_probe",
-    frozenset({"httpx", "httprobe", "dnsx"}),
-)
+_RECON_LIVE_HOST_BINS: frozenset[str] = _load_recon_bins("live_host_probe")
 
 _RECON_CONTENT_DISCOVERY_BINS: frozenset[str] = (
-    _load_recon_bins("crawling", frozenset({"katana", "waybackurls", "gau", "hakrawler"}))
-    | _load_recon_bins("directory_bruteforce", frozenset({"gobuster", "feroxbuster", "ffuf", "dirsearch", "dirb"}))
+    _load_recon_bins("crawling")
+    | _load_recon_bins("directory_bruteforce")
 )
 
 

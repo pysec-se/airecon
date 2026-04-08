@@ -231,6 +231,27 @@ async def test_execute_filesystem_tool_read(agent, mocker):
 
 
 @pytest.mark.asyncio
+async def test_execute_filesystem_tool_keeps_upload_paths_target_relative(agent, mocker):
+    read_mock = mocker.patch(
+        "airecon.proxy.agent.executors.read_file",
+        return_value={"success": True, "result": "file content"},
+    )
+
+    success, _, result, _ = await agent._execute_filesystem_tool(
+        "read_file", {"path": "uploads/core/main.py"}
+    )
+
+    assert success
+    assert result["result"] == "file content"
+    assert agent.state.tool_history[0].arguments["path"] == "uploads/core/main.py"
+    read_mock.assert_called_once_with(
+        path="example.com/uploads/core/main.py",
+        offset=0,
+        limit=500,
+    )
+
+
+@pytest.mark.asyncio
 async def test_execute_web_search_tool(agent, mocker):
     async def mock_search(*args, **kwargs):
         return {"success": True, "result": "Search Results String"}
@@ -261,7 +282,13 @@ async def test_execute_report_tool(agent, mocker):
     )
 
     success, duration, result, out_file = await agent._execute_report_tool(
-        "create_vulnerability_report", {"title": "Test Vuln"}
+        "create_vulnerability_report", {
+            "title": "Test Vuln",
+            "description": "Test XSS found",
+            "target": "http://test.local",
+            "poc_description": "GET /?q=%3Cscript%3Ealert(1)%3C/script%3E returned 200 with body reflection",
+            "poc_script_code": "print(result)",
+        }
     )
 
     assert success
@@ -276,16 +303,55 @@ async def test_execute_report_tool_marks_existing_vulnerability(agent, mocker):
     )
     agent._session = SessionData(target="example.com")
     agent._session.vulnerabilities.append(
-        {"finding": "SQL injection in /login endpoint", "endpoint": "/login"}
+        {
+            "finding": "SQL injection in /login endpoint",
+            "endpoint": "/login",
+            "verified": True,
+        }
     )
 
     success, _, _, _ = await agent._execute_report_tool(
         "create_vulnerability_report",
-        {"title": "SQL injection in /login endpoint", "endpoint": "/login"},
+        {
+            "title": "SQL injection in /login endpoint",
+            "endpoint": "/login",
+            "description": "SQLi at /login",
+            "target": "http://example.com",
+            "poc_description": "POST /login username=' OR 1=1 -- returned admin profile",
+            "poc_script_code": "print(result)",
+        },
     )
 
     assert success
     assert agent._session.vulnerabilities[0].get("report_generated") is True
+
+
+@pytest.mark.asyncio
+async def test_execute_report_tool_blocks_weak_unverified_claim(agent, mocker):
+    report_mock = mocker.patch(
+        "airecon.proxy.agent.executors.create_vulnerability_report",
+        return_value={"success": True, "finding_id": "VULN-BLOCK"},
+    )
+    agent._session = SessionData(target="example.com")
+    agent._session.vulnerabilities.append(
+        {"finding": "SQL injection in /login endpoint", "endpoint": "/login"}
+    )
+
+    success, _, result, _ = await agent._execute_report_tool(
+        "create_vulnerability_report",
+        {
+            "title": "SQL injection in /login endpoint",
+            "endpoint": "/login",
+            "description": "Login response looked suspicious",
+            "target": "http://example.com",
+            "poc_description": "POST /login returned admin profile",
+            "poc_script_code": "print(result)",
+        },
+    )
+
+    assert success is False
+    assert result["blocked_by_verifier"] is True
+    report_mock.assert_not_called()
 
 
 @pytest.mark.asyncio
@@ -301,12 +367,72 @@ async def test_execute_report_tool_does_not_append_unmatched_title(agent, mocker
 
     success, _, _, _ = await agent._execute_report_tool(
         "create_vulnerability_report",
-        {"title": "Remote code execution in admin panel", "endpoint": "/admin"},
+        {
+            "title": "Remote code execution in admin panel",
+            "endpoint": "/admin",
+            "description": "RCE in admin panel",
+            "target": "http://example.com",
+            "poc_description": "POST /admin returned root shell",
+            "poc_script_code": "print(result)",
+        },
     )
 
-    assert success
+    assert success is False
     assert len(agent._session.vulnerabilities) == 1
     assert agent._session.vulnerabilities[0].get("report_generated") is not True
+
+
+@pytest.mark.asyncio
+async def test_execute_code_analysis_tool_profiles_target_and_expands_rules(
+    agent, mocker, tmp_path
+):
+    project_dir = tmp_path / "example.com"
+    project_dir.mkdir()
+    (project_dir / "auth_checkout.py").write_text("print('ok')\n")
+    (project_dir / "Dockerfile").write_text("FROM python:3.12\n")
+
+    run_mock = mocker.patch(
+        "airecon.proxy.semgrep.run_code_analysis",
+        new=AsyncMock(
+            return_value={
+                "summary": "1 finding",
+                "total": 1,
+                "findings": [
+                    {
+                        "severity": "HIGH",
+                        "rule_id": "test-rule",
+                        "message": "Issue",
+                        "file": "auth_checkout.py",
+                        "start_line": 1,
+                        "code_snippet": "print('ok')",
+                    }
+                ],
+                "errors": [],
+            }
+        ),
+    )
+    mocker.patch("airecon.proxy.semgrep.get_default_rules", return_value=["p/default"])
+    mocker.patch(
+        "airecon.proxy.agent.executors_observe.get_workspace_root",
+        return_value=tmp_path,
+    )
+    agent.engine = MagicMock()
+
+    success, _, result, _ = await agent._execute_code_analysis_tool(
+        "code_analysis",
+        {"target_path": "."},
+    )
+
+    assert success is True
+    assert "python" in result["target_profile"]["languages"]
+    assert "p/docker" in result["target_profile"]["rules"]
+    assert any("auth_surface:" in item for item in result["target_profile"]["signals"])
+    assert any("workflow_surface:" in item for item in result["target_profile"]["signals"])
+    assert "Code profile:" in result["summary"]
+    called = run_mock.await_args.kwargs
+    assert "python" in called["languages"]
+    assert "p/default" in called["rules"]
+    assert "p/python" in called["rules"]
 
 
 # ── schemathesis behavioral tests ─────────────────────────────────────────────

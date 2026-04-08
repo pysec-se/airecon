@@ -105,6 +105,12 @@ class TestIsFilesystemLikeTarget:
     def test_parent_relative_path(self):
         assert _is_filesystem_like_target("../etc/passwd") is True
 
+    def test_workspace_relative_upload_path(self):
+        assert _is_filesystem_like_target("uploads/core/main.py") is True
+
+    def test_relative_project_path(self):
+        assert _is_filesystem_like_target("core/main.py") is True
+
     def test_plain_domain(self):
         assert _is_filesystem_like_target("example.com") is False
 

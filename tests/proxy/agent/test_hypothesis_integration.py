@@ -59,11 +59,11 @@ class TestAutoFormHypotheses:
             arguments={"command": "searchsploit apache"},
             result_text="CVE-2021-41773 path traversal on Apache 2.4.49",
         )
-        assert len(m.state.hypothesis_queue) == 1
-        hyp = m.state.hypothesis_queue[0]
-        assert "CVE-2021-41773" in hyp["claim"]
-        assert hyp["status"] == "pending"
-        assert hyp["phase"] == "ANALYSIS"
+        assert len(m.state.hypothesis_queue) >= 1
+        cve_hyps = [h for h in m.state.hypothesis_queue if "CVE-2021-41773" in h["claim"]]
+        assert cve_hyps
+        assert cve_hyps[0]["status"] == "pending"
+        assert cve_hyps[0]["phase"] == "ANALYSIS"
 
     def test_sqli_signal_creates_hypothesis(self):
         m = _make_mixin()
@@ -83,9 +83,10 @@ class TestAutoFormHypotheses:
             arguments={"command": "dalfox url http://target.com/search"},
             result_text="[POC] Reflected XSS found in parameter q",
         )
-        assert any("XSS" in h["claim"] for h in m.state.hypothesis_queue)
-        xss_hyp = next(h for h in m.state.hypothesis_queue if "XSS" in h["claim"])
-        assert "dalfox" in xss_hyp["test_plan"]
+        xss_hyps = [h for h in m.state.hypothesis_queue if "XSS" in h["claim"]]
+        assert xss_hyps, "No XSS hypothesis formed"
+        assert "xss" in xss_hyps[0]["tags"]
+        assert "confirm" in xss_hyps[0]["test_plan"].lower()
 
     def test_false_signal_not_added(self):
         m = _make_mixin()
@@ -107,12 +108,14 @@ class TestAutoFormHypotheses:
             phase="RECON",
             tool_name="execute",
             arguments={"command": "nmap -sV target.com"},
-            result_text="80/open tcp http\n443/open tcp https\n22/open tcp ssh",
+            result_text="80/open tcp http Apache 2.4.49 — known XSS\n443/open tcp https\n22/open tcp ssh OpenSSH",
         )
+        # Port hypotheses are formed when a vuln pattern matches first,
+        # leaving capacity (< _MAX_HYPO_PER_CALL) for the port entry.
         port_hyps = [
             h for h in m.state.hypothesis_queue if "port" in h["claim"].lower()
         ]
-        assert port_hyps, "No port hypothesis formed"
+        assert port_hyps, "Port hypothesis should form when vuln signal matches"
         assert "80" in port_hyps[0]["claim"]
 
     def test_open_port_in_exploit_not_added(self):

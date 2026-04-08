@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import json
 import logging
 import re
+from pathlib import Path
 from typing import Any
 from urllib.parse import urlparse
 
@@ -9,20 +11,40 @@ import httpx
 
 logger = logging.getLogger("airecon.proxy.agent.auth_manager")
 
-class AuthManager:
-    AUTH_FAILURE_PATTERNS = {
+_AUTH_PATTERNS_FILE = Path(__file__).parent.parent / "data" / "verification_patterns.json"
+
+
+def _load_auth_patterns():
+    """Load compiled auth patterns from verification_patterns.json."""
+    try:
+        if _AUTH_PATTERNS_FILE.exists():
+            data = json.loads(_AUTH_PATTERNS_FILE.read_text(encoding="utf-8"))
+            auth_failure = data.get("auth_failure_patterns", {})
+            login_form = data.get("login_form_patterns", {})
+            return {
+                k: re.compile(v, re.I) for k, v in auth_failure.items()
+            }, {
+                k: re.compile(v, re.I) for k, v in login_form.items()
+            }
+    except Exception as e:
+        logger.warning("Failed to load auth patterns from JSON, using defaults: %s", e)
+    return {
         "401_unauthorized": re.compile(r"401|unauthorized|authentication required", re.I),
         "403_forbidden": re.compile(r"403|forbidden|access denied", re.I),
         "session_expired": re.compile(r"session expired|session timeout|logged out", re.I),
         "csrf_token": re.compile(r"csrf|xsrf|token mismatch", re.I),
         "login_required": re.compile(r"login required|sign in|please log", re.I),
-    }
-
-    LOGIN_FORM_PATTERNS = {
+    }, {
         "username": re.compile(r'name=["\']?(username|user|email|login)["\']?', re.I),
         "password": re.compile(r'name=["\']?(password|pass|pwd)["\']?', re.I),
         "csrf": re.compile(r'name=["\']?(csrf|_token|authenticity_token)["\']?', re.I),
     }
+
+
+_AUTH_FAILURE_PATTERNS, _LOGIN_FORM_PATTERNS = _load_auth_patterns()
+
+
+class AuthManager: 
 
     def __init__(self, timeout: int = 30):
         self.timeout = timeout
@@ -59,7 +81,7 @@ class AuthManager:
 
         body_text = response.text
 
-        for failure_type, pattern in self.AUTH_FAILURE_PATTERNS.items():
+        for failure_type, pattern in _AUTH_FAILURE_PATTERNS.items():
             if pattern.search(body_text):
                 logger.info(f"Auth failure detected: {failure_type}")
                 return True, failure_type
@@ -71,7 +93,6 @@ class AuthManager:
             login_host = urlparse(login_url).hostname
             if not login_host:
                 return False
-            # Normalize bare domains (no scheme) so urlparse works
             if "://" not in target_url:
                 target_host = urlparse(f"https://{target_url}").hostname
             else:
@@ -310,7 +331,6 @@ class AuthManager:
             "phpsessid",
             "jsessionid",
             "asp.net_sessionid",
-
             "remember",
             "auth",
             "jwt",

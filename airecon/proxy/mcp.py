@@ -145,11 +145,16 @@ def mcp_ollama_tools(max_servers: int = 10) -> list[dict[str, Any]]:
     tools: list[dict[str, Any]] = []
     for name, server_cfg in enabled_servers:
         tool_name = f"mcp_{_normalize_name(name)}"
-        desc = f"MCP tools from {name}. Use search_tools to find specific tools, then call_tool to execute."
+        desc_prefix = f"MCP server {name}. "
         if server_cfg.get("command"):
-            desc = f"Command-based MCP server {name}. "
+            desc_prefix = f"Command-based MCP server {name}. "
         elif server_cfg.get("url"):
-            desc = f"HTTP/SSE MCP server {name}. "
+            desc_prefix = f"HTTP/SSE MCP server {name}. "
+        desc = (
+            desc_prefix
+            + "Dynamic tools are discovered at runtime. "
+            + "Use search_tools or list_tools to inspect available tools, then call_tool to execute."
+        )
         tools.append(
             {
                 "type": "function",
@@ -161,8 +166,8 @@ def mcp_ollama_tools(max_servers: int = 10) -> list[dict[str, Any]]:
                         "properties": {
                             "action": {
                                 "type": "string",
-                                "enum": ["search_tools", "call_tool"],
-                                "description": "search_tools: find tool by keyword; call_tool: execute specific tool",
+                                "enum": ["list_tools", "search_tools", "call_tool"],
+                                "description": "list_tools: list exposed MCP tools; search_tools: find tool by keyword; call_tool: execute specific tool",
                             },
                             "query": {
                                 "type": "string",
@@ -396,7 +401,17 @@ async def _mcp_stdio_request(
         )
         resp = await _read_response_for(req_id, timeout=30.0)
     except Exception as e:
-        err_msg = str(e)
+        err_msg = str(e).strip() or type(e).__name__
+        stderr_tail = ""
+        with contextlib.suppress(Exception):
+            if proc.returncode is None:
+                proc.kill()
+        with contextlib.suppress(Exception):
+            await asyncio.wait_for(proc.wait(), timeout=3)
+        with contextlib.suppress(Exception):
+            if proc.stderr is not None:
+                raw_stderr = await asyncio.wait_for(proc.stderr.read(), timeout=0.2)
+                stderr_tail = raw_stderr.decode("utf-8", errors="ignore").strip()[:400]
         if (
             "Separator is found" in err_msg and "chunk is longer" in err_msg
         ) or "response exceeds max chunk size" in err_msg.lower():
@@ -406,8 +421,8 @@ async def _mcp_stdio_request(
                 "Use action='search_tools' with a query (e.g., query='scan') "
                 "instead of listing all tools at once."
             )
-        with contextlib.suppress(Exception):
-            proc.kill()
+        elif stderr_tail:
+            err_msg = f"{err_msg} | stderr: {stderr_tail}" if err_msg else stderr_tail
         return False, {"error": f"MCP stdio request failed: {err_msg}"}
     finally:
         with contextlib.suppress(Exception):

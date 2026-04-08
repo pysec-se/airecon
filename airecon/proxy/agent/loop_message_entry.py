@@ -140,19 +140,7 @@ class _MessageEntryMixin:
                 }
             )
 
-        EPHEMERAL_PREFIXES = (
-            "[SYSTEM: WORKSPACE",
-            "[SYSTEM: ACTIVE_TARGET",
-            "[SYSTEM: ADDITIONAL_TARGETS",
-            "[SYSTEM: OBJECTIVE FOCUS",
-            "<objective_focus",
-            "[SYSTEM: PHASE GATE",
-            "[SYSTEM: AGGRESSIVE EXPLORATION",
-            "[SYSTEM: QUALITY SCOREBOARD",
-            "[SYSTEM: RECOVERY STATE",
-            "<reflector ",
-            "<mentor_analysis>",
-        )
+        from .constants import EPHEMERAL_PREFIXES
         self.state.conversation = [
             msg
             for msg in self.state.conversation
@@ -298,7 +286,7 @@ class _MessageEntryMixin:
                 if self.pipeline:
                     phase_hint = self.pipeline.get_current_phase().value
             except Exception as e:
-                logger.debug("Exception in %s: %s", __name__, e)
+                logger.warning("Operation failed: %s", e)
                 phase_hint = ""
             pin_lines = [
                 "[SYSTEM: PINNED CONTEXT]",

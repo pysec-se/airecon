@@ -104,7 +104,7 @@ class TestDuplicateCommandDetection:
             "execute", {"command": "nmap -sV 10.0.0.1"}
         )
         assert is_dup
-        assert "[ANTI-REPEAT]" in msg
+        assert "[NO NEW EVIDENCE]" in msg
 
     def test_different_commands_not_duplicate(self, loop):
         loop._is_duplicate_command("execute", {"command": "nmap -sV 10.0.0.1"})

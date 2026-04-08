@@ -6,6 +6,10 @@ import re
 from pathlib import Path
 from typing import Any
 
+from ..data_loader import load_vuln_hypothesis_legacy
+from ..system import _discover_all_skills, _phase_preferred_skill_dirs
+from .vuln_classifier import get_classifier
+
 logger = logging.getLogger("airecon.agent.tool_scorer")
 
 # ── Load tool metadata ──────────────────────────────────────────────────────
@@ -33,7 +37,7 @@ def _derive_core_tools() -> frozenset[str]:
                 if name:
                     core.add(name)
     except Exception as exc:
-        logger.debug("Operation failed: %s", exc)
+        logger.warning("Operation failed: %s", exc)
     # Remove tools that belong to specific categories in tools_meta.json
     categories = _TOOLS_META.get("categories", {})
     categorized: set[str] = set()
@@ -65,6 +69,8 @@ _PHASE_EXTRAS: dict[str, set[str]] = {
 }
 
 _REPORT_TOOLS = frozenset(_TOOLS_META.get("report_tools", []))
+_VULN_HYPOTHESIS = load_vuln_hypothesis_legacy()
+_SKILLS_DIR = Path(__file__).resolve().parent.parent / "skills"
 
 
 def _lookup_category(categories: dict, name: str) -> set[str]:
@@ -90,6 +96,91 @@ def _collect_all_known_tools() -> set[str]:
                     if isinstance(tool_list, list):
                         all_tools.update(t for t in tool_list if isinstance(t, str))
     return all_tools
+
+
+def _normalize_signal_term(text: str) -> str:
+    return re.sub(r"[^a-z0-9]+", "_", str(text or "").lower()).strip("_")
+
+
+def _contains_term(haystack: str, needle: str) -> bool:
+    norm_haystack = _normalize_signal_term(haystack)
+    norm_needle = _normalize_signal_term(needle)
+    if not norm_haystack or not norm_needle:
+        return False
+    return f"_{norm_needle}_" in f"_{norm_haystack}_"
+
+
+def _resolve_labels_for_hypothesis(
+    hypo_name: str,
+    indicators: list[str],
+) -> set[str]:
+    classifier = get_classifier()
+    labels: set[str] = set()
+    base_name = str(hypo_name or "").replace("hypothesis_", "").replace("_", " ")
+
+    for candidate in [base_name, *indicators]:
+        if not str(candidate).strip():
+            continue
+        labels.update(classifier.resolve_labels(str(candidate)))
+        result = classifier.classify(str(candidate))
+        if result.category != "UNKNOWN":
+            labels.add(result.category)
+        if result.subcategory:
+            labels.add(result.subcategory)
+
+    return {label for label in labels if label and label != "UNKNOWN"}
+
+
+def _build_tool_vuln_label_map() -> dict[str, set[str]]:
+    tool_vuln_map: dict[str, set[str]] = {}
+    descriptions = _TOOLS_META.get("tool_descriptions", {})
+    categories = _TOOLS_META.get("categories", {})
+
+    def _searchable_text(tool_name: str) -> str:
+        parts = [tool_name]
+        description = descriptions.get(tool_name, "")
+        if isinstance(description, str) and description:
+            parts.append(description)
+        for group in categories.values():
+            if not isinstance(group, dict):
+                continue
+            for subcat_name, tool_list in group.items():
+                if isinstance(tool_list, list) and tool_name in tool_list:
+                    parts.append(str(subcat_name))
+        return " ".join(parts)
+
+    for tool_name in _collect_all_known_tools() | set(_CORE_TOOLS):
+        searchable = _searchable_text(tool_name)
+        if not searchable:
+            continue
+        labels: set[str] = set()
+        for entry in _VULN_HYPOTHESIS:
+            indicators = [
+                str(ind).strip()
+                for ind in (entry.get("patterns") or entry.get("indicators", []))
+                if str(ind).strip()
+            ]
+            if not indicators:
+                continue
+            if any(_contains_term(searchable, ind) for ind in indicators):
+                labels.update(
+                    _resolve_labels_for_hypothesis(
+                        str(entry.get("type", entry.get("name", ""))),
+                        indicators,
+                    )
+                )
+        if labels:
+            tool_vuln_map[str(tool_name).lower()] = labels
+
+    return tool_vuln_map
+
+
+def _load_all_skills() -> dict[str, str]:
+    try:
+        return _discover_all_skills(_SKILLS_DIR)
+    except Exception as exc:
+        logger.debug("Could not discover skills for tool scorer: %s", exc)
+        return {}
 
 
 def _build_phase_appropriate() -> dict[str, set[str]]:
@@ -143,6 +234,8 @@ def _build_phase_blocked() -> dict[str, set[str]]:
 _PHASE_APPROPRIATE_TOOLS: dict[str, set[str]] = _build_phase_appropriate()
 _PHASE_BLOCKED_TOOLS: dict[str, set[str]] = _build_phase_blocked()
 _KNOWN_TOOL_BINARIES: set[str] = _collect_all_known_tools()
+_TOOL_VULN_LABEL_MAP: dict[str, set[str]] = _build_tool_vuln_label_map()
+_ALL_SKILLS: dict[str, str] = _load_all_skills()
 
 
 # Shell binary descriptions sourced from tools_meta.json["tool_descriptions"]
@@ -151,19 +244,34 @@ _KNOWN_TOOL_BINARIES: set[str] = _collect_all_known_tools()
 # Map phases to relevant shell binary subcategory names from tools_meta.json
 _PHASE_SHELL_CATEGORIES = {
     "RECON": {
-        "subdomain_enum", "port_scan", "web_probing", "fingerprinting",
-        "crawling", "live_host_probe", "directory_bruteforce",
-        "parameter_discovery", "extraction",
+        "subdomain_enum",
+        "port_scan",
+        "web_probing",
+        "fingerprinting",
+        "crawling",
+        "live_host_probe",
+        "directory_bruteforce",
+        "parameter_discovery",
+        "extraction",
     },
     "ANALYSIS": {
-        "generic_scanners", "cms_scanners", "fuzzing",
-        "specific_vulnerabilities", "evasion_and_waf",
-        "analysis", "code_analysis",
+        "generic_scanners",
+        "cms_scanners",
+        "fuzzing",
+        "specific_vulnerabilities",
+        "evasion_and_waf",
+        "analysis",
+        "code_analysis",
     },
     "EXPLOIT": {
-        "specific_vulnerabilities", "advanced_injection", "evasion_and_waf",
-        "network_pivoting", "networking", "bruteforce",
-        "priv_esc", "cloud_exploitation",
+        "specific_vulnerabilities",
+        "advanced_injection",
+        "evasion_and_waf",
+        "network_pivoting",
+        "networking",
+        "bruteforce",
+        "priv_esc",
+        "cloud_exploitation",
     },
     "REPORT": set(),
 }
@@ -192,6 +300,96 @@ def _match_shells_for_phase(phase: str) -> set[str]:
                 if isinstance(tlist, list):
                     result.update(t for t in tlist if isinstance(t, str))
     return result
+
+
+def _resolve_skill_labels(skill_stem: str, description: str = "") -> set[str]:
+    classifier = get_classifier()
+    labels: set[str] = set()
+    for candidate in (skill_stem, skill_stem.replace("_", " "), description):
+        if not str(candidate).strip():
+            continue
+        labels.update(classifier.resolve_labels(str(candidate)))
+        result = classifier.classify(str(candidate))
+        if result.category != "UNKNOWN":
+            labels.add(result.category)
+        if result.subcategory:
+            labels.add(result.subcategory)
+    return {label for label in labels if label and label != "UNKNOWN"}
+
+
+def _build_skill_catalog_entries(
+    phase: str,
+    context_tools: list[str] | None = None,
+    chain_step_hint: str = "",
+    wrong_tool_picked: str = "",
+    max_entries: int = 10,
+) -> list[str]:
+    skills_catalog = _TOOLS_META.get("skills_catalog", {})
+    preferred_dirs = _phase_preferred_skill_dirs(phase)
+    if not isinstance(skills_catalog, dict) or not _ALL_SKILLS or not preferred_dirs:
+        return []
+
+    context_terms = [
+        str(term).strip()
+        for term in [*(context_tools or []), chain_step_hint, wrong_tool_picked]
+        if str(term).strip()
+    ]
+    normalized_terms = {_normalize_signal_term(term) for term in context_terms if term}
+
+    classifier = get_classifier()
+    context_labels: set[str] = set()
+    for term in context_terms:
+        context_labels.update(_TOOL_VULN_LABEL_MAP.get(term.lower(), set()))
+        context_labels.update(classifier.resolve_labels(term))
+        result = classifier.classify(term)
+        if result.category != "UNKNOWN":
+            context_labels.add(result.category)
+        if result.subcategory:
+            context_labels.add(result.subcategory)
+
+    scored: list[tuple[int, str, str]] = []
+    for rel_path, stem in _ALL_SKILLS.items():
+        category = rel_path.split("/", 1)[0] if "/" in rel_path else rel_path
+        if category not in preferred_dirs:
+            continue
+
+        description = ""
+        category_catalog = skills_catalog.get(category, {})
+        if isinstance(category_catalog, dict):
+            description = str(category_catalog.get(stem, ""))
+
+        rel_norm = _normalize_signal_term(rel_path)
+        stem_norm = _normalize_signal_term(stem)
+        score = 2
+
+        for term_norm in normalized_terms:
+            if not term_norm:
+                continue
+            if stem_norm == term_norm:
+                score += 10
+            elif term_norm in rel_norm:
+                score += 6
+
+        overlap = _resolve_skill_labels(stem, description) & context_labels
+        if overlap:
+            score += 4 + len(overlap)
+
+        if not normalized_terms and category in preferred_dirs:
+            score += 1
+
+        if score > 0:
+            scored.append((score, rel_path, description))
+
+    scored.sort(key=lambda item: (-item[0], item[1]))
+
+    entries: list[str] = []
+    for _, rel_path, description in scored[:max_entries]:
+        if description:
+            desc = description[:177] + "..." if len(description) > 180 else description
+            entries.append(f"    - skills/{rel_path}: {desc}")
+        else:
+            entries.append(f"    - skills/{rel_path}")
+    return entries
 
 
 def extract_binary_from_command(command: str) -> str:
@@ -272,6 +470,10 @@ def score_tool(
     chain_step_hint: str = "",
     session_evidence_count: int = 0,
     consecutive_failures: int = 0,
+    recent_tool_names: list[str] | None = None,
+    tested_vuln_classes: set[str] | None = None,
+    adaptive_tool_scores: dict[str, float] | None = None,
+    strategy_tool_sequence: list[str] | None = None,
 ) -> dict[str, Any]:
     """Score a single tool for relevance."""
     reasons: list[str] = []
@@ -284,19 +486,30 @@ def score_tool(
     is_blocked = tool_name.lower() in {t.lower() for t in blocked_tools}
     is_appropriate = tool_name.lower() in {t.lower() for t in appropriate_tools}
 
-    if is_blocked:
+    # FLEXIBILITY: Tool phase blocking is now ADVISORY not HARD.
+    # Novel discoveries can override phase restrictions.
+    # If session has many unconfirmed hypotheses (discovery mode), allow cross-phase tools.
+    discovery_exception = False
+    if is_blocked and session_evidence_count >= 3:
+        discovery_exception = True
+        reasons.append(
+            f"[DISCOVERY OVERRIDE] '{tool_name}' normally blocked in {phase_upper}, but enabled due to active investigation"
+        )
+
+    if is_blocked and not discovery_exception:
+        # Hard block for tools inappropriate for this phase
         score = 0.0
         reasons.append(
-            f"BLOCKED: '{tool_name}' is not appropriate for {phase_upper} phase"
+            f"[PHASE BLOCKED] '{tool_name}' is not allowed in {phase_upper} phase"
         )
-        return {
-            "score": 0.0,
-            "phase_appropriate": False,
-            "phase_blocked": True,
-            "reasons": reasons,
-        }
-
-    if is_appropriate:
+        # Don't return yet - continue scoring
+    elif is_blocked and discovery_exception:
+        # Boost score when discovery exception applies
+        score = 0.6
+        reasons.append(
+            f"[CROSS-PHASE ALLOWED] Research mode active - using {tool_name} despite phase"
+        )
+    elif is_appropriate:
         score += 0.15
         reasons.append(f"Phase-appropriate for {phase_upper}")
 
@@ -327,6 +540,50 @@ def score_tool(
             score += 0.05
             reasons.append("Not yet used this session — worth trying")
 
+    # ── Diversity penalty: penalize tools used recently ──────────────
+    if recent_tool_names:
+        recent_count = recent_tool_names.count(tool_name)
+        window_size = len(recent_tool_names)
+        if recent_count > 0:
+            frequency = recent_count / max(window_size, 1)
+            penalty = min(0.4, frequency * 0.5)
+            score -= penalty
+            reasons.append(
+                f"DIVERSITY PENALTY: used {recent_count}/{window_size} recent calls ({frequency:.0%}) — score -{penalty:.2f}"
+            )
+            # Hard block if tool dominates the window
+            if frequency >= 0.6:
+                score = max(0.0, score - 0.3)
+                reasons.append(
+                    "HEAVY PENALTY: tool dominates recent window — strongly prefer alternatives"
+                )
+        # Bonus for tools NOT yet used recently
+        if (
+            recent_count == 0
+            and is_appropriate
+            and tool_name
+            not in (
+                "execute",
+                "browser_action",
+                "create_file",
+                "read_file",
+                "list_files",
+            )
+        ):
+            score += 0.1
+            reasons.append("DIVERSITY BONUS: not used recently — fresh approach")
+
+    # ── Vuln class coverage bonus: boost tools for untested vuln classes ──
+    if tested_vuln_classes:
+        tool_lower = tool_name.lower()
+        tool_classes = _TOOL_VULN_LABEL_MAP.get(tool_lower, set())
+        untested_by_tool = tool_classes - tested_vuln_classes
+        if untested_by_tool:
+            score += 0.1 * len(untested_by_tool)
+            reasons.append(
+                f"COVERAGE BONUS: can test untested classes: {', '.join(untested_by_tool)}"
+            )
+
     if budget_remaining:
         remaining = budget_remaining.get(tool_name, 999)
         if remaining <= 0:
@@ -344,6 +601,32 @@ def score_tool(
             reasons.append(
                 f"ALIGNMENT: Matches current exploit chain step hint '{chain_step_hint}'"
             )
+
+    if adaptive_tool_scores and tool_name in adaptive_tool_scores:
+        learned_score = float(adaptive_tool_scores.get(tool_name, 0.0) or 0.0)
+        if learned_score >= 0.75:
+            score += 0.15
+            reasons.append(
+                f"ADAPTIVE BONUS: prior runs strongly favor this tool ({learned_score:.2f})"
+            )
+        elif learned_score >= 0.6:
+            score += 0.08
+            reasons.append(
+                f"ADAPTIVE BONUS: prior runs favor this tool ({learned_score:.2f})"
+            )
+        elif learned_score <= 0.3:
+            score -= 0.08
+            reasons.append(
+                f"ADAPTIVE PENALTY: prior runs show weak returns ({learned_score:.2f})"
+            )
+
+    if strategy_tool_sequence and tool_name in strategy_tool_sequence:
+        idx = strategy_tool_sequence.index(tool_name)
+        boost = max(0.04, 0.12 - (idx * 0.02))
+        score += boost
+        reasons.append(
+            f"STRATEGY ALIGNMENT: matches learned sequence position {idx + 1}/{len(strategy_tool_sequence)}"
+        )
 
     if consecutive_failures >= 3:
         if tool_use_counts and tool_name in tool_use_counts:
@@ -372,6 +655,10 @@ def rank_tools_for_phase(
     chain_step_hint: str = "",
     session_evidence_count: int = 0,
     consecutive_failures: int = 0,
+    recent_tool_names: list[str] | None = None,
+    tested_vuln_classes: set[str] | None = None,
+    adaptive_tool_scores: dict[str, float] | None = None,
+    strategy_tool_sequence: list[str] | None = None,
     top_n: int | None = None,
     use_memory: bool = True,
 ) -> list[dict[str, Any]]:
@@ -408,6 +695,10 @@ def rank_tools_for_phase(
             chain_step_hint=chain_step_hint,
             session_evidence_count=session_evidence_count,
             consecutive_failures=consecutive_failures,
+            recent_tool_names=recent_tool_names,
+            tested_vuln_classes=tested_vuln_classes,
+            adaptive_tool_scores=adaptive_tool_scores,
+            strategy_tool_sequence=strategy_tool_sequence,
         )
 
         if result["phase_blocked"]:
@@ -445,6 +736,7 @@ def build_tool_recommendation_context(
 
     phase_upper = current_phase.upper()
     appropriate = _PHASE_APPROPRIATE_TOOLS.get(phase_upper, set())
+    top_tools: list[str] = []
     if appropriate:
         top_tools = sorted(appropriate)[:15]
 
@@ -501,7 +793,7 @@ def build_tool_recommendation_context(
 
         parts.append(
             '<tool_guidance phase="' + phase_upper + '">\n'
-            '  Recommended tools for this phase (with descriptions):\n'
+            "  Recommended tools for this phase (with descriptions):\n"
             + "\n".join(tool_lines)
             + "\n  Prioritize tools that advance your current objective.\n"
             "</tool_guidance>"
@@ -544,50 +836,20 @@ def build_tool_recommendation_context(
         )
 
     # Skills catalog index — tell agent about available knowledge
-    _skills = _TOOLS_META.get("skills_catalog", {})
-    if isinstance(_skills, dict):
-        phase_skills: dict[str, set[str]] = {
-            "RECON": {"subdomain_enum", "full_recon", "dorking", "asn_whois_osint"},
-            "ANALYSIS": {"javascript_analysis", "waf_detection", "cors", "idor"},
-            "EXPLOIT": {
-                "xss", "sql_injection", "ssrf", "lfi", "ssti", "command_injection",
-                "xxe", "deserialization", "auth_workflow", "business_logic",
-            },
-            "REPORT": {"information_disclosure", "web_cache_poisoning"},
-        }
-        relevant_skill_names = phase_skills.get(phase_upper, set())
-        # Auto-derive relevant tool↔skill cross-links from catalog itself
-        _skill_tool_names: set[str] = {
-            sname.lower()
-            for sub in _skills.values()
-            if isinstance(sub, dict)
-            for sname in sub.keys()
-        } & _KNOWN_TOOL_BINARIES
-
-        skill_entries: list[str] = []
-        for cat, skills in _skills.items():
-            if isinstance(skills, dict):
-                for sname, sdesc in skills.items():
-                    if sname in relevant_skill_names:
-                        skill_entries.append(f"    - skills/{cat}/{sname}.md: {sdesc[:180]}")
-                    # Match if skill name is also a known tool/binary
-                    if sname.lower() in _skill_tool_names and sname not in relevant_skill_names:
-                        skill_entries.append(f"    - skills/{cat}/{sname}.md: {sdesc[:180]}")
-        if skill_entries:
-            # Deduplicate
-            seen = set()
-            unique_skills = []
-            for line in skill_entries:
-                if line not in seen:
-                    seen.add(line)
-                    unique_skills.append(line)
-            parts.append(
-                '<skills_catalog>\n'
-                '  Available knowledge modules. Load with read_file(path="skills/<cat>/<name>.md"):\n'
-                + "\n".join(unique_skills)
-                + "\n  Use these modules to guide your approach and avoid common pitfalls.\n"
-                "</skills_catalog>"
-            )
+    skill_entries = _build_skill_catalog_entries(
+        phase_upper,
+        context_tools=top_tools[:8],
+        chain_step_hint=chain_step_hint,
+        wrong_tool_picked=wrong_tool_picked,
+    )
+    if skill_entries:
+        parts.append(
+            "<skills_catalog>\n"
+            '  Available knowledge modules. Load with read_file(path="skills/<cat>/<name>.md"):\n'
+            + "\n".join(skill_entries)
+            + "\n  Use these modules to guide your approach and avoid common pitfalls.\n"
+            "</skills_catalog>"
+        )
 
     if not parts:
         return ""

@@ -9,9 +9,7 @@ from pathlib import Path
 
 logger = logging.getLogger("airecon.file_reference")
 
-_AT_REF_RE = re.compile(r"@(/[^\s\"'<>]+)")
-
-_AT_REF_QUOTED_RE = re.compile(r"([\"'])@(/[^\n]*?)\1")
+_TRAILING_REF_PUNCTUATION = ".,;:!?)]}"
 
 _BINARY_EXTENSIONS = frozenset({
     ".exe", ".el", ".bin", ".so", ".dll", ".dylib",
@@ -65,52 +63,66 @@ class ResolvedRef:
     error: str | None = None
 
 def parse_refs(message: str) -> list[FileRef]:
+    if not message:
+        return []
+
     refs: list[FileRef] = []
-    quoted_ranges: list[tuple[int, int]] = []
+    idx = 0
+    msg_len = len(message)
 
-    for m in _AT_REF_QUOTED_RE.finditer(message):
-        path_str = m.group(2).strip()
-        if not path_str.startswith("/") or "<" in path_str or ">" in path_str:
-            continue
-        token_start = m.start(0) + 1
-        token_end = token_start + 1 + len(path_str)
-        if token_end <= token_start:
-            continue
-        raw = message[token_start:token_end]
-        refs.append(
-            FileRef(
-                raw=raw,
-                path=Path(path_str),
-                start=token_start,
-                end=token_end,
+    while idx < msg_len:
+        token_start = message.find("@/", idx)
+        if token_start < 0:
+            break
+
+        quote_char = message[token_start - 1] if token_start > 0 else ""
+        path_str = ""
+        token_end = -1
+
+        if quote_char in {"'", '"'}:
+            quoted_end = message.find(quote_char, token_start + 2)
+            if quoted_end > token_start:
+                candidate = message[token_start + 1 : quoted_end].strip()
+                if (
+                    candidate.startswith("/")
+                    and "<" not in candidate
+                    and ">" not in candidate
+                ):
+                    path_str = candidate
+                    token_end = quoted_end
+
+        if token_end < 0:
+            scan_end = token_start + 2
+            while scan_end < msg_len:
+                ch = message[scan_end]
+                if ch.isspace() or ch in "\"'<>`":
+                    break
+                scan_end += 1
+            candidate = message[token_start + 1 : scan_end].rstrip(
+                _TRAILING_REF_PUNCTUATION
             )
-        )
-        quoted_ranges.append((token_start, token_end))
+            if (
+                candidate.startswith("/")
+                and "<" not in candidate
+                and ">" not in candidate
+            ):
+                path_str = candidate
+                token_end = token_start + 1 + len(candidate)
 
-    for m in _AT_REF_RE.finditer(message):
-        token_start = m.start(0)
-        if any(start <= token_start < end for start, end in quoted_ranges):
-            continue
-        path_str = m.group(1)
-
-        trimmed = path_str.rstrip(".,;:!?)")
-        if not trimmed.startswith("/"):
-            continue
-        strip_count = len(path_str) - len(trimmed)
-        token_end = m.end(0) - strip_count
-        if token_end <= token_start:
-            continue
-        raw = message[token_start:token_end]
-        refs.append(
-            FileRef(
-                raw=raw,
-                path=Path(trimmed),
-                start=token_start,
-                end=token_end,
+        if path_str and token_end > token_start:
+            refs.append(
+                FileRef(
+                    raw=message[token_start:token_end],
+                    path=Path(path_str),
+                    start=token_start,
+                    end=token_end,
+                )
             )
-        )
+            idx = token_end
+            continue
 
-    refs.sort(key=lambda r: r.start)
+        idx = token_start + 2
+
     return refs
 
 def strip_refs(message: str, refs: list[FileRef]) -> str:
@@ -403,7 +415,7 @@ def _docker_path_for(path: Path, fallback: Path) -> Path:
         return fallback
     except Exception as e:
 
-        logger.debug("Exception: %s", e)
+        logger.warning("Operation failed: %s", e)
 
         logger.debug("_docker_path_for: unexpected error for %s, using fallback", path)
         return fallback
@@ -519,6 +531,15 @@ def build_injection_message(resolved: list[ResolvedRef]) -> str | None:
         parts.append(f"[FILE REFERENCE ERRORS]\n{err_lines}")
 
     for r in valid:
+        if not parts:
+            parts.append(
+                "[FILE REFERENCES ACTIVE]\n"
+                "Treat these referenced files/directories as concrete target evidence. "
+                "Analyze their actual contents and behavior, not generic assumptions. "
+                "Use notes only for working memory; confirmed findings must go to "
+                "create_vulnerability_report so the final artifact lands under "
+                "the active target's vulnerabilities/ directory."
+            )
         parts.append(r.context_block)
 
     return "\n\n".join(parts) if parts else None

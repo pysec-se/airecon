@@ -7,6 +7,7 @@ import warnings
 from pathlib import Path
 from typing import Any
 
+from ..data_loader import int_to_severity, severity_to_int
 from .pipeline import PipelinePhase
 from .tuning import get_tuning
 from .validators import has_dangerous_patterns
@@ -232,7 +233,7 @@ class _SupervisionMixin:
         )
         high_sev = sum(
             1 for e in self.state.evidence_log
-            if int(e.get("severity", 1)) >= 4
+            if severity_to_int(e.get("severity", 1)) >= 4
         )
 
         progress_parts = [f"{phase_ev} evidence item(s) in {phase_str} phase"]
@@ -243,8 +244,8 @@ class _SupervisionMixin:
         latest_summary = ""
         if recent_evidence:
             ev = recent_evidence[0]
-            sev = int(ev.get("severity", 1))
-            sev_label = {5: "CRITICAL", 4: "HIGH", 3: "MEDIUM", 2: "LOW"}.get(sev, "INFO")
+            sev = severity_to_int(ev.get("severity", 1))
+            sev_label = int_to_severity(sev)
             latest_summary = f"Latest: [{sev_label}] {ev.get('summary', '')[:120]}"
 
         if pending:
@@ -265,8 +266,8 @@ class _SupervisionMixin:
         ab_signal: dict[str, Any] | None = None
         if recent_evidence:
             last_ev = recent_evidence[0]
-            last_sev = int(last_ev.get("severity", 1))
-            _min_sev = int(_AB_SIGNALS_DATA.get("min_severity", 3))
+            last_sev = severity_to_int(last_ev.get("severity", 1))
+            _min_sev = severity_to_int(_AB_SIGNALS_DATA.get("min_severity", 3))
             if last_sev >= _min_sev:
                 ab_signal = self._get_ab_signals(last_ev.get("summary", ""))
 
@@ -551,11 +552,22 @@ class _SupervisionMixin:
                     self._session.target, current_phase
                 )
                 for rec in skill_recs:
-                    skill_path = f"ctf/{rec['skill_name']}.py" if current_phase == "EXPLOIT" else f"reconnaissance/{rec['skill_name']}.py"
-                    recommended_skills.add(skill_path)
+                    skill_path = str(rec.get("skill_path") or rec.get("skill_name") or "")
+                    if not skill_path:
+                        continue
+
+                    if "/" in skill_path:
+                        skill_path = skill_path.replace("\\", "/")
+                        if not skill_path.endswith(".md"):
+                            skill_path = f"{skill_path}.md"
+                        recommended_skills.add(skill_path)
+                        continue
+
+                    skill_stem = Path(skill_path).stem
+                    default_dir = "ctf" if current_phase == "EXPLOIT" else "reconnaissance"
+                    recommended_skills.add(f"{default_dir}/{skill_stem}.md")
                     for phase_dir in phase_dirs:
-                        alt_path = f"{phase_dir}/{rec['skill_name']}.py"
-                        recommended_skills.add(alt_path)
+                        recommended_skills.add(f"{phase_dir}/{skill_stem}.md")
         except Exception as e:
             logger.debug("Skill recommendation lookup for pruning failed: %s", e)
 

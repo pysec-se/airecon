@@ -136,6 +136,16 @@ def _is_filesystem_like_target(raw_target: str) -> bool:
     raw = (raw_target or "").strip()
     if not raw:
         return False
+    if "://" in raw:
+        return False
+    if "/" in raw and not raw.startswith(("/", ".", "@")):
+        host_candidate = raw.split("/", 1)[0]
+        host_only = host_candidate.split(":", 1)[0]
+        if re.fullmatch(r"(?:\d{1,3}\.){3}\d{1,3}", host_only):
+            return False
+        if "." in host_only and re.fullmatch(r"[a-zA-Z0-9.-]+", host_only):
+            return False
+        return True
     return (
         raw.startswith("@/")
         or raw.startswith("/workspace/")

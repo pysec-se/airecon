@@ -142,7 +142,7 @@ The single entry point for all shell command execution. Runs any bash command in
 
 **Example calls:**
 
-```bash
+```text
 # Basic scan — writes output to workspace
 execute(command="subfinder -d example.com -o /workspace/example.com/output/subdomains.txt")
 
@@ -278,7 +278,7 @@ browser_action(action="view_source")
 browser_action(action="get_console_logs")
 
 # XSS verification
-browser_action(action="goto", url="https://example.com/search?q=<script>alert(1)</script>")
+browser_action(action="goto", url="https://example.com/search?q=%3Cscript%3Ealert(document.cookie)%3C/script%3E")
 browser_action(action="execute_js", js_code="document.querySelector('script') ? 'INJECTED' : 'NOT_INJECTED'")
 
 # Login flow automation (get session token)

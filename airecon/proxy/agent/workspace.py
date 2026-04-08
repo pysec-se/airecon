@@ -201,7 +201,7 @@ class _WorkspaceMixin:
             try:
                 arguments = json.loads(arguments)
             except Exception as e:
-                logger.debug("Exception: %s", e)
+                logger.warning("Operation failed: %s", e)
                 arguments = {}
         if not isinstance(arguments, dict):
             return {}
@@ -222,7 +222,6 @@ class _WorkspaceMixin:
             os.makedirs(command_dir, exist_ok=True)
             os.makedirs(output_dir, exist_ok=True)
             os.makedirs(os.path.join(base_dir, "tools"), exist_ok=True)
-            os.makedirs(os.path.join(base_dir, "vulnerabilities"), exist_ok=True)
 
             timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
             succeeded = result.get("success", False)
@@ -269,12 +268,22 @@ class _WorkspaceMixin:
                 return json_filepath
 
             txt_content = ""
-            if isinstance(result, dict) and "result" in result:
-                res_data = result["result"]
+            if isinstance(result, dict):
+                res_data = result.get("result")
                 if isinstance(res_data, dict) and "stdout" in res_data:
-                    txt_content = res_data["stdout"]
-                else:
+                    txt_content = str(res_data.get("stdout", ""))
+                elif res_data is not None:
                     txt_content = str(res_data)
+                elif result.get("stdout"):
+                    summary = str(result.get("summary", "")).strip()
+                    stdout = str(result.get("stdout", "")).strip()
+                    txt_content = (
+                        f"{summary}\n\n{stdout}"
+                        if summary and stdout and summary not in stdout
+                        else (stdout or summary)
+                    )
+                elif result.get("summary"):
+                    txt_content = str(result.get("summary", ""))
 
             if txt_content:
                 txt_filename = f"{tool_name}_{timestamp}.txt"

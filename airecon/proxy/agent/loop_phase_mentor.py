@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from typing import Any
 
+from ..data_loader import severity_to_int
+
 
 def maybe_inject_mentor_analysis(
     agent: Any,
@@ -15,7 +17,7 @@ def maybe_inject_mentor_analysis(
 
     mentor_tool_name = all_results[max(all_results.keys())][2]
     last_ev = agent.state.evidence_log[-1]
-    last_sev = int(last_ev.get("severity", 1))
+    last_sev = severity_to_int(last_ev.get("severity", 1))
     trigger_mentor = (
         last_sev >= 4
         or agent._mentor_tool_call_count % 3 == 0

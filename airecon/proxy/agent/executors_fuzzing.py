@@ -5,13 +5,135 @@ import logging
 import time
 from pathlib import Path
 from typing import Any
-from urllib.parse import urlparse
 
 from ..config import get_workspace_root
 from ..fuzzer import FUZZ_PAYLOADS as _FUZZ_PAYLOAD_KEYS
 from .models import ToolExecution
+from .utils import (
+    NO_VULNS_FOUND,
+    as_bool,
+    as_str_list,
+    is_host_in_scope,
+    FINDING_FORMAT,
+)
 
 logger = logging.getLogger("airecon.agent")
+
+NO_FUZZING_RESULT = NO_VULNS_FOUND
+
+
+def _parse_auth(
+    arguments: dict[str, Any],
+) -> tuple[str | None, str | None, str | None, dict[str, str] | None]:
+    raw = arguments.get("auth_login_url")
+    login_url = raw.strip() if isinstance(raw, str) and raw.strip() else None
+    username = arguments.get("auth_username")
+    password = arguments.get("auth_password")
+    raw_extra = arguments.get("auth_extra_fields")
+    extra: dict[str, str] | None = None
+    if isinstance(raw_extra, dict):
+        extra = {str(k): str(v) for k, v in raw_extra.items() if str(k).strip()}
+    return login_url, username, password, extra
+
+
+def _record_tool_completion(
+    self,
+    tool_name: str,
+    arguments: dict[str, Any],
+    result: dict[str, Any],
+    start_time: float,
+    success: bool,
+    output_file: str | None = None,
+) -> None:
+    """Common boilerplate: save output, append history, increment counter."""
+    duration = time.time() - start_time
+    try:
+        self._save_tool_output(tool_name, arguments, result)
+    except Exception as _e:
+        logger.debug("Could not save tool output")
+    self.state.tool_history.append(
+        ToolExecution(
+            tool_name=tool_name,
+            arguments=arguments,
+            result=result,
+            duration=duration,
+            status="success" if success else "error",
+        )
+    )
+    self.state.tool_counts["total"] += 1
+
+
+def _format_findings(results: list[Any]) -> list[str]:
+    return [
+        FINDING_FORMAT.format(
+            p=r.parameter,
+            v=r.vuln_type,
+            s=r.severity,
+            c=r.confidence,
+            e=r.evidence,
+        )
+        for r in results
+    ]
+
+
+def _scope_error(target: str, session_target: str, detail: str = "") -> str:
+    domain = "subdomains of" if not detail else detail
+    return (
+        f"OUT-OF-SCOPE: {target!r} does not belong to the target scope "
+        f"({session_target!r}). Do NOT fuzz third-party domains. "
+        f"Only fuzz {domain} {session_target!r}."
+    )
+
+
+def _handle_oos(
+    self, tool_name: str, arguments: dict[str, Any], target: str, start_time: float
+) -> tuple[bool, float, dict[str, Any], str | None]:
+    session_target = getattr(getattr(self, "_session", None), "target", "unknown")
+    logger.warning(
+        "Fuzzing scope violation — target %r is outside session scope %r. Skipping.",
+        target,
+        session_target,
+    )
+    result = {"success": False, "error": _scope_error(target, session_target)}
+    _record_tool_completion(
+        self, tool_name, arguments, result, start_time, success=False
+    )
+    return False, time.time() - start_time, result, None
+
+
+def _record_fuzz_surface(
+    self_ref: Any, arguments: dict[str, Any], findings: list[Any], success: bool
+) -> None:
+    try:
+        tracker = getattr(self_ref, "_surface_tracker", None)
+        if tracker is None:
+            return
+    except AttributeError:
+        return
+
+    target_url = str(arguments.get("target", ""))
+    params = arguments.get("parameters", [])
+    vuln_types = arguments.get("vuln_types", [])
+    n_findings = len(findings) if findings else 0
+
+    endpoints: list[str] = (
+        [target_url]
+        if target_url
+        else ([str(p) for p in params if str(p)] if isinstance(params, list) else [])
+        or ["<root>"]
+    )
+    vts = [str(v) for v in vuln_types if str(v)] if isinstance(vuln_types, list) else []
+    if not vts:
+        vts = ["generic_fuzz"]
+
+    for ep in endpoints:
+        for vt in vts:
+            tracker.record_test(
+                endpoint=ep,
+                vuln_type=vt,
+                tool_used="advanced_fuzz",
+                findings=n_findings,
+            )
 
 
 class _FuzzingExecutorMixin:
@@ -28,54 +150,21 @@ class _FuzzingExecutorMixin:
         target = arguments.get("target", "")
         params = arguments.get("parameters", [])
         method = arguments.get("method", "GET")
-        _valid_vuln_types = set(_FUZZ_PAYLOAD_KEYS.keys())
-        _raw_vuln_types = arguments.get("vuln_types")
-        if _raw_vuln_types and isinstance(_raw_vuln_types, list):
-            vuln_types = [
-                v
-                for v in _raw_vuln_types
-                if isinstance(v, str) and v in _valid_vuln_types
-            ] or list(_valid_vuln_types)
-        else:
-            vuln_types = list(_valid_vuln_types)
+        valid_vuln_types = set(_FUZZ_PAYLOAD_KEYS.keys())
+        raw_vuln_types = arguments.get("vuln_types")
+        vuln_types = (
+            [v for v in raw_vuln_types if isinstance(v, str) and v in valid_vuln_types]
+            if raw_vuln_types and isinstance(raw_vuln_types, list)
+            else []
+        ) or list(valid_vuln_types)
 
-        def _as_bool(value: Any, default: bool = True) -> bool:
-            if value is None:
-                return default
-            if isinstance(value, bool):
-                return value
-            if isinstance(value, (int, float)):
-                return bool(value)
-            if isinstance(value, str):
-                return value.strip().lower() in {"1", "true", "yes", "y", "on"}
-            return default
-
-        def _as_str_list(value: Any) -> list[str] | None:
-            if not isinstance(value, list):
-                return None
-            cleaned = [str(v).strip() for v in value if str(v).strip()]
-            return cleaned or None
-
-        enable_phase2 = _as_bool(arguments.get("phase2"), default=True)
-        ssrf_params = _as_str_list(arguments.get("ssrf_params"))
-        graphql_endpoints = _as_str_list(arguments.get("graphql_endpoints"))
-        race_params = _as_str_list(arguments.get("race_params"))
-        auth_login_url_raw = arguments.get("auth_login_url")
-        auth_login_url = (
-            auth_login_url_raw.strip()
-            if isinstance(auth_login_url_raw, str) and auth_login_url_raw.strip()
-            else None
+        enable_phase2 = as_bool(arguments.get("phase2"), default=True)
+        ssrf_params = as_str_list(arguments.get("ssrf_params"))
+        graphql_endpoints = as_str_list(arguments.get("graphql_endpoints"))
+        race_params = as_str_list(arguments.get("race_params"))
+        auth_login_url, auth_username, auth_password, auth_extra_fields = _parse_auth(
+            arguments
         )
-        auth_username = arguments.get("auth_username")
-        auth_password = arguments.get("auth_password")
-        auth_extra_fields_raw = arguments.get("auth_extra_fields")
-        auth_extra_fields: dict[str, str] | None = None
-        if isinstance(auth_extra_fields_raw, dict):
-            auth_extra_fields = {
-                str(k): str(v)
-                for k, v in auth_extra_fields_raw.items()
-                if str(k).strip()
-            }
 
         try:
             async with Fuzzer(
@@ -101,55 +190,28 @@ class _FuzzingExecutorMixin:
                     )
                 results = list(fuzzer.results)
 
-            if not results:
-                res_dict = {
-                    "success": True,
-                    "result": "No vulnerabilities found with confidence > 0.60.",
-                    "phase2_enabled": enable_phase2,
-                    "phase2_findings": len(phase2_findings) if enable_phase2 else 0,
-                }
-            else:
-                findings_list = []
-                for r in results:
-                    findings_list.append(
-                        f"Param: {r.parameter} | Vuln: {r.vuln_type} | "
-                        f"Severity: {r.severity} | Conf: {r.confidence:.2f} | "
-                        f"Evidence: {r.evidence}"
-                    )
-                res_dict = {
-                    "success": True,
-                    "findings": findings_list,
-                    "phase2_enabled": enable_phase2,
-                    "phase2_findings": len(phase2_findings) if enable_phase2 else 0,
-                }
-
-            try:
-                self._save_tool_output(tool_name, arguments, res_dict)
-            except Exception as _e:
-                logger.debug("Could not save tool output: %s", _e)
-            success = True
+            res_dict = {
+                "success": True,
+                "findings": _format_findings(results) if results else NO_FUZZING_RESULT,
+                "phase2_enabled": enable_phase2,
+                "phase2_findings": len(phase2_findings) if enable_phase2 else 0,
+            }
+            _record_tool_completion(
+                self, tool_name, arguments, res_dict, start_time, success=True
+            )
         except Exception as e:
             logger.error("Fuzzer error: %s", e)
             res_dict = {"success": False, "error": str(e)}
-            success = False
-
-        duration = time.time() - start_time
-
-        self.state.tool_history.append(
-            ToolExecution(
-                tool_name=tool_name,
-                arguments=arguments,
-                result=res_dict,
-                duration=duration,
-                status="success" if success else "error",
+            _record_tool_completion(
+                self, tool_name, arguments, res_dict, start_time, success=False
             )
-        )
-        self.state.tool_counts["total"] += 1
+            return False, time.time() - start_time, res_dict, None
 
-        return success, duration, res_dict, None
+        _record_fuzz_surface(self, arguments, results, success=True)
+        return True, time.time() - start_time, res_dict, None
 
     def _is_target_in_scope(self, target_url: str) -> bool:
-        session_target: str = ""
+        session_target = ""
         try:
             if self._session and self._session.target:
                 session_target = self._session.target.strip()
@@ -157,30 +219,7 @@ class _FuzzingExecutorMixin:
             logger.debug(
                 "Expected failure reading session target for scope check: %s", e
             )
-
-        if not session_target or not target_url:
-            return True
-
-        try:
-            target_host = urlparse(target_url).hostname or ""
-
-            if "://" in session_target:
-                scope_host = urlparse(session_target).hostname or ""
-            else:
-                scope_host = session_target.split(":")[0].split("/")[0].lower()
-
-            if not scope_host or not target_host:
-                return True
-
-            target_host = target_host.lower()
-            scope_host = scope_host.lower()
-
-            return target_host == scope_host or target_host.endswith("." + scope_host)
-        except Exception as exc:
-            logger.debug(
-                "Expected failure normalizing target URL for scope check: %s", exc
-            )
-            return True
+        return is_host_in_scope(target_url, session_target)
 
     async def _execute_quick_fuzz_tool(
         self,
@@ -191,70 +230,29 @@ class _FuzzingExecutorMixin:
 
         self._last_output_file = None
         start_time = time.time()
-
         target = arguments.get("target", "")
         params = arguments.get("params") or None
 
         if not self._is_target_in_scope(target):
-            session_target = getattr(
-                getattr(self, "_session", None), "target", "unknown"
-            )
-            logger.warning(
-                "quick_fuzz scope violation — target %r is outside session scope %r. Skipping.",
-                target,
-                session_target,
-            )
-            oos_result = {
-                "success": False,
-                "error": (
-                    f"OUT-OF-SCOPE: {target!r} does not belong to the target scope "
-                    f"({session_target!r}). Do NOT fuzz third-party domains "
-                    f"(CDNs, analytics, font services, etc.). "
-                    f"Only fuzz subdomains of {session_target!r}."
-                ),
-            }
-            duration = time.time() - start_time
-            self.state.tool_history.append(
-                ToolExecution(
-                    tool_name=tool_name,
-                    arguments=arguments,
-                    result=oos_result,
-                    duration=duration,
-                    status="error",
-                )
-            )
-            self.state.tool_counts["total"] += 1
-            return False, duration, oos_result, None
+            return _handle_oos(self, tool_name, arguments, target, start_time)
 
         try:
             results = await asyncio.wait_for(
                 quick_fuzz_url(
-                    url=target,
-                    params=params,
-                    headers=self._build_fuzz_headers(),
+                    url=target, params=params, headers=self._build_fuzz_headers()
                 ),
                 timeout=300.0,
             )
 
             if not results:
-                res_dict = {
-                    "success": True,
-                    "result": "No vulnerabilities found with confidence > 0.60.",
-                }
+                res_dict = {"success": True, "result": NO_FUZZING_RESULT}
             else:
-                findings_list = [
-                    f"Param: {r.parameter} | Vuln: {r.vuln_type} | "
-                    f"Severity: {r.severity} | Conf: {r.confidence:.2f} | "
-                    f"Evidence: {r.evidence}"
-                    for r in results
-                ]
-
+                findings_list = _format_findings(results)
                 stdout_lines = []
                 for r in results:
                     sev = r.severity.upper()
                     stdout_lines.append(
-                        f"[{sev}] {r.vuln_type.upper()} on param '{r.parameter}'"
-                        f" at {r.target}"
+                        f"[{sev}] {r.vuln_type.upper()} on param '{r.parameter}' at {r.target}"
                     )
                     stdout_lines.append(
                         f"Payload: {r.payload} | Conf: {r.confidence:.2f}"
@@ -266,29 +264,18 @@ class _FuzzingExecutorMixin:
                     "findings": findings_list,
                     "total": len(findings_list),
                 }
-
-            try:
-                self._save_tool_output(tool_name, arguments, res_dict)
-            except Exception as _e:
-                logger.debug("Could not save tool output: %s", _e)
-            success = True
+            _record_tool_completion(
+                self, tool_name, arguments, res_dict, start_time, success=True
+            )
         except Exception as e:
             logger.error("quick_fuzz error: %s", e)
             res_dict = {"success": False, "error": str(e)}
-            success = False
-
-        duration = time.time() - start_time
-        self.state.tool_history.append(
-            ToolExecution(
-                tool_name=tool_name,
-                arguments=arguments,
-                result=res_dict,
-                duration=duration,
-                status="success" if success else "error",
+            _record_tool_completion(
+                self, tool_name, arguments, res_dict, start_time, success=False
             )
-        )
-        self.state.tool_counts["total"] += 1
-        return success, duration, res_dict, None
+            return False, time.time() - start_time, res_dict, None
+
+        return True, time.time() - start_time, res_dict, None
 
     async def _execute_deep_fuzz_tool(
         self,
@@ -303,77 +290,20 @@ class _FuzzingExecutorMixin:
         vuln_types = arguments.get("vuln_types") or None
 
         if not self._is_target_in_scope(target):
-            session_target = getattr(
-                getattr(self, "_session", None), "target", "unknown"
-            )
-            logger.warning(
-                "deep_fuzz scope violation — target %r is outside session scope %r. Skipping.",
-                target,
-                session_target,
-            )
-            oos_result = {
-                "success": False,
-                "error": (
-                    f"OUT-OF-SCOPE: {target!r} does not belong to the target scope "
-                    f"({session_target!r}). Do NOT fuzz third-party domains. "
-                    f"Only fuzz subdomains of {session_target!r}."
-                ),
-            }
-            duration = time.time() - start_time
-            self.state.tool_history.append(
-                ToolExecution(
-                    tool_name=tool_name,
-                    arguments=arguments,
-                    result=oos_result,
-                    duration=duration,
-                    status="error",
-                )
-            )
-            self.state.tool_counts["total"] += 1
-            return False, duration, oos_result, None
+            return _handle_oos(self, tool_name, arguments, target, start_time)
 
-        def _as_bool(value: Any, default: bool = True) -> bool:
-            if value is None:
-                return default
-            if isinstance(value, bool):
-                return value
-            if isinstance(value, (int, float)):
-                return bool(value)
-            if isinstance(value, str):
-                return value.strip().lower() in {"1", "true", "yes", "y", "on"}
-            return default
-
-        def _as_str_list(value: Any) -> list[str] | None:
-            if not isinstance(value, list):
-                return None
-            cleaned = [str(v).strip() for v in value if str(v).strip()]
-            return cleaned or None
-
-        enable_phase2 = _as_bool(arguments.get("phase2"), default=True)
-        enable_phase3 = _as_bool(arguments.get("phase3"), default=True)
-        ssrf_params = _as_str_list(arguments.get("ssrf_params"))
-        graphql_endpoints = _as_str_list(arguments.get("graphql_endpoints"))
-        race_params = _as_str_list(arguments.get("race_params"))
-        store_params = _as_str_list(arguments.get("store_params"))
-        trigger_paths = _as_str_list(arguments.get("trigger_paths"))
-        auth_login_url_raw = arguments.get("auth_login_url")
-        auth_login_url = (
-            auth_login_url_raw.strip()
-            if isinstance(auth_login_url_raw, str) and auth_login_url_raw.strip()
-            else None
+        enable_phase2 = as_bool(arguments.get("phase2"), default=True)
+        enable_phase3 = as_bool(arguments.get("phase3"), default=True)
+        ssrf_params = as_str_list(arguments.get("ssrf_params"))
+        graphql_endpoints = as_str_list(arguments.get("graphql_endpoints"))
+        race_params = as_str_list(arguments.get("race_params"))
+        store_params = as_str_list(arguments.get("store_params"))
+        trigger_paths = as_str_list(arguments.get("trigger_paths"))
+        auth_login_url, auth_username, auth_password, auth_extra_fields = _parse_auth(
+            arguments
         )
-        auth_username = arguments.get("auth_username")
-        auth_password = arguments.get("auth_password")
-        auth_extra_fields_raw = arguments.get("auth_extra_fields")
-        auth_extra_fields: dict[str, str] | None = None
-        if isinstance(auth_extra_fields_raw, dict):
-            auth_extra_fields = {
-                str(k): str(v)
-                for k, v in auth_extra_fields_raw.items()
-                if str(k).strip()
-            }
-        tester = None
 
+        tester = None
         try:
             from ..fuzzer import InteractiveRealTimeTester
 
@@ -391,8 +321,11 @@ class _FuzzingExecutorMixin:
                     auth_extra_fields,
                     login_url=auth_login_url,
                 )
-            async for event in tester.stream_fuzz(params=params, vuln_types=vuln_types):
+            async for _event in tester.stream_fuzz(
+                params=params, vuln_types=vuln_types
+            ):
                 pass
+
             phase2_findings: list[Any] = []
             phase3_findings: list[Any] = []
             if enable_phase2:
@@ -408,54 +341,36 @@ class _FuzzingExecutorMixin:
                 )
             if phase2_findings or phase3_findings:
                 tester._findings.extend(phase2_findings + phase3_findings)
+
             summary = tester.get_summary()
             summary["phase2_enabled"] = enable_phase2
             summary["phase3_enabled"] = enable_phase3
             summary["phase2_findings"] = len(phase2_findings)
             summary["phase3_findings"] = len(phase3_findings)
 
-            findings_list = []
-            for f in getattr(tester, "_findings", []):
-                findings_list.append(
-                    f"Param: {f.parameter} | Vuln: {f.vuln_type} | "
-                    f"Severity: {f.severity} | Conf: {f.confidence:.2f} | "
-                    f"Evidence: {f.evidence}"
-                )
-
             res_dict = {
                 "success": True,
                 "summary": summary,
-                "findings": findings_list,
+                "findings": _format_findings(getattr(tester, "_findings", [])),
             }
-
-            try:
-                self._save_tool_output(tool_name, arguments, res_dict)
-            except Exception as _e:
-                logger.debug("Could not save tool output: %s", _e)
-            success = True
+            _record_tool_completion(
+                self, tool_name, arguments, res_dict, start_time, success=True
+            )
         except Exception as e:
             logger.error("deep_fuzz error: %s", e)
             res_dict = {"success": False, "error": str(e)}
-            success = False
+            _record_tool_completion(
+                self, tool_name, arguments, res_dict, start_time, success=False
+            )
+            return False, time.time() - start_time, res_dict, None
         finally:
             if tester is not None:
                 try:
                     await tester.fuzzer.close()
-                except Exception as _close_err:
-                    logger.debug("Could not close deep_fuzz tester: %s", _close_err)
+                except Exception as _e:
+                    logger.debug("Could not close deep_fuzz tester")
 
-        duration = time.time() - start_time
-        self.state.tool_history.append(
-            ToolExecution(
-                tool_name=tool_name,
-                arguments=arguments,
-                result=res_dict,
-                duration=duration,
-                status="success" if success else "error",
-            )
-        )
-        self.state.tool_counts["total"] += 1
-        return success, duration, res_dict, None
+        return True, time.time() - start_time, res_dict, None
 
     async def _execute_generate_wordlist_tool(
         self,
@@ -474,10 +389,8 @@ class _FuzzingExecutorMixin:
 
         try:
             wordlist = generate_fuzz_wordlist(
-                max_combinations=max_combinations,
-                vuln_types=vuln_types,
+                max_combinations=max_combinations, vuln_types=vuln_types
             )
-
             target = self.state.active_target or "unknown"
             host_output = get_workspace_root() / target / "output"
             host_output.mkdir(parents=True, exist_ok=True)
@@ -491,31 +404,21 @@ class _FuzzingExecutorMixin:
                 "result": f"Generated {len(wordlist)} entries saved to {saved_path}.",
                 "saved_to": saved_path,
                 "total_entries": len(wordlist),
+                "model_used": getattr(self, "_fuzzer_instance", None).model
+                if hasattr(self, "_fuzzer_instance")
+                else None,
             }
-            self._last_output_file = saved_path
-
-            try:
-                self._save_tool_output(tool_name, arguments, res_dict)
-            except Exception as _e:
-                logger.debug("Could not save tool output: %s", _e)
-            success = True
+            _record_tool_completion(
+                self, tool_name, arguments, res_dict, start_time, success=True
+            )
+            return True, time.time() - start_time, res_dict, self._last_output_file
         except Exception as e:
             logger.error("generate_wordlist error: %s", e)
             res_dict = {"success": False, "error": str(e)}
-            success = False
-
-        duration = time.time() - start_time
-        self.state.tool_history.append(
-            ToolExecution(
-                tool_name=tool_name,
-                arguments=arguments,
-                result=res_dict,
-                duration=duration,
-                status="success" if success else "error",
+            _record_tool_completion(
+                self, tool_name, arguments, res_dict, start_time, success=False
             )
-        )
-        self.state.tool_counts["total"] += 1
-        return success, duration, res_dict, self._last_output_file
+            return False, time.time() - start_time, res_dict, self._last_output_file
 
     def _build_fuzz_headers(self) -> dict[str, str] | None:
         headers: dict[str, str] = {}

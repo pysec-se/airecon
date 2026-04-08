@@ -2,22 +2,30 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass, field
-from enum import Enum
 from typing import Any, AsyncIterator
 
 from .models import AgentEvent
 from .pipeline import PipelineEngine
 from .session import session_to_context
+from .constants import AgentRole
 
 logger = logging.getLogger("airecon.agent.graph")
 
 
-class AgentRole(Enum):
-    RECON = "recon"
-    ANALYZER = "analyzer"
-    EXPLOITER = "exploit"
-    REPORTER = "reporter"
-    SPECIALIST = "specialist"
+# Load agent graph max iterations from config.py (was hardcoded)
+def _get_agent_graph_max_iters() -> dict[str, int]:
+    from ..config import get_config as _get_config
+
+    cfg = _get_config()
+    return {
+        "recon": getattr(cfg, "agent_graph_max_iterations_recon", 150),
+        "analyzer": getattr(cfg, "agent_graph_max_iterations_analyzer", 100),
+        "exploiter": getattr(cfg, "agent_graph_max_iterations_exploiter", 200),
+        "reporter": getattr(cfg, "agent_graph_max_iterations_reporter", 100),
+    }
+
+
+_AGENT_GRAPH_MAX_ITERS = _get_agent_graph_max_iters()
 
 
 @dataclass
@@ -81,7 +89,9 @@ class AgentGraph:
 
         return order
 
-    async def execute(self, shared_session: Any, parent_context: str = "") -> AsyncIterator[AgentEvent]:
+    async def execute(
+        self, shared_session: Any, parent_context: str = ""
+    ) -> AsyncIterator[AgentEvent]:
         from .loop import AgentLoop
 
         order = self.execution_order()
@@ -132,7 +142,9 @@ class AgentGraph:
                 yield event
 
 
-def create_default_graph(target: str, prompt: str = "", recon_mode: str = "full") -> AgentGraph:
+def create_default_graph(
+    target: str, prompt: str = "", recon_mode: str = "full"
+) -> AgentGraph:
 
     g = AgentGraph(target, ollama=None, engine=None)
     if recon_mode == "full":
@@ -150,7 +162,7 @@ def _build_full_pipeline(g: AgentGraph, target: str, prompt: str) -> AgentGraph:
             if prompt
             else "Perform surface reconnaissance. Find subdomains, ports, and URLs."
         ),
-        max_iterations=150,
+        max_iterations=_AGENT_GRAPH_MAX_ITERS.get("recon", 150),
     )
 
     n_analyzer = AgentNode(
@@ -159,7 +171,7 @@ def _build_full_pipeline(g: AgentGraph, target: str, prompt: str) -> AgentGraph:
         prompt_template=(
             "Analyze the discovered attack surface for vulnerabilities and paths. Run semgrep if code exists."
         ),
-        max_iterations=100,
+        max_iterations=_AGENT_GRAPH_MAX_ITERS.get("analyzer", 100),
         depends_on=["recon_node"],
     )
 
@@ -171,7 +183,7 @@ def _build_full_pipeline(g: AgentGraph, target: str, prompt: str) -> AgentGraph:
             if prompt
             else "Focus on high-value exploits."
         ),
-        max_iterations=200,
+        max_iterations=_AGENT_GRAPH_MAX_ITERS.get("exploiter", 200),
         depends_on=["analyzer_node"],
     )
 
@@ -179,7 +191,7 @@ def _build_full_pipeline(g: AgentGraph, target: str, prompt: str) -> AgentGraph:
         id="reporter_node",
         role=AgentRole.REPORTER,
         prompt_template="Create final vulnerability reports for all findings in the session.",
-        max_iterations=100,
+        max_iterations=_AGENT_GRAPH_MAX_ITERS.get("reporter", 100),
         depends_on=["exploiter_node"],
     )
 

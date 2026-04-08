@@ -5,7 +5,7 @@ Welcome to the AIRecon documentation.
 ## Guides
 
 - [Features & Capabilities](features.md) — Core feature overview, Docker sandbox, pipeline phases, multi-agent system, anti-hallucination controls
-- [Tools Reference](tools.md) — Complete reference for all 31 native tools, Docker sandbox tools, and git-cloned scripts
+- [Tools Reference](tools.md) — Complete reference for native tools, Docker sandbox tools, and dynamic MCP tools
 - [Installation & Setup](installation.md) — Step-by-step installation guide with hardware requirements
 - [Configuration Reference](configuration.md) — All config options with examples, presets, and environment variable overrides
 - [Stability & Quality Status](stability.md) — Current validation snapshot, blockers, and realistic stability criteria

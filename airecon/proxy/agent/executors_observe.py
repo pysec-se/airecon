@@ -5,12 +5,78 @@ import logging
 import re
 import shlex
 import time
+from pathlib import Path
 from typing import Any
 from urllib.parse import parse_qs, urlparse
 
 from .models import ToolExecution
+from ..config import get_workspace_root
 
 logger = logging.getLogger("airecon.agent")
+
+
+def _profile_code_analysis_target(host_path: Path) -> dict[str, Any]:
+    profile = {
+        "languages": [],
+        "rules": [],
+        "signals": [],
+    }
+    if not host_path.exists():
+        return profile
+
+    if host_path.is_file():
+        files = [host_path]
+        base_dir = host_path.parent
+    else:
+        base_dir = host_path
+        files = []
+        for item in sorted(host_path.rglob("*")):
+            if not item.is_file():
+                continue
+            files.append(item)
+            if len(files) >= 250:
+                break
+
+    languages: set[str] = set()
+    rules: set[str] = set()
+    signals: list[str] = []
+
+    for item in files:
+        rel = str(item.relative_to(base_dir)) if item != host_path else item.name
+        rel_lower = rel.lower()
+        name_lower = item.name.lower()
+        suffix = item.suffix.lower()
+
+        if suffix == ".py" or name_lower in {"pyproject.toml", "requirements.txt", "setup.py"}:
+            languages.add("python")
+            rules.add("p/python")
+        if suffix in {".js", ".jsx"} or name_lower == "package.json":
+            languages.add("javascript")
+            rules.add("p/javascript")
+        if suffix in {".ts", ".tsx"} or name_lower == "tsconfig.json":
+            languages.add("typescript")
+            rules.add("p/typescript")
+        if name_lower in {"dockerfile", "docker-compose.yml", "docker-compose.yaml"}:
+            rules.add("p/docker")
+        if ".github/workflows/" in rel_lower or name_lower == ".gitlab-ci.yml":
+            rules.add("p/ci")
+        if (
+            name_lower.startswith(".env")
+            or any(token in name_lower for token in ("secret", "token", "credential", "key"))
+            or suffix in {".pem", ".p12", ".kdbx"}
+        ):
+            rules.add("p/secrets")
+        if any(token in rel_lower for token in ("auth", "login", "session", "token", "jwt", "oauth")):
+            signals.append(f"auth_surface:{rel}")
+        if any(token in rel_lower for token in ("checkout", "payment", "coupon", "refund", "order")):
+            signals.append(f"workflow_surface:{rel}")
+        if any(token in rel_lower for token in ("admin", "tenant", "org", "workspace", "project")):
+            signals.append(f"scope_surface:{rel}")
+
+    profile["languages"] = sorted(languages)
+    profile["rules"] = sorted(rules)
+    profile["signals"] = signals[:8]
+    return profile
 
 
 class _ObserveExecutorMixin:
@@ -391,7 +457,7 @@ class _ObserveExecutorMixin:
         tool_name: str,
         arguments: dict[str, Any],
     ) -> tuple[bool, float, dict[str, Any], str | None]:
-        from ..semgrep import run_code_analysis
+        from ..semgrep import get_default_rules, run_code_analysis
 
         self._last_output_file = None
         start_time = time.time()
@@ -417,6 +483,30 @@ class _ObserveExecutorMixin:
                 None,
             )
         target_path = str(_resolved)
+
+        raw_target_path = self._str_arg(arguments, "target_path") or "."
+        host_target_path = None
+        try:
+            workspace_root = get_workspace_root()
+            raw_clean = raw_target_path.removeprefix("/workspace/").removeprefix("workspace/")
+            if raw_target_path.startswith("/"):
+                host_target_path = workspace_root / raw_clean
+            else:
+                host_target_path = workspace_root / active_target / raw_clean
+        except Exception as e:
+            logger.debug("Failed to resolve host target path: %s", e)
+            host_target_path = None
+
+        code_profile = _profile_code_analysis_target(host_target_path) if host_target_path else {
+            "languages": [],
+            "rules": [],
+            "signals": [],
+        }
+        if not languages and code_profile["languages"]:
+            languages = list(code_profile["languages"])
+        if code_profile["rules"]:
+            base_rules = list(rules or get_default_rules())
+            rules = list(dict.fromkeys(base_rules + list(code_profile["rules"])))
 
         try:
             result = await run_code_analysis(
@@ -448,7 +538,15 @@ class _ObserveExecutorMixin:
                 "findings": findings_capped,
                 "errors": result.get("errors", []),
                 "stdout": "\n".join(_stdout_lines),
+                "target_profile": code_profile,
             }
+            if code_profile["signals"]:
+                profile_summary = ", ".join(code_profile["signals"][:5])
+                res_dict["summary"] = (
+                    f"{res_dict['summary']} | Code profile: {profile_summary}"
+                    if res_dict["summary"]
+                    else f"Code profile: {profile_summary}"
+                )
 
             try:
                 self._save_tool_output(tool_name, arguments, res_dict)

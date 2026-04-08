@@ -62,11 +62,10 @@ code ~/.airecon/config.yaml
 #╚══════════════════════════════════════════════════════════╝
 
 # Quick Start:
-#   1. Check your VRAM and set appropriate model:
-#      - 12GB VRAM: qwen2.5:7b or qwen2.5:1.8b (stable)
-#      - 16GB VRAM: qwen2.5:14b or qwen3.5:32b
-#      - 24GB+ VRAM: qwen3.5:70b
-#      - 60GB+ VRAM: qwen3.5:122b
+#   1. Choose a tool-calling model that fits your VRAM:
+#      - Small: qwen3.5:9b (minimum viable)
+#      - Medium: qwen3.5:35b (recommended)
+#      - Large: qwen3.5:70b / qwen3.5:122b (high-end)
 #   2. Context sizes (VRAM requirements):
 #      - 32K (32768): 8GB VRAM stable (CTF mode)
 #      - 64K (65536): 12GB VRAM stable (standard mode)
@@ -80,7 +79,7 @@ code ~/.airecon/config.yaml
 # ======================================
 # Ollama API endpoint. REQUIRED — must be set. For local: http://127.0.0.1:11434. For remote: http://IP:11434
 ollama_url: "http://127.0.0.1:11434"
-# Model to use. 122B for best reasoning (requires 60GB+ VRAM). For 12GB VRAM: use qwen2.5:7b or smaller. For 8GB VRAM: use qwen2.5:1.8b.
+# Model to use. Choose based on your VRAM and tool-calling support.
 ollama_model: "qwen3.5:122b"
 # Total request timeout (seconds). 180s = 3 min. Stable for most models. Increase to 300s for slow remote servers or 122B models.
 ollama_timeout: 180.0
@@ -166,19 +165,19 @@ ollama_url: "http://127.0.0.1:3003"
 The model name exactly as shown in `ollama list`. Must include the tag.
 
 ```yaml
-# Minimum recommended (30B — anything below 30B is unreliable)
-ollama_model: "qwen3:32b"
+# Minimum viable (small VRAM)
+ollama_model: "qwen3.5:9b"
 
-# Lower VRAM option (MoE — 30B active params)
-ollama_model: "qwen3:30b-a3b"
+# Recommended mid-tier
+ollama_model: "qwen3.5:35b"
 
-# High-end (best quality)
+# High-end (best quality if you have the VRAM)
 ollama_model: "qwen3.5:122b"
 ```
 
-> **Important:** The name must match exactly. `qwen3:32b` and `qwen3:latest` are different entries. Run `ollama list` to see exact names.
+> **Important:** The name must match exactly. `qwen3.5:35b` and `qwen3.5:latest` are different entries. Run `ollama list` to see exact names.
 >
-> **Minimum size:** 30B parameters. Models below 30B frequently fail to follow scope rules, hallucinate tool output, and produce incomplete function calls. `qwen3:14b` is NOT recommended for real engagements.
+> **Small models:** models below 8B are not recommended for full engagements. Expect more tool-call errors and hallucinations as size shrinks.
 
 ---
 
@@ -200,23 +199,23 @@ Controls output randomness. This is the single most impactful setting for agent 
 
 The model's job is to follow strict protocols (task scoping, CVSS scoring, PoC requirements) rather than to be creative. Higher temperature increases the chance the model "reasons itself" into skipping rules.
 
-For reasoning models (qwen3 with `ollama_enable_thinking: true`), the `<think>` phase already handles analytical depth internally. The output temperature can therefore be very low (0.15) without losing quality.
+For reasoning-capable models with `ollama_enable_thinking: true`, the `<think>` phase handles analytical depth internally. The output temperature can therefore be very low (0.15) without losing quality.
 
 ---
 
 ### `ollama_num_ctx`
-**Type:** int | **Default:** `131072` (128K tokens)
+**Type:** int | **Default:** `65536` (64K tokens)
 
 Context window size in tokens. Larger = more history visible to the model = better continuity, but requires more VRAM.
 
-| Value | VRAM impact (122B model) | Use case |
+| Value | Approx VRAM impact (varies by model) | Use case |
 |-------|-------------------------|----------|
 | `-1` | N/A (server default) | **Unlimited** — use Ollama server's default/max (recommended for remote servers) |
 | `8192` | ~2 GB | Quick tests, very limited VRAM |
 | `32768` | ~8 GB | General use with 8–16 GB VRAM |
-| `65536` | ~15 GB | Deep recon sessions, 16+ GB VRAM |
-| `131072` | ~31 GB | **Default** — full 128K context for qwen3.5:122b, 32+ GB VRAM |
-| `1000000` | ~248 GB | 1M tokens — high-end GPU clusters (100+ GB VRAM) |
+| `65536` | ~15 GB | **Default** — deep sessions on mid/large VRAM |
+| `131072` | ~31 GB | Large context window; high VRAM requirement |
+| `1000000` | ~248 GB | 1M tokens — specialized setups only |
 
 **For remote Ollama servers:** Set `ollama_num_ctx: -1` to use the server's default/max context limit without hardcoding a value. This is useful when connecting to cloud Ollama instances with high context limits.
 
@@ -225,14 +224,14 @@ Context window size in tokens. Larger = more history visible to the model = bett
 ---
 
 ### `ollama_num_ctx_small`
-**Type:** int | **Default:** `65536` (64K tokens)
+**Type:** int | **Default:** `32768` (32K tokens)
 
 A smaller context window used for compression calls (`compress_with_llm`) and VRAM crash recovery tiers. Reduces VRAM pressure during context management. This is also the starting point for multi-level recovery — see VRAM Recovery below.
 
 ---
 
 ### `ollama_num_predict`
-**Type:** int | **Default:** `32768`
+**Type:** int | **Default:** `16384`
 
 Maximum number of tokens the model can generate in a single response. 32768 ≈ ~24,000 words — sufficient for complex reasoning + tool-calling responses.
 
@@ -241,13 +240,13 @@ Reduce to `8192` if responses feel slow. The agent automatically caps this furth
 ---
 
 ### `ollama_timeout`
-**Type:** float | **Default:** `300.0` seconds (5 minutes)
+**Type:** float | **Default:** `180.0` seconds
 
-How long to wait for a streaming response before giving up. Default is 5 minutes — appropriate for large 122B models on GPU with 128K context.
+How long to wait for a streaming response before giving up. Increase for slow remote servers or large models.
 
 ```yaml
-# For fast GPU inference
-ollama_timeout: 300.0
+# Example: increase for slow inference
+ollama_timeout: 240.0
 
 # For very large models (122B) on CPU
 ollama_timeout: 7200.0
@@ -271,7 +270,7 @@ Enables the `think=true` parameter when calling Ollama, which activates extended
 
 | Model type | Recommended setting |
 |------------|-------------------|
-| Reasoning model (qwen3, deepseek-r1) | `true` |
+| Reasoning-capable model | `true` |
 | Standard/chat model (llama3, mistral) | `false` |
 
 When enabled, the TUI shows the model's internal reasoning process in the thinking panel, separate from the final output. This is very useful for understanding why the agent made a specific decision.
@@ -484,7 +483,7 @@ The message role used when returning tool results to the LLM in the conversation
 
 | Value | When to use |
 |-------|-------------|
-| `"tool"` | Models that support the Ollama `tool` message role (qwen3, most modern models) |
+| `"tool"` | Models that support the Ollama `tool` message role (most modern models) |
 | `"user"` | Fallback for older models that don't understand the tool role |
 
 Most models work correctly with `"tool"`. If you see the model failing to parse tool results, try `"user"`.
@@ -770,7 +769,7 @@ Any config key can be overridden without editing the file using environment vari
 
 ```bash
 # Override model
-AIRECON_OLLAMA_MODEL=qwen3:32b airecon start
+AIRECON_OLLAMA_MODEL=qwen3.5:35b airecon start
 
 # Override temperature
 AIRECON_OLLAMA_TEMPERATURE=0.2 airecon start
@@ -796,10 +795,10 @@ Environment variables take precedence over the config file. They are applied at 
 
 ## 14. Configuration Presets
 
-### Preset: Minimum viable (16 GB VRAM, qwen3:30b-a3b MoE)
+### Preset: Small (8–12 GB VRAM, qwen3.5:9b)
 
 ```yaml
-ollama_model: "qwen3:30b-a3b"
+ollama_model: "qwen3.5:9b"
 ollama_num_ctx: 32768
 ollama_num_ctx_small: 16384
 ollama_temperature: 0.15
@@ -812,12 +811,10 @@ agent_max_tool_iterations: 300
 searxng_url: "http://localhost:8080"
 ```
 
-> Note: `qwen3:30b-a3b` is a Mixture-of-Experts model — it has fewer *active* parameters than the full 30B, making it faster and more VRAM-efficient while retaining comparable reasoning quality.
-
-### Preset: Recommended (20 GB VRAM, qwen3:32b)
+### Preset: Recommended (16–24 GB VRAM, qwen3.5:35b)
 
 ```yaml
-ollama_model: "qwen3:32b"
+ollama_model: "qwen3.5:35b"
 ollama_num_ctx: 65536
 ollama_num_ctx_small: 32768
 ollama_temperature: 0.15
@@ -835,14 +832,14 @@ searxng_url: "http://localhost:8080"
 
 ```yaml
 ollama_model: "qwen3.5:122b"
-ollama_num_ctx: 131072
-ollama_num_ctx_small: 65536
+ollama_num_ctx: 65536
+ollama_num_ctx_small: 32768
 ollama_temperature: 0.15
-ollama_num_predict: 32768
+ollama_num_predict: 16384
 ollama_enable_thinking: true
 ollama_supports_thinking: true
 ollama_supports_native_tools: true
-ollama_timeout: 2400.0
+ollama_timeout: 240.0
 ollama_keep_alive: "60m"
 command_timeout: 900.0
 agent_max_tool_iterations: 800
@@ -854,9 +851,9 @@ searxng_url: "http://localhost:8080"
 ```yaml
 ollama_url: "http://192.168.1.100:11434"
 ollama_model: "qwen3.5:122b"
-ollama_timeout: 2400.0
-ollama_num_ctx: 131072
-ollama_num_ctx_small: 65536
+ollama_timeout: 240.0
+ollama_num_ctx: 65536
+ollama_num_ctx_small: 32768
 ollama_temperature: 0.15
 ollama_enable_thinking: true
 ollama_supports_thinking: true
@@ -910,10 +907,10 @@ Optimized for CTF challenges where you want fast, focused exploitation without b
 
 1. **Lower `ollama_temperature`** — Try 0.1 or 0.0
 2. **Ensure `ollama_enable_thinking: true`** — Helps model reason before acting
-3. **Check model size** — Use 30B+ models only
+3. **Check model capability** — Use a model that supports native tool calling; smaller models are less reliable
 
 ### Slow Response Times
 
 1. **Reduce `ollama_num_ctx`** — Less context = faster inference
 2. **Reduce `ollama_timeout`** — Fail fast on stalled requests
-3. **Use smaller model** — qwen3:32b is faster than qwen3.5:122b
+3. **Use smaller model** — for example, qwen3.5:35b is faster than qwen3.5:122b

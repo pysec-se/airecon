@@ -19,6 +19,17 @@ from .executors_catalog import (
 
 logger = logging.getLogger("airecon.agent")
 
+_TARGET_RELATIVE_PATHS = frozenset(
+    {
+        "uploads",
+        "output",
+        "notes",
+        "tools",
+        "vulnerabilities",
+        "command",
+    }
+)
+
 
 class _FilesystemExecutorMixin:
     async def _execute_filesystem_tool(
@@ -29,35 +40,72 @@ class _FilesystemExecutorMixin:
         self._last_output_file = None
         start_time = time.time()
 
-        try:
-            path_arg = arguments.get("path", "")
-            if path_arg.startswith("workspace/"):
-                path_arg = path_arg[10:]
-            elif path_arg.startswith("/workspace/"):
-                path_arg = path_arg[11:]
+        def _strip_workspace_prefix(p: str) -> str:
+            p = p.removeprefix("workspace/")
+            return p.removeprefix("/workspace/")
 
-            if self.state.active_target:
-                if not path_arg.startswith(self.state.active_target) and not os.path.isabs(
-                        path_arg):
-                    path_arg = os.path.join(
-                        self.state.active_target,
-                        path_arg)
+        def _display_path(raw_path: str) -> str:
+            clean = _strip_workspace_prefix(raw_path)
+            active_target = self.state.active_target or ""
+            if not active_target:
+                return clean
+            prefix = f"{active_target}/"
+            if not clean.startswith(prefix):
+                return clean
+            candidate = clean[len(prefix) :]
+            root = candidate.split("/", 1)[0]
+            if root in _TARGET_RELATIVE_PATHS:
+                return candidate
+            return clean
 
-            workspace_root = get_workspace_root()
-            resolved = (workspace_root / path_arg).resolve()
+        def _runtime_path(raw_path: str) -> str:
+            clean = _strip_workspace_prefix(raw_path)
+            if not clean:
+                return clean
+            if os.path.isabs(clean):
+                return clean
+            if clean.startswith("skills/"):
+                return str((Path(__file__).resolve().parents[1] / clean).resolve())
+            active_target = self.state.active_target or ""
+            if active_target and not clean.startswith(f"{active_target}/"):
+                return os.path.join(active_target, clean)
+            return clean
+
+        def _resolve_allowed_path(p: str) -> Path | None:
+            ws = get_workspace_root()
+            project_root = Path(__file__).resolve().parents[2]
+            resolved = Path(p).resolve() if os.path.isabs(p) else (ws / p).resolve()
             try:
-                resolved.relative_to(workspace_root.resolve())
+                resolved.relative_to(ws.resolve())
+                return resolved
             except ValueError:
+                try:
+                    resolved.relative_to(project_root)
+                    return resolved
+                except ValueError:
+                    return None
+
+        try:
+            history_arguments = dict(arguments)
+            history_path = _display_path(str(arguments.get("path", "")))
+            runtime_path = _runtime_path(str(arguments.get("path", "")))
+
+            if _resolve_allowed_path(runtime_path) is None:
                 return False, 0.0, {
                     "success": False,
-                    "error": f"Path traversal attempt blocked: '{path_arg}' resolves outside workspace.",
+                    "error": (
+                        "Path traversal attempt blocked: "
+                        f"'{runtime_path}' resolves outside allowed paths."
+                    ),
                 }, None
 
-            arguments["path"] = path_arg
+            history_arguments["path"] = history_path
+            call_arguments = dict(arguments)
+            call_arguments["path"] = runtime_path
 
             if tool_name == "create_file":
 
-                _raw_path = str(arguments.get("path", "")).strip()
+                _raw_path = str(history_arguments.get("path", "")).strip()
                 _is_skill_file = "skills/" in _raw_path.replace("\\", "/")
                 basename_lower = Path(_raw_path).name.lower()
                 if (
@@ -72,9 +120,9 @@ class _FilesystemExecutorMixin:
                             "Use create_vulnerability_report for confirmed findings."
                         ),
                     }, None
-                result = await asyncio.to_thread(create_file, **arguments)
+                result = await asyncio.to_thread(create_file, **call_arguments)
             elif tool_name == "read_file":
-                path_arg_clean = arguments.get("path", "")
+                path_arg_clean = history_arguments.get("path", "")
                 if "skills/" in path_arg_clean and path_arg_clean.endswith(".md"):
                     skill_name = os.path.basename(
                         path_arg_clean).replace(".md", "")
@@ -82,14 +130,14 @@ class _FilesystemExecutorMixin:
                         self.state.skills_used.append(skill_name)
                 result = await asyncio.to_thread(
                     read_file,
-                    path=path_arg_clean,
-                    offset=int(arguments.get("offset", 0)),
-                    limit=int(arguments.get("limit", 500)),
+                    path=call_arguments.get("path", ""),
+                    offset=int(call_arguments.get("offset", 0)),
+                    limit=int(call_arguments.get("limit", 500)),
                 )
             elif tool_name == "list_files":
                 result = await asyncio.to_thread(
                     list_files,
-                    path=arguments.get("path", ""),
+                    path=call_arguments.get("path", ""),
                 )
             else:
                 result = {
@@ -98,7 +146,7 @@ class _FilesystemExecutorMixin:
 
             success = result.get("success", False)
             try:
-                self._save_tool_output(tool_name, arguments, result)
+                self._save_tool_output(tool_name, history_arguments, result)
             except Exception as _e:
                 logger.debug("Could not save tool output: %s", _e)
         except Exception as e:
@@ -120,7 +168,7 @@ class _FilesystemExecutorMixin:
 
         self.state.tool_history.append(
             ToolExecution(
-                tool_name=tool_name, arguments=arguments,
+                tool_name=tool_name, arguments=history_arguments,
                 result=history_result, duration=duration,
                 status="success" if success else "error",
             )

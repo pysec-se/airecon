@@ -1,57 +1,47 @@
 from __future__ import annotations
 
 import logging
+from typing import Any
 
 from .pipeline import PipelinePhase
-from typing import Any
+from .constants import SHALLOW_TOOLS as _SHALLOW_TOOLS, DEEP_TOOLS as _DEEP_TOOLS
+from .utils import cfg_typed
 
 logger = logging.getLogger("airecon.agent.inference")
 
+
+def _cfg_bool_impl(cfg: Any, key: str, default: bool) -> bool:
+    try:
+        val = getattr(cfg, key, default)
+        if isinstance(val, bool):
+            return val
+        if isinstance(val, str):
+            return val.lower() in ("1", "true", "yes", "on")
+        return bool(val)
+    except Exception as _e:
+        return default
+
+
 class _InferenceMixin:
-    _SHALLOW_TOOLS: frozenset[str] = frozenset({
-        "list_files", "read_file", "create_file", "get_console_logs",
-        "get_network_logs", "view_source", "caido_list_requests",
-    })
-
-    _DEEP_TOOLS: frozenset[str] = frozenset({
-        "advanced_fuzz", "deep_fuzz", "schemathesis_fuzz",
-        "spawn_agent", "create_vulnerability_report", "code_analysis",
-    })
-
     @staticmethod
     def _cfg_bool(cfg: Any, key: str, default: bool) -> bool:
-        try:
-            val = getattr(cfg, key, default)
-            if isinstance(val, bool):
-                return val
-            if isinstance(val, str):
-                return val.lower() in ("1", "true", "yes", "on")
-            return bool(val)
-        except Exception as e:
-            logger.debug("Exception in %s: %s", __name__, e)
-            return default
+        return _cfg_bool_impl(cfg, key, default)
 
     @staticmethod
     def _cfg_int(cfg: Any, key: str, default: int) -> int:
-        try:
-            return int(getattr(cfg, key, default))
-        except Exception as e:
-            logger.debug("Exception in %s: %s", __name__, e)
-            return default
+        return cfg_typed(cfg, key, default, int)
 
     @staticmethod
     def _cfg_float(cfg: Any, key: str, default: float) -> float:
-        try:
-            return float(getattr(cfg, key, default))
-        except Exception as e:
-            logger.debug("Exception in %s: %s", __name__, e)
-            return default
+        return cfg_typed(cfg, key, default, float)
 
     @staticmethod
     def _get_thinking_mode(cfg: Any) -> str:
         raw_mode = getattr(cfg, "ollama_thinking_mode", "adaptive")
         if not isinstance(raw_mode, str):
-            logger.warning(f"Invalid thinking mode type ({type(raw_mode)}), using 'adaptive'")
+            logger.warning(
+                f"Invalid thinking mode type ({type(raw_mode)}), using 'adaptive'"
+            )
             return "adaptive"
 
         thinking_mode = raw_mode.lower().strip()
@@ -102,9 +92,7 @@ class _InferenceMixin:
 
         return self._fit_num_predict_to_ctx(_requested, num_ctx)
 
-    def _should_use_thinking(
-        self, cfg: Any, current_phase: Any
-    ) -> bool:
+    def _should_use_thinking(self, cfg: Any, current_phase: Any) -> bool:
         thinking_enabled = self._cfg_bool(cfg, "ollama_enable_thinking", True)
         model_supports_thinking = self.ollama.supports_thinking
 
@@ -128,8 +116,13 @@ class _InferenceMixin:
             or self._watchdog_forced_calls > 0
         )
 
-        _max_consecutive_thinking = self._cfg_int(cfg, "agent_max_consecutive_thinking", 5)
-        if getattr(self, "_consecutive_thinking_iterations", 0) >= _max_consecutive_thinking:
+        _max_consecutive_thinking = self._cfg_int(
+            cfg, "agent_max_consecutive_thinking", 5
+        )
+        if (
+            getattr(self, "_consecutive_thinking_iterations", 0)
+            >= _max_consecutive_thinking
+        ):
             logger.debug(
                 f"Thinking DISABLED (mode={thinking_mode}): consecutive_thinking={self._consecutive_thinking_iterations} >= {_max_consecutive_thinking}"
             )
@@ -141,8 +134,8 @@ class _InferenceMixin:
             )
             return True
 
-        is_deep_tool = last_tool in self._DEEP_TOOLS
-        is_shallow_tool = last_tool in self._SHALLOW_TOOLS
+        is_deep_tool = last_tool in _DEEP_TOOLS
+        is_shallow_tool = last_tool in _SHALLOW_TOOLS
 
         if self._ctf_mode:
             if is_deep_tool:
@@ -156,7 +149,9 @@ class _InferenceMixin:
                     f"Thinking {'ENABLED' if should_think else 'DISABLED'} (mode={thinking_mode}, CTF): iteration={self.state.iteration}, periodic={should_think}"
                 )
                 return should_think
-            logger.debug(f"Thinking DISABLED (mode={thinking_mode}, CTF): low/medium mode")
+            logger.debug(
+                f"Thinking DISABLED (mode={thinking_mode}, CTF): low/medium mode"
+            )
             return False
 
         if thinking_mode == "low":
@@ -168,7 +163,8 @@ class _InferenceMixin:
 
         if thinking_mode == "medium":
             should_think = (
-                current_phase and current_phase in (PipelinePhase.ANALYSIS, PipelinePhase.EXPLOIT)
+                current_phase
+                and current_phase in (PipelinePhase.ANALYSIS, PipelinePhase.EXPLOIT)
             ) or is_deep_tool
             logger.debug(
                 f"Thinking {'ENABLED' if should_think else 'DISABLED'} (mode=medium): phase={phase_name}, deep_tool={is_deep_tool}"
@@ -190,16 +186,15 @@ class _InferenceMixin:
             logger.debug(f"Thinking ENABLED (mode=high): default for {phase_name}")
             return True
 
-        if current_phase and current_phase in (PipelinePhase.ANALYSIS, PipelinePhase.EXPLOIT):
-            logger.debug(
-                f"Thinking ENABLED (mode=adaptive): phase={phase_name}"
-            )
+        if current_phase and current_phase in (
+            PipelinePhase.ANALYSIS,
+            PipelinePhase.EXPLOIT,
+        ):
+            logger.debug(f"Thinking ENABLED (mode=adaptive): phase={phase_name}")
             return True
 
         if is_deep_tool:
-            logger.debug(
-                f"Thinking ENABLED (mode=adaptive): deep_tool={last_tool}"
-            )
+            logger.debug(f"Thinking ENABLED (mode=adaptive): deep_tool={last_tool}")
             return True
 
         should_think = self.state.iteration <= 8
@@ -224,11 +219,11 @@ class _InferenceMixin:
         if (
             self._stagnation_iterations >= stagnation_threshold
             or phase in ("ANALYSIS", "EXPLOIT", "REPORT")
-            or last_tool in self._DEEP_TOOLS
+            or last_tool in _DEEP_TOOLS
         ):
             return min(base, 16384)
 
-        if last_tool in self._SHALLOW_TOOLS:
+        if last_tool in _SHALLOW_TOOLS:
             return min(base, 4096)
 
         return min(base, 8192)
@@ -237,9 +232,7 @@ class _InferenceMixin:
         base_temp = self._cfg_float(cfg, "ollama_temperature", 0.15)
         if not self._cfg_bool(cfg, "agent_exploration_mode", True):
             return base_temp
-        exploration_temp = self._cfg_float(
-            cfg, "agent_exploration_temperature", 0.35
-        )
+        exploration_temp = self._cfg_float(cfg, "agent_exploration_temperature", 0.35)
         stagnation_threshold = self._cfg_int(cfg, "agent_stagnation_threshold", 2)
 
         if phase in ("ANALYSIS", "EXPLOIT"):

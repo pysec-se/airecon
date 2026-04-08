@@ -137,7 +137,7 @@ class TestAgentLoopDuplicateDetection:
         assert msg == ""
 
     def test_is_duplicate_command_repeated(self):
-        """Repeated execution should be marked as duplicate."""
+        """Repeated execution with no evidence growth should be marked as duplicate."""
         mock_ollama = AsyncMock(spec=OllamaClient)
         mock_engine = AsyncMock(spec=DockerEngine)
 
@@ -147,10 +147,34 @@ class TestAgentLoopDuplicateDetection:
         is_dup1, msg1 = loop._is_duplicate_command("execute", {"command": "ls -la"})
         assert is_dup1 is False
 
-        # Repeated execution with same args
+        # Repeated execution with same args and no new evidence
         is_dup2, msg2 = loop._is_duplicate_command("execute", {"command": "ls -la"})
         assert is_dup2 is True
-        assert "ANTI-REPEAT" in msg2
+        assert "NO NEW EVIDENCE" in msg2
+
+    def test_is_duplicate_command_evidence_driven_rerun(self):
+        """Command can be re-executed if new evidence emerges."""
+        mock_ollama = AsyncMock(spec=OllamaClient)
+        mock_engine = AsyncMock(spec=DockerEngine)
+
+        loop = AgentLoop(mock_ollama, mock_engine)
+
+        # First execution
+        is_dup1, _ = loop._is_duplicate_command("execute", {"command": "nmap -sV localhost"})
+        assert is_dup1 is False
+
+        # Add evidence to the state
+        loop.state.add_evidence(
+            phase="RECON",
+            source_tool="nmap",
+            summary="Found open port 80",
+            confidence=0.8,
+        )
+
+        # Repeated execution with new evidence should be allowed
+        is_dup2, msg2 = loop._is_duplicate_command("execute", {"command": "nmap -sV localhost"})
+        assert is_dup2 is False  # Can re-run because evidence grew
+        assert "EVIDENCE-DRIVEN RERUN" in msg2
 
     def test_is_duplicate_command_whitespace_normalized(self):
         """Duplicate detection should normalize whitespace in strings."""
@@ -457,28 +481,28 @@ class TestPhaseObjectives:
     """Test phase objectives."""
 
     def test_recon_objective(self):
-        """RECON should focus on enumeration."""
+        """RECON objective should come from dynamic prompt content."""
         recon = DEFAULT_PHASES[PipelinePhase.RECON]
 
         objective = recon.objective.lower()
-        assert "enumerat" in objective or "discover" in objective or "scan" in objective
+        assert "attack surface" in objective or "recon" in objective or "scope" in objective
 
     def test_analysis_objective(self):
-        """ANALYSIS should focus on finding vulnerabilities."""
+        """ANALYSIS objective should reflect analysis/validation guidance."""
         analysis = DEFAULT_PHASES[PipelinePhase.ANALYSIS]
 
         objective = analysis.objective.lower()
-        assert "analyz" in objective or "identify" in objective
+        assert "validation" in objective or "evidence" in objective or "analysis" in objective
 
     def test_exploit_objective(self):
-        """EXPLOIT should focus on testing/exploiting."""
+        """EXPLOIT objective should focus on measurable exploitability."""
         exploit = DEFAULT_PHASES[PipelinePhase.EXPLOIT]
 
         objective = exploit.objective.lower()
-        assert "test" in objective or "exploit" in objective or "fuzz" in objective
+        assert "exploit" in objective or "impact" in objective or "verify" in objective
 
     def test_report_objective(self):
         """REPORT should focus on documentation."""
         report = DEFAULT_PHASES[PipelinePhase.REPORT]
         # Report phase should exist and have objective
-        assert len(report.objective) > 0
+        assert "report" in report.objective.lower() or "evidence" in report.objective.lower()

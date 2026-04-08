@@ -581,13 +581,13 @@ class SubAgentBlock(Vertical):
         self.add_class("done" if success else "error")
         try:
             self.query_one(".subagent-spinner", LoadingIndicator).remove()
-        except Exception:
-            pass
+        except Exception as e:
+            logger.debug("Failed to remove subagent spinner: %s", e)
         if self._text_static is not None:
             try:
                 self._text_static.update("")
-            except Exception:
-                pass
+            except Exception as e:
+                logger.debug("Failed to clear subagent text: %s", e)
         self.call_after_refresh(self._update_header)
     
     def _update_header(self) -> None:
@@ -605,8 +605,8 @@ class SubAgentBlock(Vertical):
                 plural = "s" if self._tool_count > 1 else ""
                 note_parts.append(f"{self._tool_count} tool{plural}")
             header.update(self._header_text("  ".join(note_parts)))
-        except Exception:
-            pass
+        except Exception as e:
+            logger.debug("Failed to update subagent header: %s", e)
 
     def _collapse_to_summary(self) -> None:
         for child in list(self.children):

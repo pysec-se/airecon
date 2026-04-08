@@ -130,7 +130,7 @@ async def _ddg_search(query: str, max_results: int) -> dict[str, Any]:
         return {
             "success": False,
             "error": f"DuckDuckGo rate limited after 3 attempts: {last_err}. "
-            "Configure searxng_url in ~/.airecon/config.json for better results.",
+            "Configure searxng_url in ~/.airecon/config.yaml for better results.",
         }
 
     if not results:

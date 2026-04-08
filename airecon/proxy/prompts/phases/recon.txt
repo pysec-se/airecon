@@ -1,87 +1,101 @@
 [PIPELINE PHASE: RECON - Reconnaissance and Enumeration]
 
 OBJECTIVE:
-Map the attack surface and collect enough baseline intelligence to form exploit hypotheses.
-Breadth-first — map the ENTIRE surface before diving into any single target.
-Quality over quantity — a well-understood single endpoint is better than a shallow scan of 100 hosts.
+Systematically map the attack surface: scope boundaries, service topology, technology stack,
+authentication mechanisms, and input vectors. Gather enough baseline intelligence to form
+reliable exploit hypotheses. Breadth-first before depth — understand the FULL surface before
+targeting any single component.
 
-KEY INTELLIGENCE TO COLLECT:
-1. Live services: confirm which endpoints/hosts are reachable and responding.
-2. Application routes: root path, login, API endpoints, admin panels, upload paths.
-3. Technology signals: framework, language, server, version hints from headers/errors/responses.
-4. Authentication surface: login forms, session tokens, API keys, cookie patterns.
-5. Input vectors: query parameters, form fields, headers, cookies that accept user data.
-6. Exposure clues: error messages, debug info, backup files, exposed configs.
-7. Historical/passive: archived routes, certificate subdomains (for multi-host targets).
+RECONNAISSANCE PRINCIPLES:
 
-TOOL SELECTION:
-Refer to your injected skills for tool-specific commands and flag recommendations.
-Skills cover subdomain enumeration, live host validation, port scanning, web crawling,
-parameter discovery, and more. Use the tool best suited to the current task — do not
-repeat the same tool class twice with identical scope.
+1. SCOPE DEFINITION & REACHABILITY
+   - Establish target boundaries: does scope include subdomains, external APIs, third-party integrations?
+   - Confirm live services at defined scope limits — do not waste effort enumerating dead hosts.
+   - Identify service topology: monolithic vs. distributed, cloud-hosted vs. on-premises.
+   - Map trust boundaries: public-facing vs. internal, authenticated vs. unauthenticated zones.
 
-ANTI-MONOTONY RULE — READ THIS FIRST:
-Do NOT default to the same tool sequence every session. Pick your approach based on
-what is most likely to work for THIS specific target type. If the common path yields
-nothing after two attempts, switch technique entirely — not just parameters.
+2. APPLICATION SURFACE MAPPING
+   - Extract accessible routes through multiple discovery vectors (passive + active).
+   - Map request/response patterns: identify how the application responds to valid vs. invalid input.
+   - Identify all input acceptance points: form fields, query parameters, headers, cookies.
+   - Classify endpoint types by function: authentication, data access, admin functions, uploads.
+   - Document observable technology signals: framework hints, language clues, library versions.
 
-Tool diversity examples:
-  • Subdomain enum: subfinder OR amass OR crt.sh OR tlsx — pick one, not all
-  • Port scan: nmap OR masscan OR rustscan — pick based on target size
-  • Web crawl: katana OR gospider OR hakrawler — pick one
-  • Dir enum: ffuf OR feroxbuster OR gobuster — if one finds nothing, try a different wordlist first
-  • OSINT: dorks OR archive crawl OR cert transparency OR Shodan — pick the angle
-    that fits the target, not the one you always use
+3. AUTHENTICATION & SESSION INTELLIGENCE
+   - Identify all authentication mechanisms: form-based, token-based, mTLS, OAuth, API keys.
+   - Extract session/token handling: cookie names, JWT structure, token lifetime clues.
+   - Map authentication gates: which routes require authentication vs. public access.
+   - Note account/identity model: single-user vs. multi-user, role hierarchy if visible.
 
-RECON COMPLETION CRITERIA — advance when ANY of these are satisfied:
-- At least one live endpoint confirmed reachable and returning meaningful content.
-- Application technology or framework identified from response headers/body.
-- At least one route or parameter beyond the root path discovered.
-- Authentication mechanism located (login form, token endpoint, cookie pattern).
-- For single-endpoint CTF targets: initial probe complete → advance immediately to ANALYSIS/EXPLOIT.
+4. HIDDEN / SENSITIVE EXPOSURE
+   - Error messages revealing technology or logic flow.
+   - Debug information in responses or error pages.
+   - Backup or configuration files (common naming patterns, archive formats).
+   - Historical data from archives or CDN caches.
+   - Sensitive metadata: certificates, DNS records, cloud metadata endpoints.
 
-APPROACH BY TARGET TYPE:
+TOOL SELECTION STRATEGY:
+Choose discovery techniques based on target TYPE and SCOPE, not habit. Prioritize information
+gain over tool familiarity. If one technique yields nothing after two iterations, switch
+strategy entirely (not just parameters). Examples:
+  • Surface mapping: start with available recon tools → validate reachability → technology profiling
+  • Live host validation: use appropriate probing tools → avoid redundant checks
+  • Service discovery: systematic scanning → fingerprinting → escalate from general to specific
+  • Route discovery: gather from multiple sources (passive extraction, JS analysis, guided discovery)
 
-Single-endpoint / CTF (localhost, single service):
-- Probe root and a handful of common paths (/, /login, /api, /admin, /register, /api/v1/).
-- Read ALL response headers and body — identify technology, auth mechanism, interesting parameters.
-- Note any session cookies or tokens returned.
-- Advance to EXPLOIT after basic surface map — do NOT over-enumerate a CTF target.
-- Creative angles: check /robots.txt, /sitemap.xml, /.git/, /.env before brute-forcing paths.
+RECONNAISSANCE ADAPTATION BY SCOPE:
 
-Multi-host / External assessment (choose 2–3 of these angles, not all):
-- Passive OSINT: dork operators, archive sources, certificate transparency, Shodan favicon hash.
-- Subdomain enumeration → validate live hosts — do NOT port scan until live hosts confirmed.
-- Port scan ONLY on validated live hosts (not CDN IPs).
-- Web crawl on confirmed live web services — extract endpoints from JS for SPA targets.
-- Parameter discovery on interesting endpoints.
-- Check for cloud assets: S3/GCS bucket names, exposed APIs, cloud metadata endpoints.
-- Persist ALL artifacts in output/ — files, not just memory.
+LOCAL / SINGLE-ENDPOINT (CTF, localhost, defined service):
+- Objective: understand this single application completely.
+- Strategy: enumerate EXHAUSTIVELY but efficiently.
+  1. Surface probe: root + standard structural paths (metadata, mirrors).
+  2. Response inspection: extract technology signals, auth gates, interesting parameters.
+  3. Behavior mapping: how does app respond to valid vs. invalid requests?
+  4. Route enrichment: JS analysis, source comments, backup discovery before fuzzing.
+  5. Advance criteria: technology identified + auth mechanism mapped + input vectors documented.
+  6. CRITICAL: do not waste time on redundant probes — move to EXPLOIT once surface is understood.
 
-NON-OBVIOUS ANGLES TO CONSIDER:
-- favicon.ico hash → identify framework and find related assets via Shodan
-- TLS certificate SAN fields contain sibling subdomains not visible via DNS
-- DMARC/SPF/DKIM records leak internal mail servers and infrastructure hostnames
-- Probe non-standard ports before full port scan: 8080, 8443, 8888, 9200, 6379, 27017
-- DNS zone transfer (1 second, occasionally succeeds even on production)
-- Wayback Machine CDX API for endpoints removed from current sitemap
-- HTTP response timing differences reveal internal service existence even on error responses
+EXTERNAL / MULTI-SCOPE (Penetration Test, Bug Bounty, Red Team):
+- Objective: map organizational attack surface within defined scope.
+- Strategy: prioritize coverage over depth until surface is mapped.
+  1. Scope clarification: what domains/IPs/cloud assets are in-scope?
+  2. Passive reconnaissance: archives, whois, DNS, certificates (zero detection risk).
+  3. Live host validation: confirm reachability before resource-intensive scanning.
+  4. Service topology mapping: identify service distribution, clustering, externally-facing components.
+  5. Application discovery: enumerate accessible interfaces (web, API, custom protocols).
+  6. Route & parameter mapping: prioritize high-value or interesting endpoints first.
+  7. Advance criteria: all in-scope services catalogued + authentication mechanisms identified.
 
-PHASE DISCIPLINE:
-- Do not repeat the same discovery category twice with identical parameters.
-- If two independent approaches find no new data, advance to ANALYSIS — do not loop endlessly.
-- Never block on incomplete subdomain enumeration for CTF/single-service targets.
-- Chain tools via output files (not pipes) so each artifact is reusable by downstream tools.
+INFORMATION SOURCE PRIORITY:
+1. Passive sources FIRST: archives, whois, DNS, certificates (zero detection risk).
+2. Semi-active SECOND: JS extraction, metadata probing (minimal resource/noise).
+3. Active enumeration LAST: port scanning, fuzzing (high resource, high noise).
+
+ADVANCED RECONNAISSANCE ANGLES:
+- HTTP metadata analysis: headers, cookies, response timing, error patterns reveal platform hints.
+- Certificate analysis: SAN fields, issuing CA, certificate history (crt.sh, Google CT logs).
+- DNS intelligence: zone transfer attempts, SPF/DMARC/DKIM records, DNS response anomalies.
+- Historical data: Wayback archives for deprecated endpoints, outdated configurations, deprecated integrations.
+- Favicon identification: icon hash matches against known frameworks (favicon.ico, apple-touch-icon).
+- Protocol probing: attempt various ports and protocols (HTTP, HTTPS, WebSocket, gRPC) systematically.
+- Metadata endpoint probing: cloud platforms often expose metadata at standard locations.
+- Service enumeration via error messages: custom error pages reveal framework, language, version clues.
+
+RECONNAISSANCE DISCIPLINE:
+- Avoid redundant tool execution: if technique A finds nothing, switch to technique B (different approach).
+- Enforce discovery completion gates: advance when scope surface is adequately mapped, not when exhaustive.
+- Balance comprehensiveness with time: focus on high-value targets first; deprioritize low-risk assets.
+- Maintain artifact chain: persist discoveries in structured format for downstream tools.
+- Document decision rationale: why was this technique chosen? What assumptions were made?
 
 <capability_spotlight>
-SPECIALIZED CAPABILITIES FOR THIS PHASE:
-- Passive OSINT: search with dork operators before any active scanning.
-  Effective dorks: site:{target}, inurl:admin, filetype:env, filetype:sql, filetype:bak,
-  intitle:"index of", intext:password, intext:secret, intext:apikey.
-- Historical intelligence: archive crawling for forgotten endpoints (Wayback CDX API).
-- Certificate transparency: crt.sh JSON API or tlsx for subdomain enumeration.
-- Proxy workflow: set scope → route traffic → enumerate sitemap before active scanning.
-- JS analysis: extract endpoints from JavaScript — prefer over directory brute-forcing
-  for single-page applications (React/Vue/Angular). Use linkfinder or subjs.
-- Cloud intelligence: S3 bucket enumeration, metadata endpoint probing if cloud-hosted.
+SPECIALIZED INTELLIGENCE SOURCES FOR THIS PHASE:
+- Passive OSINT: search operators targeting public records, code repositories, and indexing services.
+  Strategy: formulate queries that match target characteristics (domain, organization, technology patterns).
+- Historical data: archive APIs for removed endpoints, outdated configurations, deprecated integrations.
+- Certificate transparency: TLS certificate logs reveal subdomains and host information not in DNS.
+- Proxy traffic analysis: route application traffic to identify dynamic endpoints and hidden services.
+- Client-side intelligence: JavaScript extraction reveals API endpoints, internal service references, configuration hints.
+- Infrastructure intelligence: technology fingerprinting reveals deployment model (cloud/on-premise), scaling patterns.
+- Metadata probing: standard protocol endpoints (metadata services, configuration endpoints, health checks).
 </capability_spotlight>

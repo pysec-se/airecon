@@ -28,6 +28,7 @@ from .executors_filesystem import _FilesystemExecutorMixin
 from .executors_fuzzing import _FuzzingExecutorMixin
 from .executors_interactive import _InteractiveExecutorMixin
 from .executors_observe import _ObserveExecutorMixin
+from .executors_utils import _UtilsExecutorMixin
 from .executors_reporting import _ReportingExecutorMixin
 from .models import ToolExecution, _truncate_tool_result
 
@@ -72,6 +73,7 @@ class _ExecutorMixin(
     _ObserveExecutorMixin,
     _InteractiveExecutorMixin,
     _DispatchExecutorMixin,
+    _UtilsExecutorMixin,
 ):
     if TYPE_CHECKING:
         engine: DockerEngine
@@ -81,7 +83,7 @@ class _ExecutorMixin(
         _executed_tool_counts: dict[tuple[str, str], int]
 
     def _get_executor_providers(self) -> dict[str, dict[str, Any]]:
-   
+
         try:
             self._executor_providers
         except AttributeError:

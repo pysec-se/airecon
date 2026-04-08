@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 from pathlib import Path
 from typing import Any
 
@@ -18,6 +19,98 @@ def _load_json(filename: str) -> dict[str, Any]:
     except Exception as exc:
         logger.warning("Failed to load %s: %s", filename, exc)
         return {}
+
+
+# ── Unified vulnerability patterns (merged from 6 separate files) ─────────────
+
+_UNIFIED_PATTERNS: dict[str, Any] | None = None
+
+
+def _load_unified_patterns() -> dict[str, Any]:
+    """Load unified pattern catalog. Falls back to legacy files if unified not found."""
+    global _UNIFIED_PATTERNS
+    if _UNIFIED_PATTERNS is not None:
+        return _UNIFIED_PATTERNS
+
+    unified_path = _DATA_DIR / "unified_patterns.json"
+    if unified_path.exists():
+        try:
+            _UNIFIED_PATTERNS = json.loads(unified_path.read_text(encoding="utf-8"))
+            return _UNIFIED_PATTERNS
+        except Exception as exc:
+            logger.warning("Failed to load unified_patterns.json: %s", exc)
+
+    # Fallback: merge legacy files
+    result: dict[str, Any] = {"_fallback": True}
+    for fname in ["patterns.json", "business_logic_patterns.json", "zeroday_patterns.json"]:
+        result.update(_load_json(fname))
+    _UNIFIED_PATTERNS = result
+    return _UNIFIED_PATTERNS
+
+
+def load_vuln_patterns() -> dict[str, Any]:
+    """Load unified vulnerability patterns (merged from patterns.json, business_logic_patterns.json, zeroday_patterns.json)."""
+    return _load_unified_patterns()
+
+
+def load_vuln_hypothesis() -> list[dict[str, Any]]:
+    """Load vulnerability hypothesis list from unified patterns."""
+    data = _load_unified_patterns()
+    return [v for k, v in data.items() if not k.startswith("_")]
+
+
+def load_pattern_by_category(category: str) -> dict[str, Any] | None:
+    """Get a single pattern entry by name from unified catalog."""
+    data = _load_unified_patterns()
+    entry = data.get(category)
+    if entry and not isinstance(entry, dict):
+        return None
+    return entry if entry and not entry.get("_comment") else None
+
+
+# ── Legacy compatibility — still loads from unified catalog ──────────────────
+
+def load_expert_testing_patterns() -> dict[str, Any]:
+    """Load expert testing patterns (from unified catalog, filtered by severity)."""
+    data = _load_unified_patterns()
+    return {k: v for k, v in data.items() if not k.startswith("_") and v.get("severity") in ("HIGH", "CRITICAL")}
+
+
+def load_zeroday_patterns() -> dict[str, Any]:
+    """Load zeroday/advanced patterns (from unified catalog, CRITICAL severity)."""
+    data = _load_unified_patterns()
+    return {k: v for k, v in data.items() if not k.startswith("_") and v.get("severity") == "CRITICAL"}
+
+
+def load_business_logic_patterns() -> dict[str, Any]:
+    """Load business logic patterns (from unified catalog, business-related entries)."""
+    data = _load_unified_patterns()
+    return {
+        k: v for k, v in data.items()
+        if not k.startswith("_") and any(
+            term in k.lower()
+            for term in ["business", "workflow", "checkout", "payment", "coupon", "subscription", "race", "loyalty"]
+        )
+    }
+
+
+def load_objective_patterns() -> dict[str, Any]:
+    """Load objective patterns (objectives section from unified catalog)."""
+    data = _load_unified_patterns()
+    objectives = data.get("objectives", {})
+    if isinstance(objectives, dict):
+        return {"objectives": objectives}
+    return {"objectives": {}}
+
+
+def load_vuln_hypothesis_legacy() -> list[dict[str, Any]]:
+    """Load vuln hypothesis (from unified catalog)."""
+    data = _load_unified_patterns()
+    return [
+        {"type": name, "patterns": entry.get("indicators", [])}
+        for name, entry in data.items()
+        if not name.startswith("_") and "hypothesis" in name.lower()
+    ]
 
 
 # ── Verification patterns ────────────────────────────────────────────────────
@@ -193,19 +286,63 @@ SEVERITY_TO_INT: dict[str, int] = {
     "MEDIUM": 3,
     "LOW": 2,
     "INFO": 1,
+    "INFORMATIONAL": 1,
+    "NOTICE": 2,
+    "WARNING": 3,
+    "WARN": 3,
+    "ERROR": 4,
+    "UNKNOWN": 1,
 }
 
-INT_TO_SEVERITY: dict[int, str] = {v: k for k, v in SEVERITY_TO_INT.items()}
+INT_TO_SEVERITY: dict[int, str] = {
+    5: "CRITICAL",
+    4: "HIGH",
+    3: "MEDIUM",
+    2: "LOW",
+    1: "INFO",
+}
 
 
-def severity_to_int(severity: str) -> int:
-    """Convert severity label to integer (1-5 scale)."""
-    return SEVERITY_TO_INT.get(severity.upper(), 1)
+def severity_to_int(severity: Any) -> int:
+    """Convert a severity value to integer (1-5 scale).
+
+    Accepts numeric values, numeric strings, and common labels emitted by
+    heterogeneous tools such as HIGH/critical/WARNING/ERROR.
+    """
+    if isinstance(severity, (int, float)) and not isinstance(severity, bool):
+        return max(1, min(int(severity), 5))
+
+    text = str(severity or "").strip()
+    if not text:
+        return 1
+
+    try:
+        return max(1, min(int(float(text)), 5))
+    except (TypeError, ValueError):
+        pass
+
+    normalized = re.sub(r"[^A-Z0-9]+", "_", text.upper()).strip("_")
+    if normalized in SEVERITY_TO_INT:
+        return SEVERITY_TO_INT[normalized]
+
+    for token, value in (
+        ("CRIT", 5),
+        ("HIGH", 4),
+        ("MED", 3),
+        ("WARN", 3),
+        ("ERROR", 4),
+        ("LOW", 2),
+        ("INFO", 1),
+    ):
+        if token in normalized:
+            return value
+
+    return 1
 
 
-def int_to_severity(value: int) -> str:
+def int_to_severity(value: Any) -> str:
     """Convert integer to severity label (1-5 scale)."""
-    return INT_TO_SEVERITY.get(value, "INFO")
+    return INT_TO_SEVERITY.get(severity_to_int(value), "INFO")
 
 
 # ── WAF bypass strategies ────────────────────────────────────────────────────

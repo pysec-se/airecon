@@ -8,6 +8,11 @@ from typing import Any
 
 from .agent.session import SessionData
 from .agent.tuning import get_tuning
+from .data_loader import (
+    load_business_logic_patterns,
+    load_expert_testing_patterns,
+    load_zeroday_patterns,
+)
 
 logger = logging.getLogger("airecon.correlation")
 
@@ -32,16 +37,18 @@ PORT_CORRELATIONS: dict[int, dict] = {
 
 TECH_CORRELATIONS: dict[str, dict] = _load("tech_correlations.json")
 CVE_CORRELATIONS: dict[str, dict] = _load("cve_correlations.json")
-_attack_chains_raw = _load("attack_chains.json", default=[])
+_attack_chains_raw = _load("attack_chains.json")
 
 ATTACK_CHAINS: list[dict] = (
     _attack_chains_raw.get("chains", [])
     if isinstance(_attack_chains_raw, dict)
     else _attack_chains_raw
 )
-BUSINESS_LOGIC_PATTERNS: dict[str, dict] = _load("business_logic_patterns.json")
-EXPERT_TESTING_PATTERNS: dict[str, dict] = _load("patterns.json")
-ZERODAY_PATTERNS: dict[str, dict] = _load("zeroday_patterns.json")
+
+# Loaded from unified pattern catalog (merged from 4 separate files)
+BUSINESS_LOGIC_PATTERNS: dict[str, dict] = load_business_logic_patterns()
+EXPERT_TESTING_PATTERNS: dict[str, dict] = load_expert_testing_patterns()
+ZERODAY_PATTERNS: dict[str, dict] = load_zeroday_patterns()
 
 _URL_TECH_MAP: dict[str, str] = {
     path.lower(): tech

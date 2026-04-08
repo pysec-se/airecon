@@ -3,11 +3,7 @@ from __future__ import annotations
 import re
 import shlex
 
-_WRAPPER_TOKENS = {
-    "sudo", "timeout", "stdbuf", "env", "command", "nice", "nohup",
-}
-
-_SHELL_WRAPPERS = {"bash", "sh", "zsh"}
+from .constants import WRAPPER_TOKENS as _WRAPPER_TOKENS, SHELL_WRAPPERS as _SHELL_WRAPPERS
 
 def _basename(token: str) -> str:
     return token.rsplit("/", 1)[-1].lower()
@@ -45,7 +41,7 @@ def extract_primary_binary(command: str) -> str:
         if token_base in _WRAPPER_TOKENS:
             i += 1
 
-            if token_base == "timeout":
+            if token_base == "timeout":  # nosec B105
 
                 while i < len(tokens) and tokens[i].startswith("-"):
                     i += 1
@@ -54,11 +50,11 @@ def extract_primary_binary(command: str) -> str:
                 if i < len(tokens) and tokens[i] == "--":
                     i += 1
 
-            elif token_base == "stdbuf":
+            elif token_base == "stdbuf":  # nosec B105
                 while i < len(tokens) and tokens[i].startswith("-"):
                     i += 1
 
-            elif token_base == "env":
+            elif token_base == "env":  # nosec B105
 
                 while i < len(tokens):
                     t = tokens[i]

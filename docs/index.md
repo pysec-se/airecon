@@ -23,7 +23,15 @@ AIRecon combines a self-hosted **Ollama LLM** with a **Kali Linux Docker sandbox
 
 AIRecon is designed for local-first workflows where model execution and tool orchestration run in your own environment.
 
-| Feature | AIRecon | Cloud-based agents |\n|---------|---------|-------------------|\n| API keys required | **No** | Yes |\n| Target data sent to cloud | **No** | Yes |\n| Works offline | **Yes** | No |\n| Caido integration | **Native** | None |\n| Session resume | **Yes** | Varies |\n| VRAM crash recovery | **4-tier auto** | N/A |\n| MCP support | **Built-in** | None |
+| Feature | AIRecon | Cloud-based agents |
+|---------|---------|-------------------|
+| API keys required | **No** | Yes |
+| Target data sent to cloud | **No** | Yes |
+| Works offline | **Yes** | No |
+| Caido integration | **Native** | None |
+| Session resume | **Yes** | Varies |
+| VRAM/oom recovery | **Yes** | N/A |
+| MCP support | **Built-in** | Varies |
 
 ---
 
@@ -43,12 +51,12 @@ Includes VRAM/OOM recovery paths, context monitoring, and conversation compressi
 
 <div class="feature-card" markdown>
 ### Exploration Engine
-Anti-stagnation with temperature boost, tool diversity tracking, same-tool streak detection, per-phase exploration directives.
+Anti-stagnation with tool diversity tracking, same-tool streak detection, and per-phase exploration directives.
 </div>
 
 <div class="feature-card" markdown>
 ### Docker Sandbox
-Kali Linux container with preinstalled recon and testing tools (for example: subfinder, nuclei, sqlmap, dalfox, ffuf, semgrep, and Playwright).
+Kali Linux container with a curated recon/testing toolset. See the tools reference for the current catalog.
 </div>
 
 <div class="feature-card" markdown>
@@ -85,52 +93,37 @@ Config-based context limits, tool result truncation (50KB), incremental pruning,
 
 ---
 
-## Recent Improvements (v0.1.7-beta)
+## Release Notes
 
-### MCP Improvements
-- ✅ MCP server list now surfaces total tool counts (`total_tools`) when available
-- ✅ `/mcp list <name>` keeps output lightweight by showing only the first 10 tools
-- ✅ Better MCP display consistency for large toolsets (for example 150+ tools)
-
-### TUI & UX
-- ✅ Confirm-delete modal styling centralized in `styles.tcss`
-- ✅ Status bar rendering restored using widget-local CSS to avoid global style conflicts
-
-### Stability & Tests
-- ✅ `/api/status` degraded-state logic fixed for explicit Ollama-down results
-- ✅ Full test suite green after fixes: `1608 passed`
-- ⚠️ Interactive CAPTCHA/TOTP verification remains user-led before production promotion.
+See [Changelog](changelog.md) for versioned updates.
 
 
 ---
 
 ## Quick Start
 
+### 1.  install (recommended)
+
 ```bash
-# 1. Clone and install
-git clone https://github.com/pikpikcu/airecon.git
-cd airecon
-./install.sh
-
-# 2. Pull a model (minimum 30B parameters)
-ollama pull qwen3:32b
-
-# 3. Start
+curl -fsSL https://raw.githubusercontent.com/pikpikcu/airecon/refs/heads/main/install.sh | bash
+```
+### 2. Start
+```bash
 airecon start
 ```
 
-!!! tip "Recommended model"
-    **qwen3:32b** (20 GB VRAM) is a practical minimum. **qwen3.5:122b** (48+ GB VRAM) generally performs better on long, complex runs.
+!!! tip "Model guidance"
+    Use the largest model you can run reliably. AIRecon requires **native tool calling** support. Smaller models can work for limited tasks but are less reliable for long, autonomous runs.
 
-!!! warning "Minimum model size"
-    Models below **30B parameters** frequently hallucinate tool output, ignore scope rules, and produce incomplete function calls. `qwen3:14b` is **not recommended** for real engagements.
+!!! warning "Small models"
+    Models below **8B** are not recommended for full engagements. Expect more tool-call errors and hallucinations as model size shrinks.
 
 ---
 
 ## Pipeline
 
-```
-RECON ──────────────────────► ANALYSIS
+<div class="pipeline-diagram">
+  <pre><code>RECON ──────────────────────► ANALYSIS
   Enumerate attack surface       Identify injection points
   subfinder, nmap, katana,       semgrep, browser, httpx,
   httpx, ffuf, web_search        technology fingerprinting
@@ -145,9 +138,10 @@ RECON ──────────────────────► ANAL
                                REPORT   ▼
                                Document all findings
                                create_vulnerability_report
-```
+  </code></pre>
+</div>
 
-Each phase has specific objectives, recommended tools, and transition criteria. Phase enforcement is guidance-based, not strict hard-blocking.
+Each phase has objectives, recommended tools, and transition criteria. Tool lists are examples; actual execution depends on scope and data. Phase enforcement is guidance-based and configurable.
 
 ---
 
@@ -158,7 +152,7 @@ Each phase has specific objectives, recommended tools, and transition criteria. 
 | [Installation](installation.md) | Hardware requirements, step-by-step setup, troubleshooting |
 | [Configuration](configuration.md) | All config options with defaults, presets, and env var overrides |
 | [Features](features.md) | Deep dive into every feature — pipeline, browser auth, fuzzing, skills, anti-context-loss |
-| [Tools Reference](tools.md) | Complete reference for all 31 native tools |
+| [Tools Reference](tools.md) | Complete reference for native tools and MCP tools |
 | [Creating Skills](development/creating_skills.md) | Write your own skill files, use the airecon-skills community library |
 | [Stability & Quality Status](stability.md) | Current validation snapshot, known blockers, and release-stability criteria |
 | [Changelog](changelog.md) | Version history and release notes |

@@ -88,11 +88,7 @@ class StrategyPattern:
 
 @dataclass
 class LearnedInsight:
-    """A generalized rule/pattern abstracted from multiple observations.
 
-    This is the 'learning' layer — raw observations get distilled into
-    reusable insights that persist across sessions.
-    """
 
     insight_id: str
     category: str  # "tool_tech", "vuln_pattern", "exploit_chain", "doc_pattern"
@@ -165,7 +161,6 @@ class AdaptiveLearningEngine:
             for idict in data.get("learned_insights", []):
                 self.learned_insights.append(LearnedInsight(**idict))
 
-            # Only load recent observations (last 500 to avoid memory bloat)
             for odict in data.get("observation_log", [])[-500:]:
                 self.observation_log.append(ObservationLog(**odict))
 
@@ -195,7 +190,6 @@ class AdaptiveLearningEngine:
             conn.row_factory = sqlite3.Row
             cur = conn.cursor()
 
-            # Import tool_usage → ToolPerformance
             cur.execute("SELECT * FROM tool_usage")
             for row in cur.fetchall():
                 name = row["tool_name"]
@@ -214,7 +208,6 @@ class AdaptiveLearningEngine:
                         name, row["success_count"], row["failure_count"],
                     )
 
-            # Import patterns → StrategyPattern
             cur.execute("SELECT * FROM patterns")
             for row in cur.fetchall():
                 conditions: dict[str, Any] = {}
@@ -398,7 +391,6 @@ class AdaptiveLearningEngine:
 
             phase = pat.conditions.get("phase", "unknown")
 
-            # Deduplicate: skip if we already have an insight for this tool+phase
             key = f"{tool_name}:{phase}"
             existing_keys = {
                 f"{_extract_tool_name(i.title)}:{i.conditions.get('phase', '')}"
@@ -408,7 +400,6 @@ class AdaptiveLearningEngine:
                 continue
 
             conf = pat.reliability
-            # Cap confidence based on observation count — more data = more trust
             if total < 10:
                 conf = min(conf, 0.6 + (total / 100))
 
@@ -438,8 +429,6 @@ class AdaptiveLearningEngine:
                 insight.observation_count,
             )
 
-        # Also bootstrap from aggregate tool performance for tools that didn't
-        # appear as strategy patterns or were filtered as noise commands
         bootstrapped_tools = {
             _extract_tool_name(i.title)
             for i in self.learned_insights
@@ -449,7 +438,6 @@ class AdaptiveLearningEngine:
             if pname in bootstrapped_tools:
                 continue
 
-            # Determine likely phase from tool name
             phase = _infer_phase_from_tool(pname)
             purpose = _infer_tool_purpose(pname, {"phase": phase})
 
@@ -515,7 +503,7 @@ class AdaptiveLearningEngine:
             perf.failure_streak += 1
             perf.success_streak = 0
 
-        alpha = 0.3  # Weight for new observations
+        alpha = 0.3
         perf.avg_duration = (alpha * duration) + ((1 - alpha) * perf.avg_duration)
         perf.avg_confidence = (alpha * confidence) + ((1 - alpha) * perf.avg_confidence)
 
@@ -539,7 +527,6 @@ class AdaptiveLearningEngine:
                     (1 - alpha) * old
                 )
 
-        # Negative pattern detection
         if perf.failure_streak >= self.min_observations:
             if tool_name not in self.negative_patterns:
                 self.negative_patterns[tool_name] = []
@@ -581,7 +568,6 @@ class AdaptiveLearningEngine:
         )
         self.observation_log.append(obs)
 
-        # Trim to 1000 latest — we only need enough for pattern extraction
         if len(self.observation_log) > 1000:
             self.observation_log = self.observation_log[-800:]
 
@@ -641,7 +627,6 @@ class AdaptiveLearningEngine:
         if not new_obs:
             return []
 
-        # Format observations for LLM
         obs_text = "\n".join(
             f"- phase={o.phase}, tool={o.tool_name}, target={o.target_type}, "
             f"vuln={o.vuln_found or 'none'}, result={'success' if o.success else 'fail'}"
@@ -933,8 +918,8 @@ class TargetMemoryStore:
             if t.startswith(prefix):
                 t = t[len(prefix):]
                 break
-        t = t.split("/")[0]      # strip path
-        t = t.split(":")[0]      # strip port
+        t = t.split("/")[0]     
+        t = t.split(":")[0]      
         t = t.rstrip(".")
         return t
 
@@ -1078,7 +1063,6 @@ class TargetMemoryStore:
         if tm is None:
             return None
 
-        # Don't inject if there's no useful data
         if not any([
             tm.endpoints, tm.vulnerabilities, tm.waf_bypass,
             tm.sensitive_params, tm.tech_stack, tm.auth_endpoints,
@@ -1290,24 +1274,10 @@ def _infer_tool_purpose(tool_name: str, conditions: dict) -> str:
     if tool_lower in unix_utils:
         return unix_utils[tool_lower]
 
-    airecon_tools = {
-        "http_observe": "HTTP request/response observation with diffing",
-        "advanced_fuzz": "advanced heuristics and intelligent fuzzing for zero-days",
-        "deep_fuzz": "thorough interactive fuzzing with chain discovery",
-        "quick_fuzz": "fast fuzz scan with common payloads (SQLi, XSS, traversal, SSTI)",
-        "record_hypothesis": "security hypothesis tracking and management",
-        "browser_action": "headless browser automation for recon and auth workflows",
-        "web_search": "web/OSINT research via SearXNG search engine",
-        "spawn_agent": "specialist subagent spawning for deep investigation",
-        "caido_send_request": "HTTP request replay via Caido proxy",
-        "caido_list_requests": "HTTP traffic inspection via Caido proxy",
-        "caido_automate": "Caido proxy automate/fuzz with marked injection points",
-        "schemathesis_fuzz": "schema-aware API fuzzing with OpenAPI/Swagger specs",
-        "code_analysis": "Semgrep static code analysis for security issues",
-        "generate_wordlist": "targeted wordlist/payload generation",
-    }
-    if tool_lower in airecon_tools:
-        return airecon_tools[tool_lower]
+    meta = _load_tools_meta()
+    tool_descs = meta.get("tool_descriptions", {})
+    if tool_lower in tool_descs:
+        return tool_descs[tool_lower]
 
     return f"{tool_name} usage pattern observed"
 

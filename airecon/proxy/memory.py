@@ -4,6 +4,7 @@ import sqlite3
 import threading
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlparse
 
 logger = logging.getLogger("airecon.memory")
 
@@ -144,6 +145,27 @@ def _init_schema(conn: sqlite3.Connection) -> None:
             tags TEXT  -- JSON array
         )
     """)
+
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS chain_discoveries (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            chain_id TEXT NOT NULL,
+            name TEXT NOT NULL,
+            combined_severity INTEGER DEFAULT 1,
+            attack_path TEXT,
+            reasoning TEXT,
+            findings TEXT,  -- JSON array of finding IDs
+            relation_types TEXT,  -- JSON array of relationship types
+            target TEXT DEFAULT '',
+            discovered_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+    """)
+    cursor.execute(
+        "CREATE INDEX IF NOT EXISTS idx_chain_severity ON chain_discoveries(combined_severity DESC)"
+    )
+    cursor.execute(
+        "CREATE INDEX IF NOT EXISTS idx_chain_target ON chain_discoveries(target)"
+    )
 
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_findings_target ON findings(target)")
     cursor.execute(
@@ -705,6 +727,16 @@ class MemoryManager:
                 context_parts.append(line)
                 tokens_used += len(line) // 4
 
+        learned_chains = self.get_learned_chains(target=target, limit=5)
+        if learned_chains and tokens_used < max_tokens * 0.78:
+            context_parts.append("\n## LEARNED ATTACK CHAINS")
+            for chain in learned_chains[:3]:
+                path = str(chain.get("attack_path", "") or "").strip()
+                reasoning = str(chain.get("reasoning", "") or "").strip()
+                line = f"- {chain.get('name', 'chain')}: {(path or reasoning or 'historical chain')[:140]}"
+                context_parts.append(line)
+                tokens_used += len(line) // 4
+
         if tokens_used < max_tokens * 0.6:
             tool_stats = self.get_tool_statistics()
             if isinstance(tool_stats, list) and tool_stats:
@@ -718,6 +750,21 @@ class MemoryManager:
                     line = f"- {t.get('tool_name', 'unknown')}: {sr:.0f}% success ({total} runs)"
                     context_parts.append(line)
                     tokens_used += len(line) // 4
+
+                weak_tools = [
+                    t
+                    for t in tool_stats
+                    if t.get("total_calls", 0) >= 3 and t.get("success_rate", 1.0) <= 0.35
+                ]
+                if weak_tools and tokens_used < max_tokens * 0.72:
+                    context_parts.append("\n## TOOL PITFALLS")
+                    for t in weak_tools[:4]:
+                        line = (
+                            f"- Avoid repeating {t.get('tool_name', 'unknown')} blindly: "
+                            f"{t.get('success_rate', 0.0) * 100:.0f}% success over {t.get('total_calls', 0)} runs"
+                        )
+                        context_parts.append(line)
+                        tokens_used += len(line) // 4
 
         if current_phase == "EXPLOIT" and tokens_used < max_tokens * 0.85:
             knowledge = self.get_knowledge("exploitation", limit=10)  # Increased from 5
@@ -754,6 +801,7 @@ class MemoryManager:
 
         similar = []
         for row in cursor.fetchall():
+            target_data = None
             try:
                 techs = json.loads(row["technologies"]) if row["technologies"] else {}
                 overlap = current_techs.intersection(set(techs.keys()))
@@ -763,9 +811,10 @@ class MemoryManager:
                     target_data["similarity_score"] = len(overlap) / max(
                         len(current_techs), 1
                     )
-                    similar.append(target_data)
-            except Exception:
-                continue
+            except Exception as e:
+                logger.debug("Failed to parse similar target row: %s", e)
+            if target_data is not None:
+                similar.append(target_data)
 
         similar.sort(key=lambda x: x.get("similarity_score", 0), reverse=True)
         return similar[:limit]
@@ -932,6 +981,35 @@ class MemoryManager:
         except Exception as exc:
             return {"ok": False, "error": str(exc)}
 
+    def _normalize_skill_target(self, target: str) -> str:
+        raw = str(target or "").strip().lower()
+        if not raw:
+            return ""
+        parsed = urlparse(raw if "://" in raw else f"https://{raw}")
+        host = parsed.netloc or parsed.path
+        host = host.split("/", 1)[0]
+        host = host.split("@", 1)[-1]
+        if ":" in host:
+            host = host.split(":", 1)[0]
+        return host.strip().strip(".")
+
+    def _normalize_skill_name(self, skill_name: str) -> str:
+        value = str(skill_name or "").strip().replace("\\", "/")
+        if value.startswith("skills/"):
+            value = value[7:]
+        return value
+
+    def _skill_target_matches(self, stored_target: str, requested_target: str) -> bool:
+        stored = self._normalize_skill_target(stored_target)
+        requested = self._normalize_skill_target(requested_target)
+        if not stored or not requested:
+            return False
+        return (
+            stored == requested
+            or stored.endswith(f".{requested}")
+            or requested.endswith(f".{stored}")
+        )
+
     def get_skill_recommendations(
         self, target: str, current_phase: str
     ) -> list[dict[str, Any]]:
@@ -943,28 +1021,101 @@ class MemoryManager:
             return []
 
         cursor = self.conn.cursor()
+        phase_norm = str(current_phase or "").strip().upper()
+        target_norm = self._normalize_skill_target(target)
 
-        cursor.execute("""
-            SELECT technique_name, target_tech, success_rate, times_used, source_session
-            FROM patterns
-            WHERE success_rate >= 0.60 AND times_used >= 2
-            ORDER BY effectiveness_score DESC
-            LIMIT 15
-        """)
+        cursor.execute(
+            """
+            SELECT skill_name, target, phase, success, effectiveness_score,
+                   tokens_saved, timestamp
+            FROM skill_usage
+            ORDER BY timestamp DESC
+            LIMIT 1000
+            """
+        )
 
-        skill_data = []
+        aggregated: dict[str, dict[str, Any]] = {}
         for row in cursor.fetchall():
-            skill_data.append(
+            row_phase = str(row["phase"] or "").strip().upper()
+            row_target = str(row["target"] or "")
+
+            target_match = self._skill_target_matches(row_target, target_norm)
+            if target_norm and not target_match:
+                continue
+            if phase_norm and row_phase and row_phase != phase_norm:
+                continue
+
+            skill_path = self._normalize_skill_name(str(row["skill_name"] or ""))
+            if not skill_path:
+                continue
+
+            info = aggregated.setdefault(
+                skill_path,
                 {
-                    "skill_name": row["technique_name"],
-                    "tech": row["target_tech"],
-                    "success_rate": row["success_rate"],
-                    "times_used": row["times_used"],
-                    "source_session": row["source_session"],
+                    "skill_path": skill_path,
+                    "skill_name": Path(skill_path).stem,
+                    "times_used": 0,
+                    "successes": 0,
+                    "effectiveness_total": 0.0,
+                    "tokens_saved_total": 0,
+                    "phase": row_phase,
+                    "phase_match": False,
+                    "target_match": False,
+                    "latest_timestamp": str(row["timestamp"] or ""),
+                },
+            )
+            info["times_used"] += 1
+            info["successes"] += 1 if bool(row["success"]) else 0
+            info["effectiveness_total"] += float(row["effectiveness_score"] or 0.0)
+            info["tokens_saved_total"] += int(row["tokens_saved"] or 0)
+            info["phase_match"] = info["phase_match"] or bool(
+                phase_norm and row_phase == phase_norm
+            )
+            info["target_match"] = info["target_match"] or target_match
+            if str(row["timestamp"] or "") > info["latest_timestamp"]:
+                info["latest_timestamp"] = str(row["timestamp"] or "")
+
+        recommendations: list[dict[str, Any]] = []
+        for info in aggregated.values():
+            times_used = int(info["times_used"])
+            if times_used <= 0:
+                continue
+            success_rate = info["successes"] / times_used
+            avg_effectiveness = info["effectiveness_total"] / times_used
+            avg_tokens_saved = info["tokens_saved_total"] / times_used
+
+            score = avg_effectiveness
+            score += success_rate * 0.35
+            score += min(0.2, avg_tokens_saved / 4000.0)
+            if info["phase_match"]:
+                score += 0.2
+            if info["target_match"]:
+                score += 0.2
+
+            recommendations.append(
+                {
+                    "skill_name": info["skill_name"],
+                    "skill_path": info["skill_path"],
+                    "phase": info["phase"],
+                    "success_rate": round(success_rate, 3),
+                    "times_used": times_used,
+                    "effectiveness_score": round(avg_effectiveness, 3),
+                    "avg_tokens_saved": int(avg_tokens_saved),
+                    "target_match": bool(info["target_match"]),
+                    "score": round(score, 3),
+                    "latest_timestamp": info["latest_timestamp"],
                 }
             )
 
-        return skill_data
+        recommendations.sort(
+            key=lambda rec: (
+                rec["score"],
+                rec["times_used"],
+                rec["latest_timestamp"],
+            ),
+            reverse=True,
+        )
+        return recommendations[:15]
 
     def save_skill_usage(
         self,
@@ -981,6 +1132,12 @@ class MemoryManager:
         if not self.conn:
             return
 
+        skill_name = self._normalize_skill_name(skill_name)
+        target = self._normalize_skill_target(target)
+        phase = str(phase or "").strip().upper()
+        if not skill_name or not target:
+            return
+
         cursor = self.conn.cursor()
         cursor.execute(
             """
@@ -994,8 +1151,8 @@ class MemoryManager:
                 target,
                 phase,
                 1 if success else 0,
-                effectiveness_score,
-                tokens_saved,
+                max(0.0, min(float(effectiveness_score), 1.0)),
+                max(0, int(tokens_saved)),
             ),
         )
         self.conn.commit()
@@ -1057,6 +1214,76 @@ class MemoryManager:
             )
 
         self.conn.commit()
+
+    def save_chain_discovery(self, chain_data: dict[str, Any]) -> None:
+        """Save a discovered attack chain for cross-session learning."""
+        if not self.conn:
+            return
+
+        cursor = self.conn.cursor()
+        cursor.execute(
+            """
+            INSERT OR REPLACE INTO chain_discoveries
+            (chain_id, name, combined_severity, attack_path, reasoning,
+             findings, relation_types, target, discovered_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                chain_data.get("chain_id"),
+                chain_data.get("name"),
+                chain_data.get("combined_severity", 1),
+                chain_data.get("attack_path", ""),
+                chain_data.get("reasoning", ""),
+                json.dumps(chain_data.get("findings", [])),
+                json.dumps(chain_data.get("relation_types", [])),
+                chain_data.get("target", ""),
+                chain_data.get("discovered_at", ""),
+            ),
+        )
+        self.conn.commit()
+
+    def get_learned_chains(self, target: str = "", limit: int = 10) -> list[dict[str, Any]]:
+        """Get previously discovered chains for cross-session learning."""
+        if not self.conn:
+            return []
+
+        cursor = self.conn.cursor()
+        if target:
+            cursor.execute(
+                """
+                SELECT chain_id, name, combined_severity, attack_path, reasoning,
+                       findings, relation_types
+                FROM chain_discoveries
+                WHERE target = ? OR target = ''
+                ORDER BY combined_severity DESC, discovered_at DESC
+                LIMIT ?
+                """,
+                (target, limit),
+            )
+        else:
+            cursor.execute(
+                """
+                SELECT chain_id, name, combined_severity, attack_path, reasoning,
+                       findings, relation_types
+                FROM chain_discoveries
+                ORDER BY combined_severity DESC, discovered_at DESC
+                LIMIT ?
+                """,
+                (limit,),
+            )
+
+        chains = []
+        for row in cursor.fetchall():
+            chains.append({
+                "chain_id": row[0],
+                "name": row[1],
+                "combined_severity": row[2],
+                "attack_path": row[3],
+                "reasoning": row[4],
+                "findings": json.loads(row[5]) if row[5] else [],
+                "relation_types": json.loads(row[6]) if row[6] else [],
+            })
+        return chains
 
     def get_model_recommendation(self, task_type: str) -> str:
 

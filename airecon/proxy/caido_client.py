@@ -6,7 +6,7 @@ import logging
 import os
 import re
 import shutil
-import subprocess
+import subprocess  # nosec B404
 import threading
 import time
 from pathlib import Path
@@ -140,7 +140,7 @@ class CaidoClient:
         logger.info("Attempting Caido bootstrap via host command: %s", " ".join(cmd))
 
         def _run() -> tuple[int, str]:
-            proc = subprocess.run(
+            proc = subprocess.run(  # nosec B603
                 cmd,
                 capture_output=True,
                 text=True,

@@ -13,6 +13,7 @@ from datetime import datetime
 from typing import Any, Iterable, TypeVar
 from urllib.parse import parse_qsl, urlencode, urlparse, urlunparse
 
+from ..data_loader import load_vuln_hypothesis_legacy
 from .models import (
     CausalHypothesis,
     CausalIntervention,
@@ -105,7 +106,7 @@ def _coerce_sequence_field(
             if isinstance(parsed, tuple):
                 return BoundedList(list(parsed), maxlen=maxlen)
         except Exception as e:
-            logger.debug("Exception: %s", e)
+            logger.warning("Operation failed: %s", e)
             logger.warning(
                 "Failed to parse legacy %s field value; resetting to empty.",
                 field_name,
@@ -114,7 +115,7 @@ def _coerce_sequence_field(
     try:
         return BoundedList(list(value), maxlen=maxlen)
     except Exception as e:
-        logger.debug("Exception: %s", e)
+        logger.warning("Operation failed: %s", e)
         logger.warning(
             "Unsupported %s field type %s; resetting to empty.",
             field_name,
@@ -346,7 +347,7 @@ def _normalize_url(url: str) -> str:
             )
         )
     except Exception as e:
-        logger.debug("Exception: %s", e)
+        logger.warning("Operation failed: %s", e)
         return url
 
 
@@ -381,7 +382,7 @@ def _is_duplicate_vulnerability(new_vuln: dict, existing_vulns: list[dict]) -> b
 
         threshold = get_config().vuln_similarity_threshold
     except Exception as e:
-        logger.debug("Exception: %s", e)
+        logger.warning("Operation failed: %s", e)
         from ..config import DEFAULT_CONFIG
 
         threshold = DEFAULT_CONFIG["vuln_similarity_threshold"]
@@ -415,6 +416,91 @@ def _is_duplicate_vulnerability(new_vuln: dict, existing_vulns: list[dict]) -> b
     return False
 
 
+_ROLE_HINTS = (
+    "admin",
+    "superuser",
+    "moderator",
+    "staff",
+    "manager",
+    "owner",
+    "member",
+    "user",
+    "guest",
+    "support",
+    "billing",
+    "auditor",
+)
+
+_WORKFLOW_STAGE_KEYWORDS: dict[str, tuple[str, ...]] = {
+    "auth": (
+        "login",
+        "signin",
+        "sign-in",
+        "auth",
+        "oauth",
+        "sso",
+        "password",
+        "reset",
+        "session",
+        "token",
+    ),
+    "mfa": ("otp", "totp", "mfa", "2fa", "verify", "verification", "challenge"),
+    "onboarding": ("invite", "signup", "register", "activate", "join", "onboard"),
+    "admin_approval": (
+        "approve",
+        "approval",
+        "review",
+        "moderate",
+        "impersonate",
+        "elevate",
+    ),
+    "commerce": (
+        "cart",
+        "checkout",
+        "payment",
+        "order",
+        "refund",
+        "coupon",
+        "promo",
+        "invoice",
+        "subscription",
+        "credit",
+        "balance",
+    ),
+    "file_transfer": ("upload", "download", "import", "export", "attachment", "file"),
+    "tenant_scope": (
+        "tenant",
+        "org",
+        "organization",
+        "workspace",
+        "project",
+        "company",
+        "team",
+        "account",
+    ),
+}
+
+_TENANT_MARKER_HINTS = (
+    "tenant",
+    "org",
+    "organization",
+    "workspace",
+    "project",
+    "company",
+    "team",
+    "account",
+)
+
+_TRUST_BOUNDARY_HINTS: dict[str, tuple[str, ...]] = {
+    "api_boundary": ("api", "graphql", "rpc"),
+    "admin_boundary": ("admin", "moderate", "approve", "impersonate"),
+    "tenant_boundary": _TENANT_MARKER_HINTS,
+    "auth_boundary": ("login", "oauth", "sso", "session", "token", "mfa", "totp", "otp"),
+    "file_boundary": ("upload", "download", "import", "export", "attachment"),
+    "payment_boundary": ("payment", "checkout", "refund", "invoice", "coupon", "credit"),
+}
+
+
 @dataclass
 class ApplicationModel:
     resources: dict[str, dict[str, Any]] = field(default_factory=dict)
@@ -422,6 +508,157 @@ class ApplicationModel:
     param_relationships: dict[str, list[str]] = field(default_factory=dict)
     roles_detected: list[str] = field(default_factory=list)
     api_schema: dict[str, dict[str, Any]] = field(default_factory=dict)
+    principal_profiles: dict[str, dict[str, Any]] = field(default_factory=dict)
+    workflow_paths: dict[str, list[str]] = field(default_factory=dict)
+    tenant_markers: list[str] = field(default_factory=list)
+    trust_boundaries: list[str] = field(default_factory=list)
+
+    @staticmethod
+    def _append_unique(items: list[str], value: str, *, limit: int = 12) -> None:
+        cleaned = str(value or "").strip()
+        if not cleaned or cleaned in items:
+            return
+        items.append(cleaned)
+        if len(items) > limit:
+            del items[:-limit]
+
+    def _register_principal(self, role: str, endpoint: str, auth_type: str = "") -> None:
+        role_name = str(role or "").strip().lower()
+        if not role_name:
+            return
+        profile = self.principal_profiles.setdefault(
+            role_name,
+            {
+                "auth_types": [],
+                "endpoints": [],
+                "workflow_stages": [],
+                "tenant_markers": [],
+            },
+        )
+        self._append_unique(profile.setdefault("endpoints", []), endpoint, limit=8)
+        if auth_type:
+            self._append_unique(profile.setdefault("auth_types", []), auth_type, limit=6)
+
+    def _record_workflow_stage(self, stage: str, endpoint: str) -> None:
+        bucket = self.workflow_paths.setdefault(stage, [])
+        self._append_unique(bucket, endpoint, limit=8)
+
+    def _record_trust_boundary(self, label: str) -> None:
+        self._append_unique(self.trust_boundaries, label, limit=10)
+
+    def _ingest_context_signals(
+        self,
+        endpoint: str,
+        *,
+        status_code: int,
+        method: str,
+        body_text: str,
+        param_names: list[str] | None,
+        auth_type: str,
+        content_types: list[str] | None = None,
+    ) -> None:
+        params = [str(p).strip() for p in (param_names or []) if str(p).strip()]
+        combined = " ".join(
+            part
+            for part in [
+                endpoint,
+                method,
+                body_text,
+                " ".join(params),
+                " ".join(content_types or []),
+                auth_type,
+            ]
+            if part
+        ).lower()
+
+        detected_roles = [role for role in _ROLE_HINTS if role in combined]
+        for role in detected_roles:
+            if role not in self.roles_detected:
+                self.roles_detected.append(role)
+            self._register_principal(role, endpoint, auth_type or "observed")
+
+        if status_code in {401, 403}:
+            self._register_principal("anonymous", endpoint, "none")
+        elif auth_type:
+            self._register_principal("authenticated", endpoint, auth_type)
+
+        for stage, keywords in _WORKFLOW_STAGE_KEYWORDS.items():
+            if any(keyword in combined for keyword in keywords):
+                self._record_workflow_stage(stage, endpoint)
+                for role in detected_roles:
+                    profile = self.principal_profiles.get(role)
+                    if profile is not None:
+                        self._append_unique(
+                            profile.setdefault("workflow_stages", []),
+                            stage,
+                            limit=8,
+                        )
+
+        tenant_candidates = [
+            param
+            for param in params
+            if any(marker in param.lower() for marker in _TENANT_MARKER_HINTS)
+        ]
+        if any(marker in combined for marker in _TENANT_MARKER_HINTS):
+            tenant_candidates.extend(
+                marker for marker in _TENANT_MARKER_HINTS if marker in combined
+            )
+        for marker in tenant_candidates:
+            self._append_unique(self.tenant_markers, marker, limit=10)
+            for role in detected_roles or ["authenticated"]:
+                profile = self.principal_profiles.setdefault(
+                    role,
+                    {
+                        "auth_types": [],
+                        "endpoints": [],
+                        "workflow_stages": [],
+                        "tenant_markers": [],
+                    },
+                )
+                self._append_unique(
+                    profile.setdefault("tenant_markers", []), marker, limit=6
+                )
+
+        for boundary, hints in _TRUST_BOUNDARY_HINTS.items():
+            if any(hint in combined for hint in hints):
+                self._record_trust_boundary(boundary)
+
+    def record_text_signal(
+        self,
+        text: str,
+        endpoint: str = "",
+        param_names: list[str] | None = None,
+        auth_type: str = "",
+        method: str = "OBSERVE",
+    ) -> None:
+        self._ingest_context_signals(
+            endpoint or "/observed",
+            status_code=200,
+            method=method,
+            body_text=str(text or "")[:4000],
+            param_names=param_names,
+            auth_type=auth_type,
+            content_types=[],
+        )
+
+    def export_workflow_context(self) -> dict[str, Any]:
+        return {
+            "roles": list(self.roles_detected),
+            "principals": {
+                name: {
+                    "auth_types": list(info.get("auth_types", [])),
+                    "endpoints": list(info.get("endpoints", [])),
+                    "workflow_stages": list(info.get("workflow_stages", [])),
+                    "tenant_markers": list(info.get("tenant_markers", [])),
+                }
+                for name, info in self.principal_profiles.items()
+            },
+            "workflow_paths": {
+                stage: list(paths) for stage, paths in self.workflow_paths.items()
+            },
+            "tenant_markers": list(self.tenant_markers),
+            "trust_boundaries": list(self.trust_boundaries),
+        }
 
     def update_from_response(
         self,
@@ -436,7 +673,7 @@ class ApplicationModel:
             parsed = urlparse(url)
             endpoint = parsed.path.rstrip("/") or "/"
         except Exception as e:
-            logger.debug("Exception: %s", e)
+            logger.warning("Operation failed: %s", e)
             endpoint = url
 
         entry = self.resources.setdefault(
@@ -493,13 +730,30 @@ class ApplicationModel:
             except Exception as e:
                 logger.debug("Expected failure parsing JSON in app model update: %s", e)
 
+        self._ingest_context_signals(
+            endpoint,
+            status_code=status_code,
+            method=method.upper(),
+            body_text=body_excerpt,
+            param_names=param_names,
+            auth_type=self.auth_map.get(endpoint, ""),
+            content_types=entry.get("content_types", []),
+        )
+
         if len(self.resources) > 500:
             excess = list(self.resources.keys())[:-500]
             for k in excess:
                 del self.resources[k]
 
     def build_context(self, max_endpoints: int = 8) -> str:
-        if not self.resources and not self.roles_detected:
+        if (
+            not self.resources
+            and not self.roles_detected
+            and not self.principal_profiles
+            and not self.workflow_paths
+            and not self.tenant_markers
+            and not self.trust_boundaries
+        ):
             return ""
 
         lines = ["<application_model>"]
@@ -528,6 +782,36 @@ class ApplicationModel:
         if self.roles_detected:
             lines.append(f"  <roles>{', '.join(self.roles_detected)}</roles>")
 
+        if self.principal_profiles:
+            lines.append("  <principals>")
+            for role, info in list(self.principal_profiles.items())[:6]:
+                auth_types = ",".join(info.get("auth_types", [])[:3]) or "unknown"
+                endpoints = ",".join(info.get("endpoints", [])[:3]) or "-"
+                stages = ",".join(info.get("workflow_stages", [])[:4])
+                attrs = (
+                    f' auth="{auth_types}" endpoints="{endpoints}"'
+                    + (f' stages="{stages}"' if stages else "")
+                )
+                lines.append(f'    <principal role="{role}"{attrs}/>')
+            lines.append("  </principals>")
+
+        if self.workflow_paths:
+            lines.append("  <workflow_surfaces>")
+            for stage, paths in list(self.workflow_paths.items())[:6]:
+                preview = ", ".join(paths[:4])
+                lines.append(f'    <workflow stage="{stage}" paths="{preview}"/>')
+            lines.append("  </workflow_surfaces>")
+
+        if self.tenant_markers:
+            lines.append(
+                f"  <tenant_markers>{', '.join(self.tenant_markers[:8])}</tenant_markers>"
+            )
+
+        if self.trust_boundaries:
+            lines.append(
+                f"  <trust_boundaries>{', '.join(self.trust_boundaries[:8])}</trust_boundaries>"
+            )
+
         if self.api_schema:
             for ep, schema in list(self.api_schema.items())[:3]:
                 keys_str = ", ".join(list(schema.keys())[:10])
@@ -543,6 +827,10 @@ def _serialize_app_model(model: ApplicationModel) -> dict[str, Any]:
         "auth_map": dict(model.auth_map),
         "roles_detected": list(model.roles_detected),
         "api_schema": dict(model.api_schema),
+        "principal_profiles": dict(model.principal_profiles),
+        "workflow_paths": dict(model.workflow_paths),
+        "tenant_markers": list(model.tenant_markers),
+        "trust_boundaries": list(model.trust_boundaries),
     }
 
 
@@ -554,6 +842,10 @@ def _deserialize_app_model(raw: Any) -> ApplicationModel:
     auth_map = raw.get("auth_map", {})
     roles = raw.get("roles_detected", [])
     api_schema = raw.get("api_schema", {})
+    principal_profiles = raw.get("principal_profiles", {})
+    workflow_paths = raw.get("workflow_paths", {})
+    tenant_markers = raw.get("tenant_markers", [])
+    trust_boundaries = raw.get("trust_boundaries", [])
     if isinstance(resources, dict):
         model.resources = resources
     if isinstance(auth_map, dict):
@@ -562,6 +854,31 @@ def _deserialize_app_model(raw: Any) -> ApplicationModel:
         model.roles_detected = [str(r) for r in roles]
     if isinstance(api_schema, dict):
         model.api_schema = api_schema
+    if isinstance(principal_profiles, dict):
+        model.principal_profiles = {
+            str(role): {
+                "auth_types": [str(x) for x in (info or {}).get("auth_types", [])],
+                "endpoints": [str(x) for x in (info or {}).get("endpoints", [])],
+                "workflow_stages": [
+                    str(x) for x in (info or {}).get("workflow_stages", [])
+                ],
+                "tenant_markers": [
+                    str(x) for x in (info or {}).get("tenant_markers", [])
+                ],
+            }
+            for role, info in principal_profiles.items()
+            if isinstance(info, dict)
+        }
+    if isinstance(workflow_paths, dict):
+        model.workflow_paths = {
+            str(stage): [str(x) for x in paths]
+            for stage, paths in workflow_paths.items()
+            if isinstance(paths, list)
+        }
+    if isinstance(tenant_markers, list):
+        model.tenant_markers = [str(x) for x in tenant_markers]
+    if isinstance(trust_boundaries, list):
+        model.trust_boundaries = [str(x) for x in trust_boundaries]
     return model
 
 
@@ -1192,7 +1509,11 @@ def save_session(session: SessionData) -> None:
     if not session.target:
         logger.debug("Skipping save for session %s — no target set", session.session_id)
         return
-    SESSIONS_DIR.mkdir(parents=True, exist_ok=True)
+    try:
+        SESSIONS_DIR.mkdir(parents=True, exist_ok=True)
+    except Exception as e:
+        logger.warning("Failed to create sessions directory: %s, skipping save", e)
+        return
     try:
         session.prune_old_data()
         session.updated_at = datetime.now().isoformat()
@@ -1245,10 +1566,24 @@ def save_session(session: SessionData) -> None:
                 payload[key] = []
 
         temp_filepath = filepath.with_suffix(".tmp")
-        with open(temp_filepath, "w", encoding="utf-8") as f:
-            json.dump(payload, f, indent=2, default=str, ensure_ascii=False)
+        try:
+            with open(temp_filepath, "w", encoding="utf-8") as f:
+                json.dump(payload, f, indent=2, default=str, ensure_ascii=False)
+        except Exception as write_err:
+            logger.error("Failed to write temp file %s: %s", temp_filepath, write_err)
+            raise
 
-        temp_filepath.replace(filepath)
+        try:
+            temp_filepath.replace(filepath)
+        except Exception as replace_err:
+            logger.error(
+                "Failed to replace %s → %s: %s, temp_file_exists=%s",
+                temp_filepath,
+                filepath,
+                replace_err,
+                temp_filepath.exists(),
+            )
+            raise
 
         logger.info(
             "[DEBUG-MEMORY] Saved session %s (target=%s, subdomains=%d, vulns=%d)",
@@ -1521,6 +1856,34 @@ def update_from_parsed_output(
         r")\b",
         re.IGNORECASE,
     )
+    _cached_vuln_signals: list[re.Pattern] | None = None
+
+    @classmethod
+    def _load_vuln_signals(cls) -> list[re.Pattern]:
+        if cls._cached_vuln_signals:
+            return cls._cached_vuln_signals
+
+        patterns = []
+        try:
+            for entry in load_vuln_hypothesis_legacy():
+                for pat in entry.get("patterns", []):
+                    try:
+                        patterns.append(re.compile(str(pat), re.IGNORECASE))
+                    except re.error:
+                        pass
+        except Exception as _e:
+            logger.debug("Failed to load tool vuln patterns: %s", _e)
+
+        if not patterns:
+            patterns = [
+                re.compile(r"vulnerab\w*", re.IGNORECASE),
+                re.compile(r"exploit\w*", re.IGNORECASE),
+                re.compile(r"CVE-\d{4}-\d+", re.IGNORECASE),
+            ]
+
+        cls._cached_vuln_signals = patterns
+        return patterns
+
     _VULN_PATTERN_RE = re.compile(
         r"^\[\+\].{0,120}(vulnerab|exploit|session opened|shell|meterpreter|"
         r"access granted|credentials? found|credential found)|"

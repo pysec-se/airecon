@@ -445,6 +445,9 @@ class TestDataLoaderIntegration:
         assert severity_to_int("MEDIUM") == 3
         assert severity_to_int("LOW") == 2
         assert severity_to_int("INFO") == 1
+        assert severity_to_int("warning") == 3
+        assert severity_to_int("ERROR") == 4
+        assert severity_to_int("4") == 4
 
         assert int_to_severity(5) == "CRITICAL"
         assert int_to_severity(4) == "HIGH"

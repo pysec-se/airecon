@@ -190,7 +190,7 @@ The library provides specialized skills not bundled with AIRecon by default:
 
 ### Installation
 
-```bash
+```text
 # Clone into your local skills directory
 git clone https://github.com/pikpikcu/airecon-skills ~/.airecon/skills
 
@@ -200,7 +200,7 @@ git clone https://github.com/pikpikcu/airecon-skills /path/to/airecon-skills
 
 Then configure AIRecon to load skills from the additional directory by setting the path in your config or by symlinking into the built-in skills folder:
 
-```bash
+```text
 # Option 1: Symlink into built-in skills (recommended)
 ln -s ~/.airecon/skills/skills/* /path/to/airecon/airecon/proxy/skills/
 
@@ -212,7 +212,7 @@ After adding skills, restart AIRecon — they will appear automatically in `<ava
 
 ### Verifying community skills are loaded
 
-```bash
+```text
 python3 -c "
 from airecon.proxy.system import get_system_prompt
 p = get_system_prompt()
@@ -257,7 +257,7 @@ If you write a skill that could be useful to others, consider contributing it up
 
 ### Step 3: Create the file
 
-```bash
+```text
 # Example: adding a WebSocket testing skill
 touch airecon/proxy/skills/protocols/websocket.md
 ```
@@ -268,7 +268,7 @@ touch airecon/proxy/skills/protocols/websocket.md
 
 Skills are scanned at startup. Restart for the new file to appear in the `<available_skills>` list.
 
-```bash
+```text
 # Stop current session and restart
 airecon start
 ```
@@ -355,7 +355,7 @@ Split `sql_and_nosql_injection.md` into `sql_injection.md` and `nosql_injection.
 ## Detection
 How to confirm the target uses this technology or is affected:
 
-```bash
+```text
 # Detection command 1
 <exact command>
 
@@ -424,7 +424,7 @@ After creating a skill, verify it works as expected:
 
 **1. Check it appears in the skill list:**
 
-```bash
+```text
 # Start AIRecon and look at the system prompt (dev mode)
 python3 -c "
 from airecon.proxy.system import get_system_prompt
@@ -438,7 +438,7 @@ print(p[start:end])
 
 **2. Test the read_file path directly:**
 
-```bash
+```text
 # Find the exact absolute path AIRecon will use
 python3 -c "
 from pathlib import Path

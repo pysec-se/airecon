@@ -155,6 +155,7 @@ BrowserAction = Literal[
     "oauth_authorize",
     "check_auth_status",
     "wait_for_element",
+    "solve_captcha",
 ]
 
 _DEFAULT_USERNAME_SEL: str = (
@@ -719,6 +720,8 @@ class BrowserInstance:
         page = self.pages[tab_id]
         try:
             await self._navigate_with_fallback(page, url)
+            state = await self._get_page_state(tab_id)
+            return state
         except DeadHostError as e:
             logger.warning(
                 "Dead host detected via goto: %s (%s)", e.host, e.original_error
@@ -736,7 +739,36 @@ class BrowserInstance:
                     "Mark this host as dead and move on to the next target."
                 ),
             }
-        return await self._get_page_state(tab_id)
+        except RuntimeError as e:
+            # Handle redirect loops consistently with _safe_action pattern
+            err_str = str(e)
+            if "Too many redirects" in err_str or "redirect loop" in err_str.lower():
+                redirected_url = ""
+                m = re.search(r"final URL:\s*(\S+)", err_str)
+                if m:
+                    redirected_url = m.group(1)
+                logger.warning(
+                    "Browser redirect loop on %s — final: %s",
+                    url[:120],
+                    redirected_url[:120] if redirected_url else "unknown",
+                )
+                return {
+                    "success": False,
+                    "redirect_loop": True,
+                    "error": err_str[:500],
+                    "message": (
+                        "The page redirect chain exceeded 10 hops. This is usually caused by "
+                        "tracking pixels, ad blockers, or SSO redirect chains — not a real page."
+                    ),
+                    "final_url": redirected_url[:200],
+                    "next_action": (
+                        "Do NOT retry the same URL. If it redirected to a third-party domain "
+                        "(ads, analytics, SSO, or CDN), skip it and test the next endpoint. "
+                        "If you need to see this page, try with JavaScript disabled or "
+                        "use curl --head to inspect redirects manually."
+                    ),
+                }
+            raise
 
     def click(self, coordinate: str, tab_id: str | None = None) -> dict[str, Any]:
         with self._execution_lock:
@@ -1253,8 +1285,8 @@ class BrowserInstance:
             try:
                 await page.fill(sel.strip(), value, timeout=timeout_ms)
                 return True
-            except Exception:
-                continue
+            except Exception as e:
+                logger.debug("Fill selector failed (%s): %s", sel.strip(), e)
         return False
 
     async def _click_selectors(
@@ -1272,8 +1304,8 @@ class BrowserInstance:
             try:
                 await page.click(sel.strip(), timeout=timeout_ms)
                 return True
-            except Exception:
-                continue
+            except Exception as e:
+                logger.debug("Click selector failed (%s): %s", sel.strip(), e)
         return False
 
     async def _login_form(
@@ -1562,15 +1594,18 @@ class BrowserInstance:
 
         otp_filled = False
         for sel in field_selector.split(","):
+            filled = False
             try:
                 await page.fill(
                     sel.strip(), code, timeout=get_config().browser_totp_fill_timeout_ms
                 )
+                filled = True
+            except Exception as e:
+                logger.debug("handle_totp: fill failed for %s: %s", sel.strip(), e)
+            if filled:
                 otp_filled = True
                 logger.debug("handle_totp: filled field %s with code", sel.strip())
                 break
-            except Exception:
-                continue
         if not otp_filled:
             logger.warning("handle_totp: no OTP field matched (%s)", field_selector)
 
@@ -1593,12 +1628,15 @@ class BrowserInstance:
         )
         submitted = False
         for sel in _submit_selectors:
+            clicked = False
             try:
                 await page.click(sel, timeout=2000)
+                clicked = True
+            except Exception as e:
+                logger.debug("handle_totp: submit click failed for %s: %s", sel, e)
+            if clicked:
                 submitted = True
                 break
-            except Exception:
-                continue
         if not submitted:
             await page.keyboard.press("Enter")
 
@@ -2288,7 +2326,7 @@ class BrowserTabManager:
         username: str,
         password: str,
         username_selector: str = 'input[type="email"],input[name="username"],input[name="email"],#username,#email',
-        password_selector: str = 'input[type="password"]',
+        password_selector: str = 'input[type="password"]',  # nosec B107
         submit_selector: str = 'button[type="submit"],input[type="submit"]',
         tab_id: str | None = None,
         multi_step: bool = False,
@@ -2457,6 +2495,7 @@ _manager = BrowserTabManager()
 
 def browser_action(
     action: BrowserAction,
+    timeout: float | None = None,
     url: str | None = None,
     coordinate: str | None = None,
     text: str | None = None,

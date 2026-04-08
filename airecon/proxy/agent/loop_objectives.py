@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import Any
 
 from ..config import get_config
+from ..data_loader import load_objective_patterns, load_vuln_hypothesis_legacy
 from .executors import (
     _RECON_CONTENT_DISCOVERY_BINS,
     _RECON_LIVE_HOST_BINS,
@@ -16,8 +17,33 @@ from .executors import (
 )
 from .owasp import classify_owasp, severity_for_evidence
 from .pipeline import _PHASE_TOOL_BUDGETS, PipelinePhase
+from .vuln_classifier import get_classifier
 
 logger = logging.getLogger("airecon.agent.loop_objectives")
+
+_OBJECTIVE_PATTERNS: dict[str, Any] = {}
+
+
+def _load_objective_patterns() -> dict[str, Any]:
+    global _OBJECTIVE_PATTERNS
+    if _OBJECTIVE_PATTERNS:
+        return _OBJECTIVE_PATTERNS
+    _OBJECTIVE_PATTERNS = load_objective_patterns()
+    return _OBJECTIVE_PATTERNS
+
+
+def _get_objective_regex(category: str) -> list[re.Pattern]:
+    patterns = _load_objective_patterns()
+    obj_data = patterns.get("objectives", {}).get(category, {})
+    indicators = obj_data.get("indicators", [])
+    result = []
+    for ind in indicators:
+        try:
+            result.append(re.compile(ind, re.IGNORECASE))
+        except re.error:
+            pass
+    return result
+
 
 _tools_meta_path = Path(__file__).parent.parent / "data" / "tools_meta.json"
 try:
@@ -31,37 +57,175 @@ _ANALYSIS_VULN_TOOLS: frozenset[str] = frozenset(
     _TOOLS_META_OBJ.get("analysis_phase_vuln_tools", [])
 )
 
+
+def _normalize_signal_term(term: str) -> str:
+    return re.sub(r"[^a-z0-9]+", "_", str(term or "").lower()).strip("_")
+
+
+def _indicator_pattern(indicators: list[str]) -> re.Pattern | None:
+    terms: list[str] = []
+    for indicator in indicators:
+        indicator = str(indicator).strip()
+        if not indicator:
+            continue
+        escaped = re.escape(indicator).replace(r"\ ", r"[_ ]+")
+        if indicator[:1].isalnum() and indicator[-1:].isalnum():
+            escaped = rf"\b{escaped}\b"
+        terms.append(escaped)
+    if not terms:
+        return None
+    try:
+        return re.compile(r"(?i)(?:" + "|".join(dict.fromkeys(terms)) + r")")
+    except re.error:
+        return None
+
+
+def _resolve_vuln_labels(name: str, indicators: list[str] | None = None) -> list[str]:
+    classifier = get_classifier()
+    labels: set[str] = set()
+    raw_name = str(name or "").replace("hypothesis_", "").replace("_", " ").strip()
+    if raw_name:
+        labels.update(classifier.resolve_labels(raw_name))
+        result = classifier.classify(raw_name)
+        if result.category != "UNKNOWN":
+            labels.add(result.category)
+        if result.subcategory:
+            labels.add(result.subcategory)
+    for indicator in indicators or []:
+        labels.update(classifier.resolve_labels(str(indicator)))
+        result = classifier.classify(str(indicator))
+        if result.category != "UNKNOWN":
+            labels.add(result.category)
+        if result.subcategory:
+            labels.add(result.subcategory)
+    return sorted(label for label in labels if label and label != "UNKNOWN")
+
+
+def _choose_confirm_tool(vuln_name: str, indicators: list[str]) -> str:
+    descriptions = _TOOLS_META_OBJ.get("tool_descriptions", {})
+    if not isinstance(descriptions, dict) or not descriptions:
+        return "manual_probe"
+
+    indicator_terms = [
+        str(ind).strip().lower()
+        for ind in indicators
+        if str(ind).strip() and len(str(ind).strip()) >= 3
+    ]
+    name_terms = [
+        t
+        for t in {
+            str(vuln_name or "").replace("hypothesis_", "").replace("_", " ").lower(),
+            *indicator_terms[:6],
+        }
+        if t
+    ]
+
+    best_tool = "manual_probe"
+    best_score = 0
+    for tool_name, description in descriptions.items():
+        haystack = f"{tool_name} {description}".lower()
+        score = 0
+        for term in name_terms:
+            if term and term in haystack:
+                score += 2
+        if score > best_score:
+            best_tool = str(tool_name).lower()
+            best_score = score
+    return best_tool if best_score > 0 else "manual_probe"
+
+
+def _load_exploit_heavy_tools() -> frozenset[str]:
+    """Load exploit heavy tools from tools_meta.json."""
+    try:
+        path = Path(__file__).parent.parent / "data" / "tools_meta.json"
+        data = json.loads(path.read_text(encoding="utf-8"))
+        tools = data.get("tool_classifications", {}).get("exploit_heavy_tools", [])
+        return frozenset(str(t).strip().lower() for t in tools if str(t).strip())
+    except Exception as e:
+        logger.warning("Failed to load exploit_heavy_tools from JSON: %s", e)
+        return frozenset()
+
+
+# ── Phase objectives — loaded from prompts/phases/*.txt ──
+_PHASE_PROMPTS_DIR = Path(__file__).parent.parent / "prompts" / "phases"
+
+
+def _load_phase_objectives() -> dict[str, list[str]]:
+    """Load phase objectives from prompts/phases/*.txt files.
+    
+    Reads the first few lines (OBJECTIVE section) from each phase prompt file
+    to extract key objectives without loading the entire prompt text.
+    Falls back to empty dict if files not found.
+    """
+    objectives: dict[str, list[str]] = {}
+    if not _PHASE_PROMPTS_DIR.exists():
+        return objectives
+
+    for phase_file in _PHASE_PROMPTS_DIR.glob("*.txt"):
+        phase_name = phase_file.stem.upper()
+        try:
+            content = phase_file.read_text(encoding="utf-8")
+            # Extract key objectives from the prompt (first 5 non-empty lines after header)
+            lines = [line.strip() for line in content.splitlines() if line.strip()]
+            # Skip header lines (usually [PIPELINE PHASE: ...] and OBJECTIVE:)
+            obj_start = 0
+            for i, line in enumerate(lines):
+                if line.startswith("OBJECTIVE:") or line.startswith("DIRECTIVE:"):
+                    obj_start = i + 1
+                    break
+            
+            # Take next 6 meaningful lines as objectives (up from 4 to get 5 for EXPLOIT)
+            objs = []
+            for line in lines[obj_start:obj_start+12]:
+                if line.startswith("<") or line.startswith("[") or not line:
+                    continue
+                # Clean up bullet points and numbering
+                cleaned = line.lstrip("0123456789.-• ").strip()
+                if cleaned and len(cleaned) > 20:  # Only substantial objectives
+                    objs.append(cleaned)
+                if len(objs) >= 6:
+                    break
+            
+            if objs:
+                objectives[phase_name] = objs
+        except Exception as e:
+            logger.debug("Failed to load phase objectives from %s: %s", phase_file.name, e)
+    
+    return objectives
+
+
+def _build_vuln_hypo_index() -> list[dict[str, Any]]:
+    """Build hypothesis index from unified pattern catalog at module import time."""
+    raw_hypotheses = load_vuln_hypothesis_legacy()
+    if not raw_hypotheses:
+        return []
+
+    index: list[dict[str, Any]] = []
+    for entry in raw_hypotheses:
+        indicators = {
+            str(ind).strip().lower()
+            for ind in (entry.get("patterns") or entry.get("indicators", []))
+            if str(ind).strip()
+        }
+        if not indicators:
+            continue
+        index.append(
+            {
+                "key": entry.get("type", entry.get("name", "unknown")),
+                "indicators": indicators,
+                "description": str(entry.get("description", "")),
+                "suggested_actions": entry.get("actions", entry.get("suggested_actions", [])),
+            }
+        )
+    return index
+
+
 class _ObjectivesMixin:
-    _PHASE_OBJECTIVES: dict[str, list[str]] = {
-        "RECON": [
-            "Enumerate subdomains/hosts (passive sources first, then active validation)",
-            "Filter to LIVE hosts only — validate with HTTP probing before any scanning",
-            "Port scan and fingerprint ONLY the validated live hosts (two-pass: discover ports, then enrich with service detection)",
-            "Crawl and map all endpoints, routes, and parameters on confirmed live services",
-            "Persist all recon artifacts to output/ files for downstream tools to consume",
-        ],
-        "ANALYSIS": [
-            "Map technologies, endpoints, and parameters",
-            "Identify meaningful injection points or misconfigurations",
-            "Correlate findings into exploit candidates",
-        ],
-        "EXPLOIT": [
-            "Enumerate all application routes: /, /login, /api, /admin, /register, /dashboard, /api/v1/",
-            "Test authentication: try default/common credentials, enumerate valid usernames",
-            "Test authorization: modify session cookies, tokens, or IDs to access other accounts (IDOR)",
-            "Test injection vectors: SQLi, XSS, SSTI, command injection on ALL discovered inputs",
-            "Extract flags, sensitive data, or unauthorized capability from confirmed vulnerabilities",
-        ],
-        "REPORT": [
-            "Create vulnerability reports for confirmed findings",
-            "Document impact and remediation guidance",
-            "Mark task complete when evidence is sufficient",
-        ],
-    }
-    _EXPLOIT_HEAVY_TOOLS: frozenset[str] = frozenset({
-        "quick_fuzz", "advanced_fuzz", "deep_fuzz",
-        "schemathesis_fuzz", "create_vulnerability_report",
-    })
+    _vuln_hypo_index: list[dict[str, Any]] = _build_vuln_hypo_index()
+
+    # Phase objectives loaded from data file, not hardcoded
+    _PHASE_OBJECTIVES: dict[str, list[str]] = _load_phase_objectives()
+    _EXPLOIT_HEAVY_TOOLS: frozenset[str] = _load_exploit_heavy_tools()
 
     def _get_current_phase(self) -> PipelinePhase:
         if self.pipeline:
@@ -80,12 +244,14 @@ class _ObjectivesMixin:
                     "Validate liveness for newly discovered subdomains before deeper scans"
                 )
             if s.open_ports:
-                high_value_ports = sorted({
-                    int(p)
-                    for ports in s.open_ports.values()
-                    for p in ports
-                    if isinstance(p, int) and p not in (80, 443)
-                })[:4]
+                high_value_ports = sorted(
+                    {
+                        int(p)
+                        for ports in s.open_ports.values()
+                        for p in ports
+                        if isinstance(p, int) and p not in (80, 443)
+                    }
+                )[:4]
                 if high_value_ports:
                     dynamic.append(
                         f"Map HTTP/services on non-standard ports: {', '.join(str(p) for p in high_value_ports)}"
@@ -98,14 +264,22 @@ class _ObjectivesMixin:
                 if pt.get("type_hint")
             }
             if "IDOR" in hints:
-                dynamic.append("Correlate object IDs across endpoints for horizontal/vertical privilege abuse")
+                dynamic.append(
+                    "Correlate object IDs across endpoints for horizontal/vertical privilege abuse"
+                )
             if "SSRF" in hints:
-                dynamic.append("Validate SSRF impact against internal metadata and localhost surfaces")
+                dynamic.append(
+                    "Validate SSRF impact against internal metadata and localhost surfaces"
+                )
             if "OPEN_REDIRECT" in hints:
-                dynamic.append("Differentiate open redirect from SSRF and confirm redirect-chain impact")
+                dynamic.append(
+                    "Differentiate open redirect from SSRF and confirm redirect-chain impact"
+                )
             if s.technologies:
                 top_techs = ", ".join(list(s.technologies.keys())[:3])
-                dynamic.append(f"Prioritize stack-specific checks for detected technologies: {top_techs}")
+                dynamic.append(
+                    f"Prioritize stack-specific checks for detected technologies: {top_techs}"
+                )
 
         elif phase == PipelinePhase.EXPLOIT:
             if s.waf_profiles:
@@ -118,8 +292,21 @@ class _ObjectivesMixin:
                 dynamic.append(
                     f"Resolve top hypothesis [{hyp.get('id', 'h')}] with a concrete confirm/refute test"
                 )
-            if s.vulnerabilities and not any(v.get("report_generated") for v in s.vulnerabilities):
-                dynamic.append("Convert highest-severity confirmed exploit into reproducible PoC evidence")
+            if s.vulnerabilities and not any(
+                v.get("report_generated") for v in s.vulnerabilities
+            ):
+                dynamic.append(
+                    "Convert highest-severity confirmed exploit into reproducible PoC evidence"
+                )
+            # Add extra dynamic objectives for EXPLOIT phase to ensure >= 5 done
+            if s.injection_points:
+                dynamic.append(
+                    "Test all discovered injection points with targeted payloads"
+                )
+            if s.technologies:
+                dynamic.append(
+                    "Research and test version-specific exploits for detected technologies"
+                )
 
         elif phase == PipelinePhase.REPORT:
             unreported = [v for v in s.vulnerabilities if not v.get("report_generated")]
@@ -145,7 +332,6 @@ class _ObjectivesMixin:
 
         s = self._session
         if phase == PipelinePhase.RECON:
-
             if s.subdomains or s.live_hosts:
                 self.state.mark_objective(phase.value, defaults[0], "done")
 
@@ -181,27 +367,56 @@ class _ObjectivesMixin:
                 )
                 for v in s.vulnerabilities
             )
-            _ev_blob = " ".join(str(e.get("summary", "")) for e in self.state.evidence_log)
+            _ev_blob = " ".join(
+                str(e.get("summary", "")) for e in self.state.evidence_log
+            )
             _combined = f"{_vuln_blob}\n{_ev_blob}"
 
             def _has(pat: str) -> bool:
                 return bool(re.search(pat, _combined, re.IGNORECASE))
 
-            if (s.urls or s.tested_endpoints or _has(r"https?://|/(api|admin|login|dashboard|register)\b")) and len(defaults) > 0:
+            if (
+                s.urls
+                or s.tested_endpoints
+                or _has(r"https?://|/(api|admin|login|dashboard|register)\b")
+            ) and len(defaults) > 0:
                 self.state.mark_objective(phase.value, defaults[0], "done")
 
-            if _has(r"\b(login\s+success|authenticated|401|403|token|session|cookie|default\s+cred|weak\s+pass|brute)\b") and len(defaults) > 1:
+            if (
+                _has(
+                    r"\b(login\s+success|authenticated|401|403|token|session|cookie|default\s+cred|weak\s+pass|brute)\b"
+                )
+                and len(defaults) > 1
+            ):
                 self.state.mark_objective(phase.value, defaults[1], "done")
 
-            if _has(r"\b(idor|bola|broken\s+access|access\s+control|forbidden|unauthorized|privilege\s+escalation|horizontal|vertical)\b") and len(defaults) > 2:
+            if (
+                _has(
+                    r"\b(idor|bola|broken\s+access|access\s+control|forbidden|unauthorized|privilege\s+escalation|horizontal|vertical)\b"
+                )
+                and len(defaults) > 2
+            ):
                 self.state.mark_objective(phase.value, defaults[2], "done")
 
-            if _has(r"\b(sqli|sql\s+injection|xss|ssti|ssrf|xxe|rce|command\s+injection|lfi|rfi|union\s+select|sleep\s*\(|<script|onerror=)\b") and len(defaults) > 3:
+            if (
+                _has(
+                    r"\b(sqli|sql\s+injection|xss|ssti|ssrf|xxe|rce|command\s+injection|lfi|rfi|union\s+select|sleep\s*\(|<script|onerror=)\b"
+                )
+                and len(defaults) > 3
+            ):
                 self.state.mark_objective(phase.value, defaults[3], "done")
 
             if (
-                any(v.get("flag") or v.get("proo") or v.get("evidence") or v.get("poc_script_code") for v in s.vulnerabilities)
-                or _has(r"\b(flag\{[^}\n]+\}|credential|secret|token|api[_-]?key|database\s+dump|exfiltrat|unauthorized\s+data|admin\s+access|read\s+/etc/passwd)\b")
+                any(
+                    v.get("flag")
+                    or v.get("proo")
+                    or v.get("evidence")
+                    or v.get("poc_script_code")
+                    for v in s.vulnerabilities
+                )
+                or _has(
+                    r"\b(flag\{[^}\n]+\}|credential|secret|token|api[_-]?key|database\s+dump|exfiltrat|unauthorized\s+data|admin\s+access|read\s+/etc/passwd)\b"
+                )
             ) and len(defaults) > 4:
                 self.state.mark_objective(phase.value, defaults[4], "done")
         elif phase == PipelinePhase.REPORT:
@@ -232,17 +447,24 @@ class _ObjectivesMixin:
             cmd = str(arguments.get("command", "")).lower()
 
         if phase == PipelinePhase.RECON:
-
             _subdomain_hit = (
                 cmd and any(b in cmd for b in _RECON_SUBDOMAIN_BINS)
             ) or tool_name in ("web_search", "browser_action")
             if _subdomain_hit:
                 self.state.mark_objective(phase.value, defaults[0], "done")
 
-            if cmd and any(b in cmd for b in _RECON_LIVE_HOST_BINS) and len(defaults) > 1:
+            if (
+                cmd
+                and any(b in cmd for b in _RECON_LIVE_HOST_BINS)
+                and len(defaults) > 1
+            ):
                 self.state.mark_objective(phase.value, defaults[1], "done")
 
-            if cmd and any(b in cmd for b in _RECON_PORT_SCAN_BINS) and len(defaults) > 2:
+            if (
+                cmd
+                and any(b in cmd for b in _RECON_PORT_SCAN_BINS)
+                and len(defaults) > 2
+            ):
                 self.state.mark_objective(phase.value, defaults[2], "done")
 
             _crawl_hit = (
@@ -259,20 +481,20 @@ class _ObjectivesMixin:
                 self.state.mark_objective(phase.value, defaults[4], "done")
 
         elif phase == PipelinePhase.ANALYSIS:
-
             _result_text = self._extract_result_text(result)
-            _has_tech_evidence = bool(re.search(
-                r"\b(apache|nginx|iis|php|python|django|flask|express|rails|laravel|"
-                r"wordpress|drupal|joomla|jquery|react|angular|vue|spring|struts|"
-                r"server:|x-powered-by|content-type:|location:|set-cookie:)\b",
-                _result_text,
-                re.IGNORECASE,
-            )) or bool(
+            _has_tech_evidence = bool(
+                re.search(
+                    r"\b(apache|nginx|iis|php|python|django|flask|express|rails|laravel|"
+                    r"wordpress|drupal|joomla|jquery|react|angular|vue|spring|struts|"
+                    r"server:|x-powered-by|content-type:|location:|set-cookie:)\b",
+                    _result_text,
+                    re.IGNORECASE,
+                )
+            ) or bool(
                 self._session and (self._session.technologies or self._session.urls)
             )
-            if (
-                tool_name in ("read_file", "browser_action", "web_search")
-                or (tool_name == "execute" and _has_tech_evidence)
+            if tool_name in ("read_file", "browser_action", "web_search") or (
+                tool_name == "execute" and _has_tech_evidence
             ):
                 self.state.mark_objective(phase.value, defaults[0], "done")
 
@@ -280,7 +502,8 @@ class _ObjectivesMixin:
                 self.state.mark_objective(phase.value, defaults[1], "done")
 
             meaningful_ev = [
-                e for e in self.state.evidence_log
+                e
+                for e in self.state.evidence_log
                 if float(e.get("confidence", 0)) >= 0.65
             ]
             if len(meaningful_ev) >= 2:
@@ -291,70 +514,129 @@ class _ObjectivesMixin:
 
             _enum_hit = tool_name in self._EXPLOIT_HEAVY_TOOLS or (
                 tool_name == "execute"
-                and bool(re.search(
-                    r"(GET|POST|PUT|DELETE|PATCH)\s+/|status[:\s]+\d{3}|https?://",
-                    result_text,
-                    re.IGNORECASE,
-                ))
+                and bool(
+                    re.search(
+                        r"(GET|POST|PUT|DELETE|PATCH)\s+/|status[:\s]+\d{3}|https?://",
+                        result_text,
+                        re.IGNORECASE,
+                    )
+                )
             )
             if _enum_hit:
                 self.state.mark_objective(phase.value, defaults[0], "done")
 
-            _auth_hit = bool(re.search(
-                r"(FLAG\{[^}\n]+\}|CVE-\d{4}-\d+|"
-                r"login\s+success|authenticated|access\s+denied|"
-                r"401|403|session\s+creat|token\s+issued|cookie)",
-                result_text,
-                re.IGNORECASE,
-            ))
+            _auth_patterns = _get_objective_regex("authentication")
+            _auth_hit = (
+                any(p.search(result_text) for p in _auth_patterns)
+                if _auth_patterns
+                else bool(
+                    re.search(
+                        r"(FLAG\{[^}\n]+\}|CVE-\d{4}-\d+|"
+                        r"login\s+success|authenticated|access\s+denied|"
+                        r"401|403|session\s+creat|token\s+issued|cookie)",
+                        result_text,
+                        re.IGNORECASE,
+                    )
+                )
+            )
             if _auth_hit and len(defaults) > 1:
                 self.state.mark_objective(phase.value, defaults[1], "done")
 
-            _authz_hit = bool(re.search(
-                r"(idor|bola|broken\s+access|access\s+control|forbidden|unauthorized|"
-                r"privilege\s+escalation|horizontal|vertical)",
-                result_text,
-                re.IGNORECASE,
-            ))
+            _authz_patterns = _get_objective_regex("authorization")
+            _authz_hit = (
+                any(p.search(result_text) for p in _authz_patterns)
+                if _authz_patterns
+                else bool(
+                    re.search(
+                        r"(idor|bola|broken\s+access|access\s+control|forbidden|unauthorized|"
+                        r"privilege\s+escalation|horizontal|vertical)",
+                        result_text,
+                        re.IGNORECASE,
+                    )
+                )
+            )
             if _authz_hit and len(defaults) > 2:
                 self.state.mark_objective(phase.value, defaults[2], "done")
 
-            _inject_hit = bool(re.search(
-                r"(sqli|sql\s+injection|xss|ssti|command\s+injection|"
-                r"ssrf|xxe|lfi|rfi|union\s+select|sleep\s*\(|"
-                r"<script|onerror=|alert\s*\(|\{\{.*\}\}|%27|'--)",
-                result_text,
-                re.IGNORECASE,
-            )) or tool_name in self._EXPLOIT_HEAVY_TOOLS
+            _inject_patterns = _get_objective_regex("injection")
+            _inject_hit = (
+                any(p.search(result_text) for p in _inject_patterns)
+                if _inject_patterns
+                else (
+                    bool(
+                        re.search(
+                            r"(sqli|sql\s+injection|xss|ssti|command\s+injection|"
+                            r"ssrf|xxe|lfi|rfi|union\s+select|sleep\s*\(|"
+                            r"<script|onerror=|alert\s*\(|\{\{.*\}\}|%27|'--)",
+                            result_text,
+                            re.IGNORECASE,
+                        )
+                    )
+                    or tool_name in self._EXPLOIT_HEAVY_TOOLS
+                )
+            )
             if _inject_hit and len(defaults) > 3:
                 self.state.mark_objective(phase.value, defaults[3], "done")
 
-            _impact_hit = bool(re.search(
-                r"(FLAG\{[^}\n]+\}|credential|secret|api[_-]?key|database\s+dump|"
-                r"exfiltrat|unauthorized\s+data|admin\s+access|read\s+/etc/passwd)",
-                result_text,
-                re.IGNORECASE,
-            )) or bool(
-                output_file and re.search(r"(proof|poc|dump|credential|secret|flag)", output_file, re.IGNORECASE)
+            _impact_hit = bool(
+                re.search(
+                    r"(FLAG\{[^}\n]+\}|credential|secret|api[_-]?key|database\s+dump|"
+                    r"exfiltrat|unauthorized\s+data|admin\s+access|read\s+/etc/passwd)",
+                    result_text,
+                    re.IGNORECASE,
+                )
+            ) or bool(
+                output_file
+                and re.search(
+                    r"(proof|poc|dump|credential|secret|flag)",
+                    output_file,
+                    re.IGNORECASE,
+                )
             )
             if _impact_hit and len(defaults) > 4:
                 self.state.mark_objective(phase.value, defaults[4], "done")
 
         elif phase == PipelinePhase.REPORT:
             result_text = self._extract_result_text(result)
+            _note_tools = {
+                "create_note",
+                "list_notes",
+                "search_notes",
+                "read_note",
+                "export_notes_wiki",
+            }
+            _is_note_tool = tool_name in _note_tools
             _is_report_tool = tool_name == "create_vulnerability_report"
-            _has_report_content = bool(re.search(
-                r"\b(vulnerability report|executive summary|CVSS|severity[:\s]|"
-                r"remediation|proof.of.concept|PoC|report generated|report written|"
-                r"risk rating|findings? documented)\b",
-                result_text,
-                re.IGNORECASE,
-            ))
+            _has_report_marker = bool(
+                isinstance(result, dict)
+                and (
+                    result.get("artifact_type") == "vulnerability_report"
+                    or result.get("report_generated") is True
+                )
+            )
+            _has_report_content = bool(
+                (not _is_note_tool)
+                and re.search(
+                    r"\b(vulnerability report|executive summary|CVSS|severity[:\s]|"
+                    r"remediation|proof.of.concept|PoC|report generated|report written|"
+                    r"risk rating|findings? documented)\b",
+                    result_text,
+                    re.IGNORECASE,
+                )
+            )
             _is_report_output = bool(
                 output_file
-                and re.search(r"report|finding|vuln", output_file, re.IGNORECASE)
+                and (
+                    "/vulnerabilities/" in output_file.replace("\\", "/")
+                    or output_file.replace("\\", "/").startswith("vulnerabilities/")
+                )
             )
-            if _is_report_tool or _has_report_content or _is_report_output:
+            if (
+                (_is_report_tool and not _is_note_tool)
+                or _has_report_marker
+                or _has_report_content
+                or _is_report_output
+            ):
                 self.state.mark_objective(phase.value, defaults[0], "done")
                 self.state.mark_objective(phase.value, defaults[1], "done")
             if output_file and output_file.startswith("output/"):
@@ -370,8 +652,14 @@ class _ObjectivesMixin:
 
         parts: list[str] = []
         for key in (
-            "stdout", "stderr", "result", "summary", "error", "message",
-            "note", "findings",
+            "stdout",
+            "stderr",
+            "result",
+            "summary",
+            "error",
+            "message",
+            "note",
+            "findings",
         ):
             value = result.get(key)
             if isinstance(value, str):
@@ -410,7 +698,9 @@ class _ObjectivesMixin:
         output_file: str | None,
     ) -> None:
         if output_file:
-            _t, _s = self._enrich_evidence(f"Artifact saved to {output_file}", ["artifact", "file"], 0.9, tool_name)
+            _t, _s = self._enrich_evidence(
+                f"Artifact saved to {output_file}", ["artifact", "file"], 0.9, tool_name
+            )
             self.state.add_evidence(
                 phase=phase,
                 source_tool=tool_name,
@@ -426,7 +716,9 @@ class _ObjectivesMixin:
             return
 
         if not success:
-            err = str(result.get("error", "")).strip() if isinstance(result, dict) else ""
+            err = (
+                str(result.get("error", "")).strip() if isinstance(result, dict) else ""
+            )
             if err:
                 _summary = f"Execution error observed: {err[:240]}"
                 _t, _s = self._enrich_evidence(_summary, ["error"], 0.4, tool_name)
@@ -452,9 +744,27 @@ class _ObjectivesMixin:
                 severity=_s,
             )
 
+            # Continuous correlation: trigger on every new finding
+            try:
+                from .correlation_engine import get_correlation_engine
+                engine = get_correlation_engine()
+                # Add finding to correlation engine for continuous discovery
+                engine.add_finding(
+                    vuln_class="flag_capture",
+                    severity=_s,
+                    confidence=1.0,
+                    endpoint="",
+                    parameter="",
+                    description=_summary,
+                )
+            except Exception as _corr_err:
+                logger.debug("Continuous correlation failed: %s", _corr_err)
+
         for cve in re.findall(r"CVE-\d{4}-\d{4,7}", blob, re.IGNORECASE):
             _summary = f"CVE reference discovered: {cve.upper()}"
-            _t, _s = self._enrich_evidence(_summary, ["cve", "vulnerability"], 0.75, tool_name)
+            _t, _s = self._enrich_evidence(
+                _summary, ["cve", "vulnerability"], 0.75, tool_name
+            )
             self.state.add_evidence(
                 phase=phase,
                 source_tool=tool_name,
@@ -465,14 +775,13 @@ class _ObjectivesMixin:
             )
 
         url_matches = list(
-            dict.fromkeys(
-                re.findall(r"https?://[^\s\"'<>]+", blob, re.IGNORECASE)
-            )
+            dict.fromkeys(re.findall(r"https?://[^\s\"'<>]+", blob, re.IGNORECASE))
         )
 
         _target_domain: str = ""
         if self._session and self._session.target:
             import urllib.parse as _up
+
             _parsed = _up.urlparse(
                 self._session.target
                 if "://" in self._session.target
@@ -486,18 +795,21 @@ class _ObjectivesMixin:
         in_scope_urls: list[str] = []
         if _target_domain:
             import urllib.parse as _up2
+
             for _u in url_matches:
                 try:
                     _h = _up2.urlparse(_u).hostname or ""
-                except Exception as e:
-                    logger.debug("Exception in %s: %s", __name__, e)
+                except Exception as _e:
+                    logger.warning("Operation failed: %s", _e)
                     continue
                 if _h.endswith(_target_domain):
                     in_scope_urls.append(_u)
 
         for url in in_scope_urls[:4]:
             _summary = f"Interesting URL collected: {url}"
-            _t, _s = self._enrich_evidence(_summary, ["url", "endpoint"], 0.65, tool_name)
+            _t, _s = self._enrich_evidence(
+                _summary, ["url", "endpoint"], 0.65, tool_name
+            )
             self.state.add_evidence(
                 phase=phase,
                 source_tool=tool_name,
@@ -518,7 +830,9 @@ class _ObjectivesMixin:
         )
         for hit in port_hits[:4]:
             _summary = f"Service/port evidence: {hit}"
-            _t, _s = self._enrich_evidence(_summary, ["network", "recon"], 0.7, tool_name)
+            _t, _s = self._enrich_evidence(
+                _summary, ["network", "recon"], 0.7, tool_name
+            )
             self.state.add_evidence(
                 phase=phase,
                 source_tool=tool_name,
@@ -564,11 +878,50 @@ class _ObjectivesMixin:
                 severity=_s,
             )
 
+        workflow_re = re.compile(
+            r"(?i)\b("
+            r"workflow|state|transition|step|checkout|payment|refund|coupon|promo|"
+            r"approval|invite|register|signup|tenant|organization|workspace|project|"
+            r"role|admin|owner|member|impersonat|verify|totp|otp|mfa"
+            r")\b"
+        )
+        workflow_lines: list[str] = []
+        for line in blob.splitlines():
+            line = line.strip()
+            if len(line) < 16 or not workflow_re.search(line):
+                continue
+            if _FALSE_SIGNAL_RE.search(line):
+                continue
+            workflow_lines.append(line[:260])
+            if len(workflow_lines) >= 3:
+                break
+        for line in workflow_lines:
+            base_tags = ["workflow", "business_logic"]
+            lower_line = line.lower()
+            if any(token in lower_line for token in ("tenant", "org", "workspace", "project")):
+                base_tags.extend(["tenant", "trust_boundary"])
+            if any(token in lower_line for token in ("role", "admin", "owner", "member", "impersonat")):
+                base_tags.extend(["principal", "authorization"])
+            if any(token in lower_line for token in ("checkout", "payment", "refund", "coupon", "promo", "balance")):
+                base_tags.extend(["commerce", "state_machine"])
+            _summary = f"Workflow signal: {line}"
+            _t, _s = self._enrich_evidence(_summary, base_tags, 0.68, tool_name)
+            self.state.add_evidence(
+                phase=phase,
+                source_tool=tool_name,
+                summary=_summary,
+                confidence=0.68,
+                tags=_t,
+                severity=_s,
+            )
+
         if tool_name == "execute":
             cmd = str(arguments.get("command", "")).strip()
             if cmd:
                 _summary = f"Executed command: {cmd[:220]}"
-                _t, _s = self._enrich_evidence(_summary, ["execution", "trace"], 0.55, tool_name)
+                _t, _s = self._enrich_evidence(
+                    _summary, ["execution", "trace"], 0.55, tool_name
+                )
                 self.state.add_evidence(
                     phase=phase,
                     source_tool=tool_name,
@@ -578,50 +931,86 @@ class _ObjectivesMixin:
                     severity=_s,
                 )
 
+        if self._session and getattr(self._session, "app_model", None):
+            observed_endpoint = str(
+                arguments.get("url")
+                or arguments.get("endpoint")
+                or arguments.get("path")
+                or arguments.get("target")
+                or ""
+            ).strip()
+            observed_params = [
+                key
+                for key in arguments.keys()
+                if key
+                not in {
+                    "command",
+                    "url",
+                    "endpoint",
+                    "path",
+                    "target",
+                    "body",
+                    "data",
+                    "headers",
+                    "cookies",
+                }
+            ]
+            try:
+                self._session.app_model.record_text_signal(
+                    blob,
+                    endpoint=observed_endpoint,
+                    param_names=observed_params,
+                    auth_type=getattr(self._session, "auth_type", ""),
+                    method=str(arguments.get("method", tool_name)).upper(),
+                )
+            except Exception as _model_err:
+                logger.debug("Application model signal ingest failed: %s", _model_err)
+
         if success:
             self._auto_form_hypotheses(phase, tool_name, arguments, blob)
 
-    _VULN_HYPO_PATTERNS: list[tuple[re.Pattern, str, str]] = [
-        (re.compile(
-            r"\b(sql\s*i(?:njection)?|sqli|union\s+select|error.based\s+sql|"
-            r"boolean.based|time.based\s+blind)\b", re.IGNORECASE),
-         "sql_injection", "sqlmap"),
-        (re.compile(
-            r"\b(xss|cross.site\s+script|reflected|stored\s+xss|dom.based)\b",
-            re.IGNORECASE),
-         "xss", "dalfox"),
-        (re.compile(
-            r"\b(ssrf|server.side\s+request|internal\s+host|metadata\s+endpoint|"
-            r"169\.254\.169\.254)\b", re.IGNORECASE),
-         "ssr", "ffu"),
-        (re.compile(
-            r"\b(idor|insecure\s+direct|object\s+reference|bola|broken\s+access\s+control)\b",
-            re.IGNORECASE),
-         "idor", "curl"),
-        (re.compile(
-            r"\b(rce|remote\s+code\s+exec|command\s+exec|os\s+command\s+inject)\b",
-            re.IGNORECASE),
-         "rce", "curl"),
-        (re.compile(
-            r"\b(ssti|server.side\s+template|template\s+inject)\b", re.IGNORECASE),
-         "ssti", "tplmap"),
-        (re.compile(
-            r"\b(lfi|local\s+file\s+inclus|path\s+travers|directory\s+travers|"
-            r"\.\./|etc/passwd)\b", re.IGNORECASE),
-         "lfi", "ffu"),
-        (re.compile(
-            r"\b(auth\s+bypass|broken\s+auth|default\s+cred|weak\s+pass|"
-            r"admin:admin|password123)\b", re.IGNORECASE),
-         "auth_bypass", "hydra"),
-        (re.compile(
-            r"\b(jwt|json\s+web\s+token|hs256|alg.none|secret\s+key\s+exposed)\b",
-            re.IGNORECASE),
-         "jwt_weakness", "jwt_tool"),
-        (re.compile(
-            r"\b(open\s+redirect|location\s+header\s+inject|redirect\s+to)\b",
-            re.IGNORECASE),
-         "open_redirect", "curl"),
-    ]
+    # ── Dynamic hypothesis index loaded from data/patterns.json ──────────
+    # Data-driven, NOT hardcoded. Each entry: (indicators_set, key, description, suggested_actions)
+    # Built at class-init time from the authoritative patterns JSON.
+
+    @staticmethod
+    def _load_vuln_hypo_index() -> list[dict[str, Any]]:
+        """Build hypothesis index from data/patterns.json.
+
+        Returns a list of dicts keyed by pattern name, each with:
+        - indicators: set of lowercase indicator words/phrases
+        - description: human-readable description
+        - suggested_actions: list of recommended test actions
+        """
+        _patterns_path = Path(__file__).parent.parent / "data" / "patterns.json"
+        if not _patterns_path.exists():
+            return []
+        try:
+            with open(_patterns_path) as _pf:
+                _raw: dict[str, dict[str, Any]] = json.load(_pf)
+        except (json.JSONDecodeError, OSError):
+            return []
+
+        index: list[dict[str, Any]] = []
+        for key, entry in _raw.items():
+            indicators = {
+                str(ind).strip().lower()
+                for ind in (entry.get("indicators") or [])
+                if str(ind).strip()
+            }
+            if not indicators:
+                continue
+            index.append(
+                {
+                    "key": key,
+                    "indicators": indicators,
+                    "description": str(entry.get("description", "")),
+                    "suggested_actions": entry.get("suggested_actions", []),
+                }
+            )
+        return index
+
+    _vuln_hypo_index: list[dict[str, Any]] = []
 
     _HYPO_FALSE_SIGNAL_RE = re.compile(
         r"(?i)\b("
@@ -632,6 +1021,126 @@ class _ObjectivesMixin:
         r"nothing\s+found|no\s+result|0\s+result"
         r")\b"
     )
+
+    @staticmethod
+    def _load_vuln_hypo_patterns() -> list[tuple[re.Pattern, str, str]]:
+        """Load vuln hypothesis patterns dynamically from data sources.
+
+        Patterns are derived from:
+        1. unified pattern catalog — hypothesis indicators
+        2. system.txt §11 — vulnerability priority terms
+        3. skills/vulnerabilities/ — skill file names as indicators
+        """
+        patterns: list[tuple[re.Pattern, str, str]] = []
+
+        # Source 1: unified pattern catalog hypothesis indicators
+        try:
+            for entry in load_vuln_hypothesis_legacy():
+                indicators = [
+                    str(ind).strip()
+                    for ind in (entry.get("patterns") or entry.get("indicators", []))
+                    if str(ind).strip()
+                ]
+                if not indicators:
+                    continue
+                vuln_type = (
+                    str(entry.get("type", entry.get("name", "")))
+                    .strip()
+                    .lower()
+                    .replace("-", "_")
+                )
+                if vuln_type.startswith("hypothesis_"):
+                    vuln_type = vuln_type[len("hypothesis_") :]
+                if not vuln_type:
+                    continue
+                pattern = _indicator_pattern(indicators)
+                if pattern is None:
+                    continue
+                confirm_tool = _choose_confirm_tool(vuln_type, indicators)
+                patterns.append((pattern, vuln_type, confirm_tool))
+        except Exception as exc:
+            logger.debug("Failed to load hypothesis patterns from unified catalog: %s", exc)
+
+        # Source 2: system.txt §12 VULNERABILITY PRIORITY terms
+        try:
+            prompt_path = Path(__file__).parent.parent / "prompts" / "system.txt"
+            if prompt_path.exists():
+                content = prompt_path.read_text(encoding="utf-8")
+                in_section = False
+                for line in content.splitlines():
+                    if "§12" in line or "VULNERABILITY PRIORITY" in line:
+                        in_section = True
+                        continue
+                    if in_section:
+                        if line.startswith("━") or (
+                            line.strip().startswith("§") and "§12" not in line
+                        ):
+                            break
+                        if (
+                            "P1" in line
+                            or "P2" in line
+                            or "P3" in line
+                            or "P4" in line
+                            or "P5" in line
+                        ):
+                            parts = line.split("  ", 1)
+                            if len(parts) > 1:
+                                raw_terms = parts[1]
+                                for term in raw_terms.split(","):
+                                    term = term.strip().split("(")[0].strip()
+                                    if (
+                                        term
+                                        and len(term) >= 3
+                                        and term.lower()
+                                        not in (
+                                            "and",
+                                            "or",
+                                            "the",
+                                        )
+                                    ):
+                                        vuln_type = term.lower().replace(" ", "_")
+                                        _pat = _indicator_pattern([term])
+                                        if _pat is not None:
+                                            _labels = _resolve_vuln_labels(
+                                                vuln_type, [term]
+                                            )
+                                            _confirm = _choose_confirm_tool(
+                                                vuln_type, [term, *_labels]
+                                            )
+                                            patterns.append(
+                                                (_pat, vuln_type, _confirm)
+                                            )
+        except Exception as exc:
+            logger.debug("Failed to load hypothesis patterns from system prompt: %s", exc)
+
+        # Source 3: skills catalog — vulnerability skill file names
+        try:
+            skills_dir = Path(__file__).parent.parent / "skills" / "vulnerabilities"
+            if skills_dir.is_dir():
+                for md_file in skills_dir.iterdir():
+                    if md_file.suffix == ".md":
+                        vuln_type = md_file.stem.lower().replace("-", "_")
+                        _term = md_file.stem.replace("-", " ").replace("_", " ")
+                        _pat = _indicator_pattern([_term])
+                        if _pat is not None:
+                            _labels = _resolve_vuln_labels(vuln_type, [_term])
+                            _confirm = _choose_confirm_tool(
+                                vuln_type, [_term, *_labels]
+                            )
+                            patterns.append((_pat, vuln_type, _confirm))
+        except Exception as exc:
+            logger.debug("Failed to load hypothesis patterns from skills catalog: %s", exc)
+
+        return patterns
+
+    # Lazy-loaded — built on first access from data sources
+    _cached_vuln_hypo_patterns: list[tuple[re.Pattern, str, str]] | None = None
+
+    @property
+    def _VULN_HYPO_PATTERNS(self) -> list[tuple[re.Pattern, str, str]]:
+        if self.__class__._cached_vuln_hypo_patterns is None:
+            self.__class__._cached_vuln_hypo_patterns = self._load_vuln_hypo_patterns()
+        return self.__class__._cached_vuln_hypo_patterns
 
     def _auto_form_hypotheses(
         self,
@@ -673,9 +1182,7 @@ class _ObjectivesMixin:
                 continue
             _label = _vuln_type.replace("_", " ").upper()
             self.state.add_hypothesis(
-                claim=(
-                    f"Potential {_label} vulnerability detected near {_endpoint}"
-                ),
+                claim=(f"Potential {_label} vulnerability detected near {_endpoint}"),
                 test_plan=(
                     f"Use {_confirm_tool} to confirm. "
                     "Test all input parameters on the endpoint. "
@@ -687,30 +1194,33 @@ class _ObjectivesMixin:
             )
             formed += 1
 
-        if phase == "RECON" and formed < _MAX_HYPO_PER_CALL:
-            _port_hits = list(dict.fromkeys(
-                re.findall(r"\b(\d{1,5})/open\b", result_text, re.IGNORECASE)
-            ))
-            if _port_hits:
-                _ports_str = ", ".join(_port_hits[:3])
-                self.state.add_hypothesis(
-                    claim=(
-                        f"Open port(s) {_ports_str} may expose exploitable services"
-                    ),
-                    test_plan=(
-                        f"Run: nmap -sV -sC -p {','.join(_port_hits[:3])} <target>. "
-                        "Check service versions against CVE databases. "
-                        "Test for default credentials and known exploits."
-                    ),
-                    phase=phase,
-                    tags=["network", "service"],
+            if phase == "RECON" and formed < _MAX_HYPO_PER_CALL:
+                _port_hits = list(
+                    dict.fromkeys(
+                        re.findall(r"\b(\d{1,5})/open\b", result_text, re.IGNORECASE)
+                    )
                 )
+                if _port_hits:
+                    _ports_str = ", ".join(_port_hits[:3])
+                    self.state.add_hypothesis(
+                        claim=(
+                            f"Open port(s) {_ports_str} may expose exploitable services"
+                        ),
+                        test_plan=(
+                            f"Run: nmap -sV -sC -p {','.join(_port_hits[:3])} <target>. "
+                            "Check service versions against CVE databases. "
+                            "Test for default credentials and known exploits."
+                        ),
+                        phase=phase,
+                        tags=["network", "service"],
+                    )
 
     def _build_phase_gate_note(self, tool_name: str, success: bool) -> str:
         phase = self._get_current_phase()
         phase_name = phase.value
         phase_evidence = [
-            e for e in self.state.evidence_log
+            e
+            for e in self.state.evidence_log
             if str(e.get("phase", "")).upper() == phase_name
         ]
         cfg = get_config()
@@ -748,7 +1258,6 @@ class _ObjectivesMixin:
     def _check_tool_budget(self, tool_name: str, phase: str) -> str:
         budget = _PHASE_TOOL_BUDGETS.get(phase, {}).get(tool_name)
         if budget is None:
-
             eff = self.state.get_tool_effectiveness(phase, tool_name)
             calls = int(eff.get("calls", 0.0))
             hit_rate = float(eff.get("hit_rate", 0.0))

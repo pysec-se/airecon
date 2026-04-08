@@ -3,18 +3,18 @@ from __future__ import annotations
 import json
 import logging
 import re
+import warnings
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
-from xml.etree.ElementTree import (
-    ParseError as XMLParseError,
-)
-
+from defusedxml.ElementTree import ParseError as XMLParseError
 import defusedxml.ElementTree as ET
 
 from .command_parse import extract_primary_binary
+from .constants import SEVERITY_ORDER
 
 logger = logging.getLogger("airecon.agent.output_parser")
+
 
 @dataclass
 class ParsedOutput:
@@ -30,17 +30,28 @@ class ParsedOutput:
 
     causal_observations: list[dict[str, Any]] = field(default_factory=list)
 
-_MAX_ITEMS_BY_PHASE: dict[str, int] = {
-    "RECON": 200,
-    "ANALYSIS": 150,
-    "EXPLOIT": 50,
-    "REPORT": 25,
-}
+
+# Load max items by phase from config.py
+def _get_max_items_by_phase() -> dict[str, int]:
+    from ..config import get_config as _get_config
+
+    cfg = _get_config()
+    return {
+        "RECON": getattr(cfg, "pipeline_output_parser_max_items_recon", 200),
+        "ANALYSIS": getattr(cfg, "pipeline_output_parser_max_items_analysis", 150),
+        "EXPLOIT": getattr(cfg, "pipeline_output_parser_max_items_exploit", 50),
+        "REPORT": getattr(cfg, "pipeline_output_parser_max_items_report", 25),
+    }
+
+
+_MAX_ITEMS_BY_PHASE: dict[str, int] = _get_max_items_by_phase()
 
 DEFAULT_MAX_ITEMS = 100
 
 MAX_RAW_FALLBACK = 3000
 
+
+# Load tools_meta for other configs
 def _load_tools_meta() -> dict[str, Any]:
     try:
         path = Path(__file__).resolve().parent.parent / "data" / "tools_meta.json"
@@ -49,17 +60,23 @@ def _load_tools_meta() -> dict[str, Any]:
         logger.warning("Could not load tools_meta.json: %s", exc)
         return {}
 
-_TOOLS_META: dict[str, Any] = _load_tools_meta()
-_CAUSAL_CONFIDENCE_RAW = _TOOLS_META.get("causal_observation_confidence", {})
-if not isinstance(_CAUSAL_CONFIDENCE_RAW, dict):
-    _CAUSAL_CONFIDENCE_RAW = {}
 
-def _causal_confidence(key: str, default: float) -> float:
-    try:
-        value = float(_CAUSAL_CONFIDENCE_RAW.get(key, default))
-    except (TypeError, ValueError):
-        value = default
-    return max(0.0, min(value, 1.0))
+_TOOLS_META: dict[str, Any] = _load_tools_meta()
+
+
+# Load causal observation confidence from config.py (moved from tools_meta.json)
+def _get_causal_confidence(key: str, default: float) -> float:
+    from ..config import get_config as _get_config
+
+    cfg = _get_config()
+    config_key = f"causal_confidence_{key}"
+    value = getattr(cfg, config_key, default)
+    return max(0.0, min(float(value), 1.0)) if value else default
+
+
+# Backwards compatible alias
+_causal_confidence = _get_causal_confidence
+
 
 def _load_tool_patterns() -> list[tuple[re.Pattern[str], str]]:
     patterns = _TOOLS_META.get("output_parser_tool_patterns", {})
@@ -75,6 +92,7 @@ def _load_tool_patterns() -> list[tuple[re.Pattern[str], str]]:
         if binary and parser_type
     ]
 
+
 def _compile_regex_list(raw_patterns: list[Any]) -> list[re.Pattern[str]]:
     compiled: list[re.Pattern[str]] = []
     for pattern in raw_patterns:
@@ -87,7 +105,10 @@ def _compile_regex_list(raw_patterns: list[Any]) -> list[re.Pattern[str]]:
             logger.debug("Skipping invalid adaptive regex pattern: %r", p)
     return compiled
 
-def _load_adaptive_unknown_hints() -> tuple[list[dict[str, Any]], list[dict[str, Any]], list[dict[str, Any]], dict[str, str]]:
+
+def _load_adaptive_unknown_hints() -> tuple[
+    list[dict[str, Any]], list[dict[str, Any]], list[dict[str, Any]], dict[str, str]
+]:
     cfg = _TOOLS_META.get("output_parser_adaptive_hints", {})
     if not isinstance(cfg, dict):
         return [], [], [], {}
@@ -105,9 +126,21 @@ def _load_adaptive_unknown_hints() -> tuple[list[dict[str, Any]], list[dict[str,
         content_rules.append(
             {
                 "parser": parser_name,
-                "contains_any": [str(v).lower() for v in (raw.get("contains_any") or []) if str(v).strip()],
-                "contains_all": [str(v).lower() for v in (raw.get("contains_all") or []) if str(v).strip()],
-                "command_contains_any": [str(v).lower() for v in (raw.get("command_contains_any") or []) if str(v).strip()],
+                "contains_any": [
+                    str(v).lower()
+                    for v in (raw.get("contains_any") or [])
+                    if str(v).strip()
+                ],
+                "contains_all": [
+                    str(v).lower()
+                    for v in (raw.get("contains_all") or [])
+                    if str(v).strip()
+                ],
+                "command_contains_any": [
+                    str(v).lower()
+                    for v in (raw.get("command_contains_any") or [])
+                    if str(v).strip()
+                ],
                 "regex_any": _compile_regex_list(raw.get("regex_any") or []),
                 "regex_all": _compile_regex_list(raw.get("regex_all") or []),
             }
@@ -146,8 +179,16 @@ def _load_adaptive_unknown_hints() -> tuple[list[dict[str, Any]], list[dict[str,
         json_rules.append(
             {
                 "parser": parser_name,
-                "contains_any": [str(v).lower() for v in (raw.get("contains_any") or []) if str(v).strip()],
-                "contains_all": [str(v).lower() for v in (raw.get("contains_all") or []) if str(v).strip()],
+                "contains_any": [
+                    str(v).lower()
+                    for v in (raw.get("contains_any") or [])
+                    if str(v).strip()
+                ],
+                "contains_all": [
+                    str(v).lower()
+                    for v in (raw.get("contains_all") or [])
+                    if str(v).strip()
+                ],
                 "regex_any": _compile_regex_list(raw.get("regex_any") or []),
                 "regex_all": _compile_regex_list(raw.get("regex_all") or []),
             }
@@ -164,24 +205,59 @@ def _load_adaptive_unknown_hints() -> tuple[list[dict[str, Any]], list[dict[str,
 
     return content_rules, count_rules, json_rules, command_hints
 
+
 _TOOL_PATTERNS: list[tuple[re.Pattern[str], str]] = _load_tool_patterns()
 _GENERIC_WARNED_TOOLS: set[str] = set()
 
-_COMMON_SHELL_TOOLS: frozenset[str] = frozenset({
-    "which", "whereis", "type",
-    "cat", "head", "tail", "wc", "sort", "uniq",
-    "grep", "egrep", "fgrep", "zgrep",
-    "awk", "sed", "cut", "tr",
-    "xargs", "tee", "paste",
-    "echo", "printf",
-    "true", "false",
-    "cd", "pwd", "ls", "dir",
-    "cp", "mv", "rm", "mkdir", "touch",
-    "chmod", "chown",
-    "env", "export",
-    "curl", "wget",
-    "for", "while", "if", "then", "do", "done",
-})
+_COMMON_SHELL_TOOLS: frozenset[str] = frozenset(
+    {
+        "which",
+        "whereis",
+        "type",
+        "cat",
+        "head",
+        "tail",
+        "wc",
+        "sort",
+        "uniq",
+        "grep",
+        "egrep",
+        "fgrep",
+        "zgrep",
+        "awk",
+        "sed",
+        "cut",
+        "tr",
+        "xargs",
+        "tee",
+        "paste",
+        "echo",
+        "printf",
+        "true",
+        "false",
+        "cd",
+        "pwd",
+        "ls",
+        "dir",
+        "cp",
+        "mv",
+        "rm",
+        "mkdir",
+        "touch",
+        "chmod",
+        "chown",
+        "env",
+        "export",
+        "curl",
+        "wget",
+        "for",
+        "while",
+        "if",
+        "then",
+        "do",
+        "done",
+    }
+)
 
 _ADAPTIVE_TOOL_HINTS: dict[str, str] = {}
 _MAX_ADAPTIVE_TOOL_HINTS = 128
@@ -191,6 +267,7 @@ _MAX_ADAPTIVE_TOOL_HINTS = 128
     _ADAPTIVE_JSON_RULES,
     _ADAPTIVE_COMMAND_HINTS,
 ) = _load_adaptive_unknown_hints()
+
 
 def _remember_adaptive_tool_hint(binary: str, parser_name: str) -> None:
     b = str(binary or "").strip().lower()
@@ -204,6 +281,7 @@ def _remember_adaptive_tool_hint(binary: str, parser_name: str) -> None:
         oldest = next(iter(_ADAPTIVE_TOOL_HINTS))
         _ADAPTIVE_TOOL_HINTS.pop(oldest, None)
 
+
 def detect_tool(command: str) -> str | None:
     first_token = extract_primary_binary(command)
     if not first_token:
@@ -213,6 +291,7 @@ def detect_tool(command: str) -> str | None:
         if pattern.search(first_token):
             return tool_name
     return None
+
 
 def _signature_candidates_for_unknown(command: str, stdout: str) -> list[str]:
     cmd = (command or "").lower()
@@ -226,7 +305,9 @@ def _signature_candidates_for_unknown(command: str, stdout: str) -> list[str]:
         if name in _PARSERS and name not in candidates:
             candidates.append(name)
 
-    def _rule_matches(text: str, rule: dict[str, Any], *, command_text: str = "") -> bool:
+    def _rule_matches(
+        text: str, rule: dict[str, Any], *, command_text: str = ""
+    ) -> bool:
         contains_any = rule.get("contains_any", [])
         if contains_any and not any(token in text for token in contains_any):
             return False
@@ -234,7 +315,9 @@ def _signature_candidates_for_unknown(command: str, stdout: str) -> list[str]:
         if contains_all and not all(token in text for token in contains_all):
             return False
         command_contains_any = rule.get("command_contains_any", [])
-        if command_contains_any and not any(token in command_text for token in command_contains_any):
+        if command_contains_any and not any(
+            token in command_text for token in command_contains_any
+        ):
             return False
         regex_any = rule.get("regex_any", [])
         if regex_any and not any(rx.search(text) for rx in regex_any):
@@ -284,6 +367,7 @@ def _signature_candidates_for_unknown(command: str, stdout: str) -> list[str]:
 
     return candidates
 
+
 def _score_parsed_quality(parsed: ParsedOutput, stdout: str) -> float:
     lines = [line.strip() for line in stdout.splitlines() if line.strip()]
     raw_count = len(lines)
@@ -304,7 +388,9 @@ def _score_parsed_quality(parsed: ParsedOutput, stdout: str) -> float:
         ):
             structured += 1
     structure_ratio = structured / max(1, min(len(items), 30))
-    summary_quality = 1.0 if parsed.summary and not parsed.summary.startswith("Output:") else 0.4
+    summary_quality = (
+        1.0 if parsed.summary and not parsed.summary.startswith("Output:") else 0.4
+    )
     raw_fallback_penalty = 0.15 if parsed.raw_truncated and not items else 0.0
 
     score = (
@@ -315,6 +401,7 @@ def _score_parsed_quality(parsed: ParsedOutput, stdout: str) -> float:
         - raw_fallback_penalty
     )
     return max(0.0, min(1.0, score))
+
 
 def _adaptive_unknown_parse(
     command: str,
@@ -349,6 +436,7 @@ def _adaptive_unknown_parse(
         _remember_adaptive_tool_hint(detected_binary, best_parser)
     return best_parsed, best_parser, best_score
 
+
 _CAUSAL_URL_STATUS_RE = re.compile(r"(https?://\S+?)\s+\[(\d{3})[^\]]*\]")
 _CAUSAL_URL_RE = re.compile(r"^https?://\S+")
 _CAUSAL_ANY_URL_RE = re.compile(r"https?://\S+")
@@ -359,10 +447,56 @@ _CAUSAL_SUBDOMAIN_RE = re.compile(
     re.IGNORECASE,
 )
 _CAUSAL_SEVERITY_RE = re.compile(r"\[(CRITICAL|HIGH|MEDIUM|LOW|INFO)\]", re.IGNORECASE)
-_CAUSAL_VULN_HINT_RE = re.compile(
-    r"\b(vulnerab|exploit|sqli|sql injection|xss|ssrf|idor|csrf|rce|lfi|cve-\d{4}-\d{4,7})\b",
-    re.IGNORECASE,
-)
+
+_DYNAMIC_VULN_PATTERNS: list[tuple[str, str, float]] = []
+
+
+def _load_vuln_patterns() -> list[tuple[str, str, float]]:
+    """Load vulnerability hint patterns from data files dynamically."""
+    patterns = []
+    try:
+        from pathlib import Path
+
+        patterns_file = Path(__file__).parent.parent / "data" / "vuln_patterns.json"
+        if patterns_file.exists():
+            import json
+
+            data = json.loads(patterns_file.read_text(encoding="utf-8"))
+            for p in data.get("patterns", []):
+                patterns.append(
+                    (
+                        p.get("pattern", ""),
+                        p.get("category", "unknown"),
+                        p.get("weight", 0.5),
+                    )
+                )
+    except Exception as _e:
+        logger.debug("Failed to load vulnerability hint patterns: %s", _e)
+
+    if not patterns:
+        patterns = [
+            (r"vulnerab", "general_vuln", 0.6),
+            (r"exploit", "exploitation", 0.7),
+            (r"injection", "injection", 0.8),
+            (r"bypass", "bypass", 0.6),
+            (r"exposed", "exposure", 0.5),
+        ]
+
+    return patterns
+
+
+def _get_vuln_hint_re() -> re.Pattern[str]:
+    """Get dynamically loaded vulnerability hint regex."""
+    global _DYNAMIC_VULN_PATTERNS
+    if not _DYNAMIC_VULN_PATTERNS:
+        _DYNAMIC_VULN_PATTERNS = _load_vuln_patterns()
+
+    if _DYNAMIC_VULN_PATTERNS:
+        pattern = "|".join(p[0] for p in _DYNAMIC_VULN_PATTERNS)
+        return re.compile(rf"\b({pattern}|cve-\d{{4}}-\d{{4,7}})\b", re.IGNORECASE)
+
+    return re.compile(r"\bvulnerab|exploit\b", re.IGNORECASE)
+
 
 def _append_causal_observation(
     observations: list[dict[str, Any]],
@@ -399,6 +533,7 @@ def _append_causal_observation(
             "phase": str(phase or "").strip().upper()[:24],
         }
     )
+
 
 def _extract_causal_observations(
     command: str,
@@ -544,7 +679,8 @@ def _extract_causal_observations(
             )
 
         sev_match = _CAUSAL_SEVERITY_RE.search(item)
-        if sev_match or _CAUSAL_VULN_HINT_RE.search(item):
+        vuln_hint_re = _get_vuln_hint_re()
+        if sev_match or vuln_hint_re.search(item):
             severity = sev_match.group(1).upper() if sev_match else "UNSPECIFIED"
             _append_causal_observation(
                 observations,
@@ -575,6 +711,7 @@ def _extract_causal_observations(
         )
 
     return observations
+
 
 def parse_tool_output(
     command: str,
@@ -636,7 +773,6 @@ def parse_tool_output(
                 )
             _GENERIC_WARNED_TOOLS.add(detected)
         elif is_common_tool:
-
             logger.debug(
                 "Common shell tool '%s' parsed via '%s' (quality=%.2f).",
                 detected,
@@ -656,6 +792,7 @@ def parse_tool_output(
         logger.warning(f"Generic parser failed: {e}")
         return None
 
+
 def register_output_parser(
     parser_name: str,
     parser_fn: Any,
@@ -672,6 +809,7 @@ def register_output_parser(
                 continue
             _TOOL_PATTERNS.append((re.compile(rf"\b{re.escape(b)}\b"), name))
 
+
 def _parse_nmap(stdout: str, max_items: int = DEFAULT_MAX_ITEMS) -> ParsedOutput:
     if "<?xml" in stdout or "<nmaprun" in stdout:
         return _parse_nmap_xml(stdout)
@@ -683,9 +821,7 @@ def _parse_nmap(stdout: str, max_items: int = DEFAULT_MAX_ITEMS) -> ParsedOutput
     for line in stdout.split("\n"):
         line = line.strip()
 
-        port_match = re.match(
-            r"(\d+)/(tcp|udp)\s+(open|filtered)\s+(\S+)\s*(.*)", line
-        )
+        port_match = re.match(r"(\d+)/(tcp|udp)\s+(open|filtered)\s+(\S+)\s*(.*)", line)
         if port_match:
             port, proto, state, service, version = port_match.groups()
             version = version.strip()[:60]
@@ -714,6 +850,7 @@ def _parse_nmap(stdout: str, max_items: int = DEFAULT_MAX_ITEMS) -> ParsedOutput
         total_count=len(open_ports),
     )
 
+
 def _parse_nmap_xml(stdout: str, max_items: int = DEFAULT_MAX_ITEMS) -> ParsedOutput:
     xml_start = stdout.find("<?xml")
     if xml_start == -1:
@@ -726,7 +863,6 @@ def _parse_nmap_xml(stdout: str, max_items: int = DEFAULT_MAX_ITEMS) -> ParsedOu
     try:
         root = ET.fromstring(xml_content)
     except XMLParseError:
-
         return ParsedOutput(
             tool="nmap",
             summary="Nmap XML parse failed — showing raw output",
@@ -745,17 +881,21 @@ def _parse_nmap_xml(stdout: str, max_items: int = DEFAULT_MAX_ITEMS) -> ParsedOu
 
         for port in host.findall(".//port"):
             state_el = port.find("state")
-            if state_el is not None and state_el.get(
-                    "state") in ("open", "filtered"):
+            if state_el is not None and state_el.get("state") in ("open", "filtered"):
                 portid = port.get("portid", "?")
                 proto = port.get("protocol", "tcp")
                 service_el = port.find("service")
-                service = service_el.get(
-                    "name", "unknown") if service_el is not None else "unknown"
-                product = service_el.get(
-                    "product", "") if service_el is not None else ""
-                version = service_el.get(
-                    "version", "") if service_el is not None else ""
+                service = (
+                    service_el.get("name", "unknown")
+                    if service_el is not None
+                    else "unknown"
+                )
+                product = (
+                    service_el.get("product", "") if service_el is not None else ""
+                )
+                version = (
+                    service_el.get("version", "") if service_el is not None else ""
+                )
                 state = state_el.get("state")
                 entry = f"{addr}:{portid}/{proto} {state} {service}"
                 if product:
@@ -771,10 +911,16 @@ def _parse_nmap_xml(stdout: str, max_items: int = DEFAULT_MAX_ITEMS) -> ParsedOu
         total_count=len(open_ports),
     )
 
+
 def _parse_nuclei(stdout: str, max_items: int = DEFAULT_MAX_ITEMS) -> ParsedOutput:
     findings: list[str] = []
     severity_counts: dict[str, int] = {
-        "critical": 0, "high": 0, "medium": 0, "low": 0, "info": 0}
+        "critical": 0,
+        "high": 0,
+        "medium": 0,
+        "low": 0,
+        "info": 0,
+    }
 
     for line in stdout.strip().split("\n"):
         line = line.strip()
@@ -784,16 +930,11 @@ def _parse_nuclei(stdout: str, max_items: int = DEFAULT_MAX_ITEMS) -> ParsedOutp
         if line.startswith("{"):
             try:
                 data = json.loads(line)
-                template_id = data.get(
-                    "template-id",
-                    data.get(
-                        "templateID",
-                        "?"))
+                template_id = data.get("template-id", data.get("templateID", "?"))
                 severity = data.get("info", {}).get("severity", "info").lower()
                 matched = data.get("matched-at", data.get("matched", ""))
                 name = data.get("info", {}).get("name", template_id)
-                severity_counts[severity] = severity_counts.get(
-                    severity, 0) + 1
+                severity_counts[severity] = severity_counts.get(severity, 0) + 1
                 findings.append(f"[{severity.upper()}] {name} — {matched}")
                 continue
             except json.JSONDecodeError:
@@ -804,8 +945,7 @@ def _parse_nuclei(stdout: str, max_items: int = DEFAULT_MAX_ITEMS) -> ParsedOutp
             template_id, severity, rest = text_match.groups()
             severity = severity.strip().lower()
             severity_counts[severity] = severity_counts.get(severity, 0) + 1
-            findings.append(
-                f"[{severity.upper()}] {template_id} — {rest.strip()}")
+            findings.append(f"[{severity.upper()}] {template_id} — {rest.strip()}")
 
     if not findings:
         return ParsedOutput(
@@ -816,9 +956,7 @@ def _parse_nuclei(stdout: str, max_items: int = DEFAULT_MAX_ITEMS) -> ParsedOutp
             raw_truncated=stdout[:MAX_RAW_FALLBACK],
         )
 
-    sev_str = ", ".join(
-        f"{v} {k}" for k,
-        v in severity_counts.items() if v > 0)
+    sev_str = ", ".join(f"{v} {k}" for k, v in severity_counts.items() if v > 0)
 
     sev_order = {"CRITICAL": 0, "HIGH": 1, "MEDIUM": 2, "LOW": 3, "INFO": 4}
     findings.sort(key=lambda f: sev_order.get(f.split("]")[0].strip("["), 5))
@@ -829,6 +967,7 @@ def _parse_nuclei(stdout: str, max_items: int = DEFAULT_MAX_ITEMS) -> ParsedOutp
         items=findings[:max_items],
         total_count=len(findings),
     )
+
 
 def _parse_httpx(stdout: str, max_items: int = DEFAULT_MAX_ITEMS) -> ParsedOutput:
     hosts: list[str] = []
@@ -849,11 +988,10 @@ def _parse_httpx(stdout: str, max_items: int = DEFAULT_MAX_ITEMS) -> ParsedOutpu
                 tech_raw = data.get("tech", [])
                 entry = f"{url} [{status}]"
                 if title:
-                    entry += f" \"{title}\""
+                    entry += f' "{title}"'
                 if tech_raw:
                     entry += f" [{','.join(tech_raw[:3])}]"
                     for t in tech_raw:
-
                         if "/" in t:
                             name, _, ver = t.partition("/")
                             technologies[name.strip()] = ver.strip()
@@ -886,6 +1024,7 @@ def _parse_httpx(stdout: str, max_items: int = DEFAULT_MAX_ITEMS) -> ParsedOutpu
         technologies=technologies,
     )
 
+
 def _parse_whatweb(stdout: str, max_items: int = DEFAULT_MAX_ITEMS) -> ParsedOutput:
     technologies: dict[str, str] = {}
     items: list[str] = []
@@ -896,15 +1035,14 @@ def _parse_whatweb(stdout: str, max_items: int = DEFAULT_MAX_ITEMS) -> ParsedOut
             data = json.loads(stripped)
             if isinstance(data, dict):
                 data = [data]
-            for entry in (data if isinstance(data, list) else []):
+            for entry in data if isinstance(data, list) else []:
                 target = entry.get("target", "")
                 plugins = entry.get("plugins", {})
                 for name, info in plugins.items():
                     versions = info.get("version", info.get("string", []))
                     ver = versions[0] if versions else ""
                     technologies[name] = ver
-                    items.append(
-                        f"{name}{('/' + ver) if ver else ''} on {target}")
+                    items.append(f"{name}{('/' + ver) if ver else ''} on {target}")
             if technologies:
                 return ParsedOutput(
                     tool="whatweb",
@@ -934,19 +1072,14 @@ def _parse_whatweb(stdout: str, max_items: int = DEFAULT_MAX_ITEMS) -> ParsedOut
         for tech_m in _tech_token_re.finditer(summary_str):
             name, value = tech_m.group(1), tech_m.group(2)
 
-            _SKIP = {
-                "Email",
-                "Country",
-                "IP",
-                "Meta",
-                "Script",
-                "Title",
-                "Frame"}
+            _SKIP = {"Email", "Country", "IP", "Meta", "Script", "Title", "Frame"}
             if name in _SKIP:
                 continue
             technologies[name] = value if re.match(r"[\d.]", value) else ""
-            items.append(f"{name}{('/' + technologies[name]) if technologies[name] else ''}"
-                         + (f" on {current_target}" if current_target else ""))
+            items.append(
+                f"{name}{('/' + technologies[name]) if technologies[name] else ''}"
+                + (f" on {current_target}" if current_target else "")
+            )
             found_any = True
 
         if not found_any:
@@ -955,7 +1088,8 @@ def _parse_whatweb(stdout: str, max_items: int = DEFAULT_MAX_ITEMS) -> ParsedOut
                 if name not in {"HTTP", "HTML", "URL", "API"}:
                     technologies[name] = ""
                     items.append(
-                        name + (f" on {current_target}" if current_target else ""))
+                        name + (f" on {current_target}" if current_target else "")
+                    )
 
     if not technologies:
         return ParsedOutput(
@@ -974,8 +1108,11 @@ def _parse_whatweb(stdout: str, max_items: int = DEFAULT_MAX_ITEMS) -> ParsedOut
         technologies=technologies,
     )
 
+
 def _parse_line_list(stdout: str, max_items: int = DEFAULT_MAX_ITEMS) -> ParsedOutput:
-    _LOG_PREFIX_RE = re.compile(r"^\[(INFO|ERR|WRN|DEBUG|WARN|ERROR|FATAL)\]", re.IGNORECASE)
+    _LOG_PREFIX_RE = re.compile(
+        r"^\[(INFO|ERR|WRN|DEBUG|WARN|ERROR|FATAL)\]", re.IGNORECASE
+    )
     items = []
     for line in stdout.strip().split("\n"):
         line = line.strip()
@@ -1002,6 +1139,7 @@ def _parse_line_list(stdout: str, max_items: int = DEFAULT_MAX_ITEMS) -> ParsedO
         total_count=len(unique),
     )
 
+
 def _parse_ffuf(stdout: str, max_items: int = DEFAULT_MAX_ITEMS) -> ParsedOutput:
     results: list[str] = []
 
@@ -1014,13 +1152,13 @@ def _parse_ffuf(stdout: str, max_items: int = DEFAULT_MAX_ITEMS) -> ParsedOutput
                 length = r.get("length", "?")
                 words = r.get("words", "?")
                 results.append(
-                    f"{url} [Status: {status}, Size: {length}, Words: {words}]")
+                    f"{url} [Status: {status}, Size: {length}, Words: {words}]"
+                )
     except (json.JSONDecodeError, TypeError):
         pass
 
     if not results:
         for line in stdout.strip().split("\n"):
-
             if "[Status:" in line:
                 results.append(line.strip())
             elif re.match(r"\S+\s+\[", line):
@@ -1041,6 +1179,7 @@ def _parse_ffuf(stdout: str, max_items: int = DEFAULT_MAX_ITEMS) -> ParsedOutput
         items=results[:max_items],
         total_count=len(results),
     )
+
 
 def _parse_naabu(stdout: str, max_items: int = DEFAULT_MAX_ITEMS) -> ParsedOutput:
     ports: list[str] = []
@@ -1070,13 +1209,15 @@ def _parse_naabu(stdout: str, max_items: int = DEFAULT_MAX_ITEMS) -> ParsedOutpu
         )
 
     host_summary = ", ".join(
-        f"{h}({len(p)} ports)" for h, p in list(port_counts.items())[:5])
+        f"{h}({len(p)} ports)" for h, p in list(port_counts.items())[:5]
+    )
     return ParsedOutput(
         tool="naabu",
         summary=f"naabu: {len(ports)} open ports across {len(port_counts)} hosts — {host_summary}",
         items=ports[:max_items],
         total_count=len(ports),
     )
+
 
 def _parse_sqlmap(stdout: str, max_items: int = DEFAULT_MAX_ITEMS) -> ParsedOutput:
     findings: list[str] = []
@@ -1096,7 +1237,8 @@ def _parse_sqlmap(stdout: str, max_items: int = DEFAULT_MAX_ITEMS) -> ParsedOutp
 
         vuln_param = re.match(
             r".*parameter\s+'?([^']+?)'?\s+(?:is|appears to be|was found)\s+(?:vulnerable|injectable)",
-            line, re.IGNORECASE,
+            line,
+            re.IGNORECASE,
         )
         if vuln_param:
             param = vuln_param.group(1).strip()
@@ -1125,10 +1267,14 @@ def _parse_sqlmap(stdout: str, max_items: int = DEFAULT_MAX_ITEMS) -> ParsedOutp
             findings.append(f"[HIGH] {line}")
 
     if not findings and not param_vulns:
-
         if "sqlmap identified the following injection point" in stdout.lower():
-            findings.append("[HIGH] sqlmap identified injection points (check full output)")
-        elif "no parameter(s) found" in stdout.lower() or "not injectable" in stdout.lower():
+            findings.append(
+                "[HIGH] sqlmap identified injection points (check full output)"
+            )
+        elif (
+            "no parameter(s) found" in stdout.lower()
+            or "not injectable" in stdout.lower()
+        ):
             return ParsedOutput(
                 tool="sqlmap",
                 summary="sqlmap: no injectable parameters found",
@@ -1154,6 +1300,7 @@ def _parse_sqlmap(stdout: str, max_items: int = DEFAULT_MAX_ITEMS) -> ParsedOutp
         total_count=len(findings),
     )
 
+
 def _parse_nikto(stdout: str, max_items: int = DEFAULT_MAX_ITEMS) -> ParsedOutput:
     findings: list[str] = []
     target: str = ""
@@ -1166,7 +1313,9 @@ def _parse_nikto(stdout: str, max_items: int = DEFAULT_MAX_ITEMS) -> ParsedOutpu
         if line.startswith("- Target IP:") or line.startswith("+ Target IP:"):
             target = line
             continue
-        if line.startswith("+ Target Hostname:") or line.startswith("- Target Hostname:"):
+        if line.startswith("+ Target Hostname:") or line.startswith(
+            "- Target Hostname:"
+        ):
             target += " " + line.split(":", 1)[-1].strip()
             continue
 
@@ -1174,19 +1323,45 @@ def _parse_nikto(stdout: str, max_items: int = DEFAULT_MAX_ITEMS) -> ParsedOutpu
             content = line[2:].strip()
 
             skip_patterns = (
-                "Nikto", "Start Time", "End Time", "No CGI",
-                "allowed HTTP Methods", "Server:", "retrieved:",
-                "items found", "0 errors", "scan took", "Host:",
+                "Nikto",
+                "Start Time",
+                "End Time",
+                "No CGI",
+                "allowed HTTP Methods",
+                "Server:",
+                "retrieved:",
+                "items found",
+                "0 errors",
+                "scan took",
+                "Host:",
             )
             if any(s.lower() in content.lower() for s in skip_patterns):
                 continue
 
             sev = "MEDIUM"
-            high_patterns = ("XSS", "SQL", "RCE", "command", "injection",
-                             "traversal", "passwd", "password", "credentials",
-                             "admin", "phpinfo", "config", "backup", "shell")
-            low_patterns = ("X-Frame-Options", "X-Content-Type", "anti-clickjacking",
-                            "Strict-Transport", "Content-Security")
+            high_patterns = (
+                "XSS",
+                "SQL",
+                "RCE",
+                "command",
+                "injection",
+                "traversal",
+                "passwd",
+                "password",
+                "credentials",
+                "admin",
+                "phpinfo",
+                "config",
+                "backup",
+                "shell",
+            )
+            low_patterns = (
+                "X-Frame-Options",
+                "X-Content-Type",
+                "anti-clickjacking",
+                "Strict-Transport",
+                "Content-Security",
+            )
             if any(p.lower() in content.lower() for p in high_patterns):
                 sev = "HIGH"
             elif any(p.lower() in content.lower() for p in low_patterns):
@@ -1215,6 +1390,7 @@ def _parse_nikto(stdout: str, max_items: int = DEFAULT_MAX_ITEMS) -> ParsedOutpu
         total_count=len(findings),
     )
 
+
 def _parse_dalfox(stdout: str, max_items: int = DEFAULT_MAX_ITEMS) -> ParsedOutput:
     findings: list[str] = []
     poc_lines: list[str] = []
@@ -1229,7 +1405,6 @@ def _parse_dalfox(stdout: str, max_items: int = DEFAULT_MAX_ITEMS) -> ParsedOutp
         elif line.startswith("[POC]") or "] [POC]" in line:
             poc_lines.append(f"  PoC: {line}")
         elif line.startswith("[G]") or "] [G]" in line:
-
             findings.append(f"[MEDIUM] XSS potential: {line}")
         elif re.match(r"\[WEAK\]|\[I\]", line, re.IGNORECASE):
             findings.append(f"[LOW] {line}")
@@ -1255,6 +1430,7 @@ def _parse_dalfox(stdout: str, max_items: int = DEFAULT_MAX_ITEMS) -> ParsedOutp
         total_count=len(combined),
     )
 
+
 def _parse_wpscan(stdout: str, max_items: int = DEFAULT_MAX_ITEMS) -> ParsedOutput:
     findings: list[str] = []
     current_section: str = ""
@@ -1264,12 +1440,13 @@ def _parse_wpscan(stdout: str, max_items: int = DEFAULT_MAX_ITEMS) -> ParsedOutp
     while i < len(lines):
         line = lines[i].strip()
 
-        if re.match(r"\[i\]\s+(WordPress|Plugins|Themes|Users|Config)", line, re.IGNORECASE):
+        if re.match(
+            r"\[i\]\s+(WordPress|Plugins|Themes|Users|Config)", line, re.IGNORECASE
+        ):
             current_section = line
         elif re.match(r"\[\+\]\s+WordPress version", line, re.IGNORECASE):
             findings.append(f"[INFO] {line}")
         elif re.match(r"\[!\]", line):
-
             sev = "HIGH"
             content = line[3:].strip()
             if any(k in content.lower() for k in ("critical", "rce", "sqli", "exec")):
@@ -1281,11 +1458,17 @@ def _parse_wpscan(stdout: str, max_items: int = DEFAULT_MAX_ITEMS) -> ParsedOutp
             findings.append(f"[{sev}] {content}")
         elif re.match(r"\[\+\]\s+Username found", line, re.IGNORECASE):
             findings.append(f"[MEDIUM] {line[3:].strip()}")
-        elif re.match(r"\[\+\]\s+.+found", line, re.IGNORECASE) and "plugin" in current_section.lower():
+        elif (
+            re.match(r"\[\+\]\s+.+found", line, re.IGNORECASE)
+            and "plugin" in current_section.lower()
+        ):
             findings.append(f"[INFO] Plugin: {line[3:].strip()}")
 
-        if findings and "[HIGH]" in findings[-1] or (findings and "[CRITICAL]" in findings[-1]):
-
+        if (
+            findings
+            and "[HIGH]" in findings[-1]
+            or (findings and "[CRITICAL]" in findings[-1])
+        ):
             for j in range(1, min(5, len(lines) - i)):
                 ahead = lines[i + j].strip()
                 cve_m = re.search(r"CVE-\d{4}-\d+", ahead)
@@ -1314,14 +1497,15 @@ def _parse_wpscan(stdout: str, max_items: int = DEFAULT_MAX_ITEMS) -> ParsedOutp
         total_count=len(findings),
     )
 
-def _parse_generic_smart(stdout: str, max_items: int = DEFAULT_MAX_ITEMS) -> ParsedOutput:
-    lines = [line.strip()
-             for line in stdout.strip().split("\n") if line.strip()]
+
+def _parse_generic_smart(
+    stdout: str, max_items: int = DEFAULT_MAX_ITEMS
+) -> ParsedOutput:
+    lines = [line.strip() for line in stdout.strip().split("\n") if line.strip()]
     total = len(lines)
 
     if total == 0:
-        return ParsedOutput(
-            tool="unknown", summary="Empty output", total_count=0)
+        return ParsedOutput(tool="unknown", summary="Empty output", total_count=0)
 
     json_count = sum(1 for line in lines[:20] if line.startswith("{"))
     if json_count > len(lines[:20]) * 0.5:
@@ -1336,18 +1520,19 @@ def _parse_generic_smart(stdout: str, max_items: int = DEFAULT_MAX_ITEMS) -> Par
         return _parse_generic_tagged(lines, max_items=max_items)
 
     col_counts = [len(re.split(r"\s{2,}|\t", line)) for line in lines[:10]]
-    if col_counts and min(col_counts) >= 3 and max(
-            col_counts) - min(col_counts) <= 1:
+    if col_counts and min(col_counts) >= 3 and max(col_counts) - min(col_counts) <= 1:
         return _parse_generic_table(lines, max_items=max_items)
 
-    kv_count = sum(1 for line in lines[:20] if re.match(
-        r"^[\w\-\.]+:\s+.+", line))
+    kv_count = sum(1 for line in lines[:20] if re.match(r"^[\w\-\.]+:\s+.+", line))
     if kv_count > len(lines[:20]) * 0.5:
         return _parse_generic_kv(lines, max_items=max_items)
 
     return _parse_generic_lines(lines, max_items=max_items)
 
-def _parse_generic_jsonl(lines: list[str], max_items: int = DEFAULT_MAX_ITEMS) -> ParsedOutput:
+
+def _parse_generic_jsonl(
+    lines: list[str], max_items: int = DEFAULT_MAX_ITEMS
+) -> ParsedOutput:
     items: list[str] = []
     for line in lines:
         if not line.startswith("{"):
@@ -1356,8 +1541,16 @@ def _parse_generic_jsonl(lines: list[str], max_items: int = DEFAULT_MAX_ITEMS) -
             data = json.loads(line)
 
             summary_parts = []
-            for key in ("url", "host", "ip", "domain",
-                        "target", "matched", "name", "input"):
+            for key in (
+                "url",
+                "host",
+                "ip",
+                "domain",
+                "target",
+                "matched",
+                "name",
+                "input",
+            ):
                 if key in data:
                     summary_parts.append(str(data[key]))
                     break
@@ -1375,8 +1568,7 @@ def _parse_generic_jsonl(lines: list[str], max_items: int = DEFAULT_MAX_ITEMS) -
                 elif isinstance(val, dict) and "name" in val:
                     summary_parts.append(val["name"][:80])
                     break
-            items.append(" ".join(summary_parts)
-                         if summary_parts else line[:120])
+            items.append(" ".join(summary_parts) if summary_parts else line[:120])
         except json.JSONDecodeError:
             items.append(line[:120])
 
@@ -1390,7 +1582,10 @@ def _parse_generic_jsonl(lines: list[str], max_items: int = DEFAULT_MAX_ITEMS) -
         total_count=len(unique),
     )
 
-def _parse_generic_tagged(lines: list[str], max_items: int = DEFAULT_MAX_ITEMS) -> ParsedOutput:
+
+def _parse_generic_tagged(
+    lines: list[str], max_items: int = DEFAULT_MAX_ITEMS
+) -> ParsedOutput:
     items: list[str] = []
     tag_counts: dict[str, int] = {}
 
@@ -1406,12 +1601,8 @@ def _parse_generic_tagged(lines: list[str], max_items: int = DEFAULT_MAX_ITEMS) 
             items.append(line[:120])
 
     tag_str = ", ".join(
-        f"{v}x {k}" for k,
-        v in sorted(
-            tag_counts.items(),
-            key=lambda x: -
-            x[1])[
-            :5])
+        f"{v}x {k}" for k, v in sorted(tag_counts.items(), key=lambda x: -x[1])[:5]
+    )
 
     seen: set[str] = set()
     unique = [i for i in items if i not in seen and not seen.add(i)]
@@ -1423,10 +1614,13 @@ def _parse_generic_tagged(lines: list[str], max_items: int = DEFAULT_MAX_ITEMS) 
         total_count=len(unique),
     )
 
-def _parse_generic_table(lines: list[str], max_items: int = DEFAULT_MAX_ITEMS) -> ParsedOutput:
+
+def _parse_generic_table(
+    lines: list[str], max_items: int = DEFAULT_MAX_ITEMS
+) -> ParsedOutput:
     items: list[str] = []
 
-    for line in lines[:max_items + 5]:
+    for line in lines[: max_items + 5]:
         items.append(line[:150])
 
     return ParsedOutput(
@@ -1436,7 +1630,10 @@ def _parse_generic_table(lines: list[str], max_items: int = DEFAULT_MAX_ITEMS) -
         total_count=len(lines),
     )
 
-def _parse_generic_kv(lines: list[str], max_items: int = DEFAULT_MAX_ITEMS) -> ParsedOutput:
+
+def _parse_generic_kv(
+    lines: list[str], max_items: int = DEFAULT_MAX_ITEMS
+) -> ParsedOutput:
     items: list[str] = []
     for line in lines:
         items.append(line[:150])
@@ -1448,10 +1645,16 @@ def _parse_generic_kv(lines: list[str], max_items: int = DEFAULT_MAX_ITEMS) -> P
         total_count=len(lines),
     )
 
-def _parse_generic_lines(lines: list[str], max_items: int = DEFAULT_MAX_ITEMS) -> ParsedOutput:
+
+def _parse_generic_lines(
+    lines: list[str], max_items: int = DEFAULT_MAX_ITEMS
+) -> ParsedOutput:
     meaningful = [
-        line for line in lines if len(line) > 3 and not line.startswith(
-            ("---", "===", "###", "✓", "✗", "Error", "Warning"))]
+        line
+        for line in lines
+        if len(line) > 3
+        and not line.startswith(("---", "===", "###", "✓", "✗", "Error", "Warning"))
+    ]
 
     seen: set[str] = set()
     unique = [i for i in meaningful if i not in seen and not seen.add(i)]
@@ -1459,13 +1662,13 @@ def _parse_generic_lines(lines: list[str], max_items: int = DEFAULT_MAX_ITEMS) -
     dupes = len(meaningful) - len(unique)
     return ParsedOutput(
         tool="text",
-        summary=f"Output: {len(unique)} lines" +
-        (f" ({dupes} duplicates removed)" if dupes > 0 else ""),
+        summary=f"Output: {len(unique)} lines"
+        + (f" ({dupes} duplicates removed)" if dupes > 0 else ""),
         items=unique[:max_items],
         total_count=len(unique),
-        raw_truncated="" if len(
-            unique) <= max_items else "\n".join(lines[-10:]),
+        raw_truncated="" if len(unique) <= max_items else "\n".join(lines[-10:]),
     )
+
 
 def _parse_hydra(stdout: str, max_items: int = DEFAULT_MAX_ITEMS) -> ParsedOutput:
     findings: list[str] = []
@@ -1499,6 +1702,7 @@ def _parse_hydra(stdout: str, max_items: int = DEFAULT_MAX_ITEMS) -> ParsedOutpu
         total_count=len(findings),
     )
 
+
 def _parse_metasploit(stdout: str, max_items: int = DEFAULT_MAX_ITEMS) -> ParsedOutput:
     findings: list[str] = []
     _NEGATIVE_RE = re.compile(
@@ -1526,8 +1730,15 @@ def _parse_metasploit(stdout: str, max_items: int = DEFAULT_MAX_ITEMS) -> Parsed
 
         if line.startswith("[+]") and any(
             kw in line.lower()
-            for kw in ("vulnerable", "session opened", "shell", "meterpreter",
-                       "exploit succeeded", "access granted", "root")
+            for kw in (
+                "vulnerable",
+                "session opened",
+                "shell",
+                "meterpreter",
+                "exploit succeeded",
+                "access granted",
+                "root",
+            )
         ):
             findings.append(f"[HIGH] {line}")
 
@@ -1549,8 +1760,8 @@ def _parse_metasploit(stdout: str, max_items: int = DEFAULT_MAX_ITEMS) -> Parsed
         total_count=len(findings),
     )
 
+
 def _parse_quick_fuzz(stdout: str, max_items: int = DEFAULT_MAX_ITEMS) -> ParsedOutput:
-    _sev_order = {"CRITICAL": 0, "HIGH": 1, "MEDIUM": 2, "LOW": 3, "INFO": 4}
     findings: list[str] = []
     severity_counts: dict[str, int] = {}
 
@@ -1561,7 +1772,7 @@ def _parse_quick_fuzz(stdout: str, max_items: int = DEFAULT_MAX_ITEMS) -> Parsed
         m = re.match(r"\[(\w+)\]\s+(.+)", line)
         if m:
             sev = m.group(1).upper()
-            if sev in _sev_order:
+            if sev in SEVERITY_ORDER:
                 severity_counts[sev] = severity_counts.get(sev, 0) + 1
                 findings.append(f"[{sev}] {m.group(2)}")
 
@@ -1574,10 +1785,8 @@ def _parse_quick_fuzz(stdout: str, max_items: int = DEFAULT_MAX_ITEMS) -> Parsed
             raw_truncated=stdout[:MAX_RAW_FALLBACK],
         )
 
-    findings.sort(key=lambda f: _sev_order.get(f.split("]")[0].strip("["), 5))
-    sev_str = ", ".join(
-        f"{v} {k.lower()}" for k, v in severity_counts.items() if v > 0
-    )
+    findings.sort(key=lambda f: SEVERITY_ORDER.get(f.split("]")[0].strip("["), 5))
+    sev_str = ", ".join(f"{v} {k.lower()}" for k, v in severity_counts.items() if v > 0)
     return ParsedOutput(
         tool="quick_fuzz",
         summary=f"quick_fuzz: {len(findings)} finding(s) ({sev_str})",
@@ -1585,10 +1794,11 @@ def _parse_quick_fuzz(stdout: str, max_items: int = DEFAULT_MAX_ITEMS) -> Parsed
         total_count=len(findings),
     )
 
-_PARSERS: dict[str, Any] = {
+
+# ── Parser function registry (by pattern name) ─────────────────────
+_PARSER_FUNCS: dict[str, Any] = {
     "nmap": _parse_nmap,
     "nuclei": _parse_nuclei,
-    "subfinder": _parse_line_list,
     "httpx": _parse_httpx,
     "url_list": _parse_line_list,
     "ffuf": _parse_ffuf,
@@ -1597,11 +1807,34 @@ _PARSERS: dict[str, Any] = {
     "nikto": _parse_nikto,
     "dalfox": _parse_dalfox,
     "wpscan": _parse_wpscan,
-    "dnsx": _parse_line_list,
     "whatweb": _parse_whatweb,
     "dig": _parse_line_list,
     "hydra": _parse_hydra,
     "metasploit": _parse_metasploit,
-    "quick_fuzz": _parse_quick_fuzz,
-    "advanced_fuzz": _parse_quick_fuzz,
 }
+
+# ── Dynamic tool→parser mapping from tools_meta.json ───────────────
+# Mirrors output_parser_tool_patterns so new tools auto-register.
+_PARSERS: dict[str, Any] = {}
+
+_tools_meta_parser_path = (
+    Path(__file__).resolve().parent.parent / "data" / "tools_meta.json"
+)
+try:
+    _parser_meta = json.loads(_tools_meta_parser_path.read_text(encoding="utf-8"))
+    _tool_to_pattern: dict[str, str] = _parser_meta.get(
+        "output_parser_tool_patterns", {}
+    )
+    for _tool_bin, _pattern_name in _tool_to_pattern.items():
+        _parser_fn = _PARSER_FUNCS.get(_pattern_name) or _PARSER_FUNCS.get("url_list")
+        if _parser_fn:
+            _PARSERS[_tool_bin.lower()] = _parser_fn
+except Exception as _e:
+    warnings.warn(f"Could not load parser registration from tools_meta.json: {_e}")
+    _PARSERS.update(_PARSER_FUNCS)
+
+# AIRecon-native tools (not in tools_meta.json shell binaries)
+_PARSERS["quick_fuzz"] = _parse_quick_fuzz
+_PARSERS["advanced_fuzz"] = _parse_quick_fuzz
+_PARSERS["metasploit"] = _parse_metasploit
+_PARSERS["url_list"] = _parse_line_list

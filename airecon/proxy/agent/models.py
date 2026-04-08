@@ -5,6 +5,7 @@ from pathlib import Path
 import heapq
 import logging
 import re
+from collections import deque
 from typing import Any
 import os
 import uuid
@@ -14,6 +15,8 @@ from time import monotonic
 from urllib.parse import urlparse
 
 from ..config import get_config
+from ..data_loader import int_to_severity, load_vuln_hypothesis_legacy, severity_to_int
+from .constants import SEVERITY_MULTIPLIER as _SEVERITY_MULTIPLIER
 
 logger = logging.getLogger("airecon.agent")
 
@@ -26,8 +29,10 @@ FLAG_PATTERN = re.compile(r"flag\{[^}]+\}", re.IGNORECASE)
 
 _THINK_BLOCK_RE = re.compile(r"<think>.*?</think>", re.DOTALL | re.IGNORECASE)
 _THINK_OPEN_RE = re.compile(r"<think>(?!</think>).*$", re.DOTALL | re.IGNORECASE)
-_SEVERITY_MULTIPLIER: dict[int, float] = {5: 2.0, 4: 1.5, 3: 1.0, 2: 0.7, 1: 0.5}
 _MIN_SEVERITY_FOR_PRESERVATION = 4
+# FLEXIBILITY: Lower confidence floor to 0.30 to capture emerging/novel patterns
+# Novel discoveries often start with low confidence before validation
+_CONF_FLOOR = 0.30
 
 
 def _get_model_limits() -> dict[str, Any]:
@@ -45,7 +50,7 @@ def _get_model_limits() -> dict[str, Any]:
             ),
         }
     except Exception as e:
-        logger.debug("Exception: %s", e)
+        logger.warning("Operation failed: %s", e)
         return {
             "max_tool_iterations": 50,
             "max_tool_history": 100,
@@ -117,7 +122,7 @@ def _get_context_limits():
             "llm_compression_num_predict": config.agent_llm_compression_num_predict,
         }
     except Exception as e:
-        logger.debug("Exception: %s", e)
+        logger.warning("Operation failed: %s", e)
         return {
             "max_conversation_messages": 1024,
             "compression_trigger": 819,
@@ -412,6 +417,112 @@ class CausalState:
                 if str(k).strip()
             }
         return state
+
+
+# ── Runtime state grouping (replaces 50+ bare instance vars in loop.py) ──
+
+
+@dataclass
+class AntiLoopState:
+    """Tracks tool/command diversity to prevent LLM from getting stuck in loops."""
+
+    no_tool_iterations: int = 0
+    stagnation_iterations: int = 0
+    consecutive_same_approach: int = 0
+    recent_tool_names: list[str] = field(default_factory=lambda: [])
+    last_evidence_count: int = 0
+    watchdog_forced_calls: int = 0
+    empty_response_retry_count: int = 0
+    consecutive_failures: int = 0
+    mentor_tool_call_count: int = 0
+    recent_tool_queue: deque[str] = field(default_factory=lambda: deque(maxlen=8))
+
+    def record_tool_use(self, tool_name: str) -> None:
+        self.recent_tool_queue.append(tool_name)
+        self.recent_tool_names = list(self.recent_tool_queue)
+        if len(self.recent_tool_names) > 8:
+            self.recent_tool_names = self.recent_tool_names[-8:]
+
+    def get_same_tool_streak(self) -> int:
+        if len(self.recent_tool_names) < 2:
+            return 0
+        last = self.recent_tool_names[-1]
+        streak = 1
+        for name in reversed(self.recent_tool_names[:-1]):
+            if name == last:
+                streak += 1
+            else:
+                break
+        return streak
+
+    def reset_stagnation(self) -> None:
+        self.stagnation_iterations = 0
+        self.consecutive_same_approach = 0
+
+    def has_stagnated(self, threshold: int = 3) -> bool:
+        return self.stagnation_iterations >= threshold
+
+
+@dataclass
+class SessionLifecycleState:
+    """Session timing, token tracking, and save intervals."""
+
+    last_session_save_iteration: int = 0
+    session_save_interval: int = 10
+    last_conversation_save_iteration: int = 0
+    conversation_save_interval: int = 10
+    last_memory_save_iteration: int = 0
+    memory_save_interval: int = 5
+    last_memory_health_check_iteration: int = -1
+    memory_health_interval: int = 10
+    last_request_time: float = 0.0
+    last_token_snapshot_time: float = 0.0
+    last_context_validation: int = 0
+    user_input_cooldown: float = 30.0
+    last_user_input_time: float = 0.0
+
+
+@dataclass
+class RecoveryState:
+    """Tracks recovery attempts and context management state."""
+
+    recovery_force_tool_calls: int = 0
+    adaptive_num_ctx: int = 0
+    adaptive_num_predict_cap: int = 0
+    vram_crash_count: int = 0
+    token_snapshot_resave_requested: bool = False
+    compression_summary: str = ""
+    budget_pressure_level: int = 0
+    loaded_skill_hashes: set[int] = field(default_factory=set)
+    loaded_tech_skill_paths: set[str] = field(default_factory=set)
+
+    def record_vram_crash(self) -> None:
+        self.vram_crash_count += 1
+        self.adaptive_num_ctx = max(4096, self.adaptive_num_ctx - 8192)
+        self.adaptive_num_predict_cap = max(2048, self.adaptive_num_predict_cap - 1024)
+
+
+@dataclass
+class ScopeTrackingState:
+    """Tracks visited URLs, scope locks, and browser visit limits."""
+
+    visited_browser_urls: set[str] = field(default_factory=set)
+    max_browser_visits_per_domain: int = 5
+    scope_lock_active: bool = False
+    scope_lock_brief: str = ""
+    scope_anchor_target: str = ""
+
+
+@dataclass
+class UserInputState:
+    """Interactive user input handling state."""
+
+    user_input_event: asyncio.Event | None = None
+    user_input_value: str = ""
+    user_input_cancelled: bool = False
+    user_input_request_id: str = ""
+    user_input_prompt: str = ""
+    user_input_type: str = "text"
 
 
 @dataclass
@@ -894,11 +1005,25 @@ class AgentState:
                 len(self.evidence_log),
             )
 
-        clamped_severity = max(1, min(int(severity), 5))
-        if clamped_severity != severity:
+        raw_severity = severity
+        clamped_severity = severity_to_int(severity)
+        if isinstance(raw_severity, str) and raw_severity.strip().upper() != int_to_severity(
+            clamped_severity
+        ):
             logger.warning(
-                "Evidence severity clamped from %d to %d: %s",
-                severity,
+                "Evidence severity normalized from %r to %d: %s",
+                raw_severity,
+                clamped_severity,
+                clean_summary[:100],
+            )
+        elif (
+            isinstance(raw_severity, (int, float))
+            and not isinstance(raw_severity, bool)
+            and int(raw_severity) != clamped_severity
+        ):
+            logger.warning(
+                "Evidence severity normalized from %r to %d: %s",
+                raw_severity,
                 clamped_severity,
                 clean_summary[:100],
             )
@@ -922,7 +1047,7 @@ class AgentState:
 
             def _evidence_score(e: dict) -> float:
                 conf = float(e.get("confidence", 0.0))
-                sev = int(e.get("severity", 3))
+                sev = severity_to_int(e.get("severity", 3))
                 return conf * _SEVERITY_MULTIPLIER.get(sev, 1.0)
 
             kept = heapq.nlargest(
@@ -1083,7 +1208,7 @@ class AgentState:
         high_evidence = [
             e
             for e in self.evidence_log
-            if int(e.get("severity", 1)) >= 4
+            if severity_to_int(e.get("severity", 1)) >= 4
             and float(e.get("confidence", 0.0)) >= min_conf
         ]
         for hyp in self.hypothesis_queue:
@@ -1172,7 +1297,6 @@ class AgentState:
             and str(o.get("status", "")).lower() == "done"
         ][:max_objectives]
 
-        _CONF_FLOOR = 0.65
         if filter_evidence_by_phase:
             evidence = [
                 e
@@ -1230,18 +1354,16 @@ class AgentState:
                 summary = ev.get("summary", "")
                 artifact = ev.get("artifact")
                 artifact_note = f" [{artifact}]" if artifact else ""
-                sev = int(ev.get("severity", 1))
-                sev_label = {
-                    5: "CRITICAL",
-                    4: "HIGH",
-                    3: "MEDIUM",
-                    2: "LOW",
-                    1: "INFO",
-                }.get(sev, "INFO")
-                owasp_tags = [t for t in ev.get("tags", []) if t.startswith("owasp:")]
-                owasp_note = f" {','.join(owasp_tags)}" if owasp_tags else ""
+                sev = severity_to_int(ev.get("severity", 1))
+                sev_label = int_to_severity(sev)
+                category_tags = [
+                    t
+                    for t in ev.get("tags", [])
+                    if t.startswith("owasp:") or t.startswith("dynamic:")
+                ]
+                category_note = f" {','.join(category_tags)}" if category_tags else ""
                 lines.append(
-                    f"    - [{src}][{sev_label}]{owasp_note} {summary}{artifact_note}"
+                    f"    - [{src}][{sev_label}]{category_note} {summary}{artifact_note}"
                 )
             lines.append("  </recent_evidence>")
 
@@ -1718,15 +1840,40 @@ class AgentState:
                     ports.add(str(port_num))
         return ports
 
+    _cached_vuln_patterns: list[re.Pattern] | None = None
+
+    @staticmethod
+    def _load_vuln_patterns() -> list[re.Pattern]:
+        if AgentState._cached_vuln_patterns:
+            return AgentState._cached_vuln_patterns
+
+        patterns = []
+        try:
+            for entry in load_vuln_hypothesis_legacy():
+                for pat in entry.get("patterns", []):
+                    try:
+                        patterns.append(re.compile(str(pat), re.IGNORECASE))
+                    except re.error:
+                        pass
+        except Exception as _e:
+            logger.debug("Failed to load pin patterns: %s", _e)
+
+        if not patterns:
+            patterns = [
+                re.compile(r"CVE-\d{4}-\d+", re.IGNORECASE),
+                re.compile(r"CWE-\d+", re.IGNORECASE),
+                re.compile(
+                    r"(?i)(sql\s*injection|xss|csrf|ssrf|lfi|rfi|xxe|rce)",
+                    re.IGNORECASE,
+                ),
+            ]
+
+        AgentState._cached_vuln_patterns = patterns
+        return patterns
+
     @staticmethod
     def _extract_vulns(content: str) -> set[str]:
-        patterns = [
-            re.compile(r"CVE-\d{4}-\d+", re.IGNORECASE),
-            re.compile(r"CWE-\d+", re.IGNORECASE),
-            re.compile(
-                r"(?i)(sql\s*injection|xss|csrf|ssrf|lfi|rfi|xxe|rce)", re.IGNORECASE
-            ),
-        ]
+        patterns = AgentState._load_vuln_patterns()
         vulns = set()
         for p in patterns:
             vulns.update(m.group(0).upper() for m in p.finditer(content))
@@ -1748,7 +1895,7 @@ class AgentState:
         if not hasattr(AgentState._extract_tools, "_tool_names"):
             try:
                 import json
-                
+
                 tools_path = Path(__file__).parent.parent / "data" / "tools_meta.json"
                 with open(tools_path) as f:
                     meta = json.load(f)
@@ -1869,6 +2016,51 @@ class AgentState:
 
         if phase is None:
             phase = "RECON"
+
+        prior_summary = str(getattr(self, "compression_summary", "") or "").strip()
+        pending_hypotheses = self.get_pending_hypotheses(max_items=4)
+        recent_failures = self.failure_log[-4:]
+        recent_high_evidence = [
+            e
+            for e in self.evidence_log[-12:]
+            if severity_to_int(e.get("severity", 1)) >= 4
+            or float(e.get("confidence", 0.0)) >= 0.85
+        ][-4:]
+
+        carry_forward_lines: list[str] = []
+        if prior_summary:
+            carry_forward_lines.append("PREVIOUS SUMMARY TO PRESERVE:")
+            carry_forward_lines.append(prior_summary[:1200])
+
+        if pending_hypotheses:
+            carry_forward_lines.append("OPEN HYPOTHESES / WORK IN PROGRESS:")
+            for hyp in pending_hypotheses:
+                claim = str(hyp.get("claim", "") or "").strip()
+                test_plan = str(hyp.get("test_plan", "") or "").strip()
+                line = f"- {claim[:160]}"
+                if test_plan:
+                    line += f" -> next: {test_plan[:120]}"
+                carry_forward_lines.append(line)
+
+        if recent_failures:
+            carry_forward_lines.append("RECENT MISTAKES / FAILURES TO REMEMBER:")
+            for failure in recent_failures:
+                line = (
+                    f"- {str(failure.get('name', 'tool'))} "
+                    f"[{str(failure.get('error_type', 'other'))}] "
+                    f"on {str(failure.get('target', '') or 'current target')}: "
+                    f"{str(failure.get('suggested_action', 'review the last error'))[:160]}"
+                )
+                carry_forward_lines.append(line)
+
+        if recent_high_evidence:
+            carry_forward_lines.append("UNUSUAL / HIGH-VALUE SIGNALS:")
+            for ev in recent_high_evidence:
+                carry_forward_lines.append(
+                    f"- {str(ev.get('summary', '') or '')[:180]}"
+                )
+
+        carry_forward_context = "\n".join(carry_forward_lines).strip()
 
         non_system = [m for m in self.conversation if m.get("role") != "system"]
         if len(non_system) <= keep_recent + 1:
@@ -2024,22 +2216,32 @@ class AgentState:
                             f"CURRENT PHASE: {phase}{phase_context}\n\n"
                             "TASK: Summarize the conversation into 2-4 DENSE technical sentences.\n\n"
                             "RULES:\n"
+                            "0. PRESERVE previous summary, failures, and open work items if they still matter\n"
                             "1. PRESERVE ALL items in CRITICAL DATA section (exact IPs, ports, URLs)\n"
                             "2. For EXPLOIT phase: Keep vulnerability Proof-of-Concepts and exploitation steps\n"
                             "3. For RECON phase: Keep discovery chain and enumeration results\n"
                             "4. NEVER lose CVE IDs, severity ratings, or flag patterns\n"
-                            "5. Convert tool outputs to actionable findings\n\n"
+                            "5. Convert tool outputs to actionable findings\n"
+                            "6. EXPLICITLY remember what was already tried, what failed, and what remains pending\n\n"
                             "FORMAT: Technical, specific, no fluff. Example:\n"
                             "'Discovered api.example.com (80, 443), admin.example.com (80). "
                             "SQLi at /login?id=1 (CVE-2024-1234, HIGH). "
-                            "Credentials: admin:password123.'\n\n"
+                            "Credentials: admin:password123. Prior ffuf on /admin failed due to auth; next verify with member vs owner role.'\n\n"
                             "DO NOT: Add greetings, explanations, or generic statements.\n"
                             "DO: Use abbreviations (sub=domain, url=path, port=80) to save tokens"
                         ),
                     },
                     {
                         "role": "user",
-                        "content": f"CRITICAL DATA TO PRESERVE:\n{context_str}\n\nCONVERSATION TO COMPRESS:\n{chunk_text}",
+                        "content": (
+                            f"CRITICAL DATA TO PRESERVE:\n{context_str}\n\n"
+                            + (
+                                f"WORKING MEMORY TO CARRY FORWARD:\n{carry_forward_context}\n\n"
+                                if carry_forward_context
+                                else ""
+                            )
+                            + f"CONVERSATION TO COMPRESS:\n{chunk_text}"
+                        ),
                     },
                 ]
 
@@ -2096,6 +2298,7 @@ class AgentState:
 
                 phase_marker = f"[{phase}_COMP]" if phase else "[COMP]"
                 final_summary = f"{phase_marker} {final_summary}"
+                self.compression_summary = final_summary[:2000]
 
                 summaries.append(
                     {
@@ -2119,11 +2322,12 @@ class AgentState:
                 self._compress_failures.append(True)
 
                 if context_header:
+                    fallback_summary = f"[{phase}_SUMMARY]: " + "; ".join(context_header)
+                    self.compression_summary = fallback_summary[:2000]
                     summaries.append(
                         {
                             "role": "system",
-                            "content": f"[{phase}_SUMMARY]: "
-                            + "; ".join(context_header),
+                            "content": fallback_summary,
                         }
                     )
                 elif len(chunk) > 5:
@@ -2139,11 +2343,12 @@ class AgentState:
                 self._compress_failures.append(True)
 
                 if context_header:
+                    fallback_summary = f"[{phase}_SUMMARY]: " + "; ".join(context_header)
+                    self.compression_summary = fallback_summary[:2000]
                     summaries.append(
                         {
                             "role": "system",
-                            "content": f"[{phase}_SUMMARY]: "
-                            + "; ".join(context_header),
+                            "content": fallback_summary,
                         }
                     )
                 elif len(chunk) > 5:

@@ -77,6 +77,13 @@ class TestSaveAndLoadSession:
             body_excerpt='{"users":[]}',
             param_names=["page", "limit"],
         )
+        session.app_model.record_text_signal(
+            "Owner can approve tenant workspace invites after OTP verification.",
+            endpoint="/admin/approve",
+            param_names=["tenant_id", "invite_id"],
+            auth_type="cookie",
+            method="POST",
+        )
         session.waf_profiles = {
             "example.com": {
                 "waf_name": "Cloudflare",
@@ -92,6 +99,9 @@ class TestSaveAndLoadSession:
         assert loaded is not None
         assert "/api/users" in loaded.app_model.resources
         assert loaded.app_model.auth_map.get("/api/users") == "bearer"
+        assert "owner" in loaded.app_model.principal_profiles
+        assert "admin_approval" in loaded.app_model.workflow_paths
+        assert "tenant_id" in loaded.app_model.tenant_markers
         assert "example.com" in loaded.waf_profiles
         assert loaded.waf_profiles["example.com"]["waf_name"] == "Cloudflare"
 

@@ -235,6 +235,81 @@ class _CycleLlmMixin:
             for tool_name, count in getattr(self._session, "tool_counts", {}).items():
                 tool_use_counts[tool_name] = count
 
+        recent_tool_names: list[str] = []
+        for entry in getattr(self.state, "tool_history", [])[-8:]:
+            tool_name = getattr(entry, "tool_name", "")
+            if tool_name:
+                recent_tool_names.append(str(tool_name))
+
+        tested_vuln_classes: set[str] = set()
+        classifier = None
+        try:
+            from .vuln_classifier import get_classifier
+
+            classifier = get_classifier()
+        except Exception as e:
+            logger.debug("Failed to load classifier for tested vuln tracking: %s", e)
+            classifier = None
+
+        def _collect_labels(text: str) -> None:
+            if not classifier or not str(text or "").strip():
+                return
+            try:
+                tested_vuln_classes.update(classifier.resolve_labels(str(text)))
+                result = classifier.classify(str(text))
+                if result.category and result.category != "UNKNOWN":
+                    tested_vuln_classes.add(result.category)
+                if result.subcategory:
+                    tested_vuln_classes.add(result.subcategory)
+            except Exception as e:
+                logger.debug("Failed to collect vuln labels from text: %s", e)
+                return
+
+        for ev in getattr(self.state, "evidence_log", [])[-20:]:
+            if not isinstance(ev, dict):
+                continue
+            _collect_labels(ev.get("summary", ""))
+            for tag in ev.get("tags", []) or []:
+                _collect_labels(str(tag))
+
+        if self._session:
+            for vuln in getattr(self._session, "vulnerabilities", [])[-20:]:
+                if not isinstance(vuln, dict):
+                    continue
+                _collect_labels(vuln.get("title") or vuln.get("finding") or "")
+
+        adaptive_tool_scores: dict[str, float] = {}
+        strategy_tool_sequence: list[str] = []
+        try:
+            engine = self._ensure_adaptive_learning_engine()
+            techs = []
+            target_type = ""
+            if self._session:
+                techs = list(getattr(self._session, "technologies", {}).keys())
+                target_type = ", ".join(techs) or getattr(self._session, "target", "")
+
+            adaptive_tool_scores = {
+                str(name): float(score)
+                for name, score in engine.recommend_tools(
+                    phase=current_phase,
+                    tech_stack=techs,
+                    target_type=target_type,
+                    exclude=sorted(getattr(self, "_blocked_tools", set())),
+                    top_n=8,
+                )
+            }
+
+            strategy_conditions: dict[str, Any] = {"phase": current_phase}
+            if techs:
+                strategy_conditions["tech"] = sorted(techs)[0]
+            strategy = engine.recommend_strategy(strategy_conditions)
+            if strategy and getattr(strategy, "tool_sequence", None):
+                strategy_tool_sequence = [
+                    str(tool) for tool in strategy.tool_sequence if str(tool).strip()
+                ]
+        except Exception as exc:
+            logger.debug("Adaptive ranking hints unavailable: %s", exc)
+
         budget_remaining: dict[str, int] = {}
         if self.pipeline:
             from .pipeline import _PHASE_TOOL_BUDGETS
@@ -263,6 +338,10 @@ class _CycleLlmMixin:
             chain_step_hint=chain_step_hint,
             session_evidence_count=len(self.state.evidence_log),
             consecutive_failures=self._consecutive_failures,
+            recent_tool_names=recent_tool_names,
+            tested_vuln_classes=tested_vuln_classes or None,
+            adaptive_tool_scores=adaptive_tool_scores or None,
+            strategy_tool_sequence=strategy_tool_sequence or None,
         )
 
         if ranked_tools and len(ranked_tools) == len(self._tools_ollama):
@@ -295,6 +374,9 @@ class _CycleLlmMixin:
 
         # Inject learned insights from adaptive learning engine
         self._inject_learned_insights(current_phase)
+
+        # Inject learned tool and strategy recommendations from prior runs
+        self._inject_adaptive_recommendations(current_phase)
 
         # Inject meta-reasoning self-reflection every N iterations
         self._inject_meta_reflection_context(current_phase)
@@ -341,18 +423,7 @@ class _CycleLlmMixin:
         observations gets surfaced as context so the agent doesn't start from
         scratch every session.
         """
-        # Lazy-init adapter learning engine if not yet created by exploration loop
-        if not hasattr(self, "_adaptive_learning_engine"):
-            from .adaptive_learning import AdaptiveLearningEngine
-
-            session_id = ""
-            if self._session:
-                session_id = getattr(self._session, "session_id", "")
-            self._adaptive_learning_engine = AdaptiveLearningEngine(
-                session_id=session_id or "",
-            )
-
-        engine = self._adaptive_learning_engine
+        engine = self._ensure_adaptive_learning_engine()
         techs = []
         if self._session:
             techs = list(getattr(self._session, "technologies", {}).keys())
@@ -391,6 +462,62 @@ class _CycleLlmMixin:
             "Learned insights injected: phase=%s, %d insights",
             current_phase,
             len(insights),
+        )
+
+    def _inject_adaptive_recommendations(self, current_phase: str) -> None:
+        engine = self._ensure_adaptive_learning_engine()
+
+        techs: list[str] = []
+        target_type = ""
+        if self._session:
+            techs = list(getattr(self._session, "technologies", {}).keys())
+            target_type = ", ".join(techs) or getattr(self._session, "target", "")
+
+        tool_recs = engine.recommend_tools(
+            phase=current_phase,
+            tech_stack=techs,
+            target_type=target_type,
+            exclude=sorted(getattr(self, "_blocked_tools", set())),
+            top_n=4,
+        )
+
+        strategy_conditions: dict[str, Any] = {"phase": current_phase}
+        if techs:
+            strategy_conditions["tech"] = sorted(techs)[0]
+        strategy = engine.recommend_strategy(strategy_conditions)
+
+        self.state.conversation = [
+            m for m in self.state.conversation
+            if not m.get("content", "").startswith("<system_adaptive_recommendations>")
+        ]
+        if not tool_recs and not strategy:
+            return
+
+        lines = [
+            "<system_adaptive_recommendations>",
+            f"Adaptive recommendations from prior runs for {current_phase}:",
+        ]
+        if tool_recs:
+            lines.append("Preferred tools:")
+            for tool_name, score in tool_recs:
+                lines.append(f"- {tool_name} (learned score {score:.2f})")
+        if strategy:
+            lines.append("Suggested strategy:")
+            lines.append(f"- {strategy.description}")
+            if strategy.tool_sequence:
+                lines.append(f"- Sequence: {' -> '.join(strategy.tool_sequence[:5])}")
+            lines.append(f"- Reliability: {strategy.reliability:.2f}")
+        lines.append("</system_adaptive_recommendations>")
+
+        self.state.conversation.append({
+            "role": "system",
+            "content": "\n".join(lines),
+        })
+        logger.debug(
+            "Adaptive recommendations injected: phase=%s, tools=%d, strategy=%s",
+            current_phase,
+            len(tool_recs),
+            "yes" if strategy else "no",
         )
 
     def _inject_meta_reflection_context(self, current_phase: str) -> None:
@@ -683,11 +810,18 @@ class _CycleLlmMixin:
                                 )
 
                             has_tool_evidence = False
-                            vuln_scanner_tools = {"sqlmap", "nuclei", "ffuf", "katana", "execute"}
+                            _vuln_scan_tools: set[str] = set()
+                            _vuln_cats = _TOOLS_META.get("categories", {}).get("vulnerability_scanning", {})
+                            if isinstance(_vuln_cats, dict):
+                                for _cat_tools in _vuln_cats.values():
+                                    if isinstance(_cat_tools, list):
+                                        _vuln_scan_tools.update(str(t).lower() for t in _cat_tools)
+                            # Also include AIRecon fuzzing tools that target endpoints
+                            _vuln_scan_tools |= {"quick_fuzz", "advanced_fuzz", "deep_fuzz", "schemathesis_fuzz"}
                             for tc in tool_calls_acc:
                                 tc_name = tc.get("function", {}).get("name", "")
                                 tc_args = tc.get("function", {}).get("arguments", {})
-                                if tc_name in vuln_scanner_tools:
+                                if tc_name in _vuln_scan_tools:
 
                                     tc_url = str(tc_args.get("url", tc_args.get("command", ""))).lower()
                                     if endpoint.lower() in tc_url:

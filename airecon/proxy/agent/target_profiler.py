@@ -111,7 +111,7 @@ class TargetProfiler:
             async with httpx.AsyncClient(
                 timeout=self.timeout,
                 follow_redirects=True,
-                verify=False,  # nosec B501
+                verify=False,  # nosec B501 — intentional for pentesting
             ) as client:
                 resp = await client.get(url, headers=headers or {})
                 profile.status_code = resp.status_code

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import logging
+import shlex
 from typing import Any
 
 logger = logging.getLogger("airecon.semgrep")
@@ -25,18 +26,24 @@ def build_semgrep_command(
 ) -> str:
     max_findings = max(1, min(int(max_findings), 1000))
     rule_sets = rules or get_default_rules()
-    rule_args = " ".join(f"--config {r}" for r in rule_sets)
+    rule_args = " ".join(
+        f"--config {shlex.quote(str(rule))}"
+        for rule in rule_sets
+        if str(rule).strip()
+    )
 
     lang_arg = ""
     if languages:
-        lang_arg = f"--lang {','.join(languages)}"
+        filtered_languages = [str(lang).strip() for lang in languages if str(lang).strip()]
+        if filtered_languages:
+            lang_arg = f"--lang {shlex.quote(','.join(filtered_languages))}"
 
     return (
         f"semgrep {rule_args} {lang_arg} "
         f"--json --no-git-ignore --max-target-bytes 1000000 "
         f"--timeout 120 --max-memory 2048 "
         f"--metrics off --max-findings {int(max_findings)} "
-        f"{target_path} 2>/dev/null"
+        f"{shlex.quote(target_path)}"
     )
 
 
@@ -108,16 +115,27 @@ async def run_code_analysis(
 ) -> dict[str, Any]:
     install_check = await engine.execute_tool(
         "execute",
-        {"command": "which semgrep || pip install semgrep 2>&1 | tail -1"},
+        {"command": "command -v semgrep"},
     )
     if not install_check.get("success", False):
-        logger.warning("Semgrep installation may have failed, attempting scan anyway")
+        logger.warning(
+            "Semgrep not found on engine PATH, attempting scan anyway: %s",
+            install_check.get("error")
+            or install_check.get("stderr")
+            or install_check.get("result")
+            or "no details available",
+        )
 
     scan_cmd = build_semgrep_command(target_path, rules=rules, languages=languages)
     result = await engine.execute_tool("execute", {"command": scan_cmd})
 
     if not result.get("success", False):
-        error_msg = result.get("error", result.get("stderr", "Unknown error"))
+        error_msg = str(
+            result.get("error")
+            or result.get("stderr")
+            or result.get("result")
+            or "Unknown error"
+        ).strip()
         return {
             "findings": [],
             "errors": [f"Semgrep execution failed: {error_msg}"],

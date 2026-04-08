@@ -74,6 +74,7 @@ def test_build_semgrep_command_has_safety_flags():
     assert "--timeout" in cmd
     assert "--max-memory" in cmd
     assert "--metrics off" in cmd
+    assert "2>/dev/null" not in cmd
 
 
 # ── parse_semgrep_results ─────────────────────────────────────────────────────
@@ -233,6 +234,19 @@ async def test_run_code_analysis_execution_failure(mock_engine):
     assert result["total"] == 0
     assert len(result["errors"]) > 0
     assert "failed" in result["summary"].lower()
+
+
+@pytest.mark.asyncio
+async def test_run_code_analysis_execution_failure_uses_stderr(mock_engine):
+    mock_engine.execute_tool.side_effect = [
+        {"success": True, "result": "/usr/bin/semgrep"},
+        {"success": False, "stderr": "parse error in target file"},
+    ]
+
+    result = await run_code_analysis(mock_engine, "/workspace/app")
+
+    assert result["total"] == 0
+    assert "parse error in target file" in result["errors"][0]
 
 
 @pytest.mark.asyncio

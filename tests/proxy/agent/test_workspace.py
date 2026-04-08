@@ -90,3 +90,25 @@ def test_save_tool_output_skipped_tools(workspace, tmp_path, mocker):
     assert len(list(out_dir.glob("*.txt"))) == 0
     # Command log is written
     assert len(list(cmd_dir.glob("*.json"))) == 1
+
+
+def test_save_tool_output_uses_top_level_stdout_for_code_analysis(
+    workspace, tmp_path, mocker
+):
+    mocker.patch(
+        "airecon.proxy.agent.workspace.get_workspace_root", return_value=tmp_path
+    )
+
+    result = {
+        "success": True,
+        "summary": "Found 1 issue",
+        "stdout": "[HIGH] semgrep.rule: Example finding",
+    }
+    workspace._save_tool_output("code_analysis", {"target_path": "uploads/core"}, result)
+
+    out_dir = tmp_path / "live-target.com" / "output"
+    txt_files = list(out_dir.glob("code_analysis_*.txt"))
+    assert len(txt_files) == 1
+    saved = txt_files[0].read_text()
+    assert "Found 1 issue" in saved
+    assert "Example finding" in saved

@@ -48,6 +48,22 @@ class TestAnalysisPhaseTransitions:
         assert session.current_phase == "ANALYSIS"
         assert "RECON" in session.completed_phases
 
+    def test_recon_can_jump_directly_to_exploit_with_actionable_signal(self):
+        session = _make_session(
+            subdomains=["api.example.com"],
+            live_hosts=["https://api.example.com"],
+            open_ports={"example.com": [80]},
+            urls=["https://api.example.com/login"],
+            vulnerabilities=[
+                {"finding": "[HIGH] SQL Injection in login", "evidence": "db error"}
+            ],
+        )
+        engine = PipelineEngine(session)
+        _fast_forward(engine)
+
+        assert engine.should_transition() is True
+        assert engine.transition() == PipelinePhase.EXPLOIT
+
     def test_analysis_criteria_urls(self):
         session = _make_session(
             current_phase="ANALYSIS",
@@ -82,6 +98,21 @@ class TestAnalysisPhaseTransitions:
         _fast_forward(engine)
 
         assert engine.should_transition() is False
+
+    def test_analysis_stagnation_can_fall_back_to_recon(self):
+        session = _make_session(
+            current_phase="ANALYSIS",
+            subdomains=["api.example.com"],
+            live_hosts=["https://api.example.com"],
+            urls=[],
+            technologies={},
+            injection_points=[],
+        )
+        engine = PipelineEngine(session)
+        engine._phase_entry_iteration = 0
+        engine._current_iteration = engine._analysis_max_iterations
+
+        assert engine.transition() == PipelinePhase.RECON
 
 
 # ── Phase: EXPLOIT ────────────────────────────────────────────────────────────
@@ -168,6 +199,17 @@ class TestExploitPhaseTransitions:
 
         assert engine.should_transition() is False
 
+    def test_exploit_stagnation_can_fall_back_to_analysis(self):
+        session = _make_session(
+            current_phase="EXPLOIT",
+            vulnerabilities=[{"finding": "Possible SQLi candidate"}],
+        )
+        engine = PipelineEngine(session)
+        engine._phase_entry_iteration = 0
+        engine._current_iteration = engine._exploit_max_iterations
+
+        assert engine.transition() == PipelinePhase.ANALYSIS
+
 
 # ── Phase: REPORT ─────────────────────────────────────────────────────────────
 
@@ -239,17 +281,21 @@ class TestCheckToolPhaseFit:
         session = _make_session(current_phase="RECON")
         engine = PipelineEngine(session)
 
-        warning = engine.check_tool_phase_fit("quick_fuzz")
+        # hydra is only in exploitation category → should warn in RECON
+        warning = engine.check_tool_phase_fit("hydra")
         assert warning is not None
-        assert "EXPLOIT" in warning or "phase" in warning.lower()
+        assert "RECON" in warning
 
     def test_exploit_tool_in_exploit_phase_ok(self):
         session = _make_session(current_phase="EXPLOIT")
         engine = PipelineEngine(session)
 
-        assert engine.check_tool_phase_fit("quick_fuzz") is None
+        # hydra is in exploitation → valid in EXPLOIT phase
+        assert engine.check_tool_phase_fit("hydra") is None
+        # ffuf is in recon+vuln_scan+exploit → valid in EXPLOIT
+        assert engine.check_tool_phase_fit("ffuf") is None
+        # Unknown tools are assumed valid
         assert engine.check_tool_phase_fit("schemathesis_fuzz") is None
-        assert engine.check_tool_phase_fit("advanced_fuzz") is None
 
     def test_recommended_recon_tool_ok(self):
         session = _make_session(current_phase="RECON")
@@ -264,30 +310,48 @@ class TestCheckToolPhaseFit:
         session = _make_session(current_phase="RECON")
         engine = PipelineEngine(session)
 
+        # create_vulnerability_report is not in tools_meta.json → unknown → valid
+        # With dynamic approach, unknown tools are assumed valid (no false positives)
         warning = engine.check_tool_phase_fit("create_vulnerability_report")
-        assert warning is not None
+        assert warning is None
 
     def test_unknown_tool_in_recon_no_warning(self):
         """Tools not in the exploit-specific set don't generate warnings."""
         session = _make_session(current_phase="RECON")
         engine = PipelineEngine(session)
 
-        # Random tool not in _EXPLOIT_SPECIFIC_TOOLS
+        # Random tool not in tools_meta.json → assumed valid
         assert engine.check_tool_phase_fit("code_analysis") is None
 
     def test_caido_automate_warns_in_analysis(self):
         session = _make_session(current_phase="ANALYSIS")
         engine = PipelineEngine(session)
 
+        # caido_automate is not in tools_meta.json → unknown → valid
+        # With dynamic approach, unknown tools are assumed valid (no false positives)
         warning = engine.check_tool_phase_fit("caido_automate")
+        assert warning is None
+
+    def test_known_tool_wrong_phase_warns(self):
+        """Tools from tools_meta.json DO warn when used in wrong phase."""
+        session = _make_session(current_phase="REPORT")
+        engine = PipelineEngine(session)
+
+        # ffuf is in recon/vuln_scan/exploitation — NOT report → should warn
+        warning = engine.check_tool_phase_fit("ffuf")
         assert warning is not None
+        assert "REPORT" in warning
 
     def test_report_phase_all_tools_ok(self):
         session = _make_session(current_phase="REPORT")
         engine = PipelineEngine(session)
 
+        # create_vulnerability_report is unknown → valid
         assert engine.check_tool_phase_fit("create_vulnerability_report") is None
-        assert engine.check_tool_phase_fit("advanced_fuzz") is None
+        # ffuf is in recon/vuln_scanning/exploitation — NOT report → should warn
+        warning = engine.check_tool_phase_fit("ffuf")
+        assert warning is not None
+        assert "REPORT" in warning
 
 
 # ── get_phase_prompt ──────────────────────────────────────────────────────────
