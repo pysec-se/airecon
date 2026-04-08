@@ -5,6 +5,7 @@ import dataclasses
 import logging
 import os
 import threading
+import tempfile
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -947,8 +948,35 @@ def get_workspace_root() -> Path:
     if _workspace_root_cache is None:
         with _workspace_root_lock:
             if _workspace_root_cache is None:
-                _workspace_root_cache = Path.cwd() / "workspace"
-                _workspace_root_cache.mkdir(parents=True, exist_ok=True)
+                candidates: list[Path] = []
+                env_override = os.getenv("AIRECON_WORKSPACE")
+                if env_override:
+                    candidates.append(Path(env_override))
+                candidates.extend(
+                    [
+                        Path.cwd() / "workspace",
+                        Path.home() / APP_DIR_NAME / "workspace",
+                        Path(tempfile.gettempdir()) / "airecon-workspace",
+                    ]
+                )
+                for candidate in candidates:
+                    try:
+                        candidate.mkdir(parents=True, exist_ok=True)
+                        _workspace_root_cache = candidate
+                        break
+                    except PermissionError as e:
+                        logger.warning(
+                            "Workspace path not writable (%s): %s", candidate, e
+                        )
+                    except Exception as e:
+                        logger.warning(
+                            "Failed creating workspace path (%s): %s", candidate, e
+                        )
+                if _workspace_root_cache is None:
+                    raise RuntimeError(
+                        "Unable to create workspace directory. "
+                        "Set AIRECON_WORKSPACE to a writable path."
+                    )
     return _workspace_root_cache
 
 

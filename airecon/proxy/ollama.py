@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
 import logging
 import threading
@@ -422,6 +423,21 @@ class OllamaClient:
             _stream = None
             _aiter = None
 
+            async def _cleanup_next_future() -> None:
+                nonlocal _next_fut
+                if _next_fut is None:
+                    return
+                fut = _next_fut
+                _next_fut = None
+                if not fut.done():
+                    fut.cancel()
+                with contextlib.suppress(
+                    asyncio.CancelledError,
+                    StopAsyncIteration,
+                    Exception,
+                ):
+                    await fut
+
             try:
                 async with self._request_semaphore:
                     client = OllamaClient._httpx_client
@@ -464,6 +480,7 @@ class OllamaClient:
                                     raise TimeoutError("Ollama inactivity timeout")
 
                             if stop_requested_fn and stop_requested_fn():
+                                await _cleanup_next_future()
                                 return
 
                             if _next_fut is None:
@@ -533,11 +550,11 @@ class OllamaClient:
                 return
 
             except TimeoutError:
-                if _next_fut is not None and not _next_fut.done():
-                    _next_fut.cancel()
+                await _cleanup_next_future()
                 raise
 
             except httpx.ReadError as e:
+                await _cleanup_next_future()
                 # Stream-level read error (connection reset by peer,
                 # dropped TLS, etc.) — always transient, retry safely.
                 if attempt < max_retries:
@@ -590,9 +607,7 @@ class OllamaClient:
                 raise
 
             except Exception as e:
-                if _next_fut is not None and not _next_fut.done():
-                    _next_fut.cancel()
-                _next_fut = None
+                await _cleanup_next_future()
 
                 err_str = str(e).lower()
                 is_transient = any(
