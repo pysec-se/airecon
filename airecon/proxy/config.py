@@ -5,6 +5,7 @@ import dataclasses
 import logging
 import os
 import threading
+import tempfile
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -955,7 +956,7 @@ def get_workspace_root() -> Path:
                     [
                         Path.cwd() / "workspace",
                         Path.home() / APP_DIR_NAME / "workspace",
-                        Path("/tmp") / "airecon-workspace",
+                        Path(tempfile.gettempdir()) / "airecon-workspace",
                     ]
                 )
                 for candidate in candidates:
