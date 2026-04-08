@@ -1285,8 +1285,8 @@ class BrowserInstance:
             try:
                 await page.fill(sel.strip(), value, timeout=timeout_ms)
                 return True
-            except Exception:
-                continue
+            except Exception as e:
+                logger.debug("Fill selector failed (%s): %s", sel.strip(), e)
         return False
 
     async def _click_selectors(
@@ -1304,8 +1304,8 @@ class BrowserInstance:
             try:
                 await page.click(sel.strip(), timeout=timeout_ms)
                 return True
-            except Exception:
-                continue
+            except Exception as e:
+                logger.debug("Click selector failed (%s): %s", sel.strip(), e)
         return False
 
     async def _login_form(
@@ -1594,15 +1594,18 @@ class BrowserInstance:
 
         otp_filled = False
         for sel in field_selector.split(","):
+            filled = False
             try:
                 await page.fill(
                     sel.strip(), code, timeout=get_config().browser_totp_fill_timeout_ms
                 )
+                filled = True
+            except Exception as e:
+                logger.debug("handle_totp: fill failed for %s: %s", sel.strip(), e)
+            if filled:
                 otp_filled = True
                 logger.debug("handle_totp: filled field %s with code", sel.strip())
                 break
-            except Exception:
-                continue
         if not otp_filled:
             logger.warning("handle_totp: no OTP field matched (%s)", field_selector)
 
@@ -1625,12 +1628,15 @@ class BrowserInstance:
         )
         submitted = False
         for sel in _submit_selectors:
+            clicked = False
             try:
                 await page.click(sel, timeout=2000)
+                clicked = True
+            except Exception as e:
+                logger.debug("handle_totp: submit click failed for %s: %s", sel, e)
+            if clicked:
                 submitted = True
                 break
-            except Exception:
-                continue
         if not submitted:
             await page.keyboard.press("Enter")
 
@@ -2320,7 +2326,7 @@ class BrowserTabManager:
         username: str,
         password: str,
         username_selector: str = 'input[type="email"],input[name="username"],input[name="email"],#username,#email',
-        password_selector: str = 'input[type="password"]',
+        password_selector: str = 'input[type="password"]',  # nosec B107
         submit_selector: str = 'button[type="submit"],input[type="submit"]',
         tab_id: str | None = None,
         multi_step: bool = False,

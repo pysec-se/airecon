@@ -6,6 +6,8 @@ import sys
 
 from airecon._version import __version__
 
+logger = logging.getLogger("airecon.cli")
+
 
 def _print_banner() -> None:
     C = "\033[36m"
@@ -124,8 +126,8 @@ def main() -> None:
     elif args.command == "clean":
         _run_clean(args)
     else:
-        _print_banner()
-        sys.exit(0)
+        parser.print_help()
+        sys.exit(1)
 
 
 def _run_proxy(args) -> None:
@@ -262,8 +264,8 @@ def _run_status(args) -> None:
                 models = resp.json().get("models", [])
                 model_names = [m.get("name", "") for m in models if isinstance(m, dict)]
                 ollama_status = ON
-        except Exception:
-            pass
+        except Exception as e:
+            logger.debug("Ollama status check failed: %s", e)
 
         print(_row())
         print(_row(f"  {B}Ollama{X}        {ollama_status}"))
@@ -288,10 +290,10 @@ def _run_status(args) -> None:
         docker_detail = ""
         try:
             import shutil
-            import subprocess as sp
+            import subprocess as sp  # nosec B404
 
             _docker = shutil.which("docker") or "docker"
-            result = sp.run(
+            result = sp.run(  # nosec B603
                 [
                     _docker,
                     "ps",
@@ -310,7 +312,8 @@ def _run_status(args) -> None:
             else:
                 docker_status = f"{Y}● standby{X}"
                 docker_detail = "Container starts on first tool call"
-        except Exception:
+        except Exception as e:
+            logger.debug("Docker status check failed: %s", e)
             docker_status = f"{R}● not found{X}"
             docker_detail = "Docker is not installed or not in PATH"
 
@@ -323,10 +326,10 @@ def _run_status(args) -> None:
         searxng_detail = ""
         try:
             import shutil
-            import subprocess as sp
+            import subprocess as sp  # nosec B404
 
             _docker = shutil.which("docker") or "docker"
-            result = sp.run(
+            result = sp.run(  # nosec B603
                 [
                     _docker,
                     "ps",
@@ -354,7 +357,8 @@ def _run_status(args) -> None:
             else:
                 searxng_status = f"{Y}● stopped{X}"
                 searxng_detail = "Starts automatically with 'airecon start'"
-        except Exception:
+        except Exception as e:
+            logger.debug("SearXNG status check failed: %s", e)
             searxng_status = f"{Y}● unknown{X}"
             searxng_detail = "Docker not available"
 
@@ -370,8 +374,8 @@ def _run_status(args) -> None:
                 resp = await client.get(f"{proxy_url}/api/status")
                 if resp.status_code == 200:
                     proxy_status = ON
-        except Exception:
-            pass
+        except Exception as e:
+            logger.debug("Proxy status check failed: %s", e)
 
         print(_row(f"  {B}Proxy{X}         {proxy_status}"))
         print(_row(f"  {D}Endpoint:{X}     {proxy_url}"))
@@ -406,7 +410,7 @@ def _set_config_value(key: str, value: str) -> None:
 def _unload_model_safely():
     import json
     import shutil
-    import subprocess
+    import subprocess  # nosec B404
     import urllib.request
 
     C = "\033[36m"
@@ -478,13 +482,13 @@ def _unload_model_safely():
         resp = urllib.request.urlopen(f"{proxy_url}/api/status", timeout=3)  # nosec B310
         data = json.loads(resp.read())
         agent_stats = data.get("agent", {})
-    except Exception:
-        pass
+    except Exception as e:
+        logger.debug("Failed to fetch proxy status: %s", e)
     try:
         resp2 = urllib.request.urlopen(f"{proxy_url}/api/session/current", timeout=3)  # nosec B310
         session_info = json.loads(resp2.read()).get("session") or {}
-    except Exception:
-        pass
+    except Exception as e:
+        logger.debug("Failed to fetch current session: %s", e)
 
     if not session_info:
         try:
@@ -512,8 +516,8 @@ def _unload_model_safely():
                             "live_hosts": len(_sd.get("live_hosts", [])),
                             "vulnerabilities": len(_sd.get("vulnerabilities", [])),
                         }
-        except Exception:
-            pass
+        except Exception as e:
+            logger.debug("Failed to load recent session file: %s", e)
 
     token_usage = agent_stats.get("token_usage", {})
     tool_counts = agent_stats.get("tool_counts", {})
@@ -566,7 +570,7 @@ def _unload_model_safely():
 
     print(_row(f"  {D}Stopping sandbox container…{X}"), end="\r", flush=True)
     try:
-        subprocess.run(
+        subprocess.run(  # nosec B603
             [_docker, "rm", "-f", "airecon-sandbox-active"],
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
@@ -584,15 +588,15 @@ def _unload_model_safely():
         ):
             from airecon.proxy.searxng import CONTAINER_NAME as _SX_NAME
 
-            subprocess.run(
+            subprocess.run(  # nosec B603
                 [_docker, "rm", "-f", _SX_NAME],
                 stdout=subprocess.DEVNULL,
                 stderr=subprocess.DEVNULL,
                 timeout=10,
             )
             print(_svc(f"{G}✓{X}", "SearXNG", "stopped"))
-    except Exception:
-        pass
+    except Exception as e:
+        logger.debug("SearXNG shutdown failed: %s", e)
 
     print(_row(f"  {D}Unloading model…{X}"), end="\r", flush=True)
     try:
@@ -606,7 +610,7 @@ def _unload_model_safely():
             "-d",
             json.dumps({"model": model, "keep_alive": 0}),
         ]
-        subprocess.run(
+        subprocess.run(  # nosec B603
             cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=2
         )
     except Exception:
@@ -616,8 +620,8 @@ def _unload_model_safely():
                 f"{cfg.ollama_url.rstrip('/')}/api/generate", data=data, method="POST"
             )
             urllib.request.urlopen(req, timeout=2)  # nosec B310
-        except Exception:
-            pass
+        except Exception as e:
+            logger.debug("Fallback unload via urllib failed: %s", e)
     print(_svc(f"{G}✓{X}", "Ollama model", "VRAM released"))
 
     print(_row())
@@ -669,7 +673,7 @@ def _run_list_sessions() -> None:
 
 def _run_clean(args) -> None:
     import shutil
-    import subprocess
+    import subprocess  # nosec B404
 
     CYAN = "\033[96m"
     GREEN = "\033[92m"
@@ -686,7 +690,7 @@ def _run_clean(args) -> None:
         sys.exit(1)
 
     def run(cmd: list[str], capture: bool = False) -> subprocess.CompletedProcess:
-        return subprocess.run(
+        return subprocess.run(  # nosec B603
             cmd,
             stdout=subprocess.PIPE if capture else subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
@@ -715,8 +719,8 @@ def _run_clean(args) -> None:
                         totals["volumes"] = reclaimable
                     elif "Cache" in t or "Build" in t:
                         totals["cache"] = reclaimable
-                except Exception:
-                    pass
+                except Exception as e:
+                    logger.debug("Failed to parse docker df line: %s", e)
         return totals
 
     print(f"\n{BOLD}{BROOM} AIRecon Docker Cleanup{RESET}")

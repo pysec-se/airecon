@@ -22,35 +22,22 @@ logger = logging.getLogger("airecon.agent")
 
 # Static asset extensions that should NOT be fuzzed individually
 # But their PARENT DIRECTORY might be worth fuzzing!
-_PURE_STATIC_EXTS = frozenset(
-    {
-        "css",
-        "png",
-        "jpg",
-        "jpeg",
-        "gif",
-        "svg",
-        "ico",
-        "bmp",
-        "webp",
-        "woff",
-        "woff2",
-        "ttf",
-        "otf",
-        "eot",
-        "mp4",
-        "webm",
-        "ogg",
-        "mp3",
-        "wav",
-        "zip",
-        "tar",
-        "gz",
-        "rar",
-        "dat",
-        "bin",
-    }
-)
+# Loaded from file_extensions.json (was hardcoded — now single source of truth)
+def _load_pure_static_exts() -> frozenset[str]:
+    """Load static asset extensions from file_extensions.json."""
+    try:
+        from airecon.proxy.data_loader import load_file_extensions
+        data = load_file_extensions()
+        exts = data.get("static", [])
+        return frozenset(str(e).strip().lower() for e in exts if str(e).strip())
+    except Exception as e:
+        logging.getLogger("airecon.agent.loop_cycle_post").warning(
+            "Failed to load static extensions from JSON: %s", e
+        )
+        return frozenset()
+
+
+_PURE_STATIC_EXTS: frozenset[str] = _load_pure_static_exts()
 
 # JS files are GOLD — do NOT block analysis
 # PDFs can leak info — do NOT block entirely
@@ -372,7 +359,7 @@ class _CyclePostMixin:
                             _hint = str(_cur_step.get("tool_hint", "")).lower()
 
                             _match_token = tool_name.lower()
-                            if _match_token == "execute" and isinstance(
+                            if _match_token == "execute" and isinstance(  # nosec B105
                                 arguments, dict
                             ):
                                 _raw_cmd = str(arguments.get("command", "")).strip()
@@ -494,7 +481,7 @@ class _CyclePostMixin:
 
                                 if _hint:
                                     _match_token = tool_name.lower()
-                                    if _match_token == "execute" and isinstance(
+                                    if _match_token == "execute" and isinstance(  # nosec B105
                                         arguments, dict
                                     ):
                                         _raw_cmd = str(

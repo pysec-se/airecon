@@ -481,28 +481,28 @@ class TestPhaseObjectives:
     """Test phase objectives."""
 
     def test_recon_objective(self):
-        """RECON should focus on enumeration."""
+        """RECON objective should come from dynamic prompt content."""
         recon = DEFAULT_PHASES[PipelinePhase.RECON]
 
         objective = recon.objective.lower()
-        assert "enumerat" in objective or "discover" in objective or "scan" in objective
+        assert "attack surface" in objective or "recon" in objective or "scope" in objective
 
     def test_analysis_objective(self):
-        """ANALYSIS should focus on finding vulnerabilities."""
+        """ANALYSIS objective should reflect analysis/validation guidance."""
         analysis = DEFAULT_PHASES[PipelinePhase.ANALYSIS]
 
         objective = analysis.objective.lower()
-        assert "analyz" in objective or "identify" in objective
+        assert "validation" in objective or "evidence" in objective or "analysis" in objective
 
     def test_exploit_objective(self):
-        """EXPLOIT should focus on testing/exploiting."""
+        """EXPLOIT objective should focus on measurable exploitability."""
         exploit = DEFAULT_PHASES[PipelinePhase.EXPLOIT]
 
         objective = exploit.objective.lower()
-        assert "test" in objective or "exploit" in objective or "fuzz" in objective
+        assert "exploit" in objective or "impact" in objective or "verify" in objective
 
     def test_report_objective(self):
         """REPORT should focus on documentation."""
         report = DEFAULT_PHASES[PipelinePhase.REPORT]
         # Report phase should exist and have objective
-        assert len(report.objective) > 0
+        assert "report" in report.objective.lower() or "evidence" in report.objective.lower()

@@ -604,8 +604,8 @@ class WAFBypassEngine:
             return payload
 
     def _mix_case(self, payload: str) -> str:
-        import random
+        import secrets
 
         return "".join(
-            c.upper() if random.random() > 0.5 else c.lower() for c in payload
+            c.upper() if secrets.randbelow(2) == 0 else c.lower() for c in payload
         )

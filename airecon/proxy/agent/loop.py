@@ -168,6 +168,7 @@ class AgentLoop(
     _CTF_MAX_ITERATIONS = get_config().agent_ctf_max_iterations
 
     def __init__(self, ollama: OllamaClient, engine: DockerEngine) -> None:
+        super().__init__()
         self.ollama = ollama
         self.engine = engine
         self.state = AgentState()
@@ -219,6 +220,7 @@ class AgentLoop(
         self._last_saved_cumulative: int = 0
         self._memory_manager = None
         self._memory_health_status: dict[str, Any] = {}
+        self._pending_adaptive_state: dict[str, Any] | None = None
 
         # Attack surface coverage tracker — prevents repetitive testing
         self._surface_tracker: Any = None
@@ -227,7 +229,155 @@ class AgentLoop(
 
             self._surface_tracker = AttackSurfaceTracker()
         except Exception as _e:
-            pass
+            logger.debug("AttackSurfaceTracker init failed: %s", _e)
+
+    def _hydrate_adaptive_learning_state(
+        self,
+        adaptive_state: dict[str, Any],
+    ) -> bool:
+        if not adaptive_state or not hasattr(self, "_adaptive_learning_engine"):
+            return False
+
+        from .adaptive_learning import StrategyPattern, ToolPerformance
+
+        engine = self._adaptive_learning_engine
+
+        tp_data = adaptive_state.get("tool_performances", {})
+        restored_tools = 0
+        for name, pdata in tp_data.items():
+            tool_name = str(name or "").strip()
+            if not tool_name:
+                continue
+
+            perf = engine.tool_performances.get(tool_name)
+            if perf is None:
+                perf = ToolPerformance(tool_name=tool_name)
+                engine.tool_performances[tool_name] = perf
+
+            perf.total_uses = max(perf.total_uses, int(pdata.get("total_uses", 0)))
+            perf.successes = max(perf.successes, int(pdata.get("successes", 0)))
+            perf.failures = max(perf.failures, int(pdata.get("failures", 0)))
+            perf.avg_duration = max(
+                perf.avg_duration,
+                float(pdata.get("avg_duration", 0.0)),
+            )
+            perf.avg_confidence = max(
+                perf.avg_confidence,
+                float(pdata.get("avg_confidence", 0.0)),
+            )
+            perf.last_used = max(perf.last_used, float(pdata.get("last_used", 0.0)))
+            perf.success_streak = max(
+                perf.success_streak,
+                int(pdata.get("success_streak", 0)),
+            )
+            perf.failure_streak = max(
+                perf.failure_streak,
+                int(pdata.get("failure_streak", 0)),
+            )
+
+            context_scores = pdata.get("context_scores", {})
+            if isinstance(context_scores, dict):
+                for key, value in context_scores.items():
+                    perf.context_scores[str(key)] = max(
+                        float(perf.context_scores.get(str(key), 0.0)),
+                        float(value),
+                    )
+
+            target_type_scores = pdata.get("target_type_scores", {})
+            if isinstance(target_type_scores, dict):
+                for key, value in target_type_scores.items():
+                    perf.target_type_scores[str(key)] = max(
+                        float(perf.target_type_scores.get(str(key), 0.0)),
+                        float(value),
+                    )
+
+            restored_tools += 1
+
+        existing_patterns = {p.pattern_id: p for p in engine.strategy_patterns}
+        restored_patterns = 0
+        for pdata in adaptive_state.get("strategy_patterns", []):
+            pattern_id = str(pdata.get("pattern_id", "")).strip()
+            if not pattern_id:
+                continue
+
+            existing = existing_patterns.get(pattern_id)
+            tool_sequence = [
+                str(tool)
+                for tool in list(pdata.get("tool_sequence", []) or [])
+                if str(tool).strip()
+            ]
+            if existing is None:
+                existing = StrategyPattern(
+                    pattern_id=pattern_id,
+                    description=str(pdata.get("description", "")),
+                    conditions=dict(pdata.get("conditions", {}) or {}),
+                    tool_sequence=tool_sequence,
+                    success_count=int(pdata.get("success_count", 0)),
+                    failure_count=int(pdata.get("failure_count", 0)),
+                    avg_result_confidence=float(
+                        pdata.get("avg_result_confidence", 0.0)
+                    ),
+                    last_applied=float(pdata.get("last_applied", 0.0)),
+                )
+                engine.strategy_patterns.append(existing)
+                existing_patterns[pattern_id] = existing
+            else:
+                existing.success_count = max(
+                    existing.success_count,
+                    int(pdata.get("success_count", 0)),
+                )
+                existing.failure_count = max(
+                    existing.failure_count,
+                    int(pdata.get("failure_count", 0)),
+                )
+                existing.avg_result_confidence = max(
+                    existing.avg_result_confidence,
+                    float(pdata.get("avg_result_confidence", 0.0)),
+                )
+                existing.last_applied = max(
+                    existing.last_applied,
+                    float(pdata.get("last_applied", 0.0)),
+                )
+                if not existing.tool_sequence and tool_sequence:
+                    existing.tool_sequence = tool_sequence
+                if not existing.conditions:
+                    existing.conditions = dict(pdata.get("conditions", {}) or {})
+                if not existing.description:
+                    existing.description = str(pdata.get("description", ""))
+
+            restored_patterns += 1
+
+        if restored_tools or restored_patterns:
+            logger.info(
+                "Adaptive learning state restored: %d tools, %d patterns",
+                restored_tools,
+                restored_patterns,
+            )
+        return bool(restored_tools or restored_patterns)
+
+    def _ensure_adaptive_learning_engine(self) -> Any:
+        if not hasattr(self, "_adaptive_learning_engine"):
+            from .adaptive_learning import AdaptiveLearningEngine
+
+            cfg = get_config()
+            session_id = getattr(self._session, "session_id", "") if self._session else ""
+            try:
+                min_observations = int(
+                    getattr(cfg, "intelligence_adaptive_min_observations", 3)
+                )
+            except (TypeError, ValueError):
+                min_observations = 3
+            self._adaptive_learning_engine = AdaptiveLearningEngine(
+                min_observations=min_observations,
+                session_id=session_id or "",
+            )
+
+        if self._pending_adaptive_state:
+            pending = self._pending_adaptive_state
+            self._pending_adaptive_state = None
+            self._hydrate_adaptive_learning_state(pending)
+
+        return self._adaptive_learning_engine
 
     # ── Transparent compatibility layer: map old bare attrs to structured state ──
     # All 200+ references across mixin files (loop_cycle_llm.py, loop_exploration.py,
@@ -440,8 +590,11 @@ class AgentLoop(
                             "failures": p.failures,
                             "avg_duration": p.avg_duration,
                             "avg_confidence": p.avg_confidence,
+                            "last_used": p.last_used,
                             "success_streak": p.success_streak,
                             "failure_streak": p.failure_streak,
+                            "context_scores": dict(p.context_scores),
+                            "target_type_scores": dict(p.target_type_scores),
                         }
                         for name, p in ale.tool_performances.items()
                     },
@@ -454,6 +607,7 @@ class AgentLoop(
                             "success_count": p.success_count,
                             "failure_count": p.failure_count,
                             "avg_result_confidence": p.avg_result_confidence,
+                            "last_applied": p.last_applied,
                         }
                         for p in ale.strategy_patterns
                     ],
@@ -491,23 +645,9 @@ class AgentLoop(
 
             # Load adaptive learning state
             adaptive_state = persist.load_adaptive_state(self._session.target)
-            if adaptive_state and hasattr(self, "_adaptive_learning_engine"):
-                ale = self._adaptive_learning_engine
-                tp_data = adaptive_state.get("tool_performances", {})
-                for name, pdata in tp_data.items():
-                    if name not in ale.tool_performances:
-                        from .adaptive_learning import ToolPerformance
-
-                        ale.tool_performances[name] = ToolPerformance(
-                            tool_name=name,
-                            total_uses=pdata.get("total_uses", 0),
-                            successes=pdata.get("successes", 0),
-                            failures=pdata.get("failures", 0),
-                            avg_duration=pdata.get("avg_duration", 0.0),
-                            avg_confidence=pdata.get("avg_confidence", 0.0),
-                            success_streak=pdata.get("success_streak", 0),
-                            failure_streak=pdata.get("failure_streak", 0),
-                        )
+            if adaptive_state:
+                self._pending_adaptive_state = adaptive_state
+                self._ensure_adaptive_learning_engine()
                 logger.info(
                     "Adaptive learning state loaded for %s", self._session.target
                 )
@@ -730,6 +870,7 @@ class AgentLoop(
                 "findings_count": _caido_findings,
             },
             "risk": evidence_risk_summary(self.state.evidence_log),
+            "dynamic_classification": True,
         }
 
     def _extract_tool_calls_from_text(

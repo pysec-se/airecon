@@ -3,6 +3,7 @@ from __future__ import annotations
 from airecon.proxy.data_loader import (
     load_endpoint_patterns,
     load_fuzzer_data,
+    load_objective_patterns,
     load_tech_correlations,
     load_tools_meta,
 )
@@ -20,3 +21,10 @@ class TestDataLoader:
     def test_load_tools_meta(self):
         data = load_tools_meta()
         assert isinstance(data, dict)
+
+    def test_load_objective_patterns(self):
+        data = load_objective_patterns()
+        assert isinstance(data, dict)
+        assert "objectives" in data
+        assert "authentication" in data["objectives"]
+        assert "injection" in data["objectives"]

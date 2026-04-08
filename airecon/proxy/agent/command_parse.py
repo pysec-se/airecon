@@ -41,7 +41,7 @@ def extract_primary_binary(command: str) -> str:
         if token_base in _WRAPPER_TOKENS:
             i += 1
 
-            if token_base == "timeout":
+            if token_base == "timeout":  # nosec B105
 
                 while i < len(tokens) and tokens[i].startswith("-"):
                     i += 1
@@ -50,11 +50,11 @@ def extract_primary_binary(command: str) -> str:
                 if i < len(tokens) and tokens[i] == "--":
                     i += 1
 
-            elif token_base == "stdbuf":
+            elif token_base == "stdbuf":  # nosec B105
                 while i < len(tokens) and tokens[i].startswith("-"):
                     i += 1
 
-            elif token_base == "env":
+            elif token_base == "env":  # nosec B105
 
                 while i < len(tokens):
                     t = tokens[i]

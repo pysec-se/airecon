@@ -30,7 +30,7 @@
 
 ## Deep Thinking Model Support
 
-AIRecon supports reasoning models that generate internal thoughts (`<think>`) before producing a final answer. This is critical for complex tasks such as:
+AIRecon supports reasoning models that generate internal thoughts (`<think>`) before producing a final answer. This is useful for complex tasks such as:
 
 - Planning multi-stage attack chains
 - Analyzing vulnerability proof-of-concepts
@@ -38,9 +38,9 @@ AIRecon supports reasoning models that generate internal thoughts (`<think>`) be
 - Formulating exploit hypotheses
 - Navigating scope rules under complex context
 
-The agent captures the `<think>` stream separately. The TUI displays the model's reasoning process in real-time, visually distinct from tool calls and final output.
+When enabled, AIRecon keeps the `<think>` stream separate from final output. The TUI can surface it for debugging or auditability.
 
-**Controlled via config:** Set `ollama_enable_thinking: true` for reasoning models (qwen3, etc.), `false` for standard models.
+**Controlled via config:** Set `ollama_enable_thinking: true` for reasoning-capable models, `false` for standard models.
 
 ---
 
@@ -52,7 +52,7 @@ All shell commands run inside an isolated **Kali Linux Docker container** (`aire
 Agent Loop  →  execute tool  →  docker exec airecon-sandbox bash -c "<command>"
 ```
 
-**Preinstalled tools include:**
+**Common tools in the sandbox image include (may vary by build):**
 
 | Category | Tools |
 |----------|-------|
@@ -71,7 +71,7 @@ Agent Loop  →  execute tool  →  docker exec airecon-sandbox bash -c "<comman
 | Wordlists | Full SecLists at `/usr/share/seclists/`, FuzzDB at `/home/pentester/wordlists/fuzzdb/`, rockyou |
 | Scripting | `python3`, `bash`, `curl`, `wget`, `jq`, `ripgrep`, `parallel`, `tmux` |
 
-The agent runs as user `pentester` with passwordless `sudo` and internet access, so it can self-install any missing tool without interruption.
+Sandbox user permissions and network access are defined by the container build; consult the sandbox image for exact defaults.
 
 ---
 
@@ -79,43 +79,40 @@ The agent runs as user `pentester` with passwordless `sudo` and internet access,
 
 AIRecon operates through a structured 4-phase state machine. Phase transitions are triggered automatically based on real findings from tool output — not iteration counts.
 
-```
-RECON (max 500 iter)
+<div class="pipeline-diagram">
+  <pre><code>RECON
   Objective: Enumerate attack surface
-  Criteria:  subdomains_discovered + ports_scanned + recon_artifacts_saved
-  Tools:     execute (subfinder/httpx/nmap/katana/ffuf), web_search, browser_action
+  Example tools: execute (subfinder/httpx/nmap/katana/ffuf), web_search, browser_action
       │
-      ▼ (60% criteria met + min 10 iterations)
-ANALYSIS (max 300 iter)
+      ▼
+ANALYSIS
   Objective: Identify injection points, misconfigs, tech stack
-  Criteria:  urls_collected + technologies_identified
-  Tools:     execute, browser_action, code_analysis (Semgrep), read_file
+  Example tools: execute, browser_action, code_analysis (Semgrep), read_file
       │
       ▼
-EXPLOIT (max 800 iter)
+EXPLOIT
   Objective: Test and confirm vulnerabilities
-  Criteria:  vulnerabilities_tested
-  Tools:     execute, quick_fuzz, advanced_fuzz, deep_fuzz, schemathesis_fuzz,
-             caido_send_request, caido_automate, spawn_agent, create_vulnerability_report
+  Example tools: execute, quick_fuzz, advanced_fuzz, schemathesis_fuzz,
+                 caido_send_request, caido_automate, spawn_agent, create_vulnerability_report
       │
       ▼
-REPORT (max 100 iter)
-  Objective: Document all confirmed findings
-  Criteria:  reports_generated
-  Tools:     create_vulnerability_report, create_file, read_file
-```
+REPORT
+  Objective: Document confirmed findings
+  Example tools: create_vulnerability_report, create_file, read_file
+  </code></pre>
+</div>
 
-Phase guidance is **soft-enforced**: exploit-only tools used in earlier phases receive a `[PHASE GUIDANCE]` warning injected into the LLM context, but execution is not blocked.
+Phase guidance is **soft-enforced** and configurable via `pipeline_*` settings: AIRecon warns when tools are used outside their typical phase but does not hard-block execution.
 
 ### Automatic Checkpoints
 
-The agent loop runs three types of automatic checkpoints during execution:
+The agent loop runs automatic checkpoints during execution. Intervals are configurable.
 
-| Checkpoint | Interval | Purpose |
-|-----------|----------|---------|
-| Pipeline evaluation | Every 5 iterations | Check phase transition criteria, inject full session context |
-| Self-evaluation | Every 10 iterations | Full progress review, plan adjustment |
-| Context compression | Every 15 iterations | Truncate conversation history to prevent context overflow |
+| Checkpoint | Purpose |
+|-----------|---------|
+| Pipeline evaluation | Check phase transition criteria and refresh session context |
+| Self-evaluation | Progress review and plan adjustment |
+| Context compression | Trim conversation history to prevent context overflow |
 
 ---
 
@@ -128,13 +125,13 @@ Before calling any tool, the agent classifies the request:
 | `[SPECIFIC TASK]` | Single verb + target ("find subdomains", "scan ports") | Runs only the requested operation, then stops |
 | `[FULL RECON]` | Broad engagement ("pentest", "full recon", "bug bounty") | Follows the full SOP, chains all phases |
 
-**Chain creep is explicitly forbidden for specific tasks.** After subdomain enumeration, the agent will not automatically run live checks, nuclei, or port scans unless the user asked for them.
+For specific tasks, AIRecon is instructed to avoid expanding scope unless the user explicitly asks for follow-on steps.
 
 ---
 
 ## Browser Automation
 
-The agent controls a headless Chromium browser via Playwright + Chrome DevTools Protocol (CDP). The browser runs inside the Docker sandbox on port 9222.
+The agent controls a headless Chromium browser via Playwright. The browser runs inside the Docker sandbox.
 
 **Available browser actions:**
 
@@ -164,7 +161,7 @@ AIRecon supports full authenticated testing via the `browser_action` tool's auth
 
 | Method | Action | Description |
 |--------|--------|-------------|
-| Form login | `login_form` | Auto-discovers username/password selectors via heuristic scanning. Falls back to common selectors (`#username`, `input[name=email]`, etc.) |
+| Form login | `login_form` | Uses provided selectors or common defaults for username/password fields and submit buttons. |
 | TOTP / 2FA | `handle_totp` | RFC 6238 TOTP — generates code from Base32 secret automatically |
 | OAuth flows | `oauth_authorize` | Handles redirect-based OAuth: navigates authorize URL, grants permissions, captures redirect |
 | Cookie injection | `inject_cookies` | Load a saved cookie dict directly into the active browser session |
@@ -226,7 +223,7 @@ intitle:"index of" intext:password
 
 ### Setup
 
-```bash
+```text
 # Auto-managed (add to config):
 "searxng_url": "http://localhost:8080"
 
@@ -503,7 +500,7 @@ All session data is stored at `~/.airecon/sessions/<session_id>.json`:
 
 ### Resume
 
-```bash
+```text
 airecon start --session <session_id>
 ```
 
@@ -517,62 +514,18 @@ Vulnerabilities are deduplicated using **Jaccard similarity** on title + endpoin
 
 ## Anti Context-Loss
 
-On long sessions (500+ iterations), LLMs tend to "forget" findings from early in the conversation. AIRecon uses multiple complementary mechanisms to prevent context loss.
+AIRecon uses multiple mechanisms to keep long sessions stable:
+- Periodic session summaries injected into context
+- Token usage monitoring with adaptive truncation
+- LLM-based compression with rolling memory handoff
+- Local fallback summaries if remote context reset fails
+- VRAM/OOM recovery with reduced context windows to keep the run alive
 
-### Automatic Context Re-injection
-
-**Every 5 iterations**, `session_to_context()` generates a full summary of all current findings and injects it as a system message:
-
-```
-[SESSION CONTEXT UPDATE — iteration 45]
-Target: example.com
-Subdomains found: 12 (api.example.com, admin.example.com, ...)
-Open ports: 80, 443, 8080, 6379
-Technologies: PHP/8.1, Laravel, MySQL, Redis
-URLs collected: 234
-Vulnerabilities confirmed: 2
-  → HIGH: SQL Injection at /api/v1/login (CVE candidate)
-  → MED: IDOR at /api/v1/users/{id}
-Current phase: EXPLOIT
-Tested endpoints: GET https://example.com/api/v1/login, POST https://example.com/api/v1/users
-```
-
-### Proactive Context Monitoring
-
-Before each LLM call, AIRecon checks token usage:
-
-| Threshold | Action |
-|-----------|--------|
-| ≥80% full | Trim conversation to 50 messages |
-| ≥90% full | Aggressive trim to 35 messages |
-| >65% full | Skip `compress_with_llm` (prevents OOM during compression) |
-
-### Dynamic Compression Interval
-
-Context compression frequency scales automatically:
-
-| Condition | Interval |
-|-----------|----------|
-| Token usage >60% | Every 5 iterations |
-| Iteration >150 | Every 10 iterations |
-| Normal | Every 15 iterations |
-
-### Multi-Level VRAM Crash Recovery
-
-If Ollama crashes (OOM / HTML error page / `signal: killed`), AIRecon recovers automatically with 4 escalation tiers:
-
-| Tier | Trigger | Context | Max messages | Wait |
-|------|---------|---------|--------------|------|
-| 1 | 1st crash | `ollama_num_ctx_small` | 80 | 0s |
-| 2 | 2nd crash | ÷2 | 50 | 5s |
-| 3 | 3rd crash | ÷4 | 30 | 10s |
-| 4 | 4+ crashes | 4096 (min) | 20 | 30s |
-
-The reduced context persists for **all subsequent iterations** — the agent does not reset to full context after recovery. Session data is auto-saved after each crash so no findings are lost.
+Intervals and thresholds are configurable in `config.yaml`.
 
 ### Tested Endpoints Memory
 
-`SessionData.tested_endpoints` tracks every URL the agent has tested as `"METHOD url"` strings (max 500, LRU eviction). After any context truncation, the last 20 tested endpoints are re-injected into context, preventing the agent from re-testing the same endpoints.
+`SessionData.tested_endpoints` tracks endpoints the agent has already tested. Recent items are re-injected into context after truncation to reduce duplicate testing.
 
 ### Session Persistence
 
@@ -589,7 +542,7 @@ You can reference local files or directories directly in the chat input using `@
 | Syntax | Behavior |
 |--------|----------|
 | `@/path/to/file.txt` | Copy single file to `workspace/uploads/`, read content into context |
-| `@/path/to/dir/` | Copy entire directory tree (up to 50 files, 100KB each), summarize in context |
+| `@/path/to/dir/` | Copy directory tree to `workspace/uploads/` and summarize: up to 40 text files, 50KB each, 200KB total |
 | `@/path/to/script.py` | Non-text files (binary) are copied but not read into context |
 
 ### Example Usage
@@ -604,38 +557,31 @@ review my source code: @/home/user/projects/webapp/src/
 
 After copying, AIRecon reports:
 ```
-Files read into context: 12 | Skipped: 2 binary/non-text, 1 too large (>100KB), 3 limit exceeded
+Files read into context: 12 | Skipped: 2 binary/non-text, 1 too large (>50KB), 3 over read limit (40 files / 200KB)
 ```
 
 ---
 
 ## TUI — Slash Command Autocomplete
 
-In the chat input, typing `/` triggers an autocomplete dropdown listing all available slash commands.
+In the chat input, typing `/` triggers an autocomplete dropdown listing available slash commands. The exact command set depends on your build and configuration.
 
-| Command | Purpose |
-|---------|---------|
-| `/swe-review` | Full SE code review (8-point checklist) |
-| `/quality` | Run ruff + bandit + pytest |
-| `/test-gen <target>` | Generate pytest tests for a function/module |
-| `/arch <change>` | Architecture review for proposed changes |
-
-Press `Tab` or `↓/↑` to navigate, `Enter` to select. The dropdown closes on `Escape` or if you type past the autocomplete boundary.
+Press `Tab` or `↓/↑` to navigate, `Enter` to select. The dropdown closes on `Escape` or when you continue typing beyond the autocomplete scope.
 
 ---
 
 ## Skills System
 
-Skills are Markdown files in `airecon/proxy/skills/` that give the agent deep, specialized knowledge on demand — without permanently bloating the system prompt.
+Skills are Markdown files in `airecon/proxy/skills/` that give the agent specialized knowledge on demand without permanently bloating the system prompt.
 
 **How it works:**
-1. At startup, AIRecon scans `skills/` and injects a list of all file paths into the system prompt as `<available_skills>`
+1. At startup, AIRecon builds an index of available skills
 2. When the agent detects a relevant technology or vuln class, it calls `read_file` with the skill path
 3. The skill content is loaded into context for that session
 
-**Why on-demand?** Loading all 56+ skills at startup would consume 50,000+ tokens of context window — wasted on irrelevant content for most targets.
+**Why on-demand?** Loading every skill at startup would consume substantial context window budget for most targets.
 
-**Keyword mappings:** 289 keyword → skill path mappings in `system.py` trigger automatic skill suggestions. For example, detecting `GraphQL` in httpx output automatically suggests loading `protocols/graphql.md`.
+**Keyword mappings:** skill suggestions are driven by pattern matches in the system prompt and session signals.
 
 To add your own skill, see [Adding Custom Skills](development/creating_skills.md).
 
@@ -832,8 +778,8 @@ Or add to `~/.airecon/mcp.json`:
 | Command | Description |
 |---------|-------------|
 | `/mcp` | Show MCP command help/usage |
-| `/mcp list` | List configured MCP servers with ready status and tool totals |
-| `/mcp list <name>` | Show tools from specific server (first 10 only) |
+| `/mcp list` | List configured MCP servers with readiness info (when available) |
+| `/mcp list <name>` | Show tools from a specific server (output may be truncated) |
 | `/mcp add <url> auth:user/pass|auth:apikey:<token> [name]` | Add MCP server with optional auth |
 | `/mcp enable <name>` | Enable a disabled server |
 | `/mcp disable <name>` | Disable active server |
@@ -842,7 +788,7 @@ Or add to `~/.airecon/mcp.json`:
 
 MCP tools are exposed to the agent as `mcp_<server_name>`. The LLM can:
 
-- `action=list_tools`: Get all tools (truncated to 50 if >50)
+- `action=list_tools`: Get tools (may be truncated for readability)
 - `action=search_tools query=<keyword>`: Find tools by name/description
 - `action=call_tool tool=<name> arguments={...}`: Execute a tool
 
@@ -850,7 +796,7 @@ MCP tools are exposed to the agent as `mcp_<server_name>`. The LLM can:
 
 ```
 agent → mcp_example(action=list_tools)
-→ {"tools": [{"name": "nmap_scan"}, ...], "total_tools": 150}
+→ {"tools": [{"name": "nmap_scan"}, ...]}
 
 agent → mcp_example(action=search_tools query="nmap")
 → {"tools": [{"name": "nmap_scan"}], "count": 1}
@@ -863,7 +809,7 @@ agent → mcp_example(action=call_tool tool="nmap_scan" arguments={"target": "19
 
 | TUI Command | Output |
 |-------------|--------|
-| `/mcp list` | `🟢 example - Ready (150 total tools)` |
-| `/mcp list example` | Shows first 10 tools + omitted count note |
+| `/mcp list` | `🟢 example - Ready (tool count if provided)` |
+| `/mcp list example` | Shows tools (truncated for readability) |
 
 ---

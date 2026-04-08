@@ -159,13 +159,13 @@ class _NotesManager:
         index_file = self.storage_dir / "notes_index.json"
         if index_file.exists():
             try:
-                self.notes_index = json.loads(index_file.read_text())
+                self.notes_index = json.loads(index_file.read_text(encoding="utf-8"))
             except Exception as _e:
                 self.notes_index = {}
 
     def _save_index(self):
         index_file = self.storage_dir / "notes_index.json"
-        index_file.write_text(json.dumps(self.notes_index, indent=2))
+        index_file.write_text(json.dumps(self.notes_index, indent=2), encoding="utf-8")
 
     def create(
         self,
@@ -191,8 +191,19 @@ class _NotesManager:
         self._save_index()
         # Also write individual markdown file for wiki export
         note_file = self.storage_dir / f"{note_id}.md"
-        note_file.write_text(self._to_markdown(note))
-        return {"success": True, "note_id": note_id, "note": note}
+        note_file.write_text(self._to_markdown(note), encoding="utf-8")
+        return {
+            "success": True,
+            "message": (
+                "Working note saved. This is session documentation only, "
+                "not a final vulnerability report."
+            ),
+            "artifact_type": "working_note",
+            "report_generated": False,
+            "note_id": note_id,
+            "note_path": str(note_file),
+            "note": note,
+        }
 
     def _to_markdown(self, note: dict) -> str:
         return f"""# {note["title"]}
@@ -204,21 +215,177 @@ class _NotesManager:
 {note["content"]}
 """
 
+    def list_notes(
+        self,
+        category: str | None = None,
+        tag: str | None = None,
+        limit: int = 50,
+    ) -> list[dict[str, Any]]:
+        notes = list(self.notes_index.values())
+        if category:
+            notes = [n for n in notes if str(n.get("category", "")) == str(category)]
+        if tag:
+            wanted = str(tag).strip().lower()
+            notes = [
+                n
+                for n in notes
+                if wanted in {str(t).strip().lower() for t in n.get("tags", [])}
+            ]
+        notes.sort(
+            key=lambda n: (
+                str(n.get("updated_at", "")),
+                str(n.get("created_at", "")),
+                str(n.get("id", "")),
+            ),
+            reverse=True,
+        )
+        return [
+            {
+                "id": n.get("id", ""),
+                "title": n.get("title", ""),
+                "category": n.get("category", ""),
+                "tags": list(n.get("tags", []) or []),
+                "created_at": n.get("created_at", ""),
+                "updated_at": n.get("updated_at", ""),
+            }
+            for n in notes[: max(1, int(limit))]
+        ]
+
+    def search(
+        self,
+        query: str,
+        category: str | None = None,
+        limit: int = 20,
+    ) -> list[dict[str, Any]]:
+        needle = str(query or "").strip().lower()
+        if not needle:
+            return []
+
+        notes = list(self.notes_index.values())
+        if category:
+            notes = [n for n in notes if str(n.get("category", "")) == str(category)]
+
+        matches: list[dict[str, Any]] = []
+        for note in notes:
+            haystack = "\n".join(
+                [
+                    str(note.get("title", "")),
+                    str(note.get("content", "")),
+                    str(note.get("category", "")),
+                    " ".join(str(t) for t in note.get("tags", []) or []),
+                ]
+            ).lower()
+            if needle not in haystack:
+                continue
+            matches.append(note)
+
+        matches.sort(
+            key=lambda n: (
+                str(n.get("updated_at", "")),
+                str(n.get("created_at", "")),
+                str(n.get("id", "")),
+            ),
+            reverse=True,
+        )
+        return matches[: max(1, int(limit))]
+
+    def get(self, note_id: str) -> dict[str, Any] | None:
+        return self.notes_index.get(str(note_id or "").strip())
+
+    def export_wiki(self, output_path: Path) -> dict[str, Any]:
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        notes = list(self.notes_index.values())
+        notes.sort(
+            key=lambda n: (
+                str(n.get("category", "")),
+                str(n.get("created_at", "")),
+                str(n.get("id", "")),
+            )
+        )
+
+        sections = ["# Notes Wiki", ""]
+        current_category = None
+        for note in notes:
+            category = str(note.get("category", "uncategorized"))
+            if category != current_category:
+                current_category = category
+                sections.append(f"## {category.title()}")
+                sections.append("")
+            sections.append(self._to_markdown(note).rstrip())
+            sections.append("")
+
+        output_path.write_text("\n".join(sections).strip() + "\n", encoding="utf-8")
+        return {
+            "success": True,
+            "path": str(output_path),
+            "count": len(notes),
+        }
+
 
 class _UtilsExecutorMixin:
     """Mixin providing utility tools: python_session, edit_file, think, notes."""
 
     def __init__(self) -> None:
         super().__init__()  # Ensure parent init
-        self._python_sessions: dict[str, _PythonSession] = {}
-        self._python_session_timeout = 300
+        self._ensure_utils_runtime_state()
 
-        # Notes system
+    def _get_notes_storage_dir(self) -> Path | None:
         ws_root = get_workspace_root()
-        self._notes_manager = _NotesManager(ws_root / "notes")
+        target = ""
 
-        # Thoughts log
-        self._thoughts_log: list[dict] = []
+        state = getattr(self, "state", None)
+        if state is not None:
+            target = str(getattr(state, "active_target", "") or "").strip()
+
+        if not target:
+            session = getattr(self, "_session", None)
+            if session is not None:
+                target = str(getattr(session, "target", "") or "").strip()
+
+        target = target.strip().strip("/")
+        if not target:
+            return None
+        return ws_root / target / "notes"
+
+    def _notes_manager_unavailable_result(self) -> dict[str, Any]:
+        return {
+            "success": False,
+            "error": (
+                "Notes require an active target. Start or switch to a target first "
+                "so notes are stored under workspace/<target>/notes."
+            ),
+        }
+
+    def _ensure_utils_runtime_state(self) -> None:
+        if not hasattr(self, "_python_sessions") or not isinstance(
+            self._python_sessions, dict
+        ):
+            self._python_sessions = {}
+        if not hasattr(self, "_python_session_timeout") or not isinstance(
+            self._python_session_timeout, (int, float)
+        ):
+            self._python_session_timeout = 300
+        if not hasattr(self, "_thoughts_log") or not isinstance(
+            self._thoughts_log, list
+        ):
+            self._thoughts_log = []
+        try:
+            notes_dir = self._get_notes_storage_dir()
+            current_dir = getattr(self, "_notes_manager_dir", None)
+            if notes_dir is None:
+                self._notes_manager = None
+                self._notes_manager_dir = None
+            elif (
+                not hasattr(self, "_notes_manager")
+                or self._notes_manager is None
+                or current_dir != notes_dir
+            ):
+                self._notes_manager = _NotesManager(notes_dir)
+                self._notes_manager_dir = notes_dir
+        except Exception as exc:
+            logger.debug("Utility notes manager init failed: %s", exc)
+            self._notes_manager = None
+            self._notes_manager_dir = None
 
     # === Python Session ===
     async def _execute_python_session_tool(
@@ -231,6 +398,7 @@ class _UtilsExecutorMixin:
         if not code:
             return False, 0.0, {"success": False, "error": "code is required"}, None
 
+        self._ensure_utils_runtime_state()
         self._cleanup_python_sessions()
 
         if session_id not in self._python_sessions:
@@ -253,6 +421,7 @@ class _UtilsExecutorMixin:
         return success, time.time() - start_time, output_data, None
 
     def _cleanup_python_sessions(self) -> None:
+        self._ensure_utils_runtime_state()
         now = time.time()
         expired = [
             sid
@@ -358,6 +527,7 @@ class _UtilsExecutorMixin:
         if not thought:
             return False, 0.0, {"success": False, "error": "thought is required"}, None
 
+        self._ensure_utils_runtime_state()
         entry = {
             "timestamp": datetime.now().isoformat(),
             "thought": thought,
@@ -379,7 +549,7 @@ class _UtilsExecutorMixin:
                 try:
                     phase = self._get_current_phase().value
                 except Exception as _e:
-                    pass
+                    logger.debug("Failed to read current phase for thoughts log: %s", _e)
             log_file = ws_root / "output" / f"thoughts_{phase}.log"
             log_file.parent.mkdir(parents=True, exist_ok=True)
             with open(log_file, "a", encoding="utf-8") as f:
@@ -432,6 +602,14 @@ class _UtilsExecutorMixin:
                 None,
             )
 
+        self._ensure_utils_runtime_state()
+        if self._notes_manager is None:
+            return (
+                False,
+                0.0,
+                self._notes_manager_unavailable_result(),
+                None,
+            )
         result = self._notes_manager.create(category, title, content, tags)
         return True, time.time() - start_time, result, None
 
@@ -443,6 +621,14 @@ class _UtilsExecutorMixin:
         tag = arguments.get("tag")
         limit = int(arguments.get("limit", 50))
 
+        self._ensure_utils_runtime_state()
+        if self._notes_manager is None:
+            return (
+                False,
+                0.0,
+                self._notes_manager_unavailable_result(),
+                None,
+            )
         notes = self._notes_manager.list_notes(category=category, tag=tag, limit=limit)
         return (
             True,
@@ -466,6 +652,14 @@ class _UtilsExecutorMixin:
         if not query:
             return False, 0.0, {"success": False, "error": "query is required"}, None
 
+        self._ensure_utils_runtime_state()
+        if self._notes_manager is None:
+            return (
+                False,
+                0.0,
+                self._notes_manager_unavailable_result(),
+                None,
+            )
         results = self._notes_manager.search(query, category=category, limit=limit)
         return (
             True,
@@ -487,6 +681,14 @@ class _UtilsExecutorMixin:
         if not note_id:
             return False, 0.0, {"success": False, "error": "note_id is required"}, None
 
+        self._ensure_utils_runtime_state()
+        if self._notes_manager is None:
+            return (
+                False,
+                0.0,
+                self._notes_manager_unavailable_result(),
+                None,
+            )
         note = self._notes_manager.get(note_id)
         if note is None:
             return (
@@ -510,8 +712,19 @@ class _UtilsExecutorMixin:
         self, tool_name: str, arguments: dict[str, Any]
     ) -> tuple[bool, float, dict[str, Any], str | None]:
         start_time = time.time()
-        output_path = arguments.get("output_path", "notes/wiki.md")
-        ws_root = get_workspace_root()
-        full_path = ws_root / output_path
+        self._ensure_utils_runtime_state()
+        if self._notes_manager is None:
+            return (
+                False,
+                0.0,
+                self._notes_manager_unavailable_result(),
+                None,
+            )
+        output_path = arguments.get("output_path")
+        if output_path:
+            ws_root = get_workspace_root()
+            full_path = ws_root / str(output_path)
+        else:
+            full_path = self._notes_manager.storage_dir / "wiki.md"
         result = self._notes_manager.export_wiki(full_path)
         return True, time.time() - start_time, result, None

@@ -49,6 +49,24 @@ Each phase has specific objectives, recommended tools, and automatic transition 
 
 ---
 
+## Memory & Learning (What It Actually Does)
+
+AIRecon does **not** fine-tune the LLM. Its "learning" is local, structured telemetry that guides tool choice and avoids repeating failed paths.
+
+**Local persistence (all on disk, no cloud):**
+- SQLite memory DB at `~/.airecon/memory/airecon.db` storing sessions, findings, patterns, target intel, tool usage, model performance, skill usage, and attack-chain discoveries.
+- Adaptive learning state at `~/.airecon/learning/global_learning.json` (tool performance stats, strategy patterns, observation log, distilled insights).
+- Per-target memory files under `~/.airecon/memory/by_target/` when persisted, containing endpoints, vulns, WAF bypasses, sensitive params, and auth endpoints.
+- Payload memory snapshots can be saved under `workspace/<target>/payload_memory.json` when session persistence runs.
+
+**How it affects behavior:**
+- On session start, memory context is injected (target intel, similar findings, learned patterns, tool reliability).
+- Every 8 iterations, learned patterns and similar findings can be re-injected based on detected tech.
+- Adaptive tool ranking uses historical success/failure to order tools and suggest strategies.
+- Payload memory (when enabled) skips payloads that repeatedly failed for the same target/param.
+
+---
+
 ## Model Requirements
 
 AIRecon requires a model with **extended thinking** (`<think>` blocks) and **reliable tool-calling** capabilities. Capabilities are auto-detected via `ollama show` metadata.
@@ -79,7 +97,7 @@ AIRecon requires a model with **extended thinking** (`<think>` blocks) and **rel
 
 ### One-line install (recommended)
 
-```bash
+```text
 curl -fsSL https://raw.githubusercontent.com/pikpikcu/airecon/refs/heads/main/install.sh | bash
 ```
 
@@ -87,13 +105,13 @@ The script auto-detects remote vs local mode, installs Poetry if missing (via of
 
 ### Manual install (from source)
 
-```bash
+```text
 git clone https://github.com/pikpikcu/airecon.git
 cd airecon
 ./install.sh
 ```
 
-```bash
+```text
 # Add to ~/.bashrc or ~/.zshrc if needed
 export PATH="$HOME/.local/bin:$PATH"
 
@@ -103,7 +121,7 @@ airecon --version
 
 ## Configuration
 
-Config file: `~/.airecon/config.yaml` (auto-generated on first run).
+Config file: `~/.airecon/config.yaml` (auto-generated on first run). AIRecon will create `~/.airecon/` if it doesn't exist, including when a custom `~` path is used.
 
 ```yaml
 # ======================================
@@ -187,9 +205,66 @@ allow_destructive_testing: false
 
 ---
 
+## MCP Integration
+
+AIRecon can connect to external MCP servers and expose their tools dynamically as `mcp_<server>` tools.
+
+Config file: `~/.airecon/mcp.json`
+
+**Example config:**
+```json
+{
+  "mcpServers": {
+    "hexstrike": {
+      "command": "python3",
+      "args": [
+        "/path/hexstrike-ai/hexstrike_mcp.py",
+        "--server",
+        "http://127.0.0.1:8888"
+      ],
+      "env": {
+        "PYTHONUNBUFFERED": "1"
+      },
+      "enabled": true
+    },
+    "xssgen": {
+      "command": "python3",
+      "args": [
+        "/path/xssgen/xss_client.py",
+        "--server",
+        "http://127.0.0.1:8000"
+      ],
+      "env": {
+        "PYTHONUNBUFFERED": "1"
+      },
+      "enabled": true
+    },
+    "recon": {
+      "transport": "sse",
+      "url": "https://example.com/mcp",
+      "enabled": true,
+      "headers": {
+        "Authorization": "Bearer xxxxx"
+      }
+    }
+  }
+}   
+```
+
+**Using MCP tools in chat:**
+- Tool name format: `mcp_<server>`
+- Actions: `list_tools`, `search_tools`, `call_tool`
+
+Example:
+```json
+{"name": "mcp_acme", "arguments": {"action": "list_tools"}}
+```
+
+---
+
 ## Usage
 
-```bash
+```text
 airecon start                          # start TUI
 airecon start --session <session_id>  # resume session
 ```
@@ -240,7 +315,7 @@ Sessions persist at `~/.airecon/sessions/<session_id>.json` — subdomains, port
 
 **Ollama OOM / HTML error page** — Most common on long sessions or large models near VRAM limits.
 
-```bash
+```text
 sudo systemctl restart ollama
 ```
 
@@ -251,14 +326,14 @@ sudo systemctl restart ollama
 **Agent loops/stalls** — Usually a reasoning failure. Try a larger model, or reduce `ollama_temperature` to `< 0.2`.
 
 **Docker sandbox not starting:**
-```bash
+```text
 docker build -t airecon-sandbox airecon/containers/kali/
 ```
 
 **Caido connection refused** — Caido must be running before AIRecon. Default: `127.0.0.1:48080`.
 
 **PATH not found after install:**
-```bash
+```text
 export PATH="$HOME/.local/bin:$PATH" && source ~/.zshrc
 ```
 

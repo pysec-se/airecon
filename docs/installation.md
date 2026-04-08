@@ -18,34 +18,21 @@
 
 ## 1. System Requirements
 
-> **Model size requirement:** AIRecon requires a minimum of **30B parameters**. Models below 30B frequently fail to follow scope rules, hallucinate tool output, and produce incomplete function calls.
+> **Model requirement:** AIRecon requires a model with **native tool calling** support. Model size and VRAM needs depend on the specific model, quantization, and context length.
 
-### Minimum viable (qwen3:30b-a3b — MoE)
-| Component | Minimum |
+### Baseline requirements
+| Component | Baseline |
 |-----------|---------|
 | OS | Linux, macOS, WSL2 on Windows |
-| CPU | 8-core x86_64 |
-| RAM | 24 GB |
-| GPU VRAM | 16 GB NVIDIA |
-| Storage | 40 GB free (model + Docker image + tools) |
-| Python | 3.10+ |
-| Docker | 24.0+ |
-| Ollama | 0.6.1+ (required for extended thinking support) |
+| Python | 3.12+ |
+| Docker | 20.10+ |
+| Ollama | Recent version with tool-calling support |
+| Storage | 40+ GB free (model + Docker image + tools) |
 
-`qwen3:30b-a3b` is a Mixture-of-Experts model with lower active parameter count — it fits in 16 GB VRAM while retaining reasoning quality comparable to the full 32B.
-
-### Recommended (qwen3:32b)
-| Component | Recommended |
-|-----------|------------|
-| RAM | 32 GB+ |
-| GPU VRAM | 20 GB NVIDIA |
-| Storage | 60 GB free |
-
-### High-end (qwen3.5:122b)
-| Component | Required |
-|-----------|---------|
-| RAM | 80 GB+ |
-| GPU VRAM | 48+ GB (multi-GPU or CPU+GPU offload) |
+### Model guidance
+- Use the largest model you can run reliably within your VRAM budget.
+- Smaller models can work for limited tasks, but reliability drops as size shrinks.
+- Models below **8B** are not recommended for full engagements.
 
 ---
 
@@ -55,7 +42,7 @@
 # Linux / macOS
 curl -fsSL https://ollama.com/install.sh | sh
 
-# Verify version — must be >= 0.6.1
+# Verify version — use a recent Ollama build with tool calling support
 ollama --version
 ```
 
@@ -78,13 +65,9 @@ ollama serve &
 Pull the model you intend to use **before** starting AIRecon:
 
 ```bash
-# Minimum viable — 30B MoE (~18 GB download, needs 16 GB VRAM)
-ollama pull qwen3:30b-a3b
-
-# Recommended — 32B (~20 GB download, needs 20 GB VRAM)
-ollama pull qwen3:32b
-
-# Best quality — requires high-end multi-GPU hardware
+# Example picks — adjust to your VRAM and model availability
+ollama pull qwen3.5:9b
+ollama pull qwen3.5:35b
 ollama pull qwen3.5:122b
 ```
 
@@ -92,13 +75,13 @@ Verify the model is available:
 
 ```bash
 ollama list
-# Should show: qwen3:32b   <hash>  <size>  <date>
+# Should show the model(s) you pulled
 ```
 
-> **Why not smaller models?** Models below 30B (e.g., `qwen3:14b`) frequently ignore scope rules, invent CVEs, produce malformed tool calls, and skip required PoC steps. They may work for simple isolated tasks but are unreliable for full engagement pipelines.
+> **Small model caution:** models below 8B are not recommended for full engagements. Expect more tool-call errors and hallucinations as size shrinks.
 
 > **Performance tip:** For NVIDIA GPUs, set `OLLAMA_GPU_LAYERS=99` to maximize GPU offloading:
-> ```bash
+> ```
 > # Add to /etc/systemd/system/ollama.service [Service] section:
 > Environment="OLLAMA_GPU_LAYERS=99"
 > systemctl daemon-reload && systemctl restart ollama
@@ -192,7 +175,7 @@ docker images | grep airecon-sandbox
 python3 -c "from playwright.sync_api import sync_playwright; p = sync_playwright().start(); b = p.chromium.launch(); b.close(); p.stop(); print('Playwright OK')"
 
 # 5. Check config file location
-cat ~/.airecon/config.json 2>/dev/null || echo "Will be created on first run"
+cat ~/.airecon/config.yaml 2>/dev/null || echo "Will be created on first run"
 ```
 
 ---
@@ -208,7 +191,7 @@ airecon start
 ```
 
 On first run:
-- `~/.airecon/config.json` is created with default values
+- `~/.airecon/config.yaml` is created with default values
 - The `workspace/` directory is created in your current working directory
 - The Docker sandbox container is started
 
@@ -216,11 +199,11 @@ On first run:
 
 ```bash
 # Edit config
-nano ~/.airecon/config.json
+nano ~/.airecon/config.yaml
 
 # Change "ollama_model" to match what you pulled, e.g.:
-# "ollama_model": "qwen3:32b"
-# "ollama_model": "qwen3:30b-a3b"
+# "ollama_model": "qwen3.5:9b"
+# "ollama_model": "qwen3.5:35b"
 # "ollama_model": "qwen3.5:122b"
 ```
 
@@ -257,12 +240,10 @@ OLLAMA_HOST=0.0.0.0 ollama serve
 # Environment="OLLAMA_HOST=0.0.0.0"
 ```
 
-**In `~/.airecon/config.json` on your workstation:**
-```json
-{
-    "ollama_url": "http://<server-ip>:11434",
-    "ollama_model": "qwen3:32b"
-}
+**In `~/.airecon/config.yaml` on your workstation:**
+```yaml
+ollama_url: "http://<server-ip>:11434"
+ollama_model: "qwen3.5:35b"
 ```
 
 Make sure port 11434 is open in the server's firewall.
@@ -315,38 +296,32 @@ pkill ollama && ollama serve &
 ```
 
 **3. Reduce max output tokens:**
-```json
-{
-    "ollama_num_predict": 8192
-}
+```yaml
+ollama_num_predict: 8192
 ```
 
 **4. Shorten model keep-alive to free VRAM between sessions:**
-```json
-{
-    "ollama_keep_alive": "5m"
-}
+```yaml
+ollama_keep_alive: "5m"
 ```
 
 **5. Limit parallel agent concurrency** — avoid `run_parallel_agents` if VRAM is near the limit. Use `spawn_agent` (single specialist) instead.
 
 **Recommended safe config for 16–20 GB VRAM:**
-```json
-{
-    "ollama_model": "qwen3:32b",
-    "ollama_num_ctx": 32768,
-    "ollama_num_ctx_small": 16384,
-    "ollama_num_predict": 8192,
-    "ollama_keep_alive": "10m"
-}
+```yaml
+ollama_model: "qwen3.5:35b"
+ollama_num_ctx: 32768
+ollama_num_ctx_small: 16384
+ollama_num_predict: 8192
+ollama_keep_alive: "10m"
 ```
 
-> The agent uses automatic context compression every 15 iterations, so reducing `ollama_num_ctx` has minimal impact on long session quality.
+> The agent uses periodic context compression, so reducing `ollama_num_ctx` usually has limited impact on long session quality.
 
 ### Context length error / out of memory (VRAM)
 Lower `ollama_num_ctx` in config:
-```json
-"ollama_num_ctx": 32768
+```yaml
+ollama_num_ctx: 32768
 ```
 Or use a smaller model. See the `Ollama returned HTML error page` section above for a complete diagnosis.
 

@@ -101,6 +101,35 @@ class TestScoreTool:
         # Should get penalty for budget exhaustion
         assert any("budget" in r.lower() for r in result["reasons"])
 
+    def test_coverage_bonus_uses_ontology_labels(self):
+        result = score_tool(
+            "sqlmap",
+            current_phase="EXPLOIT",
+            tested_vuln_classes={"CLIENT_SIDE"},
+        )
+        coverage = [r for r in result["reasons"] if "COVERAGE BONUS" in r]
+        assert coverage
+        assert "SQL_INJECTION" in coverage[0] or "INJECTION" in coverage[0]
+        assert "specific_vulnerabilities" not in coverage[0]
+
+    def test_adaptive_learning_bonus_applies(self):
+        result = score_tool(
+            "nmap",
+            current_phase="RECON",
+            adaptive_tool_scores={"nmap": 0.91},
+        )
+        assert result["score"] > 0.5
+        assert any("ADAPTIVE BONUS" in r for r in result["reasons"])
+
+    def test_strategy_sequence_alignment_applies(self):
+        result = score_tool(
+            "ffuf",
+            current_phase="ANALYSIS",
+            strategy_tool_sequence=["ffuf", "httpx", "nuclei"],
+        )
+        assert result["score"] > 0.5
+        assert any("STRATEGY ALIGNMENT" in r for r in result["reasons"])
+
 
 class TestRankToolsForPhase:
     def test_ranking_returns_sorted_list(self):
@@ -126,11 +155,33 @@ class TestRankToolsForPhase:
         ranked = rank_tools_for_phase(tools, current_phase="RECON", top_n=3)
         assert len(ranked) <= 3
 
+    def test_adaptive_inputs_influence_ranking(self):
+        tools = [
+            {"function": {"name": "ffuf"}},
+            {"function": {"name": "nmap"}},
+        ]
+        ranked = rank_tools_for_phase(
+            tools,
+            current_phase="RECON",
+            adaptive_tool_scores={"ffuf": 0.9, "nmap": 0.2},
+            strategy_tool_sequence=["ffuf"],
+            use_memory=False,
+        )
+        assert ranked[0]["function"]["name"] == "ffuf"
+
 
 class TestBuildToolRecommendationContext:
     def test_returns_nonempty_for_phase(self):
         ctx = build_tool_recommendation_context(current_phase="RECON")
         assert "<system_tool_intelligence>" in ctx
+
+    def test_dynamic_skill_entries_follow_chain_hint(self):
+        ctx = build_tool_recommendation_context(
+            current_phase="EXPLOIT",
+            chain_step_hint="sqlmap",
+        )
+        assert "skills/tools/sqlmap.md" in ctx
+        assert "skills/vulnerabilities/sql_injection.md" in ctx
 
     def test_chain_hint_included(self):
         ctx = build_tool_recommendation_context(
@@ -138,6 +189,11 @@ class TestBuildToolRecommendationContext:
             chain_step_hint="sqlmap",
         )
         assert "sqlmap" in ctx
+
+    def test_analysis_skill_entries_stay_in_analysis_domains(self):
+        ctx = build_tool_recommendation_context(current_phase="ANALYSIS")
+        assert "skills/vulnerabilities/" in ctx or "skills/frameworks/" in ctx
+        assert "skills/payloads/" not in ctx
 
     def test_wrong_tool_correction(self):
         ctx = build_tool_recommendation_context(

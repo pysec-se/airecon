@@ -235,7 +235,7 @@ class FalsePositiveDetector:
                         "The Location header is not a JavaScript execution target.",
                     )
             except Exception as _e:
-                pass
+                logger.debug("Redirect body check failed: %s", _e)
 
         return False, ""
 
@@ -457,7 +457,7 @@ class NegativeTester:
         async with httpx.AsyncClient(
             timeout=self.timeout,
             follow_redirects=False,
-            verify=False,
+            verify=False,  # nosec B501 — intentional for pentesting
         ) as client:
             for clean_payload in _CLEAN_PAYLOADS:
                 try:

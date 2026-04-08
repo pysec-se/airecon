@@ -12,6 +12,7 @@ import httpx
 from ..config import get_config
 
 logger = logging.getLogger("airecon.proxy.agent.rate_limiter")
+rng = random.SystemRandom()
 
 
 class AdaptiveRateLimiter:
@@ -225,7 +226,7 @@ class AdaptiveRateLimiter:
                 self.max_delay,
             )
 
-        jitter = random.uniform(0.8, 1.4)
+        jitter = rng.uniform(0.8, 1.4)
         delay *= jitter
 
         self._slow_start_done[domain] = True
@@ -242,7 +243,7 @@ class AdaptiveRateLimiter:
         self.rate_limit_hits[domain] = hit_count
 
         delay = min(self.base_delay * (2 ** hit_count), self.max_delay)
-        jitter = random.uniform(0.5, 1.5)
+        jitter = rng.uniform(0.5, 1.5)
         delay *= jitter
 
         logger.info("503 backoff delay: %.2fs for %s", delay, domain)
@@ -314,7 +315,7 @@ class AdaptiveRateLimiter:
         ewma = self._response_latency_ewma.get(domain, self.base_delay * 1000)
         base = max(self.base_delay, ewma / 1000.0)
         backoff = min(base * (2 ** attempt), self.max_delay)
-        jitter = random.uniform(0.5, 1.5)
+        jitter = rng.uniform(0.5, 1.5)
         return backoff * jitter
 
     def get_domain_stats(self, domain: str) -> dict[str, Any]:

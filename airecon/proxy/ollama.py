@@ -477,7 +477,10 @@ class OllamaClient:
                             )
 
                             try:
-                                assert _next_fut is not None
+                                if _next_fut is None:
+                                    raise RuntimeError(
+                                        "Ollama stream state error: next future is None"
+                                    )
                                 line = await asyncio.wait_for(
                                     asyncio.shield(_next_fut),
                                     timeout=wait,

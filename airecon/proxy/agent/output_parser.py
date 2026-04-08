@@ -3,13 +3,11 @@ from __future__ import annotations
 import json
 import logging
 import re
+import warnings
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
-from xml.etree.ElementTree import (
-    ParseError as XMLParseError,
-)
-
+from defusedxml.ElementTree import ParseError as XMLParseError
 import defusedxml.ElementTree as ET
 
 from .command_parse import extract_primary_binary
@@ -33,18 +31,27 @@ class ParsedOutput:
     causal_observations: list[dict[str, Any]] = field(default_factory=list)
 
 
-_MAX_ITEMS_BY_PHASE: dict[str, int] = {
-    "RECON": 200,
-    "ANALYSIS": 150,
-    "EXPLOIT": 50,
-    "REPORT": 25,
-}
+# Load max items by phase from config.py
+def _get_max_items_by_phase() -> dict[str, int]:
+    from ..config import get_config as _get_config
+
+    cfg = _get_config()
+    return {
+        "RECON": getattr(cfg, "pipeline_output_parser_max_items_recon", 200),
+        "ANALYSIS": getattr(cfg, "pipeline_output_parser_max_items_analysis", 150),
+        "EXPLOIT": getattr(cfg, "pipeline_output_parser_max_items_exploit", 50),
+        "REPORT": getattr(cfg, "pipeline_output_parser_max_items_report", 25),
+    }
+
+
+_MAX_ITEMS_BY_PHASE: dict[str, int] = _get_max_items_by_phase()
 
 DEFAULT_MAX_ITEMS = 100
 
 MAX_RAW_FALLBACK = 3000
 
 
+# Load tools_meta for other configs
 def _load_tools_meta() -> dict[str, Any]:
     try:
         path = Path(__file__).resolve().parent.parent / "data" / "tools_meta.json"
@@ -55,17 +62,20 @@ def _load_tools_meta() -> dict[str, Any]:
 
 
 _TOOLS_META: dict[str, Any] = _load_tools_meta()
-_CAUSAL_CONFIDENCE_RAW = _TOOLS_META.get("causal_observation_confidence", {})
-if not isinstance(_CAUSAL_CONFIDENCE_RAW, dict):
-    _CAUSAL_CONFIDENCE_RAW = {}
 
 
-def _causal_confidence(key: str, default: float) -> float:
-    try:
-        value = float(_CAUSAL_CONFIDENCE_RAW.get(key, default))
-    except (TypeError, ValueError):
-        value = default
-    return max(0.0, min(value, 1.0))
+# Load causal observation confidence from config.py (moved from tools_meta.json)
+def _get_causal_confidence(key: str, default: float) -> float:
+    from ..config import get_config as _get_config
+
+    cfg = _get_config()
+    config_key = f"causal_confidence_{key}"
+    value = getattr(cfg, config_key, default)
+    return max(0.0, min(float(value), 1.0)) if value else default
+
+
+# Backwards compatible alias
+_causal_confidence = _get_causal_confidence
 
 
 def _load_tool_patterns() -> list[tuple[re.Pattern[str], str]]:
@@ -437,10 +447,55 @@ _CAUSAL_SUBDOMAIN_RE = re.compile(
     re.IGNORECASE,
 )
 _CAUSAL_SEVERITY_RE = re.compile(r"\[(CRITICAL|HIGH|MEDIUM|LOW|INFO)\]", re.IGNORECASE)
-_CAUSAL_VULN_HINT_RE = re.compile(
-    r"\b(vulnerab|exploit|sqli|sql injection|xss|ssrf|idor|csrf|rce|lfi|cve-\d{4}-\d{4,7})\b",
-    re.IGNORECASE,
-)
+
+_DYNAMIC_VULN_PATTERNS: list[tuple[str, str, float]] = []
+
+
+def _load_vuln_patterns() -> list[tuple[str, str, float]]:
+    """Load vulnerability hint patterns from data files dynamically."""
+    patterns = []
+    try:
+        from pathlib import Path
+
+        patterns_file = Path(__file__).parent.parent / "data" / "vuln_patterns.json"
+        if patterns_file.exists():
+            import json
+
+            data = json.loads(patterns_file.read_text(encoding="utf-8"))
+            for p in data.get("patterns", []):
+                patterns.append(
+                    (
+                        p.get("pattern", ""),
+                        p.get("category", "unknown"),
+                        p.get("weight", 0.5),
+                    )
+                )
+    except Exception as _e:
+        logger.debug("Failed to load vulnerability hint patterns: %s", _e)
+
+    if not patterns:
+        patterns = [
+            (r"vulnerab", "general_vuln", 0.6),
+            (r"exploit", "exploitation", 0.7),
+            (r"injection", "injection", 0.8),
+            (r"bypass", "bypass", 0.6),
+            (r"exposed", "exposure", 0.5),
+        ]
+
+    return patterns
+
+
+def _get_vuln_hint_re() -> re.Pattern[str]:
+    """Get dynamically loaded vulnerability hint regex."""
+    global _DYNAMIC_VULN_PATTERNS
+    if not _DYNAMIC_VULN_PATTERNS:
+        _DYNAMIC_VULN_PATTERNS = _load_vuln_patterns()
+
+    if _DYNAMIC_VULN_PATTERNS:
+        pattern = "|".join(p[0] for p in _DYNAMIC_VULN_PATTERNS)
+        return re.compile(rf"\b({pattern}|cve-\d{{4}}-\d{{4,7}})\b", re.IGNORECASE)
+
+    return re.compile(r"\bvulnerab|exploit\b", re.IGNORECASE)
 
 
 def _append_causal_observation(
@@ -624,7 +679,8 @@ def _extract_causal_observations(
             )
 
         sev_match = _CAUSAL_SEVERITY_RE.search(item)
-        if sev_match or _CAUSAL_VULN_HINT_RE.search(item):
+        vuln_hint_re = _get_vuln_hint_re()
+        if sev_match or vuln_hint_re.search(item):
             severity = sev_match.group(1).upper() if sev_match else "UNSPECIFIED"
             _append_causal_observation(
                 observations,
@@ -1739,10 +1795,10 @@ def _parse_quick_fuzz(stdout: str, max_items: int = DEFAULT_MAX_ITEMS) -> Parsed
     )
 
 
-_PARSERS: dict[str, Any] = {
+# ── Parser function registry (by pattern name) ─────────────────────
+_PARSER_FUNCS: dict[str, Any] = {
     "nmap": _parse_nmap,
     "nuclei": _parse_nuclei,
-    "subfinder": _parse_line_list,
     "httpx": _parse_httpx,
     "url_list": _parse_line_list,
     "ffuf": _parse_ffuf,
@@ -1751,11 +1807,34 @@ _PARSERS: dict[str, Any] = {
     "nikto": _parse_nikto,
     "dalfox": _parse_dalfox,
     "wpscan": _parse_wpscan,
-    "dnsx": _parse_line_list,
     "whatweb": _parse_whatweb,
     "dig": _parse_line_list,
     "hydra": _parse_hydra,
     "metasploit": _parse_metasploit,
-    "quick_fuzz": _parse_quick_fuzz,
-    "advanced_fuzz": _parse_quick_fuzz,
 }
+
+# ── Dynamic tool→parser mapping from tools_meta.json ───────────────
+# Mirrors output_parser_tool_patterns so new tools auto-register.
+_PARSERS: dict[str, Any] = {}
+
+_tools_meta_parser_path = (
+    Path(__file__).resolve().parent.parent / "data" / "tools_meta.json"
+)
+try:
+    _parser_meta = json.loads(_tools_meta_parser_path.read_text(encoding="utf-8"))
+    _tool_to_pattern: dict[str, str] = _parser_meta.get(
+        "output_parser_tool_patterns", {}
+    )
+    for _tool_bin, _pattern_name in _tool_to_pattern.items():
+        _parser_fn = _PARSER_FUNCS.get(_pattern_name) or _PARSER_FUNCS.get("url_list")
+        if _parser_fn:
+            _PARSERS[_tool_bin.lower()] = _parser_fn
+except Exception as _e:
+    warnings.warn(f"Could not load parser registration from tools_meta.json: {_e}")
+    _PARSERS.update(_PARSER_FUNCS)
+
+# AIRecon-native tools (not in tools_meta.json shell binaries)
+_PARSERS["quick_fuzz"] = _parse_quick_fuzz
+_PARSERS["advanced_fuzz"] = _parse_quick_fuzz
+_PARSERS["metasploit"] = _parse_metasploit
+_PARSERS["url_list"] = _parse_line_list

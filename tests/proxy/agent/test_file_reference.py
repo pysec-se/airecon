@@ -80,6 +80,16 @@ class TestParseRefs:
         assert len(refs) == 1
         assert refs[0].path == Path("/opt/challenges/level 1/")
 
+    def test_parenthesized_ref_trims_closing_paren(self):
+        refs = parse_refs("inspect (@/tmp/project/main.py) for issues")
+        assert len(refs) == 1
+        assert refs[0].path == Path("/tmp/project/main.py")
+
+    def test_backticked_ref_is_parsed_cleanly(self):
+        refs = parse_refs("review `@/tmp/project/` carefully")
+        assert len(refs) == 1
+        assert refs[0].path == Path("/tmp/project/")
+
 
 # ─────────────────────────────────────────────────────────────────────────────
 # strip_refs

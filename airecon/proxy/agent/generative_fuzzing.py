@@ -7,6 +7,7 @@ from dataclasses import dataclass, field
 from typing import Any
 
 logger = logging.getLogger("airecon.agent.generative_fuzzing")
+rng = random.SystemRandom()
 
 
 def mutate_url_encode(payload: str) -> str:
@@ -28,7 +29,7 @@ def mutate_url_encode(payload: str) -> str:
     }
     result = payload
     for char, encoded in encoding_map.items():
-        if char in result and random.random() > 0.5:
+        if char in result and rng.random() > 0.5:
             result = result.replace(char, encoded, 1)
     return result
 
@@ -49,17 +50,17 @@ def mutate_unicode(payload: str) -> str:
     }
     result = payload
     for char, uni in unicode_map.items():
-        if char in result and random.random() > 0.5:
+        if char in result and rng.random() > 0.5:
             result = result.replace(char, uni, 1)
     return result
 
 
 def mutate_case_toggle(payload: str) -> str:
-    return "".join(c.upper() if random.random() > 0.5 else c.lower() for c in payload)
+    return "".join(c.upper() if rng.random() > 0.5 else c.lower() for c in payload)
 
 
 def mutate_null_byte(payload: str) -> str:
-    pos = random.randint(1, max(1, len(payload) - 1))
+    pos = rng.randint(1, max(1, len(payload) - 1))
     return payload[:pos] + "%00" + payload[pos:]
 
 
@@ -70,15 +71,15 @@ def mutate_comment_injection(payload: str) -> str:
         f"--{payload}--",
         f"#{payload}#",
     ]
-    return random.choice(comment_styles)
+    return rng.choice(comment_styles)
 
 
 def mutate_whitespace(payload: str) -> str:
     whitespaces = ["%09", "%0a", "%0d", "+", "\t", "\n"]
     parts = list(payload)
     if len(parts) > 1:
-        pos = random.randint(1, len(parts) - 1)
-        ws = random.choice(whitespaces)
+        pos = rng.randint(1, len(parts) - 1)
+        ws = rng.choice(whitespaces)
         parts.insert(pos, ws)
     return "".join(parts)
 
@@ -100,7 +101,7 @@ def mutate_html_entity(payload: str) -> str:
     }
     result = payload
     for char, entity in entity_map.items():
-        if char in result and random.random() > 0.5:
+        if char in result and rng.random() > 0.5:
             result = result.replace(char, entity, 1)
     return result
 
@@ -178,7 +179,7 @@ class GenerativeFuzzingEngine:
             ]
             # Pad to population_size with mutated variants
             while len(self.population[vuln_type]) < self.population_size:
-                parent = random.choice(payloads)
+                parent = rng.choice(payloads)
                 mutated = self._mutate(parent, vuln_type)
                 self.population[vuln_type].append(
                     PayloadGenome(payload=mutated, vuln_type=vuln_type, generation=0)
@@ -327,7 +328,7 @@ class GenerativeFuzzingEngine:
             parent1 = self._tournament_select(current)
             parent2 = self._tournament_select(current)
 
-            if parent1 and parent2 and random.random() < self.crossover_rate:
+            if parent1 and parent2 and rng.random() < self.crossover_rate:
                 child_payload = self._crossover(parent1.payload, parent2.payload)
                 logger.debug(
                     "[GenFuzz] Crossover: parent1=%.20s + parent2=%.20s -> child=%.20s",
@@ -338,10 +339,10 @@ class GenerativeFuzzingEngine:
             elif parent1:
                 child_payload = parent1.payload
             else:
-                child_payload = random.choice(current).payload if current else "test"
+                child_payload = rng.choice(current).payload if current else "test"
 
             # Mutate
-            if random.random() < self.mutation_rate:
+            if rng.random() < self.mutation_rate:
                 child_payload, mutation_name = self._mutate_with_name(
                     child_payload, vuln_type
                 )
@@ -372,7 +373,7 @@ class GenerativeFuzzingEngine:
     ) -> PayloadGenome | None:
         if not population:
             return None
-        tournament = random.sample(population, min(tournament_size, len(population)))
+        tournament = rng.sample(population, min(tournament_size, len(population)))
         return max(tournament, key=lambda g: g.fitness)
 
     def _crossover(self, parent1: str, parent2: str) -> str:
@@ -383,8 +384,8 @@ class GenerativeFuzzingEngine:
         if min_len < 2:
             return parent1
 
-        point = random.randint(1, min_len - 1)
-        if random.random() > 0.5:
+        point = rng.randint(1, min_len - 1)
+        if rng.random() > 0.5:
             return parent1[:point] + parent2[point:]
         return parent2[:point] + parent1[point:]
 
@@ -419,7 +420,7 @@ class GenerativeFuzzingEngine:
         elif vuln_type == "command_injection":
             applicable = ["whitespace", "null_byte", "url_encode", "comment_injection"]
 
-        mutation_name = random.choice(applicable)
+        mutation_name = rng.choice(applicable)
         operator = _MUTATION_OPERATORS[mutation_name]
         return operator(payload), mutation_name
 

@@ -623,7 +623,7 @@ class _DispatchExecutorMixin:
             _cmd_stripped = cmd.strip()
             _first_token = _cmd_stripped.split()[0] if _cmd_stripped.split() else ""
 
-            if _first_token in _AIRECON_TOOL_NAMES and _first_token != "execute":
+            if _first_token in _AIRECON_TOOL_NAMES and _first_token != "execute":  # nosec B105
                 return (
                     False,
                     0.0,
@@ -942,12 +942,23 @@ class _DispatchExecutorMixin:
         try:
             from .executors_skill_loader import load_skill
 
+            current_target = self.state.active_target or (
+                self._session.target if self._session else ""
+            )
+            current_phase = self._get_current_phase().value
             result = load_skill(
                 self.state,
                 arguments.get("skills", ""),
                 arguments.get("replace_skills", False),
+                memory_manager=getattr(self, "_memory_manager", None),
+                current_target=current_target,
+                current_phase=current_phase,
             )
             success = result.get("success", False)
+            if success and self._session:
+                for skill_rel in result.get("loaded_skills", []):
+                    if skill_rel not in self._session.loaded_skills:
+                        self._session.loaded_skills.append(skill_rel)
         except Exception as e:
             logger.error("load_skill error: %s", e)
             result = {"success": False, "error": str(e)}

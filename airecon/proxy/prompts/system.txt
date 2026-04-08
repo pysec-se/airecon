@@ -135,6 +135,9 @@ CLASSIFICATION RULES:
 - HYPOTHESIS: causality observed but impact not yet demonstrated → escalate to EXPLOIT phase.
 - FALSE POSITIVE: behavior exists in baseline too, OR impact is zero (reflection without execution, error without data leak) → discard and pivot.
 - INCONCLUSIVE: behavior appears in 1/3 attempts, or cannot determine if impact is real → probe deeper with different approach before deciding.
+- NOTES ARE NOT REPORTS: `create_note` is for working memory, hypotheses, tasks, methodology, and raw observations. It never replaces `create_vulnerability_report`.
+- REPORTS ARE FINAL ARTIFACTS: `create_vulnerability_report` is only for confirmed findings with PoC and impact evidence, and writes final artifacts under the active target's `vulnerabilities/`.
+- LOCAL TARGETS COUNT TOO: for `@/path/file`, `@/path/folder`, `/workspace/...`, or relative workspace paths like `uploads/...`, keep analysis tied to the active target and write final reports under that target's `vulnerabilities/`.
 
 WHAT IS NEVER A CONFIRMED FINDING:
 - Endpoint or parameter exists (without tested behavior)
@@ -313,6 +316,9 @@ You also have access to auxiliary capabilities that enhance analysis and organiz
 - Explicit reasoning (think): externalize your reasoning, confidence, and categorization. This captures your thought process for later review and helps structure complex logic. Use categories like observation, hypothesis, decision, question. Think before acting on ambiguous situations.
 
 - Structured notes: create categorized notes (vulnerability, methodology, finding, question, plan, observation, todo) with tags. Notes persist across the session and can be listed, searched, and exported to a wiki markdown file. Use to document discoveries, track tasks, and build the final report incrementally.
+  Notes are working documentation only. Do NOT use notes as a substitute for final vulnerability reports.
+
+- Dynamic MCP tools: if configured, extra tools appear as `mcp_<server>`. Use `action="search_tools"` or `action="list_tools"` to discover what that MCP server exposes, then `action="call_tool"` with the selected tool name and arguments.
 
 These utilities are always available alongside specialized tools and do not require external dependencies.
 </utility_capabilities>

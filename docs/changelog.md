@@ -14,7 +14,7 @@
 - feat(tui): moved ConfirmDelete modal CSS to global `styles.tcss` with scoped selectors
 
 ### Validation
-- tests: full suite passing after fixes (`1608 passed`)
+- tests: suite green at release time
 
 ---
 

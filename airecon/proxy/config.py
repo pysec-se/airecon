@@ -390,6 +390,165 @@ _CONFIG_SCHEMA: dict[str, tuple[Any, str]] = {
         0,
         "Tool budget for REPORT phase (0 = blocked).",
     ),
+    # Phase dynamic settings (previously hardcoded in Python files)
+    "pipeline_output_parser_max_items_recon": (
+        200,
+        "Max items for RECON phase in output parser.",
+    ),
+    "pipeline_output_parser_max_items_analysis": (
+        150,
+        "Max items for ANALYSIS phase in output parser.",
+    ),
+    "pipeline_output_parser_max_items_exploit": (
+        50,
+        "Max items for EXPLOIT phase in output parser.",
+    ),
+    "pipeline_output_parser_max_items_report": (
+        25,
+        "Max items for REPORT phase in output parser.",
+    ),
+    "pipeline_max_iterations_cap": (
+        350,
+        "Hard cap for max iterations per phase to prevent infinite loops.",
+    ),
+    "pipeline_counterfactual_interval_simple": (
+        8,
+        "Counterfactual injection interval for simple targets (few vulns).",
+    ),
+    "pipeline_counterfactual_interval_complex": (
+        5,
+        "Counterfactual injection interval for complex targets (many vulns).",
+    ),
+    "pipeline_stagnation_vuln_baseline_iterations": (
+        30,
+        "Iterations before triggering stagnation escape in EXPLOIT phase.",
+    ),
+    "pipeline_analysis_min_injection_points": (
+        3,
+        "Minimum injection points to find before ANALYSIS phase can transition.",
+    ),
+    "pipeline_recon_artifacts_scan_threshold": (
+        3,
+        "Minimum scan count before recon artifacts criterion can be met.",
+    ),
+    "pipeline_min_iterations_per_phase": (
+        10,
+        "Minimum iterations before phase can transition.",
+    ),
+    "pipeline_advanced_hints_failure_threshold": (
+        3,
+        "Consecutive failures before adding advanced hints.",
+    ),
+    "pipeline_recon_strong_signals_threshold": (
+        2,
+        "Minimum strong signals needed for RECON transition.",
+    ),
+    "pipeline_counterfactual_vuln_threshold": (
+        5,
+        "Vuln count threshold for switching counterfactual interval.",
+    ),
+    "pipeline_exploit_min_signals": (
+        2,
+        "Minimum signals needed in EXPLOIT phase before transition.",
+    ),
+    "agent_graph_max_iterations_recon": (
+        150,
+        "Max iterations for recon node in agent graph.",
+    ),
+    "agent_graph_max_iterations_analyzer": (
+        100,
+        "Max iterations for analyzer node in agent graph.",
+    ),
+    "agent_graph_max_iterations_exploiter": (
+        200,
+        "Max iterations for exploiter node in agent graph.",
+    ),
+    "agent_graph_max_iterations_reporter": (
+        100,
+        "Max iterations for reporter node in agent graph.",
+    ),
+    # Phase tool budgets (previously in tools_meta.json)
+    "pipeline_tool_budget_recon_quick_fuzz": (
+        10,
+        "Tool budget: quick_fuzz for RECON phase.",
+    ),
+    "pipeline_tool_budget_recon_advanced_fuzz": (
+        5,
+        "Tool budget: advanced_fuzz for RECON phase.",
+    ),
+    "pipeline_tool_budget_recon_deep_fuzz": (
+        0,
+        "Tool budget: deep_fuzz for RECON phase.",
+    ),
+    "pipeline_tool_budget_recon_caido_automate": (
+        5,
+        "Tool budget: caido_automate for RECON phase.",
+    ),
+    "pipeline_tool_budget_recon_create_vulnerability_report": (
+        2,
+        "Tool budget: create_vulnerability_report for RECON phase.",
+    ),
+    "pipeline_tool_budget_analysis_advanced_fuzz": (
+        20,
+        "Tool budget: advanced_fuzz for ANALYSIS phase.",
+    ),
+    "pipeline_tool_budget_analysis_deep_fuzz": (
+        5,
+        "Tool budget: deep_fuzz for ANALYSIS phase.",
+    ),
+    "pipeline_tool_budget_analysis_create_vulnerability_report": (
+        5,
+        "Tool budget: create_vulnerability_report for ANALYSIS phase.",
+    ),
+    "pipeline_tool_budget_exploit_advanced_fuzz": (
+        50,
+        "Tool budget: advanced_fuzz for EXPLOIT phase.",
+    ),
+    "pipeline_tool_budget_exploit_deep_fuzz": (
+        25,
+        "Tool budget: deep_fuzz for EXPLOIT phase.",
+    ),
+    "pipeline_tool_budget_exploit_quick_fuzz": (
+        30,
+        "Tool budget: quick_fuzz for EXPLOIT phase.",
+    ),
+    "pipeline_tool_budget_exploit_caido_automate": (
+        40,
+        "Tool budget: caido_automate for EXPLOIT phase.",
+    ),
+    "pipeline_tool_budget_report_execute": (
+        50,
+        "Tool budget: execute for REPORT phase.",
+    ),
+    "pipeline_tool_budget_report_advanced_fuzz": (
+        2,
+        "Tool budget: advanced_fuzz for REPORT phase.",
+    ),
+    "pipeline_tool_budget_report_deep_fuzz": (
+        1,
+        "Tool budget: deep_fuzz for REPORT phase.",
+    ),
+    "pipeline_tool_budget_report_quick_fuzz": (
+        2,
+        "Tool budget: quick_fuzz for REPORT phase.",
+    ),
+    # Phase confidence thresholds (previously in tools_meta.json)
+    "pipeline_confidence_threshold_recon": (
+        0.6,
+        "Confidence threshold for RECON phase transition.",
+    ),
+    "pipeline_confidence_threshold_analysis": (
+        0.58,
+        "Confidence threshold for ANALYSIS phase transition.",
+    ),
+    "pipeline_confidence_threshold_exploit": (
+        0.55,
+        "Confidence threshold for EXPLOIT phase transition.",
+    ),
+    "pipeline_confidence_threshold_report": (
+        0.5,
+        "Confidence threshold for REPORT phase transition.",
+    ),
     "model_max_tool_iterations": (
         50,
         "MAX_TOOL_ITERATIONS constant for agent state model.",
@@ -417,6 +576,43 @@ _CONFIG_SCHEMA: dict[str, tuple[Any, str]] = {
     "model_min_confidence_for_preservation": (
         0.75,
         "MIN_CONFIDENCE_FOR_PRESERVATION threshold for agent state model.",
+    ),
+    # Causal observation confidence (moved from tools_meta.json)
+    "causal_confidence_technology_detected": (
+        0.86,
+        "Confidence for technology_detected causal observation.",
+    ),
+    "causal_confidence_endpoint_observed": (
+        0.82,
+        "Confidence for endpoint_observed causal observation.",
+    ),
+    "causal_confidence_endpoint_accessible": (
+        0.80,
+        "Confidence for endpoint_accessible causal observation.",
+    ),
+    "causal_confidence_service_exposed": (
+        0.80,
+        "Confidence for service_exposed causal observation.",
+    ),
+    "causal_confidence_port_state_observed": (
+        0.78,
+        "Confidence for port_state_observed causal observation.",
+    ),
+    "causal_confidence_endpoint_discovered": (
+        0.74,
+        "Confidence for endpoint_discovered causal observation.",
+    ),
+    "causal_confidence_asset_discovered": (
+        0.72,
+        "Confidence for asset_discovered causal observation.",
+    ),
+    "causal_confidence_vulnerability_signal": (
+        0.68,
+        "Confidence for vulnerability_signal causal observation.",
+    ),
+    "causal_confidence_tool_output_observed": (
+        0.55,
+        "Confidence for tool_output_observed causal observation.",
     ),
     "verification_enabled": (
         True,
@@ -783,6 +979,7 @@ _ESSENTIAL_CONFIG_KEYS: set[str] = {
 def _write_yaml_with_comments(config: dict, filepath: Path) -> None:
     from airecon._version import __version__
 
+    filepath.parent.mkdir(parents=True, exist_ok=True)
     lines = []
 
     lines.append("#╔══════════════════════════════════════════════════════════╗")
@@ -923,6 +1120,21 @@ class Config:
     pipeline_recon_min_subdomains: int
     pipeline_recon_min_urls: int
     pipeline_recon_soft_timeout: int
+    pipeline_recon_artifacts_scan_threshold: int
+    pipeline_recon_strong_signals_threshold: int
+    pipeline_analysis_min_injection_points: int
+    pipeline_exploit_min_signals: int
+    pipeline_counterfactual_interval_simple: int
+    pipeline_counterfactual_interval_complex: int
+    pipeline_counterfactual_vuln_threshold: int
+    pipeline_stagnation_vuln_baseline_iterations: int
+    pipeline_min_iterations_per_phase: int
+    pipeline_advanced_hints_failure_threshold: int
+    pipeline_max_iterations_cap: int
+    pipeline_output_parser_max_items_recon: int
+    pipeline_output_parser_max_items_analysis: int
+    pipeline_output_parser_max_items_exploit: int
+    pipeline_output_parser_max_items_report: int
 
     agent_max_conversation_messages: int
     agent_compression_trigger_ratio: float
@@ -976,6 +1188,30 @@ class Config:
     pipeline_analysis_budget: int
     pipeline_exploit_budget: int
     pipeline_report_budget: int
+    pipeline_tool_budget_recon_quick_fuzz: int
+    pipeline_tool_budget_recon_advanced_fuzz: int
+    pipeline_tool_budget_recon_deep_fuzz: int
+    pipeline_tool_budget_recon_caido_automate: int
+    pipeline_tool_budget_recon_create_vulnerability_report: int
+    pipeline_tool_budget_analysis_advanced_fuzz: int
+    pipeline_tool_budget_analysis_deep_fuzz: int
+    pipeline_tool_budget_analysis_create_vulnerability_report: int
+    pipeline_tool_budget_exploit_advanced_fuzz: int
+    pipeline_tool_budget_exploit_deep_fuzz: int
+    pipeline_tool_budget_exploit_quick_fuzz: int
+    pipeline_tool_budget_exploit_caido_automate: int
+    pipeline_tool_budget_report_execute: int
+    pipeline_tool_budget_report_advanced_fuzz: int
+    pipeline_tool_budget_report_deep_fuzz: int
+    pipeline_tool_budget_report_quick_fuzz: int
+    pipeline_confidence_threshold_recon: float
+    pipeline_confidence_threshold_analysis: float
+    pipeline_confidence_threshold_exploit: float
+    pipeline_confidence_threshold_report: float
+    agent_graph_max_iterations_recon: int
+    agent_graph_max_iterations_analyzer: int
+    agent_graph_max_iterations_exploiter: int
+    agent_graph_max_iterations_reporter: int
     model_max_tool_iterations: int
     model_max_tool_history: int
     model_max_objectives: int
@@ -983,6 +1219,15 @@ class Config:
     model_max_causal_observations: int
     model_max_tool_result_chars: int
     model_min_confidence_for_preservation: float
+    causal_confidence_technology_detected: float
+    causal_confidence_endpoint_observed: float
+    causal_confidence_endpoint_accessible: float
+    causal_confidence_service_exposed: float
+    causal_confidence_port_state_observed: float
+    causal_confidence_endpoint_discovered: float
+    causal_confidence_asset_discovered: float
+    causal_confidence_vulnerability_signal: float
+    causal_confidence_tool_output_observed: float
 
     verification_enabled: bool
     verification_enable_replay: bool
@@ -1013,7 +1258,10 @@ class Config:
     @classmethod
     def load(cls, config_path: str | Path | None = None) -> Config:
         if config_path:
-            config_file = Path(config_path)
+            config_file = Path(config_path).expanduser()
+            config_dir = config_file.parent
+            if not config_dir.exists():
+                config_dir.mkdir(parents=True, exist_ok=True)
         else:
             home_dir = Path.home()
             config_dir = home_dir / APP_DIR_NAME
@@ -1344,7 +1592,7 @@ _config_init_lock = threading.Lock()
 
 def _get_config_path(config_path: str | Path | None = None) -> Path:
     if config_path:
-        return Path(config_path)
+        return Path(config_path).expanduser()
     return Path.home() / APP_DIR_NAME / CONFIG_FILENAME
 
 
@@ -1410,8 +1658,8 @@ async def get_config_async(config_path: str | None = None) -> Config:
                     logger.info("Config file changed — reloading from %s", _config_path)
                     _config = Config.load(_config_path)
                     _config_mtime = current_mtime
-            except Exception:
-                pass
+            except Exception as e:
+                logger.debug("Config reload check failed: %s", e)
 
         if _config is None:
             _config = Config.load(config_path)

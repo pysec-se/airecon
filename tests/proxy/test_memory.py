@@ -197,6 +197,83 @@ class TestKnowledge:
         assert isinstance(entries[0]["tags"], list)
 
 
+class TestSmallModelContext:
+    def test_context_includes_learned_chains_and_tool_pitfalls(self, memory_manager):
+        memory_manager.save_target_intel(
+            {
+                "target": "example.com",
+                "subdomains": ["api.example.com"],
+                "ports": {"443": "https"},
+                "technologies": {"fastapi": "0.111"},
+                "waf": None,
+                "auth_methods": [],
+                "interesting_endpoints": ["/checkout"],
+            }
+        )
+        memory_manager.save_chain_discovery(
+            {
+                "chain_id": "chain-1",
+                "name": "Tenant Checkout Chain",
+                "combined_severity": 4,
+                "attack_path": "member -> checkout -> refund -> tenant crossover",
+                "reasoning": "Historical tenant-state abuse path",
+                "findings": [],
+                "relation_types": [],
+                "target": "example.com",
+                "discovered_at": "2026-04-07T00:00:00",
+            }
+        )
+        for _ in range(3):
+            memory_manager.record_tool_usage(
+                tool_name="ffuf",
+                target="example.com",
+                success=False,
+                duration_sec=1.2,
+                output_size=100,
+            )
+
+        ctx = memory_manager.get_context_for_small_model(
+            target="example.com",
+            current_phase="ANALYSIS",
+            max_tokens=4096,
+        )
+
+        assert "LEARNED ATTACK CHAINS" in ctx
+        assert "Tenant Checkout Chain" in ctx
+        assert "TOOL PITFALLS" in ctx
+        assert "ffuf" in ctx
+
+
+class TestSkillRecommendations:
+    def test_skill_recommendations_are_target_and_phase_aware(self, memory_manager):
+        memory_manager.save_skill_usage(
+            skill_name="skills/tools/sqlmap.md",
+            target="https://api.example.com/login",
+            phase="ANALYSIS",
+            success=True,
+            effectiveness_score=0.92,
+            tokens_saved=320,
+        )
+        memory_manager.save_skill_usage(
+            skill_name="reconnaissance/full_recon.md",
+            target="other-example.com",
+            phase="RECON",
+            success=True,
+            effectiveness_score=0.80,
+            tokens_saved=120,
+        )
+
+        recs = memory_manager.get_skill_recommendations(
+            target="example.com",
+            current_phase="ANALYSIS",
+        )
+
+        assert recs
+        assert recs[0]["skill_path"] == "tools/sqlmap.md"
+        assert recs[0]["skill_name"] == "sqlmap"
+        assert recs[0]["target_match"] is True
+
+
 class TestContextForSmallModel:
     def test_builds_context_with_intel(self, memory_manager):
         intel = {

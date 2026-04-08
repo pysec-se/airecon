@@ -377,14 +377,21 @@ def auto_load_skills_for_message(
         try:
             skill_recs = memory_manager.get_skill_recommendations(current_target, phase)
             for rec in skill_recs:
-                skill_path = (
-                    f"ctf/{rec['skill_name']}.py"
-                    if phase == "EXPLOIT"
-                    else f"reconnaissance/{rec['skill_name']}.py"
-                )
+                skill_path = str(rec.get("skill_path") or rec.get("skill_name") or "")
+                if not skill_path:
+                    continue
+                if "/" not in skill_path:
+                    skill_path = (
+                        f"ctf/{skill_path}.md"
+                        if phase == "EXPLOIT"
+                        else f"reconnaissance/{skill_path}.md"
+                    )
                 skill_file = skills_dir / skill_path
                 if skill_file.exists() and skill_path not in skill_scores:
-                    skill_scores[skill_path] = int(rec["success_rate"] * 5)
+                    score = float(
+                        rec.get("effectiveness_score", rec.get("success_rate", 0.0))
+                    )
+                    skill_scores[skill_path] = max(1, int(score * 10))
                     recommended_skills.append(skill_path)
             sorted_skills = sorted(
                 skill_scores.keys(),
@@ -440,6 +447,18 @@ def auto_load_skills_for_message(
             parts.append(f"[AUTO-LOADED SKILL: {skill_rel}]\n{content}")
             loaded_skills.append(skill_rel)
             loaded_paths.add(skill_rel)
+            if memory_manager and current_target:
+                try:
+                    memory_manager.save_skill_usage(
+                        skill_name=skill_rel,
+                        target=current_target,
+                        phase=phase,
+                        success=True,
+                        effectiveness_score=min(1.0, 0.65 + (priority * 0.1)),
+                        tokens_saved=max(0, len(content) // 4),
+                    )
+                except Exception as exc:
+                    logger.debug("Skill usage save failed for %s: %s", skill_rel, exc)
             return True
         except Exception:
             return False
@@ -450,7 +469,7 @@ def auto_load_skills_for_message(
     for skill_rel in sorted_skills:
         if keyword_count >= max_keyword_skills:
             break
-        if _load_skill(skill_rel):
+        if _load_skill(skill_rel, priority=2):
             keyword_count += 1
 
     # Priority 2: phase-relevant skills that haven't been loaded yet
@@ -459,7 +478,7 @@ def auto_load_skills_for_message(
     for skill_rel in phase_fallback:
         if phase_count >= max_phase_skills or len(parts) >= 5:
             break
-        if _load_skill(skill_rel):
+        if _load_skill(skill_rel, priority=1):
             phase_count += 1
 
     if not parts:
@@ -485,6 +504,7 @@ def auto_load_skills_for_message(
 def auto_load_skills_for_technologies(
     technologies: dict[str, str],
     already_loaded: set[str] | None = None,
+    target_profile=None,  # NEW: Target profile for context-aware selection
 ) -> tuple[str, list[str]]:
     if not technologies:
         return "", []
@@ -502,6 +522,23 @@ def auto_load_skills_for_technologies(
     for keyword, skill_path in _SKILL_KEYWORDS.items():
         if _keyword_matches_message(keyword, tech_message):
             skill_scores[skill_path] = skill_scores.get(skill_path, 0) + 1
+
+    # Context-aware skill scoring based on target profile
+    if target_profile is not None:
+        # Boost scores for skills relevant to detected attack surface
+        attack_vectors = target_profile.attack_surface.get("attack_vectors", [])
+        for vector in attack_vectors:
+            vector_lower = vector.lower()
+            for skill_path in list(skill_scores.keys()):
+                if vector_lower in skill_path.lower():
+                    skill_scores[skill_path] += 3
+
+        # Boost scores for skills relevant to security issues
+        for issue in target_profile.security_issues:
+            issue_lower = issue.lower()
+            for skill_path in list(skill_scores.keys()):
+                if issue_lower in skill_path.lower():
+                    skill_scores[skill_path] += 2
 
     if not skill_scores:
         return "", []

@@ -414,57 +414,89 @@
         "type": "function",
         "function": {
             "name": "create_vulnerability_report",
-            "description": "Create a formal vulnerability report. CALL ONLY AFTER VALIDATION AGENT CONFIRMS EXPLOITABILITY and all three confirmation criteria (causality, reproducibility, impact) are met. Required fields: id (VLN-YYYYMMDD-NNN), title (e.g., 'SQLi – /api/users?id='), severity (CRITICAL/HIGH/MEDIUM/LOW/INFO), cvss_score (0.0-10.0), cvss_vector, target (full URL), parameter (affected param/header), description (what it is, one paragraph), evidence (EXACT HTTP request + response, include baseline request/response for comparison), impact (concrete attacker outcome), reproduction (numbered steps from scratch), remediation (specific fix like library version or config change). Never report based on scanner output alone; you must have a working PoC. Evidence must include raw HTTP traffic. Do not omit any required field.",
+            "description": "Create a FINAL confirmed vulnerability report under the active target's vulnerabilities/ directory. Call this only after you have reproducible PoC evidence and concrete impact. Never use it for hypotheses, raw observations, methodology, or todo items; use create_note for those. Required fields are: title, description, target, poc_description, and poc_script_code. The target can be a URL/host or a local file/folder reference tied to the active workspace target. Optional fields include impact, technical_analysis, remediation_steps, endpoint, method, flag, cve, suggested_fix, and the 8 CVSS base metrics.",
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "id": {
-                        "type": "string",
-                        "description": "Vulnerability ID: VLN-<YYYYMMDD>-<NNN>"
-                    },
                     "title": {
                         "type": "string",
-                        "description": "Concise class-specific title: 'SQLi – /api/users?id='"
-                    },
-                    "severity": {
-                        "type": "string",
-                        "description": "CRITICAL | HIGH | MEDIUM | LOW | INFO"
-                    },
-                    "cvss_score": {
-                        "type": "number",
-                        "description": "CVSS v3.1 base score (0.0-10.0). Use NVD calculator. Never guess."
-                    },
-                    "cvss_vector": {
-                        "type": "string",
-                        "description": "CVSS v3.1 vector string, e.g., AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:H"
+                        "description": "Concise finding title, e.g. 'SQL Injection in /login' or 'Path Traversal in archive extractor'."
                     },
                     "target": {
                         "type": "string",
-                        "description": "Full target URL or hostname"
-                    },
-                    "parameter": {
-                        "type": "string",
-                        "description": "Affected parameter, header, or body field"
+                        "description": "Affected target. Use URL/host for remote findings, or a local file/folder/workspace path when analyzing code or uploaded artifacts."
                     },
                     "description": {
                         "type": "string",
-                        "description": "What the vulnerability is. One paragraph. Trace to observed data."
+                        "description": "Clear vulnerability summary tied to observed behavior and evidence."
                     },
-                    "evidence": {
+                    "poc_description": {
                         "type": "string",
-                        "description": "Exact HTTP request and response that prove the vulnerability. Include baseline (neutral) request/response for comparison. Raw data, not paraphrased."
+                        "description": "How the proof of concept works and what behavior confirmed the issue."
+                    },
+                    "poc_script_code": {
+                        "type": "string",
+                        "description": "Actual exploit, payload, code snippet, or reproduction command. This is mandatory."
                     },
                     "impact": {
                         "type": "string",
-                        "description": "What an attacker achieves: data exfiltration, privilege escalation, server takeover, etc. Concrete, not theoretical."
+                        "description": "Concrete attacker outcome: unauthorized data access, privilege change, code execution, service impact, etc."
                     },
-                    "reproduction": {
+                    "technical_analysis": {
                         "type": "string",
-                        "description": "Numbered steps to reproduce from scratch on a fresh session."
+                        "description": "Deeper root-cause or exploitability analysis."
                     },
-                    "remediation": {
+                    "remediation_steps": {
                         "type": "string",
-                        "description": "Specific fix: library version, config key, code pattern change. Avoid generic 'sanitize input'."
+                        "description": "Specific remediation guidance."
+                    },
+                    "attack_vector": {
+                        "type": "string",
+                        "description": "Optional CVSS AV metric: N, A, L, or P."
+                    },
+                    "attack_complexity": {
+                        "type": "string",
+                        "description": "Optional CVSS AC metric: L or H."
+                    },
+                    "privileges_required": {
+                        "type": "string",
+                        "description": "Optional CVSS PR metric: N, L, or H."
+                    },
+                    "user_interaction": {
+                        "type": "string",
+                        "description": "Optional CVSS UI metric: N or R."
+                    },
+                    "scope": {
+                        "type": "string",
+                        "description": "Optional CVSS S metric: U or C."
+                    },
+                    "confidentiality": {
+                        "type": "string",
+                        "description": "Optional CVSS C metric: N, L, or H."
+                    },
+                    "integrity": {
+                        "type": "string",
+                        "description": "Optional CVSS I metric: N, L, or H."
+                    },
+                    "availability": {
+                        "type": "string",
+                        "description": "Optional CVSS A metric: N, L, or H."
+                    },
+                    "endpoint": {
+                        "type": "string",
+                        "description": "Optional affected endpoint, route, or file path."
+                    },
+                    "method": {
+                        "type": "string",
+                        "description": "Optional HTTP method or protocol used in the PoC."
+                    },
+                    "cve": {
+                        "type": "string",
+                        "description": "Optional CVE ID if directly applicable."
+                    },
+                    "suggested_fix": {
+                        "type": "string",
+                        "description": "Optional code/config patch or exact fix snippet."
                     },
                     "flag": {
                         "type": "string",
@@ -472,17 +504,11 @@
                     }
                 },
                 "required": [
-                    "id",
                     "title",
-                    "severity",
-                    "cvss_score",
-                    "cvss_vector",
                     "target",
                     "description",
-                    "evidence",
-                    "impact",
-                    "reproduction",
-                    "remediation"
+                    "poc_description",
+                    "poc_script_code"
                 ]
             }
         }
@@ -1096,7 +1122,7 @@
         "type": "function",
         "function": {
             "name": "create_note",
-            "description": "Create a structured note with category, tags, and optional metadata. Notes persist across the session and can be searched later. Categories: vulnerability, methodology, finding, question, plan, observation, todo. Use to document discoveries, track tasks, record decisions. Parameters: category (required), title (required), content (required), tags (optional array). Returns note_id and status. Example: {\"category\": \"vulnerability\", \"title\": \"SQL Injection in login\", \"content\": \"Union-based SQLi on username field...\", \"tags\": [\"sqli\", \"critical\", \"auth\"]}",
+            "description": "Create a structured WORKING note with category, tags, and optional metadata. Notes persist across the session and can be searched later. Categories: vulnerability, methodology, finding, question, plan, observation, todo. Use notes for hypotheses, raw observations, task tracking, methodology, and draft evidence. Notes are NOT final vulnerability reports and do NOT write to vulnerabilities/; use create_vulnerability_report for confirmed findings. Parameters: category (required), title (required), content (required), tags (optional array). Returns note_id and status. Example: {\"category\": \"vulnerability\", \"title\": \"SQL Injection in login\", \"content\": \"Union-based SQLi on username field...\", \"tags\": [\"sqli\", \"critical\", \"auth\"]}",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -1165,13 +1191,13 @@
         "type": "function",
         "function": {
             "name": "export_notes_wiki",
-            "description": "Export all notes to a single wiki markdown file for documentation. Useful at the end of engagement to generate organized report appendix. Parameters: output_path (optional, default: \"notes/wiki.md\"). Returns export status and path. Example: {\"output_path\": \"output/wiki_notes.md\"}",
+            "description": "Export all notes to a single wiki markdown file for documentation. Useful at the end of engagement to generate organized report appendix. Parameters: output_path (optional, default: current target's \"notes/wiki.md\"). Returns export status and path. Example: {\"output_path\": \"output/wiki_notes.md\"}",
             "parameters": {
                 "type": "object",
                 "properties": {
                     "output_path": {
                         "type": "string",
-                        "description": "Output file path (workspace-relative). Default: \"notes/wiki.md\""
+                        "description": "Output file path (workspace-relative). Default: current target's notes/wiki.md"
                     }
                 }
             }

@@ -7,9 +7,14 @@ from dataclasses import asdict as _asdict
 from pathlib import Path
 from typing import Any
 
+from ..data_loader import severity_to_int
 from .chain_planner import ChainStep as _ChainStep
 from .chain_planner import ExploitChain as _ExploitChain
 from .chain_planner import build_chain_context, plan_chains
+from .novel_discovery import (
+    analyze_novel_vectors,
+    get_recommendation_for_finding,
+)
 from .pipeline import PipelinePhase
 from .session import save_session, session_to_context
 
@@ -35,6 +40,91 @@ def _chain_step_to_text(step: Any) -> str:
             or "step"
         )
     return str(step)
+
+
+def _build_graph_chain_prompt(
+    vulnerabilities: list[dict[str, Any]],
+) -> tuple[str, list[Any]]:
+    """Build a graph-correlation prompt from live findings only."""
+    if len(vulnerabilities) < 2:
+        return "", []
+
+    from .correlation_engine import get_correlation_engine, reset_correlation_engine
+
+    reset_correlation_engine()
+    engine = get_correlation_engine()
+
+    for vuln in vulnerabilities:
+        vuln_text = " ".join(
+            str(vuln.get(key, "")).strip()
+            for key in ("type", "category", "finding", "title", "description")
+            if str(vuln.get(key, "")).strip()
+        )
+        engine.add_finding(
+            vuln_class=vuln_text.lower(),
+            severity=severity_to_int(vuln.get("severity", 2)),
+            confidence=float(vuln.get("confidence", 0.5)),
+            endpoint=str(vuln.get("url", vuln.get("endpoint", ""))),
+            parameter=str(vuln.get("parameter", "")),
+            description=str(vuln.get("title", vuln.get("finding", ""))),
+        )
+
+    chains = engine.correlate_findings()
+    if not chains:
+        return "", []
+
+    lines = ["\n[GRAPH-BASED ATTACK CHAINS]"]
+    for chain in chains[:5]:
+        lines.append(f"- [{chain.combined_severity}/5] {chain.name}")
+        lines.append(f"  Path: {chain.attack_path}")
+        lines.append(f"  Reasoning: {chain.reasoning}")
+    return "\n".join(lines), chains
+
+
+def _build_novel_discovery_prompt(
+    vulnerabilities: list[dict[str, Any]],
+    iteration: int,
+) -> str:
+    """Generate a prompt for non-template attack paths from observed findings."""
+    if not vulnerabilities:
+        return ""
+
+    analysis = analyze_novel_vectors(vulnerabilities, iteration=iteration)
+    combinations = analysis.get("combinations", [])
+    tactics = analysis.get("innovative_tactics", [])
+    recommendations = analysis.get("recommendations", [])
+    vectors = analysis.get("novel_vectors", [])
+    anomalies = analysis.get("anomalies_detected", [])
+
+    if not any((combinations, tactics, recommendations, vectors, anomalies)):
+        return ""
+
+    lines = ["\n[NOVEL VECTOR ANALYSIS]"]
+    for recommendation in recommendations[:3]:
+        lines.append(f"- {recommendation}")
+    if anomalies:
+        lines.append(
+            "- Anomalies observed: "
+            + ", ".join(str(a).replace("_", " ") for a in anomalies[:4])
+        )
+    for vector in vectors[:2]:
+        bases = vector.get("bases", [])
+        lines.append(
+            f"- Novel path: {vector.get('description', 'Emergent chain')} "
+            f"(conf={float(vector.get('confidence', 0.0)):.0%})"
+        )
+        if bases:
+            lines.append(f"  Findings: {'; '.join(str(b) for b in bases[:3])}")
+    for tactic in tactics[:2]:
+        lines.append(f"- Novel tactic: {tactic}")
+
+    for vuln in vulnerabilities[:2]:
+        finding_name = str(vuln.get("title", vuln.get("finding", "finding"))).strip()
+        recs = get_recommendation_for_finding(vuln, vulnerabilities)
+        if finding_name and recs:
+            lines.append(f"- Pivot from {finding_name[:70]}: {recs[0]}")
+
+    return "\n".join(lines)
 
 
 # Anti-repetition directives — dynamically generated from session context
@@ -523,6 +613,11 @@ class _CyclePreludeMixin:
                         existing_chain_ids=_existing_ids,
                         iteration=self.state.iteration,
                         max_chains=3,
+                        workflow_context=(
+                            self._session.app_model.export_workflow_context()
+                            if self._session and getattr(self._session, "app_model", None)
+                            else None
+                        ),
                         causal_hypotheses=[
                             h.__dict__
                             for h in getattr(
@@ -798,6 +893,8 @@ class _CyclePreludeMixin:
             vuln_chaining_prompt = ""
             correlation_prompt = ""
             expert_testing_prompt = ""
+            graph_chain_prompt = ""
+            novel_chain_prompt = ""
 
             if self._session:
                 s = self._session
@@ -967,6 +1064,42 @@ class _CyclePreludeMixin:
                         f"Document attack chains in output/attack_chains.txt"
                     )
 
+                if len(s.vulnerabilities) >= 2:
+                    try:
+                        graph_chain_prompt, chains = _build_graph_chain_prompt(
+                            s.vulnerabilities,
+                        )
+                        if chains:
+                            # Persist chains to session memory for cross-session learning
+                            try:
+                                from ..memory import get_memory_manager
+                                memory = get_memory_manager()
+                                for chain in chains:
+                                    memory.save_chain_discovery({
+                                        "chain_id": chain.chain_id,
+                                        "name": chain.name,
+                                        "combined_severity": chain.combined_severity,
+                                        "attack_path": chain.attack_path,
+                                        "reasoning": chain.reasoning,
+                                        "findings": chain.findings,
+                                        "relation_types": chain.relation_types,
+                                        "target": getattr(s, 'target', ''),
+                                        "discovered_at": __import__('datetime').datetime.now().isoformat(),
+                                    })
+                            except Exception as _mem_err:
+                                logger.debug("Failed to persist correlation chains: %s", _mem_err)
+                    except Exception as _corr_err:
+                        logger.debug("Graph-based correlation failed: %s", _corr_err)
+
+                if s.vulnerabilities:
+                    try:
+                        novel_chain_prompt = _build_novel_discovery_prompt(
+                            s.vulnerabilities,
+                            self.state.iteration,
+                        )
+                    except Exception as _novel_err:
+                        logger.debug("Novel discovery prompt failed: %s", _novel_err)
+
                 if s.urls and len(s.urls) > 5:
                     url_str = " ".join(s.urls).lower()
                     expert_patterns = []
@@ -1012,7 +1145,7 @@ class _CyclePreludeMixin:
                                 expert_patterns
                             )
 
-            if correlation_prompt or vuln_chaining_prompt or expert_testing_prompt:
+            if correlation_prompt or vuln_chaining_prompt or expert_testing_prompt or graph_chain_prompt or novel_chain_prompt:
                 self.state.conversation.append(
                     {
                         "role": "system",
@@ -1020,6 +1153,8 @@ class _CyclePreludeMixin:
                             f"[SYSTEM: ANALYSIS — Itr {self.state.iteration}]"
                             f"{correlation_prompt}"
                             f"{vuln_chaining_prompt}"
+                            f"{graph_chain_prompt}"
+                            f"{novel_chain_prompt}"
                             f"{expert_testing_prompt}\n"
                         ),
                     }
@@ -1031,9 +1166,24 @@ class _CyclePreludeMixin:
         _presummary_ratio = self.state.token_usage.get("used", 0) / max(
             self._adaptive_num_ctx or cfg.ollama_num_ctx, 1
         )
-        _pressure_compress = self.state.iteration > 0 and _presummary_ratio >= 0.35
+        _model_name = str(getattr(getattr(self, "ollama", None), "model", "") or "").lower()
+        _is_large_qwen = "qwen" in _model_name and any(
+            marker in _model_name for marker in ("122b", "120b", "72b")
+        )
+        _pressure_threshold = 0.45 if _is_large_qwen else 0.35
+        _compress_threshold = 0.38 if _is_large_qwen else 0.30
+        _background_interval = 8 if _is_large_qwen else 5
+        _background_floor = 0.22 if _is_large_qwen else 0.0
+
+        _pressure_compress = (
+            self.state.iteration > 0 and _presummary_ratio >= _pressure_threshold
+        )
         _compress_now = self.state.iteration > 0 and (
-            _presummary_ratio >= 0.30 or self.state.iteration % 5 == 0
+            _presummary_ratio >= _compress_threshold
+            or (
+                self.state.iteration % _background_interval == 0
+                and _presummary_ratio >= _background_floor
+            )
         )
         if _compress_now:
             self._compress_old_tool_outputs(
@@ -1081,10 +1231,11 @@ class _CyclePreludeMixin:
             )
 
             _compress_ctx = min(8192, _cur_ctx_limit // 4)
+            _keep_recent = 40 if _is_large_qwen else 30
             try:
                 await self.state.compress_with_llm(
                     self.ollama,
-                    keep_recent=30,
+                    keep_recent=_keep_recent,
                     num_ctx=_compress_ctx,
                     num_predict=1024,
                     phase=current_phase,

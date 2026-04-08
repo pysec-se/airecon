@@ -2332,7 +2332,7 @@ class AIReconApp(App):
 
         try:
             import json
-            import subprocess
+            import subprocess  # nosec B404
 
             from airecon.proxy.config import get_config
 
@@ -2350,7 +2350,7 @@ class AIReconApp(App):
                 json.dumps({"model": model, "keep_alive": 0}),
             ]
 
-            subprocess.run(
+            subprocess.run(  # nosec B603
                 cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=2
             )
 

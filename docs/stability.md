@@ -54,8 +54,8 @@ Observed results:
 
 Short answer: **it depends on model size and context configuration**, not only AIRecon code.
 
-- With `qwen3.5:122b` or at least `qwen3:32b`, planning and tool-use reliability are typically better.
-- With smaller models (especially `<30B`), behavior can degrade: weaker planning, more hallucination, and less reliable tool calls.
+- Larger models generally provide more reliable planning and tool-use than smaller ones.
+- As model size shrinks, expect weaker planning, more hallucinations, and less reliable tool calls.
 - Context settings still matter: very small `ollama_num_ctx` values or aggressive truncation can reduce output quality even on larger models.
 
 ## Stability Exit Criteria

@@ -103,6 +103,24 @@ class TestUpdateFromResponse:
         assert "POST" in entry["methods"]
         assert "DELETE" in entry["methods"]
 
+    def test_extracts_workflow_principal_and_tenant_context(self, model: ApplicationModel) -> None:
+        model.update_from_response(
+            url="https://example.com/admin/approve",
+            method="POST",
+            status_code=200,
+            headers={"content-type": "application/json"},
+            body_excerpt="Owner can approve workspace invites after OTP verification.",
+            param_names=["tenant_id", "invite_id"],
+        )
+
+        assert "owner" in model.roles_detected
+        assert "admin_approval" in model.workflow_paths
+        assert "tenant_scope" in model.workflow_paths
+        assert "tenant_id" in model.tenant_markers
+        assert "tenant_boundary" in model.trust_boundaries
+        assert "owner" in model.principal_profiles
+        assert "/admin/approve" in model.principal_profiles["owner"]["endpoints"]
+
 
 class TestBuildContext:
     def test_returns_empty_when_no_data(self, model: ApplicationModel) -> None:
@@ -137,6 +155,22 @@ class TestBuildContext:
         ctx = model.build_context()
         assert "<roles>" in ctx
         assert "admin" in ctx
+
+    def test_includes_workflow_and_trust_boundary_context(self, model: ApplicationModel) -> None:
+        model.record_text_signal(
+            "Tenant admin can checkout and approve refunds with OTP verification.",
+            endpoint="/checkout/refund",
+            param_names=["tenant_id", "refund_id"],
+            auth_type="cookie",
+            method="POST",
+        )
+
+        ctx = model.build_context()
+        assert "<principals>" in ctx
+        assert "<workflow_surfaces>" in ctx
+        assert "<tenant_markers>" in ctx
+        assert "<trust_boundaries>" in ctx
+        assert "checkout/refund" in ctx
 
 
 class TestSessionDataAppModel:

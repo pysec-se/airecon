@@ -1,4 +1,5 @@
 import pytest
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch, MagicMock
 from airecon.proxy.agent.loop import AgentLoop
 from airecon.proxy.agent.loop_policy import should_preserve_active_target_for_subdomain
@@ -61,6 +62,63 @@ def test_agent_state_reset(agent_loop):
 
     assert agent_loop.state.iteration == 0
     assert len(agent_loop._executed_tool_counts) == 0
+
+
+@pytest.mark.asyncio
+async def test_load_session_persistence_restores_adaptive_state(agent_loop, mocker):
+    agent_loop._session = SessionData(target="example.com", session_id="sess-1")
+    persist = MagicMock()
+    persist.load_payload_memory.return_value = []
+    persist.load_adaptive_state.return_value = {
+        "tool_performances": {
+            "sqlmap": {
+                "total_uses": 4,
+                "successes": 3,
+                "failures": 1,
+                "avg_duration": 2.5,
+                "avg_confidence": 0.9,
+                "last_used": 123.0,
+                "success_streak": 2,
+                "failure_streak": 0,
+                "context_scores": {"phase=ANALYSIS": 0.8},
+                "target_type_scores": {"nginx": 0.7},
+            }
+        },
+        "strategy_patterns": [
+            {
+                "pattern_id": "p1",
+                "description": "Use httpx then nuclei",
+                "conditions": {"phase": "ANALYSIS"},
+                "tool_sequence": ["httpx", "nuclei"],
+                "success_count": 3,
+                "failure_count": 1,
+                "avg_result_confidence": 0.88,
+                "last_applied": 456.0,
+            }
+        ],
+    }
+
+    mocker.patch(
+        "airecon.proxy.agent.loop.get_config",
+        return_value=SimpleNamespace(
+            session_persistence_enabled=True,
+            intelligence_adaptive_min_observations=3,
+        ),
+    )
+    mocker.patch("airecon.proxy.agent.loop.get_workspace_root", return_value="/tmp")
+    mocker.patch(
+        "airecon.proxy.agent.session_persistence.SessionPersistenceEngine",
+        return_value=persist,
+    )
+
+    await agent_loop._load_session_persistence()
+
+    assert agent_loop._adaptive_learning_engine.tool_performances["sqlmap"].total_uses == 4
+    assert agent_loop._adaptive_learning_engine.tool_performances["sqlmap"].context_scores["phase=ANALYSIS"] == 0.8
+    assert any(
+        p.pattern_id == "p1" and p.tool_sequence == ["httpx", "nuclei"]
+        for p in agent_loop._adaptive_learning_engine.strategy_patterns
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -353,11 +411,15 @@ class TestReportObjectiveTracking:
         assert self._status(agent_loop, defaults[0]) == "done"
         assert self._status(agent_loop, defaults[1]) == "done"
 
-    def test_report_output_file_name_marks_objectives(self, agent_loop):
-        """output_file path containing 'report' triggers objectives."""
+    def test_vulnerability_output_path_marks_objectives(self, agent_loop):
+        """Only artifacts under vulnerabilities/ count as final reports."""
         phase, defaults = self._setup(agent_loop)
         self._call(
-            agent_loop, phase, "create_file", {}, output_file="output/vuln_report.md"
+            agent_loop,
+            phase,
+            "create_file",
+            {},
+            output_file="vulnerabilities/vuln_report.md",
         )
         assert self._status(agent_loop, defaults[0]) == "done"
         assert self._status(agent_loop, defaults[1]) == "done"

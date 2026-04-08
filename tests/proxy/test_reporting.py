@@ -162,6 +162,25 @@ def test_reporting_uses_active_target_for_at_folder_reference(tmp_path):
     assert os.path.exists(report_path)
 
 
+def test_reporting_uses_active_target_for_relative_workspace_path(tmp_path):
+    workspace = str(tmp_path)
+
+    result = create_vulnerability_report(
+        title="Unsafe Deserialization in Uploaded Code",
+        description="Finding tied to a workspace-relative source file.",
+        target="uploads/core/main.py",
+        poc_description="Deserialize attacker-controlled payload.",
+        poc_script_code="python3 poc.py",
+        _workspace_root=workspace,
+        _active_target="core",
+    )
+
+    assert result["success"] is True
+    report_path = result["report_path"]
+    assert "/core/vulnerabilities/" in report_path.replace("\\", "/")
+    assert os.path.exists(report_path)
+
+
 def test_reporting_uses_domain_token_for_scheme_less_url_path(tmp_path):
     workspace = str(tmp_path)
 

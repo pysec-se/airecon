@@ -5,9 +5,14 @@ Centralizes values previously duplicated across multiple files.
 
 from __future__ import annotations
 
+import json
+import logging
 import re
 from enum import Enum
+from pathlib import Path
 from typing import Any
+
+logger = logging.getLogger("airecon.agent.constants")
 
 # ---------------------------------------------------------------------------
 # EPHEMERAL_PREFIXES — was duplicated in models.py:1438, loop_exploration.py:143,
@@ -38,29 +43,24 @@ EPHEMERAL_PREFIXES: tuple[str, ...] = (
 )
 
 # ---------------------------------------------------------------------------
-# TOOL CLASSIFICATION — was duplicated in loop_exploration.py:11-19
-# and loop_inference.py:11-19
+# TOOL CLASSIFICATION — loaded from tools_meta.json (was duplicated)
 # ---------------------------------------------------------------------------
-SHALLOW_TOOLS: frozenset[str] = frozenset(
-    {
-        "execute",
-        "browser_action",
-        "web_search",
-        "http_observe",
-        "list_files",
-        "read_file",
-    }
-)
-DEEP_TOOLS: frozenset[str] = frozenset(
-    {
-        "advanced_fuzz",
-        "quick_fuzz",
-        "deep_fuzz",
-        "schemathesis_fuzz",
-        "caido_send_request",
-        "caido_automate",
-    }
-)
+def _load_tool_classifications(field: str) -> frozenset[str]:
+    """Load tool classification set from tools_meta.json."""
+    try:
+        path = Path(__file__).parent.parent / "data" / "tools_meta.json"
+        data = json.loads(path.read_text(encoding="utf-8"))
+        tools = data.get("tool_classifications", {}).get(field, [])
+        return frozenset(str(t).strip().lower() for t in tools if str(t).strip())
+    except Exception as e:
+        logger.warning("Failed to load tool classifications (%s) from JSON: %s", field, e)
+        return frozenset()
+
+
+SHALLOW_TOOLS: frozenset[str] = _load_tool_classifications("shallow_tools")
+DEEP_TOOLS: frozenset[str] = _load_tool_classifications("deep_tools")
+CAIDO_BLOCKED_TOOLS: frozenset[str] = _load_tool_classifications("caido_blocked_tools")
+MINI_AGENT_BLOCKED_TOOLS: frozenset[str] = _load_tool_classifications("mini_agent_blocked_tools")
 
 # ---------------------------------------------------------------------------
 # SEVERITY TAXONOMY — was duplicated in owasp.py, chain_planner.py (2x),
@@ -189,9 +189,21 @@ DEFAULT_USER_AGENT: str = (
 )
 
 # ---------------------------------------------------------------------------
-# WAF detection — was duplicated in waf_detector.py, waf_bypass.py, verification.py
+# WAF detection — loaded from waf_signatures.json (was duplicated)
 # ---------------------------------------------------------------------------
-WAF_BLOCK_STATUS_CODES: frozenset[int] = frozenset({403, 406, 412, 429, 501, 999})
+def _load_waf_block_status_codes() -> frozenset[int]:
+    """Load WAF block status codes from waf_signatures.json."""
+    try:
+        path = Path(__file__).parent.parent / "data" / "waf_signatures.json"
+        data = json.loads(path.read_text(encoding="utf-8"))
+        codes = data.get("block_status_codes", [])
+        return frozenset(int(c) for c in codes if c)
+    except Exception as e:
+        logger.warning("Failed to load WAF block status codes from JSON: %s", e)
+        return frozenset({403, 406, 412, 429, 501, 999})  # minimal fallback
+
+
+WAF_BLOCK_STATUS_CODES: frozenset[int] = _load_waf_block_status_codes()
 
 # ---------------------------------------------------------------------------
 # BODY TRUNCATION — was inconsistent: 3000 in waf_detector.py:125,
@@ -388,17 +400,28 @@ CD_WORKSPACE_PREFIX_RE = re.compile(r"^cd\s+/workspace/[^\s]+\s*&&\s*")
 CD_DIR_PREFIX_RE = re.compile(r"^cd\s+\S+\s*&&\s*")
 
 # ---------------------------------------------------------------------------
-# WAF BYPASS STRATEGY — was in waf_bypass.py
+# WAF BYPASS STRATEGY — loaded from waff_bypass.json (was duplicated)
 # ---------------------------------------------------------------------------
-WAF_BYPASS_STRATEGIES: dict[str, list[dict[str, Any]]] = {
-    "generic": [
-        {
-            "name": "sql_comment",
-            "description": "Append SQL comment to bypass keyword filtering",
-            "comments": ["--", "#", "/*", "-- -", "#-", "/*-"],
-        },
-    ],
-}
+def _load_waf_bypass_strategies() -> dict[str, list[dict[str, Any]]]:
+    """Load WAF bypass strategies from waff_bypass.json."""
+    try:
+        path = Path(__file__).parent.parent / "data" / "waff_bypass.json"
+        data = json.loads(path.read_text(encoding="utf-8"))
+        return data.get("BYPASS_STRATEGIES", {})
+    except Exception as e:
+        logger.warning("Failed to load WAF bypass strategies from JSON: %s", e)
+        return {
+            "generic": [
+                {
+                    "name": "sql_comment",
+                    "description": "Append SQL comment to bypass keyword filtering",
+                    "comments": ["--", "#", "/*", "-- -", "#-", "/*-"],
+                },
+            ],
+        }
+
+
+WAF_BYPASS_STRATEGIES: dict[str, list[dict[str, Any]]] = _load_waf_bypass_strategies()
 
 # ---------------------------------------------------------------------------
 # SEVERITY MULTIPLIER — was in models.py:29

@@ -1308,7 +1308,7 @@ class _ValidatorMixin:
                 score += int(replay_score * 20)
                 if replay_score < 0.65:
                     improvements.append(
-                        "perkuat replay verification (request/payload/response/impact)"
+                        "replay verification (request/payload/response/impact)"
                     )
 
             # ── Zero-FP Verification Bonus ────────────────────────────────

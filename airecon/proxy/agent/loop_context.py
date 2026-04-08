@@ -5,6 +5,7 @@ from typing import Any
 from urllib.parse import urlparse
 
 from ..config import get_config
+from ..data_loader import severity_to_int
 from .models import AgentState, _get_model_limits
 from .session import get_untested_injection_points
 
@@ -91,6 +92,95 @@ class _ContextMixin:
                 "_bucket": "protected_system",
             }
         )
+
+    def _build_recent_execution_memory(self, last_n: int = 6) -> list[str]:
+        recent = self.state.tool_history[-last_n:] if self.state.tool_history else []
+        if not recent:
+            return []
+
+        lines: list[str] = []
+        for rec in recent:
+            status = "OK" if rec.status == "success" else "FAIL"
+            detail = ""
+            if rec.tool_name == "execute":
+                command = str(rec.arguments.get("command", "") or "").strip()
+                if command:
+                    detail = command[:90]
+            elif rec.tool_name == "browser_action":
+                action = str(rec.arguments.get("action", "") or "").strip()
+                url = str(rec.arguments.get("url", "") or "").strip()
+                detail = f"{action} {url}".strip()[:90]
+            elif rec.arguments:
+                interesting_arg = next(
+                    (
+                        f"{k}={v}"
+                        for k, v in rec.arguments.items()
+                        if k in {"url", "endpoint", "path", "target", "query"}
+                    ),
+                    "",
+                )
+                detail = interesting_arg[:90]
+
+            line = f"  - [{status}] {rec.tool_name}"
+            if detail:
+                line += f": {detail}"
+            lines.append(line)
+        return lines
+
+    def _build_failure_memory(self, max_items: int = 4) -> list[str]:
+        if not getattr(self.state, "failure_log", None):
+            return []
+
+        lines: list[str] = []
+        for failure in self.state.failure_log[-max_items:]:
+            lines.append(
+                "  - "
+                + f"{str(failure.get('name', 'tool'))} "
+                + f"[{str(failure.get('error_type', 'other'))}] "
+                + f"on {str(failure.get('target', '') or 'current target')}: "
+                + f"{str(failure.get('suggested_action', 'review the last error'))[:120]}"
+            )
+        return lines
+
+    def _build_anomaly_memory(self, max_items: int = 4) -> list[str]:
+        interesting_tags = {
+            "workflow",
+            "business_logic",
+            "tenant",
+            "trust_boundary",
+            "principal",
+            "authorization",
+            "state_machine",
+            "commerce",
+            "anomaly",
+        }
+        lines: list[str] = []
+        seen: set[str] = set()
+        for ev in reversed(getattr(self.state, "evidence_log", [])[-20:]):
+            if not isinstance(ev, dict):
+                continue
+            tags = {
+                str(tag).strip().lower()
+                for tag in (ev.get("tags") or [])
+                if str(tag).strip()
+            }
+            summary = str(ev.get("summary", "") or "").strip()
+            if not summary:
+                continue
+            lower_summary = summary.lower()
+            if not (
+                tags & interesting_tags
+                or any(token in lower_summary for token in ("unexpected", "odd", "workflow", "tenant", "approve", "refund", "coupon", "otp", "totp"))
+            ):
+                continue
+            dedup_key = summary[:120].lower()
+            if dedup_key in seen:
+                continue
+            seen.add(dedup_key)
+            lines.append(f"  - {summary[:160]}")
+            if len(lines) >= max_items:
+                break
+        return lines
 
     def _compact_phase_context(self, from_phase: str) -> None:
         msgs = self.state.conversation
@@ -679,6 +769,30 @@ class _ContextMixin:
                 )
             added_any = True
 
+        compression_summary = str(getattr(self, "_compression_summary", "") or "").strip()
+        if compression_summary:
+            parts.append("ITERATIVE MEMORY HANDOFF:")
+            parts.append(f"  {compression_summary[:700]}")
+            added_any = True
+
+        recent_exec = self._build_recent_execution_memory(last_n=6)
+        if recent_exec:
+            parts.append("RECENT EXECUTION MEMORY:")
+            parts.extend(recent_exec)
+            added_any = True
+
+        failure_memory = self._build_failure_memory(max_items=4)
+        if failure_memory:
+            parts.append("FAILURE MEMORY (DO NOT REPEAT):")
+            parts.extend(failure_memory)
+            added_any = True
+
+        anomaly_memory = self._build_anomaly_memory(max_items=4)
+        if anomaly_memory:
+            parts.append("UNUSUAL SIGNALS / ANOMALIES:")
+            parts.extend(anomaly_memory)
+            added_any = True
+
         if self._session and self._session.vulnerabilities:
             vulns = self._session.vulnerabilities[:10]
             vlines = []
@@ -731,7 +845,7 @@ class _ContextMixin:
             high_ev = [
                 e
                 for e in self.state.evidence_log
-                if int(e.get("severity", 1)) >= 4
+                if severity_to_int(e.get("severity", 1)) >= 4
                 and float(e.get("confidence", 0.0)) >= 0.75
             ][:5]
             if high_ev:

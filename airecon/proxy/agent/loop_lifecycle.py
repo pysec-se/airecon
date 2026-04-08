@@ -290,15 +290,11 @@ class _LifecycleMixin:
         if last_error:
             logger.warning("Ollama context reset failed after retries: %s", last_error)
             err_text = str(last_error).lower()
-            if (
-                "runner has unexpectedly stopped" in err_text
-                or "status code: 500" in err_text
-            ):
+            if "runner has unexpectedly stopped" in err_text:
                 self._fatal_ollama_error = str(last_error)
                 logger.error(
                     "Fatal Ollama runner failure detected during context reset"
                 )
-                return False
         else:
             logger.warning(
                 "Ollama context reset failed after retries (no exception details)"

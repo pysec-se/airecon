@@ -109,6 +109,9 @@ def test_mcp_ollama_tools_only_exposes_enabled_servers():
     names = [t.get("function", {}).get("name") for t in dynamic]
     assert "mcp_hexstrike" in names
     assert "mcp_disabledsrv" not in names
+    action_enum = dynamic[0]["function"]["parameters"]["properties"]["action"]["enum"]
+    assert "list_tools" in action_enum
+    assert "call_tool" in dynamic[0]["function"]["description"]
 
 
 def test_get_tool_definitions_includes_dynamic_mcp_tools_when_enabled():
@@ -224,3 +227,49 @@ def test_mcp_search_tools_payload_filters_and_limits_results():
 def test_mcp_search_tools_payload_requires_query():
     out = mcp.mcp_search_tools_payload({"tools": []}, query="", limit=10)
     assert out.get("error")
+
+
+@pytest.mark.asyncio
+async def test_mcp_stdio_request_includes_stderr_when_server_exits_early():
+    class _FakeStdin:
+        def write(self, data: bytes) -> None:
+            return None
+
+        async def drain(self) -> None:
+            return None
+
+        def close(self) -> None:
+            return None
+
+    class _FakeStdout:
+        async def read(self, n: int) -> bytes:
+            return b""
+
+    class _FakeStderr:
+        async def read(self) -> bytes:
+            return b"startup failure on port 8888"
+
+    class _FakeProc:
+        def __init__(self) -> None:
+            self.stdin = _FakeStdin()
+            self.stdout = _FakeStdout()
+            self.stderr = _FakeStderr()
+            self.returncode = None
+
+        async def wait(self) -> int:
+            self.returncode = 1
+            return 1
+
+        def kill(self) -> None:
+            self.returncode = 1
+
+    with patch("asyncio.create_subprocess_exec", new=AsyncMock(return_value=_FakeProc())):
+        ok, payload = await mcp._mcp_stdio_request(
+            {"command": "python3", "args": ["mcp_server.py"]},
+            "tools/list",
+            {},
+        )
+
+    assert ok is False
+    assert "stderr" in str(payload.get("error", "")).lower()
+    assert "startup failure" in str(payload.get("error", "")).lower()

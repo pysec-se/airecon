@@ -83,22 +83,6 @@ reportUnboundVariable = true
 reportGeneralTypeIssues = true
 reportInvalidTypeForm = true
 
-[tool.bandit]
-# Suppress false positives inherent to security testing tools
-skips = [
-    "B101", # assert_used (internal validation, not public API)
-    "B104", # hardcoded_bind_all_interfaces (false positive on string comparisons)
-    "B105", # hardcoded_password_string (flags command names like 'timeout', 'execute')
-    "B107", # hardcoded_password_default (false positive on CSS selectors like 'input[type="password"]')
-    "B110", # try_except_pass (intentional — status checks for services that may not be installed)
-    "B112", # try_except_continue (intentional — retry loops for browser/CDP operations)
-    "B310", # urllib_urlopen (false positive — safe usage with localhost/internal endpoints)
-    "B311", # random (false positive — fuzzing/mutation, not cryptographic)
-    "B404", # import_subprocess (intentional for Docker/Ollama CLI invocations)
-    "B405", # import_xml_etree (false positive — defusedxml already in deps)
-    "B603", # subprocess_without_shell_equals_true (args are hardcoded or sanitized; see executors_dispatch)
-]
-
 [tool.ruff]
 exclude = [
     ".git",

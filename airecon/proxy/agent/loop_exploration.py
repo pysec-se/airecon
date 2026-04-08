@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import json
 import logging
 import re
 from pathlib import Path
@@ -8,15 +7,84 @@ from typing import Any
 
 from ..config import get_config
 from .pipeline import PipelinePhase
+from .vuln_classifier import get_classifier
 
 logger = logging.getLogger("airecon.agent")
+
+_STAGNATION_HISTORY: dict[str, list[int]] = {}
+_PHASE_STAGNATION_PATTERNS: dict[str, list[int]] = {}
 
 
 def _get_meaningful_evidence_threshold() -> float:
     return get_config().exploration_meaningful_evidence_threshold
 
 
+def _calculate_adaptive_threshold(
+    phase: PipelinePhase,
+    iteration: int,
+    evidence_count: int,
+    failure_count: int,
+) -> tuple[int, int]:
+    base_threshold = 1
+    base_streak = 2
+
+    if iteration < 5:
+        base_threshold = 2
+        base_streak = 3
+    elif iteration > 30:
+        base_threshold = 1
+        base_streak = 1
+
+    if evidence_count > 10:
+        base_threshold = max(1, base_threshold - 1)
+
+    if failure_count > 5:
+        base_threshold = max(1, base_threshold - 1)
+
+    phase_adjustment = getattr(_PHASE_STAGNATION_PATTERNS, phase.value.lower(), [0, 0])
+    if phase_adjustment:
+        avg_stag = sum(phase_adjustment) / len(phase_adjustment)
+        if avg_stag > 5:
+            base_threshold += 1
+            base_streak += 1
+        elif avg_stag < 1:
+            base_threshold = max(1, base_threshold - 1)
+
+    return base_threshold, base_streak
+
+
+def _record_stagnation(phase: str, count: int) -> None:
+    if phase not in _STAGNATION_HISTORY:
+        _STAGNATION_HISTORY[phase] = []
+    _STAGNATION_HISTORY[phase].append(count)
+    if len(_STAGNATION_HISTORY[phase]) > 20:
+        _STAGNATION_HISTORY[phase] = _STAGNATION_HISTORY[phase][-20:]
+
+    if phase not in _PHASE_STAGNATION_PATTERNS:
+        _PHASE_STAGNATION_PATTERNS[phase] = []
+    _PHASE_STAGNATION_PATTERNS[phase].append(count)
+    if len(_PHASE_STAGNATION_PATTERNS[phase]) > 10:
+        _PHASE_STAGNATION_PATTERNS[phase] = _PHASE_STAGNATION_PATTERNS[phase][-10:]
+
+
 class _ExplorationMixin:
+    @staticmethod
+    def _normalize_vuln_labels(raw_value: Any) -> set[str]:
+        text = str(raw_value or "").strip()
+        if not text:
+            return set()
+
+        normalized = {
+            label.lower()
+            for label in get_classifier().resolve_labels(text)
+            if str(label).strip()
+        }
+        if normalized:
+            return normalized
+
+        fallback = re.sub(r"[^a-z0-9]+", "_", text.lower()).strip("_")
+        return {fallback} if len(fallback) >= 3 else set()
+
     def _track_tool_usage(self, tool_name: str, arguments: dict | None = None) -> None:
 
         track_as = tool_name
@@ -74,7 +142,7 @@ class _ExplorationMixin:
                     output_size=output_size,
                 )
         except Exception as _e:
-            pass
+            logger.debug("Failed to record tool usage: %s", _e)
 
     def _get_same_tool_streak(self) -> int:
         if not self._recent_tool_names:
@@ -99,6 +167,11 @@ class _ExplorationMixin:
             self._consecutive_same_approach = 0
         else:
             self._stagnation_iterations += 1
+            _record_stagnation(
+                self.pipeline.get_current_phase().value if self.pipeline else "UNKNOWN",
+                self._stagnation_iterations,
+            )
+
             if not self._recent_tool_names:
                 self._consecutive_same_approach = (
                     getattr(self, "_consecutive_same_approach", 0) + 1
@@ -135,8 +208,14 @@ class _ExplorationMixin:
             return ""
 
         intensity = self._cfg_float(cfg, "agent_exploration_intensity", 0.8)
-        stagnation_threshold = 1
-        max_same_streak = 2
+
+        stagnation_threshold, max_same_streak = _calculate_adaptive_threshold(
+            phase,
+            self.state.iteration,
+            len(self.state.evidence_log),
+            self._consecutive_failures,
+        )
+
         same_tool_streak = self._get_same_tool_streak()
         window = max(3, self._cfg_int(cfg, "agent_tool_diversity_window", 8))
         recent = self._recent_tool_names[-window:]
@@ -248,22 +327,23 @@ class _ExplorationMixin:
             tags = ev.get("tags", [])
             for tag in tags:
                 if tag and isinstance(tag, str):
-                    tested.add(tag.lower().replace(" ", "_"))
+                    tested.update(self._normalize_vuln_labels(tag))
 
         # 2. From session vulnerability types (actual findings)
         if self._session:
             for v in getattr(self._session, "vulnerabilities", []):
-                vtype = str(v.get("type", v.get("finding", ""))).lower()
-                if vtype:
-                    tested.add(vtype.replace(" ", "_"))
+                vtype = " ".join(
+                    str(v.get(k, "")).strip()
+                    for k in ("type", "finding", "title", "category", "description")
+                    if str(v.get(k, "")).strip()
+                )
+                tested.update(self._normalize_vuln_labels(vtype))
 
         # 3. From evidence summaries — match against system.txt §11 terms
-        system_vuln_terms = self._get_vuln_terms_from_system_prompt()
         for ev in self.state.evidence_log:
             summary = str(ev.get("summary", "")).lower()
-            for term in system_vuln_terms:
-                if term.lower() in summary:
-                    tested.add(term.lower().replace(" ", "_"))
+            if summary:
+                tested.update(self._normalize_vuln_labels(summary))
 
         # 4. From skills catalog — check which skill-based vuln classes have been loaded
         try:
@@ -279,10 +359,9 @@ class _ExplorationMixin:
                         vuln_class = (
                             skill_path.split("/")[-1].lower().replace(".md", "")
                         )
-                        if vuln_class:
-                            tested.add(vuln_class)
+                        tested.update(self._normalize_vuln_labels(vuln_class))
         except Exception as _e:
-            pass
+            logger.debug("Failed to derive tested vuln classes from skills: %s", _e)
 
         return tested
 
@@ -330,7 +409,7 @@ class _ExplorationMixin:
                                     if term and len(term) >= 2:
                                         terms.append(term)
         except Exception as _e:
-            pass
+            logger.debug("Failed to parse vuln terms from system prompt: %s", _e)
 
         # Fallback: derive from skills catalog
         if not terms:
@@ -346,7 +425,7 @@ class _ExplorationMixin:
                         if vuln_name:
                             terms.append(vuln_name)
             except Exception as _e:
-                pass
+                logger.debug("Failed to derive vuln terms from skills: %s", _e)
 
         self._cached_vuln_terms = terms
         return terms
@@ -355,14 +434,21 @@ class _ExplorationMixin:
         """Return vuln classes not yet tested — sourced from data files only."""
         all_classes = set()
 
-        # Source 1: system.txt §11 terms
+        # Source 1: ontology categories and child labels
+        try:
+            all_classes.update(
+                label.lower()
+                for label in get_classifier().get_all_categories(include_children=True)
+            )
+        except Exception as _e:
+            logger.debug("Failed to load ontology categories: %s", _e)
+
+        # Source 2: system.txt §11 terms
         system_terms = self._get_vuln_terms_from_system_prompt()
         for term in system_terms:
-            normalized = term.lower().replace(" ", "_").replace("/", "_")
-            if normalized:
-                all_classes.add(normalized)
+            all_classes.update(self._normalize_vuln_labels(term))
 
-        # Source 2: skills catalog (vulnerabilities/ category)
+        # Source 3: skills catalog (vulnerabilities/ category)
         try:
             skills_index = self._load_skills_index()
             for skill_path in skills_index:
@@ -370,33 +456,9 @@ class _ExplorationMixin:
                     vuln_name = (
                         skill_path.split("/")[-1].replace(".md", "").replace("-", "_")
                     )
-                    if vuln_name:
-                        all_classes.add(vuln_name.lower())
+                    all_classes.update(self._normalize_vuln_labels(vuln_name))
         except Exception as _e:
-            pass
-
-        # Source 3: tools_meta.json specific_vulnerabilities
-        try:
-            meta_path = Path(__file__).parent.parent / "data" / "tools_meta.json"
-            if meta_path.exists():
-                with open(meta_path) as f:
-                    meta = json.load(f)
-                categories = meta.get("categories", {})
-                for group in categories.values():
-                    if isinstance(group, dict):
-                        for subcat_name, tool_list in group.items():
-                            if (
-                                "vulnerab" in subcat_name.lower()
-                                or "specific" in subcat_name.lower()
-                            ):
-                                if isinstance(tool_list, list):
-                                    for tool in tool_list:
-                                        if isinstance(tool, str):
-                                            all_classes.add(
-                                                tool.lower().replace("-", "_")
-                                            )
-        except Exception as _e:
-            pass
+            logger.debug("Failed to derive vuln classes from skills catalog: %s", _e)
 
         return all_classes - tested
 
@@ -537,7 +599,7 @@ class _ExplorationMixin:
                                     break
                         return " ".join(hint_lines)[:300] if hint_lines else None
         except Exception as _e:
-            pass
+            logger.debug("Failed to load skill hint for %s: %s", vuln_class, _e)
         return None
 
     def _tactics_from_phase_skills(
@@ -578,7 +640,7 @@ class _ExplorationMixin:
                     if len(tactics) >= 3:
                         break
         except Exception as _e:
-            pass
+            logger.debug("Failed to derive tactics from phase skills: %s", _e)
         return tactics
 
     def _tactics_for_tech_stack(
@@ -606,7 +668,7 @@ class _ExplorationMixin:
                 if len(tactics) >= 2:
                     break
         except Exception as _e:
-            pass
+            logger.debug("Failed to derive tactics for tech stack: %s", _e)
 
         # If no skills found, generate generic tech-aware guidance
         if not tactics and tech_names:
@@ -635,7 +697,7 @@ class _ExplorationMixin:
                     if segment:
                         path_segments.add(segment.lower())
             except Exception as _e:
-                pass
+                logger.debug("URL parse failed for %s: %s", url, _e)
 
         # Generate tactics based on discovered path patterns
         interesting_paths = path_segments - {
@@ -689,22 +751,41 @@ class _ExplorationMixin:
                         if len(vectors) >= 2:
                             break
         except Exception as _e:
-            pass
+            logger.debug("Failed to derive methodology pivots: %s", _e)
 
-        # If no methodology skills found, inject rotating guidance
+        # If no methodology skills found, derive pivots from ontology edges.
         if not vectors:
-            rotation = iteration % 4
-            guidance_pool = [
-                "Think about trust boundaries in this application — where do components trust each other? "
-                "Test what happens when that trust is violated.",
-                "Consider the data flow: where does user input enter, how is it processed, where is it stored? "
-                "Test each transformation point for weakness.",
-                "Look for state machine flaws: can you skip steps, replay old states, or trigger operations out of order? "
-                "Developers rarely test edge-case state transitions.",
-                "Think about what the developer assumed would never happen — "
-                "then test exactly that assumption. The most critical bugs are often the ones nobody thought to test.",
-            ]
-            vectors.append(guidance_pool[rotation])
+            classifier = get_classifier()
+            candidate_categories: list[str] = []
+            for raw_tested in sorted(tested_classes):
+                for label in classifier.resolve_labels(raw_tested):
+                    if label in classifier.get_all_categories():
+                        for target in classifier.get_escalation_targets(label):
+                            if target.lower() not in tested_classes:
+                                candidate_categories.append(target)
+
+            if candidate_categories:
+                for target in sorted(dict.fromkeys(candidate_categories))[:2]:
+                    target_name = target.replace("_", " ")
+                    escalations = classifier.get_escalation_targets(target)
+                    vectors.append(
+                        f"Probe non-obvious pivots around {target_name.upper()}. "
+                        f"Look for workflow, trust-boundary, and second-order behaviors that could escalate into "
+                        f"{', '.join(e.replace('_', ' ') for e in escalations[:3]) or 'higher impact states'}."
+                    )
+            else:
+                rotation = iteration % 4
+                guidance_pool = [
+                    "Think about trust boundaries in this application — where do components trust each other? "
+                    "Test what happens when that trust is violated.",
+                    "Consider the data flow: where does user input enter, how is it processed, where is it stored? "
+                    "Test each transformation point for weakness.",
+                    "Look for state machine flaws: can you skip steps, replay old states, or trigger operations out of order? "
+                    "Developers rarely test edge-case state transitions.",
+                    "Think about what the developer assumed would never happen — "
+                    "then test exactly that assumption. The most critical bugs are often the ones nobody thought to test.",
+                ]
+                vectors.append(guidance_pool[rotation])
 
         return vectors
 
@@ -725,9 +806,10 @@ class _ExplorationMixin:
                         first_line = content.splitlines()[0].strip().lstrip("#").strip()
                         index[rel_path] = first_line
                     except Exception as _e:
+                        logger.debug("Failed to read skill file %s: %s", rel_path, _e)
                         index[rel_path] = ""
         except Exception as _e:
-            pass
+            logger.debug("Failed to build skills index: %s", _e)
 
         self._cached_skills_index = index
         return index
@@ -752,14 +834,11 @@ class _ExplorationMixin:
                 return tools
         except Exception as exc:
             logger.warning("Operation failed: %s", exc)
-        return {
-            "execute",
-            "browser_action",
-            "httpx",
-            "subfinder",
-            "assetfinder",
-            "amass",
-        }
+        # Graceful fallback: only AIRecon-native tools, no shell binaries.
+        # Shell-specific tools (httpx, subfinder, etc.) are loaded from
+        # tools_meta.json; when unavailable, fall back to the generic
+        # execution and browser capabilities only.
+        return {"execute", "browser_action"}
 
     def _self_correcting_strategy(
         self,
@@ -866,20 +945,13 @@ class _ExplorationMixin:
                 session_techs = getattr(self._session, "technologies", {})
                 session_vulns = getattr(self._session, "vulnerabilities", [])
 
-            if not hasattr(self, "_adaptive_learning_engine"):
-                from .adaptive_learning import AdaptiveLearningEngine
-
-                self._adaptive_learning_engine = AdaptiveLearningEngine(
-                    min_observations=cfg.intelligence_adaptive_min_observations,
-                    session_id=session_id or "",
-                )
+            engine = self._ensure_adaptive_learning_engine()
+            if len(engine.observation_log) == 0:
                 logger.info(
                     "[AdaptiveLearning] Engine initialized (session=%s, observations=%d)",
                     session_id or "new",
-                    len(self._adaptive_learning_engine.observation_log),
+                    len(engine.observation_log),
                 )
-
-            engine = self._adaptive_learning_engine
 
             self._record_target_memory(tool_name, arguments, result, success)
 
@@ -944,6 +1016,25 @@ class _ExplorationMixin:
                 phase=phase,
                 target_type=tech_summary or session_target,
                 vuln_found=vuln_found,
+            )
+
+            strategy_conditions: dict[str, Any] = {"phase": phase}
+            if session_techs:
+                strategy_conditions["tech"] = sorted(session_techs.keys())[0]
+
+            recent_sequence: list[str] = []
+            for entry in self.state.tool_history[-3:]:
+                entry_name = str(getattr(entry, "tool_name", "")).strip()
+                if entry_name:
+                    recent_sequence.append(entry_name)
+            if tool_name and (not recent_sequence or recent_sequence[-1] != tool_name):
+                recent_sequence.append(tool_name)
+
+            engine.record_strategy_result(
+                conditions=strategy_conditions,
+                tool_sequence=recent_sequence[-3:] or [tool_name],
+                success=success,
+                confidence=confidence,
             )
 
             if len(engine.observation_log) % 10 == 0:

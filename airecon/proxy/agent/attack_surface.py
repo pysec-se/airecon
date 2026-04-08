@@ -136,7 +136,6 @@ class AttackSurfaceTracker:
         """Strip scheme/host/query — keep only the meaningful path."""
         if not endpoint:
             return "<root>"
-        # If it looks like a full URL, strip to path
         if endpoint.startswith(("http://", "https://")):
             try:
                 from urllib.parse import urlparse
@@ -144,9 +143,7 @@ class AttackSurfaceTracker:
                 parsed = urlparse(endpoint)
                 endpoint = parsed.path or "/"
             except Exception as _e:
-                pass
-        # Remove trailing slash for consistency (except bare "/")
+                logger.debug("Failed to parse endpoint %s: %s", endpoint, _e)
         endpoint = endpoint.rstrip("/") or "/"
-        # Normalise common variants
         endpoint = endpoint.lower()
         return endpoint

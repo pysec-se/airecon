@@ -1,4 +1,16 @@
 {
+    "auth_failure_patterns": {
+        "401_unauthorized": "401|unauthorized|authentication required",
+        "403_forbidden": "403|forbidden|access denied",
+        "session_expired": "session expired|session timeout|logged out",
+        "csrf_token": "csrf|xsrf|token mismatch",
+        "login_required": "login required|sign in|please log"
+    },
+    "login_form_patterns": {
+        "username": "name=[\"']?(username|user|email|login)[\"']?",
+        "password": "name=[\"']?(password|pass|pwd)[\"']?",
+        "csrf": "name=[\"']?(csrf|_token|authenticity_token)[\"']?"
+    },
     "clean_response_patterns": [
         "csrf[_-]?token", "xsrf[_-]?token", "__VIEWSTATE", "JSESSIONID",
         "set-cookie", "random[_-]?id", "timestamp", "nonce=", "uuid", "session[_-]?id"
