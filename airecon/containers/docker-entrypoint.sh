@@ -29,4 +29,11 @@ echo "[airecon-sandbox] Tools ready at: $(date)"
 #    > /dev/null 2>&1 &
 
 # Keep container alive
+if [ -d "/workspace" ]; then
+    sudo chown -R pentester:pentester /workspace 2>/dev/null || true
+    sudo chmod -R 775 /workspace 2>/dev/null || true
+    echo "[airecon-sandbox] Workspace permissions fixed."
+fi
+
+# Keep container alive
 exec sleep infinity
