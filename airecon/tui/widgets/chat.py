@@ -11,7 +11,7 @@ from textual.message import Message
 from textual.reactive import reactive
 from textual.widgets import LoadingIndicator, RichLog, Static
 
-from ..buddy import AVAILABLE_SPECIES, get_buddy_palette, get_frame, get_species_pool_for_phase
+from ..buddy import AVAILABLE_SPECIES, Species, get_buddy_palette, get_frame, get_species_pool_for_phase
 
 logger = logging.getLogger(__name__)
 
@@ -428,8 +428,8 @@ class ThinkingSpinner(Vertical):
         self._token_ratio: float | None = None
         self._tool_kind: str | None = None
         self._tool_name: str | None = None
-        self._species_pool: list[str] | None = None
-        self._current_species: str | None = None
+        self._species_pool: list[Species] | None = None
+        self._current_species: Species | None = None
         self._buddy_row_count = 5
         self._buddy_rows: list[Horizontal] = []
         self._buddy_parts: list[Static] = []

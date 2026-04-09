@@ -528,7 +528,7 @@ def get_palette(index: int, rows: int = 5) -> list[str]:
 
 def get_buddy_palette(
     *,
-    species: str | None,
+    species: Species | None,
     state: str | None,
     phase: str | None,
     pressure: float | None,
