@@ -2060,6 +2060,7 @@ class AIReconApp(App):
                 self._processing = False
                 return
             try:
+                chat.add_system_message(f"$ {shell_cmd}")
                 resp = await self._http.post(
                     "/api/shell",
                     json={"command": shell_cmd},

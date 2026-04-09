@@ -864,7 +864,8 @@ class AgentLoop(
         try:
             if self._session:
                 current_phase = self._session.current_phase
-        except Exception:
+        except Exception as e:
+            logger.debug("Expected failure in get_stats current_phase: %s", e)
             current_phase = None
         return {
             "message_count": len(self.state.conversation),
