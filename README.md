@@ -3,10 +3,12 @@
 </h1>
 <h4 align="center">AI-Powered Autonomous Penetration Testing Agent</h4>
 <p align="center">
+  <a href="https://github.com/pikpikcu/airecon/releases"><img src="https://img.shields.io/badge/version-v0.1.7--beta-green.svg">
+  <a href="https://deepwiki.com/pikpikcu/airecon"><img src="https://deepwiki.com/badge.svg" alt="Ask DeepWiki"></a>
+  <a href="https://pikpikcu.github.io/airecon/"><img src="https://img.shields.io/badge/Docs-airecon-blue.svg" alt="Docs"></a>
   <img src="https://img.shields.io/badge/language-python-green.svg">
-  <img src="https://img.shields.io/badge/version-v0.1.7--beta-green.svg">
   <img src="https://img.shields.io/badge/python-3.12%2B-blue.svg">
-  <img src="https://img.shields.io/badge/LLM-Ollama%20(local)-orange.svg">
+  <a href="https://ollama.com"><img src="https://img.shields.io/badge/LLM-Ollama%20(local)-orange.svg">
   <a href="https://github.com/pikpikcu/airecon/blob/master/LICENSE">
     <img src="https://img.shields.io/badge/LICENSE-MIT-red.svg">
   </a>
@@ -337,20 +339,24 @@ docker build -t airecon-sandbox airecon/containers/kali/
 ```text
 export PATH="$HOME/.local/bin:$PATH" && source ~/.zshrc
 ```
+## Star History
 
----
+<a href="https://www.star-history.com/?repos=pikpikcu%2Fairecon&type=date&legend=top-left">
+ <picture>
+   <source media="(prefers-color-scheme: dark)" srcset="https://api.star-history.com/chart?repos=pikpikcu/airecon&type=date&theme=dark&legend=top-left" />
+   <source media="(prefers-color-scheme: light)" srcset="https://api.star-history.com/chart?repos=pikpikcu/airecon&type=date&legend=top-left" />
+   <img alt="Star History Chart" src="https://api.star-history.com/chart?repos=pikpikcu/airecon&type=date&legend=top-left" />
+ </picture>
+</a>
 
-## Documentation
+## Contributing
 
-- [Features](docs/features.md)
-- [Configuration Reference](docs/configuration.md)
-- [Tool Reference](docs/tools.md)
-- [Adding Custom Skills](docs/development/creating_skills.md)
+Issues and PRs are welcome. If you report a bug, include logs, config, and minimal steps to reproduce.
 
----
+## Responsible Use
+
+AIRecon is for authorized security testing only. Always obtain explicit permission and follow applicable laws and program scope.
 
 ## License
 
-MIT License. See [`LICENSE`](LICENSE) for details.
-
----
+See [LICENSE](LICENSE).
