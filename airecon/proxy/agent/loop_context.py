@@ -638,18 +638,38 @@ class _ContextMixin:
         s = self._session
         parts = ["[SYSTEM: CRITICAL FINDINGS — DO NOT LOSE]"]
 
-        if s.subdomains:
+        if s.validated_subdomains:
+            parts.append(
+                "VALIDATED SUBDOMAINS ({0}): {1}".format(
+                    len(s.validated_subdomains),
+                    ", ".join(s.validated_subdomains[:5]),
+                )
+            )
+            if len(s.validated_subdomains) > 5:
+                parts.append(f"... and {len(s.validated_subdomains) - 5} more")
+            if s.subdomains:
+                parts.append(f"RAW SUBDOMAINS: {len(s.subdomains)} total")
+        elif s.subdomains:
             parts.append(
                 f"SUBDOMAINS ({len(s.subdomains)}): {', '.join(s.subdomains[:5])}"
             )
             if len(s.subdomains) > 5:
                 parts.append(f"... and {len(s.subdomains) - 5} more")
 
-        if s.live_hosts:
+        if s.validated_live_hosts:
+            parts.append(
+                "VALIDATED LIVE HOSTS ({0}): {1}".format(
+                    len(s.validated_live_hosts),
+                    ", ".join(s.validated_live_hosts[:8]),
+                )
+            )
+            if s.live_hosts:
+                parts.append(f"RAW LIVE HOSTS: {len(s.live_hosts)} total")
+        elif s.live_hosts:
             parts.append(
                 f"LIVE HOSTS ({len(s.live_hosts)}): {', '.join(s.live_hosts[:8])}"
             )
-        elif s.subdomains:
+        elif s.subdomains and not s.validated_subdomains:
             parts.append(
                 "WARNING: subdomains enumerated but NOT YET validated. "
                 "Run: httpx -l output/subdomains.txt -sc -o output/live_hosts.txt "
@@ -662,7 +682,18 @@ class _ContextMixin:
                 port_summary.append(f"{host}:{','.join(map(str, ports[:5]))}")
             parts.append(f"OPEN PORTS: {'; '.join(port_summary)}")
 
-        if s.urls:
+        if s.validated_urls:
+            parts.append(
+                "VALIDATED URLS ({0}): {1}".format(
+                    len(s.validated_urls),
+                    ", ".join(s.validated_urls[:3]),
+                )
+            )
+            if len(s.validated_urls) > 3:
+                parts.append(f"... and {len(s.validated_urls) - 3} more URLs")
+            if s.urls:
+                parts.append(f"RAW URLS: {len(s.urls)} total")
+        elif s.urls:
             parts.append(f"URLs ({len(s.urls)}): {', '.join(s.urls[:3])}")
             if len(s.urls) > 3:
                 parts.append(f"... and {len(s.urls) - 3} more URLs")

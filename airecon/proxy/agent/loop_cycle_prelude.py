@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import time
+import json
 from dataclasses import asdict as _asdict
 from pathlib import Path
 from typing import Any
@@ -361,6 +362,174 @@ class _CyclePreludeMixin:
         ):
             self._check_memory_brain_health()
             self._last_memory_health_check_iteration = self.state.iteration
+
+        # LLM-driven recon validation to reduce noise before analysis/exploit
+        try:
+            phase_name = getattr(current_phase, "value", str(current_phase or "")).upper()
+        except Exception:
+            phase_name = str(current_phase or "").upper()
+
+        if (
+            phase_name in ("ANALYSIS", "EXPLOIT")
+            and self._session
+            and hasattr(self, "ollama")
+        ):
+            last_validation = getattr(self._lifecycle, "last_context_validation", 0)
+            if self.state.iteration - last_validation >= 6:
+                s = self._session
+                if s.urls or s.subdomains or s.live_hosts:
+                    urls = list(s.urls)[:80]
+                    subs = list(s.subdomains)[:80]
+                    hosts = list(s.live_hosts)[:80]
+                    techs = list(s.technologies.items())[:40]
+
+                    prompt = (
+                        "You are validating recon results for security analysis.\n"
+                        "Goal: reduce noise and keep only high-signal assets/endpoints.\n"
+                        "Rules:\n"
+                        "- Keep endpoints likely to expose auth, data, actions, admin, API, upload, or config.\n"
+                        "- Drop static assets, tracking, docs, health checks, or pure marketing pages.\n"
+                        "- Be conservative: if unsure, keep.\n"
+                        "Return STRICT JSON only with keys:\n"
+                        "{\n"
+                        '  \"keep_urls\": [...],\n'
+                        '  \"drop_urls\": [...],\n'
+                        '  \"keep_subdomains\": [...],\n'
+                        '  \"drop_subdomains\": [...],\n'
+                        '  \"keep_hosts\": [...],\n'
+                        '  \"drop_hosts\": [...],\n'
+                        '  \"notes\": \"short reasoning\"\n'
+                        "}\n"
+                    )
+
+                    user_payload = {
+                        "urls": urls,
+                        "subdomains": subs,
+                        "live_hosts": hosts,
+                        "technologies": techs,
+                    }
+
+                    messages = [
+                        {"role": "system", "content": prompt},
+                        {
+                            "role": "user",
+                            "content": json.dumps(user_payload, ensure_ascii=False),
+                        },
+                    ]
+
+                    try:
+                        from ..config import get_config
+
+                        cfg = get_config()
+                        num_ctx = max(2048, min(4096, int(cfg.ollama_num_ctx) // 8))
+                    except Exception:
+                        num_ctx = 3072
+
+                    options = {
+                        "temperature": 0.1,
+                        "num_ctx": num_ctx,
+                        "num_predict": 512,
+                    }
+
+                    def _extract_json(text: str) -> dict[str, Any] | None:
+                        if not text:
+                            return None
+                        stripped = text.strip()
+                        if stripped.startswith("{") and stripped.endswith("}"):
+                            try:
+                                return json.loads(stripped)
+                            except Exception as exc:
+                                logger.debug(
+                                    "Recon validation JSON parse failed (direct): %s", exc
+                                )
+                        start = stripped.find("{")
+                        end = stripped.rfind("}")
+                        if start != -1 and end != -1 and end > start:
+                            try:
+                                return json.loads(stripped[start : end + 1])
+                            except Exception as exc:
+                                logger.debug(
+                                    "Recon validation JSON parse failed (slice): %s", exc
+                                )
+                                return None
+                        return None
+
+                    try:
+                        raw = await self.ollama.complete(
+                            messages,
+                            options=options,
+                            operation="analysis",
+                        )
+                    except Exception as exc:
+                        logger.debug("Recon validation LLM call failed: %s", exc)
+                        raw = ""
+
+                    data = _extract_json(raw)
+                    if isinstance(data, dict):
+                        def _sanitize(items: Any, allowed: list[str]) -> list[str]:
+                            if not isinstance(items, list):
+                                return []
+                            allowed_set = {str(x) for x in allowed}
+                            result: list[str] = []
+                            seen: set[str] = set()
+                            for item in items:
+                                if not isinstance(item, str):
+                                    continue
+                                candidate = item.strip()
+                                if not candidate or candidate in seen:
+                                    continue
+                                if candidate in allowed_set:
+                                    result.append(candidate)
+                                    seen.add(candidate)
+                            return result
+
+                        validated_urls = _sanitize(data.get("keep_urls"), urls)
+                        validated_subs = _sanitize(data.get("keep_subdomains"), subs)
+                        validated_hosts = _sanitize(data.get("keep_hosts"), hosts)
+
+                        if validated_urls or validated_subs or validated_hosts:
+                            s.validated_urls = validated_urls
+                            s.validated_subdomains = validated_subs
+                            s.validated_live_hosts = validated_hosts
+                            s.recon_validation_notes = str(
+                                data.get("notes", "") or ""
+                            )[:400]
+                            self._lifecycle.last_context_validation = (
+                                self.state.iteration
+                            )
+
+                            summary_parts = [
+                                "[SYSTEM: LLM RECON VALIDATION — focus these signals]"
+                            ]
+                            if validated_subs:
+                                summary_parts.append(
+                                    f"Validated subdomains ({len(validated_subs)}): "
+                                    + ", ".join(validated_subs[:6])
+                                )
+                            if validated_hosts:
+                                summary_parts.append(
+                                    f"Validated live hosts ({len(validated_hosts)}): "
+                                    + ", ".join(validated_hosts[:6])
+                                )
+                            if validated_urls:
+                                summary_parts.append(
+                                    f"Validated URLs ({len(validated_urls)}): "
+                                    + ", ".join(validated_urls[:6])
+                                )
+                            if s.recon_validation_notes:
+                                summary_parts.append(
+                                    f"Notes: {s.recon_validation_notes}"
+                                )
+
+                            self.state.conversation.append(
+                                {"role": "system", "content": "\n".join(summary_parts)}
+                            )
+                            logger.info(
+                                "LLM recon validation applied (urls=%d, subs=%d, hosts=%d)",
+                                len(validated_urls),
+                                len(validated_subs),
+                                len(validated_hosts),
+                            )
 
         _budget_ratio = self.state.iteration / max(self.state.max_iterations, 1)
         if _budget_ratio >= 1.0 and self._budget_pressure_level < 4:

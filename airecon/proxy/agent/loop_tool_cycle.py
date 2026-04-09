@@ -372,28 +372,61 @@ class _ToolCycleMixin(_CyclePreludeMixin, _CycleLlmMixin, _CyclePostMixin):
             if adaptive_num_ctx > 0 and _ctx_used > _budget_hard_limit:
                 logger.error(
                     "TOKEN BUDGET EXCEEDED: used=%d/%d (%.0f%%) - "
-                    "Hard limit=%d (85%%) - forcing aggressive context reset",
+                    "Hard limit=%d (85%%) - applying local compression to avoid forgetting",
                     _ctx_used,
                     adaptive_num_ctx,
                     (_ctx_used / adaptive_num_ctx) * 100,
                     _budget_hard_limit,
                 )
-                await self._reset_ollama_context()
-                self.state.conversation = self.state.conversation[-20:]
-                self.state.conversation.append(
-                    {
-                        "role": "system",
-                        "content": self._build_critical_findings_context(),
-                    }
-                )
-                self.state.conversation.append(
-                    {"role": "system", "content": self._build_handoff_summary()}
-                )
+                try:
+                    self._compress_old_tool_outputs(aggressive=True)
+                    pinned = self._build_compressed_findings_summary()
+                    if pinned:
+                        self.state.conversation = [
+                            m
+                            for m in self.state.conversation
+                            if not m.get("content", "").startswith("[SYSTEM: PINNED CONTEXT")
+                        ]
+                        self.state.conversation.append(
+                            {"role": "system", "content": pinned}
+                        )
+
+                    _model_name = str(getattr(getattr(self, "ollama", None), "model", "") or "").lower()
+                    _is_large_qwen = "qwen" in _model_name and any(
+                        marker in _model_name for marker in ("122b", "120b", "72b")
+                    )
+                    _compress_ctx = min(8192, adaptive_num_ctx // 4)
+                    _keep_recent = 50 if _is_large_qwen else 35
+                    await self.state.compress_with_llm(
+                        self.ollama,
+                        keep_recent=_keep_recent,
+                        num_ctx=_compress_ctx,
+                        num_predict=1024,
+                        phase=current_phase.value if current_phase else "RECON",
+                    )
+                except Exception as compress_err:
+                    logger.warning(
+                        "Local compression failed (%s) — using gentle fallback",
+                        str(compress_err)[:120],
+                    )
+                    self._apply_local_context_fallback(
+                        reason="token budget exceeded",
+                        target_messages=40 if not self._ctf_mode else 16,
+                    )
+
                 self._recompute_used_tokens_from_conversation()
+                _ctx_used = self.state.token_usage.get("used", 0) or 0
+                if adaptive_num_ctx > 0 and _ctx_used > _budget_hard_limit:
+                    self._apply_local_context_fallback(
+                        reason="token budget still high after compression",
+                        target_messages=32 if not self._ctf_mode else 14,
+                    )
+                    self._recompute_used_tokens_from_conversation()
+
                 yield AgentEvent(
                     type="text",
                     data={
-                        "content": "[SYSTEM: Context budget exceeded, recovery initiated]"
+                        "content": "[SYSTEM: Context budget exceeded — compressed local context to preserve task memory]"
                     },
                 )
                 continue
@@ -436,33 +469,57 @@ class _ToolCycleMixin(_CyclePreludeMixin, _CycleLlmMixin, _CyclePostMixin):
                         _ctx_used,
                         adaptive_num_ctx,
                     )
+                    try:
+                        self._compress_old_tool_outputs(aggressive=True)
+                        pinned = self._build_compressed_findings_summary()
+                        if pinned:
+                            self.state.conversation = [
+                                m
+                                for m in self.state.conversation
+                                if not m.get("content", "").startswith(
+                                    "[SYSTEM: PINNED CONTEXT"
+                                )
+                            ]
+                            self.state.conversation.append(
+                                {"role": "system", "content": pinned}
+                            )
 
-                    _sys_msgs_e = [
-                        m for m in self.state.conversation if m.get("role") == "system"
-                    ]
-                    _non_sys_e = [
-                        m for m in self.state.conversation if m.get("role") != "system"
-                    ]
-                    _emergency_trim = max(int(len(_non_sys_e) * 0.40), 6)
-                    _prev_total = len(self.state.conversation)
-                    self.state.conversation = (
-                        _sys_msgs_e + _non_sys_e[-_emergency_trim:]
+                        _model_name = str(
+                            getattr(getattr(self, "ollama", None), "model", "") or ""
+                        ).lower()
+                        _is_large_qwen = "qwen" in _model_name and any(
+                            marker in _model_name for marker in ("122b", "120b", "72b")
+                        )
+                        _compress_ctx = min(8192, adaptive_num_ctx // 4)
+                        _keep_recent = 45 if _is_large_qwen else 32
+                        await self.state.compress_with_llm(
+                            self.ollama,
+                            keep_recent=_keep_recent,
+                            num_ctx=_compress_ctx,
+                            num_predict=1024,
+                            phase=current_phase.value if current_phase else "RECON",
+                        )
+                    except Exception as compress_err:
+                        logger.warning(
+                            "Emergency compression failed (%s) — applying local fallback",
+                            str(compress_err)[:120],
+                        )
+
+                    self._recompute_used_tokens_from_conversation()
+                    _ctx_used = self.state.token_usage.get("used", 0) or 0
+                    _effective_input_ctx = max(1024, adaptive_num_ctx - _iter_num_predict)
+                    _usage_ratio = (
+                        _ctx_used / _effective_input_ctx
+                        if _effective_input_ctx > 0
+                        else 1.0
                     )
 
-                    _msg_ratio = len(self.state.conversation) / _prev_total
-                    self.state.token_usage["used"] = int(_ctx_used * _msg_ratio)
-
-                    logger.warning(
-                        "Emergency trim: %d → %d msgs (sys=%d kept, "
-                        "non-sys %d → %d), est tokens %.0f%% → %.0f%%",
-                        _prev_total,
-                        len(self.state.conversation),
-                        len(_sys_msgs_e),
-                        len(_non_sys_e),
-                        _emergency_trim,
-                        _usage_ratio * 100,
-                        _usage_ratio * _msg_ratio * 100,
-                    )
+                    if _usage_ratio >= _hard_cap_ratio:
+                        self._apply_local_context_fallback(
+                            reason="emergency context trim",
+                            target_messages=32 if not self._ctf_mode else 14,
+                        )
+                        self._recompute_used_tokens_from_conversation()
                 elif _usage_ratio >= _trim_threshold:
                     if _usage_ratio >= 0.55:
                         logger.warning(
