@@ -366,7 +366,8 @@ class _CyclePreludeMixin:
         # LLM-driven recon validation to reduce noise before analysis/exploit
         try:
             phase_name = getattr(current_phase, "value", str(current_phase or "")).upper()
-        except Exception:
+        except Exception as exc:
+            logger.debug("Failed to read current phase name: %s", exc)
             phase_name = str(current_phase or "").upper()
 
         if (
@@ -422,7 +423,8 @@ class _CyclePreludeMixin:
 
                         cfg = get_config()
                         num_ctx = max(2048, min(4096, int(cfg.ollama_num_ctx) // 8))
-                    except Exception:
+                    except Exception as exc:
+                        logger.debug("Failed to resolve ollama_num_ctx: %s", exc)
                         num_ctx = 3072
 
                     options = {

@@ -304,10 +304,17 @@ class _LifecycleMixin:
             )
 
         self._context_reset_failures += 1
-        self._apply_local_context_fallback(
-            reason="ollama reset failed",
-            target_messages=40 if not self._ctf_mode else 16,
-        )
+        try:
+            self._apply_local_context_fallback(
+                reason="ollama reset failed",
+                target_messages=40 if not self._ctf_mode else 16,
+            )
+        except TypeError as exc:
+            logger.debug(
+                "Fallback signature mismatch for _apply_local_context_fallback: %s",
+                exc,
+            )
+            self._apply_local_context_fallback(reason="ollama reset failed")
         return False
 
     def _apply_local_context_fallback(

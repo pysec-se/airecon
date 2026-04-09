@@ -546,7 +546,9 @@ class BrowserInstance:
                 raise
             finally:
                 try:
-                    page.off("request", check_redirect)
+                    off_result = page.off("request", check_redirect)
+                    if asyncio.iscoroutine(off_result):
+                        await off_result
                 except Exception as exc:
                     logger.debug("Failed to detach redirect handler: %s", exc)
 
@@ -752,10 +754,13 @@ class BrowserInstance:
 
         all_tabs = {}
         for tid, tab_page in self.pages.items():
+            is_closed = tab_page.is_closed()
+            if asyncio.iscoroutine(is_closed):
+                is_closed = await is_closed
             all_tabs[tid] = {
                 "url": tab_page.url,
                 "title": await tab_page.title()
-                if not tab_page.is_closed()
+                if not is_closed
                 else "Closed",
             }
 
