@@ -271,6 +271,8 @@ class _LifecycleMixin:
         full_prompt = f"{system_prompt}\n\n{summary}"
 
         last_error: Exception | None = None
+        if not hasattr(self, "_context_reset_failures"):
+            self._context_reset_failures = 0
         for attempt in range(1, 4):
             try:
                 success = await self.ollama.reset_context(full_prompt)
@@ -280,6 +282,7 @@ class _LifecycleMixin:
                         len(full_prompt) // 4,
                         attempt,
                     )
+                    self._context_reset_failures = 0
                     return True
             except Exception as e:
                 last_error = e
@@ -300,10 +303,25 @@ class _LifecycleMixin:
                 "Ollama context reset failed after retries (no exception details)"
             )
 
-        self._apply_local_context_fallback(reason="ollama reset failed")
+        self._context_reset_failures += 1
+        try:
+            self._apply_local_context_fallback(
+                reason="ollama reset failed",
+                target_messages=40 if not self._ctf_mode else 16,
+            )
+        except TypeError as exc:
+            logger.debug(
+                "Fallback signature mismatch for _apply_local_context_fallback: %s",
+                exc,
+            )
+            self._apply_local_context_fallback(reason="ollama reset failed")
         return False
 
-    def _apply_local_context_fallback(self, reason: str = "") -> None:
+    def _apply_local_context_fallback(
+        self,
+        reason: str = "",
+        target_messages: int | None = None,
+    ) -> None:
         prev_messages = len(self.state.conversation)
         if prev_messages == 0:
             return
@@ -311,7 +329,8 @@ class _LifecycleMixin:
         _critical_ctx = self._build_critical_findings_context()
         _handoff_ctx = self._build_handoff_summary()
 
-        target_messages = 12 if self._ctf_mode else 28
+        if target_messages is None:
+            target_messages = 16 if self._ctf_mode else 40
         self.state.truncate_conversation(max_messages=target_messages)
 
         if _handoff_ctx:
@@ -320,8 +339,16 @@ class _LifecycleMixin:
             self.state.conversation.append({"role": "system", "content": _critical_ctx})
 
         before_used = int(self.state.token_usage.get("used", 0) or 0)
-        if before_used > 0:
-            self.state.token_usage["used"] = max(0, int(before_used * 0.45))
+        try:
+            self.state.token_usage["used"] = (
+                self._recompute_used_tokens_from_conversation()
+            )
+        except Exception as e:
+            logger.debug(
+                "Expected failure recomputing token usage after fallback: %s", e
+            )
+            if before_used > 0:
+                self.state.token_usage["used"] = max(0, int(before_used * 0.65))
 
         logger.warning(
             "Local context fallback applied (%s): %d -> %d messages, token_used %d -> %d",
@@ -341,6 +368,30 @@ class _LifecycleMixin:
             f"Target: {self._session.target}",
             f"Phase: {self._get_current_phase().value if self.pipeline else 'UNKNOWN'}",
             f"Iteration: {self.state.iteration}/{self.state.max_iterations}",
+        ]
+
+        goal = ""
+        for msg in self.state.conversation:
+            if msg.get("role") == "user":
+                goal = str(msg.get("content", "")).strip()
+                if goal:
+                    break
+        if goal:
+            lines.append(f"Goal: {goal[:220]}")
+
+        pending_objs = [
+            o
+            for o in (self.state.objective_queue or [])
+            if o.get("status") == "pending"
+        ][:3]
+        if pending_objs:
+            lines.append("Active objectives:")
+            for obj in pending_objs:
+                title = str(obj.get("title") or obj.get("description") or "").strip()
+                if title:
+                    lines.append(f"- {title[:140]}")
+
+        lines.extend([
             "",
             "--- DISCOVERIES ---",
             f"Subdomains: {len(self._session.subdomains)} found",
@@ -353,7 +404,7 @@ class _LifecycleMixin:
             f"Tools used: {', '.join(list(self._session.tools_run)[:10])}{'...' if len(self._session.tools_run) > 10 else ''}",
             "",
             "--- RECENT FINDINGS ---",
-        ]
+        ])
 
         recent_evidence = (
             self.state.evidence_log[-5:] if self.state.evidence_log else []
@@ -477,6 +528,9 @@ Current workflow: Follow phase transitions (RECON→ANALYSIS→EXPLOIT→REPORT)
                         )
                     )
                 )
+                _failures = int(getattr(self, "_context_reset_failures", 0) or 0)
+                if _failures > 0:
+                    _RESET_COOLDOWN_SECONDS += min(600.0, _failures * 120.0)
                 if now - last_reset < _RESET_COOLDOWN_SECONDS:
                     logger.warning(
                         "Context reset cooldown active (ctf=%s, used=%d, ps_ctx=%d, remaining=%.0fs)",

@@ -39,7 +39,6 @@ _DEAD_HOST_MARKERS: tuple[str, ...] = (
     "err_name_not_resolved",
     "err_address_unreachable",
     "err_connection_refused",
-    "err_connection_reset",
     "err_internet_disconnected",
     "name or service not known",
     "nodename nor servname provided",
@@ -59,6 +58,17 @@ _AUTH_ERROR_MARKERS: tuple[str, ...] = (
 _BROWSER_ERROR_PAGE_MARKERS: tuple[str, ...] = (
     "chrome-error://chromewebdata/",
     "chromewebdata",
+)
+
+_RETRYABLE_NAV_MARKERS: tuple[str, ...] = (
+    "timeout",
+    "timed out",
+    "err_connection_reset",
+    "err_connection_closed",
+    "err_connection_aborted",
+    "err_network_changed",
+    "err_http2_protocol_error",
+    "err_timed_out",
 )
 
 
@@ -81,6 +91,8 @@ def _classify_dead_reason(err: str) -> str:
 
 
 def _is_dead_host_error(err_lower: str) -> bool:
+    if "err_connection_reset" in err_lower:
+        return False
     return any(m in err_lower for m in _DEAD_HOST_MARKERS)
 
 
@@ -90,6 +102,10 @@ def _is_auth_error(err_lower: str) -> bool:
 
 def _is_browser_error_page(err_lower: str) -> bool:
     return any(m in err_lower for m in _BROWSER_ERROR_PAGE_MARKERS)
+
+
+def _is_retryable_navigation_error(err_lower: str) -> bool:
+    return any(m in err_lower for m in _RETRYABLE_NAV_MARKERS)
 
 
 _TRACKING_PATTERNS: tuple[str, ...] = (
@@ -447,58 +463,97 @@ class BrowserInstance:
         """Navigate with redirect loop detection and shorter timeout."""
         if timeout_ms is None:
             timeout_ms = get_config().browser_navigation_timeout_ms
-        redirect_count = 0
-        last_url = url
-        seen_urls: set[str] = {url}
-        max_redirects = 10  # Increased from 3 — modern sites often chain 5-8 redirects
+        max_attempts = 2
+        last_error: Exception | None = None
 
-        def check_redirect(request: Any) -> None:
-            nonlocal redirect_count, last_url
-            current_url = request.url
-            if current_url != last_url:
-                redirect_count += 1
-                last_url = current_url
+        for attempt in range(1, max_attempts + 1):
+            redirect_count = 0
+            last_url = url
+            seen_urls: set[str] = {url}
+            max_redirects = 10  # modern sites often chain 5-8 redirects
 
-                # Detect actual loops (same URL visited twice) vs long chains
-                if current_url in seen_urls:
-                    logger.warning(
-                        f"Detected redirect loop ({redirect_count} redirects, "
-                        f"revisited {current_url!r}) for {url!r}"
-                    )
+            def check_redirect(request: Any) -> None:
+                nonlocal redirect_count, last_url
+                current_url = request.url
+                if current_url != last_url:
+                    redirect_count += 1
+                    last_url = current_url
+
+                    # Detect actual loops (same URL visited twice) vs long chains
+                    if current_url in seen_urls:
+                        logger.warning(
+                            f"Detected redirect loop ({redirect_count} redirects, "
+                            f"revisited {current_url!r}) for {url!r}"
+                        )
+                        raise RuntimeError(
+                            f"Redirect loop detected — revisited same URL after {redirect_count} redirects"
+                        )
+                    seen_urls.add(current_url)
+
+                    if redirect_count > max_redirects:
+                        logger.warning(
+                            f"Exceeded redirect limit ({redirect_count} > {max_redirects}) for {url!r}"
+                        )
+                        raise RuntimeError(
+                            f"Too many redirects ({redirect_count} > {max_redirects}) — "
+                            f"final URL: {current_url[:120]}"
+                        )
+
+            try:
+                page.on("request", check_redirect)
+                await page.goto(url, wait_until="domcontentloaded", timeout=timeout_ms)
+                return
+            except Exception as e:
+                last_error = e
+                err_str = str(e)
+                err_lower = err_str.lower()
+                if _is_dead_host_error(err_lower):
+                    raise DeadHostError(url, err_str) from e
+                if _is_auth_error(err_lower):
                     raise RuntimeError(
-                        f"Redirect loop detected — revisited same URL after {redirect_count} redirects"
-                    )
-                seen_urls.add(current_url)
-
-                if redirect_count > max_redirects:
+                        "Authentication required or invalid credentials for this URL"
+                    ) from e
+                if "timeout" in err_lower:
                     logger.warning(
-                        f"Exceeded redirect limit ({redirect_count} > {max_redirects}) for {url!r}"
+                        "domcontentloaded timed out for %r, retrying with wait_until='commit'",
+                        url,
                     )
-                    raise RuntimeError(
-                        f"Too many redirects ({redirect_count} > {max_redirects}) — "
-                        f"final URL: {current_url[:120]}"
-                    )
+                    try:
+                        await page.goto(url, wait_until="commit", timeout=timeout_ms)
+                        return
+                    except Exception as e2:
+                        last_error = e2
+                        err_lower = str(e2).lower()
+                        if _is_dead_host_error(err_lower):
+                            raise DeadHostError(url, str(e2)) from e2
+                        if _is_auth_error(err_lower):
+                            raise RuntimeError(
+                                "Authentication required or invalid credentials for this URL"
+                            ) from e2
 
-        try:
-            page.on("request", check_redirect)
-            await page.goto(url, wait_until="domcontentloaded", timeout=timeout_ms)
-        except Exception as e:
-            err_str = str(e)
-            err_lower = err_str.lower()
-            if _is_dead_host_error(err_lower):
-                raise DeadHostError(url, err_str) from e
-            if "timeout" in err_lower:
-                logger.warning(
-                    f"domcontentloaded timed out for {url!r}, retrying with wait_until='commit'"
-                )
-                try:
-                    await page.goto(url, wait_until="commit", timeout=timeout_ms)
-                except Exception as e2:
-                    if _is_dead_host_error(str(e2).lower()):
-                        raise DeadHostError(url, str(e2)) from e2
-                    raise
-            else:
+                if attempt < max_attempts and _is_retryable_navigation_error(err_lower):
+                    backoff = min(0.6 * attempt, 1.8)
+                    logger.info(
+                        "Navigation retry %d/%d for %s after %.1fs (error=%s)",
+                        attempt,
+                        max_attempts,
+                        url[:120],
+                        backoff,
+                        err_lower[:120],
+                    )
+                    await asyncio.sleep(backoff)
+                    continue
                 raise
+            finally:
+                try:
+                    off_result = page.off("request", check_redirect)
+                    if asyncio.iscoroutine(off_result):
+                        await off_result
+                except Exception as exc:
+                    logger.debug("Failed to detach redirect handler: %s", exc)
+
+        if last_error:
+            raise last_error
 
     async def _setup_tracking_blocker(self, page: Page) -> None:
         """Abort tracking/analytics requests at the network layer before they
@@ -598,6 +653,15 @@ class BrowserInstance:
             ignore_https_errors=True,
         )
         self.context = context
+        try:
+            nav_timeout = int(get_config().browser_navigation_timeout_ms)
+            if nav_timeout > 0:
+                context.set_default_navigation_timeout(nav_timeout)
+            action_timeout = int(get_config().browser_action_timeout * 1000)
+            if action_timeout > 0:
+                context.set_default_timeout(action_timeout)
+        except Exception as e:
+            logger.debug("Failed to set browser timeouts on context: %s", e)
 
         if auth_cookies:
             try:
@@ -690,10 +754,13 @@ class BrowserInstance:
 
         all_tabs = {}
         for tid, tab_page in self.pages.items():
+            is_closed = tab_page.is_closed()
+            if asyncio.iscoroutine(is_closed):
+                is_closed = await is_closed
             all_tabs[tid] = {
                 "url": tab_page.url,
                 "title": await tab_page.title()
-                if not tab_page.is_closed()
+                if not is_closed
                 else "Closed",
             }
 
@@ -2558,6 +2625,7 @@ def browser_action(
     js_code: str | None = None,
     parallel: bool = False,
     duration: float | None = None,
+    wait: float | None = None,
     key: str | None = None,
     file_path: str | None = None,
     clear: bool = False,
@@ -2569,6 +2637,7 @@ def browser_action(
     totp_secret: str | None = None,
     field_selector: str | None = None,
     cookies: list[dict[str, Any]] | None = None,
+    oauth_url: str | None = None,
     callback_prefix: str = "",
     multi_step: bool = False,
     totp_digits: int = 6,
@@ -2580,6 +2649,13 @@ def browser_action(
     sitekey: str | None = None,
 ) -> dict[str, Any]:
     try:
+        if wait is not None:
+            if duration is None:
+                duration = wait
+            if wait_timeout == 10.0:
+                wait_timeout = wait
+        if url is None and oauth_url:
+            url = oauth_url
         if action == "launch":
             return _manager.launch_browser(url)
         elif action == "goto":

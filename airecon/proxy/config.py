@@ -254,7 +254,6 @@ _CONFIG_SCHEMA: dict[str, tuple[Any, str]] = {
         5000,
         "Browser screenshot capture timeout in milliseconds.",
     ),
-    # captcha_ollama_model removed — uses ollama_model instead (qwen3.5 supports vision)
     "waf_bypass_timeout": (
         30,
         "WAF bypass engine HTTP timeout in seconds.",
@@ -276,7 +275,7 @@ _CONFIG_SCHEMA: dict[str, tuple[Any, str]] = {
         "Aggregate timeout for quick_fuzz in seconds. Prevents stuck state.",
     ),
     "fuzzer_deep_timeout_seconds": (
-        300.0,
+        900.0,
         "Aggregate timeout for deep_fuzz in seconds.",
     ),
     "fuzzer_advanced_max_payloads": (

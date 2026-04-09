@@ -39,6 +39,9 @@ _MAX_TESTED_ENDPOINTS = 500
 _MAX_TOOLS_RUN = 1000
 _MAX_CORRELATION_SUGGESTIONS = 200
 _MAX_COMPLETED_PHASES = 10
+_MAX_VALIDATED_URLS = 15000
+_MAX_VALIDATED_SUBDOMAINS = 8000
+_MAX_VALIDATED_HOSTS = 5000
 
 T = TypeVar("T")
 
@@ -1214,6 +1217,16 @@ class SessionData:
     )
     open_ports: dict[str, list[int]] = field(default_factory=dict)
     urls: list[str] = field(default_factory=lambda: BoundedList(maxlen=_MAX_URLS))
+    validated_urls: list[str] = field(
+        default_factory=lambda: BoundedList(maxlen=_MAX_VALIDATED_URLS)
+    )
+    validated_subdomains: list[str] = field(
+        default_factory=lambda: BoundedList(maxlen=_MAX_VALIDATED_SUBDOMAINS)
+    )
+    validated_live_hosts: list[str] = field(
+        default_factory=lambda: BoundedList(maxlen=_MAX_VALIDATED_HOSTS)
+    )
+    recon_validation_notes: str = ""
     technologies: dict[str, str] = field(default_factory=dict)
     vulnerabilities: list[dict[str, Any]] = field(
         default_factory=lambda: BoundedList(maxlen=_MAX_VULNERABILITIES)
@@ -1293,6 +1306,21 @@ class SessionData:
         )
         self.urls = _coerce_sequence_field(
             self.urls, field_name="urls", maxlen=_MAX_URLS
+        )
+        self.validated_urls = _coerce_sequence_field(
+            self.validated_urls,
+            field_name="validated_urls",
+            maxlen=_MAX_VALIDATED_URLS,
+        )
+        self.validated_subdomains = _coerce_sequence_field(
+            self.validated_subdomains,
+            field_name="validated_subdomains",
+            maxlen=_MAX_VALIDATED_SUBDOMAINS,
+        )
+        self.validated_live_hosts = _coerce_sequence_field(
+            self.validated_live_hosts,
+            field_name="validated_live_hosts",
+            maxlen=_MAX_VALIDATED_HOSTS,
         )
         self.vulnerabilities = _coerce_sequence_field(
             self.vulnerabilities,
@@ -1414,6 +1442,22 @@ def load_session(session_id: str) -> SessionData | None:
             urls=_coerce_sequence_field(
                 data.get("urls", []), field_name="urls", maxlen=_MAX_URLS
             ),
+            validated_urls=_coerce_sequence_field(
+                data.get("validated_urls", []),
+                field_name="validated_urls",
+                maxlen=_MAX_VALIDATED_URLS,
+            ),
+            validated_subdomains=_coerce_sequence_field(
+                data.get("validated_subdomains", []),
+                field_name="validated_subdomains",
+                maxlen=_MAX_VALIDATED_SUBDOMAINS,
+            ),
+            validated_live_hosts=_coerce_sequence_field(
+                data.get("validated_live_hosts", []),
+                field_name="validated_live_hosts",
+                maxlen=_MAX_VALIDATED_HOSTS,
+            ),
+            recon_validation_notes=str(data.get("recon_validation_notes", "") or ""),
             technologies=data.get("technologies", {}),
             vulnerabilities=_coerce_sequence_field(
                 data.get("vulnerabilities", []),
@@ -1540,6 +1584,9 @@ def save_session(session: SessionData) -> None:
             "subdomains",
             "live_hosts",
             "urls",
+            "validated_urls",
+            "validated_subdomains",
+            "validated_live_hosts",
             "vulnerabilities",
             "attack_chains",
             "completed_phases",
@@ -2098,6 +2145,11 @@ def session_to_context(session: SessionData) -> str:
         f"Tools previously run: {', '.join(session.tools_run) if session.tools_run else 'none'}"
     )
     parts.append(f"Total scans: {session.scan_count}")
+
+    if session.validated_urls or session.validated_subdomains or session.validated_live_hosts:
+        parts.append(
+            "LLM validation focus is available; prioritize validated assets before raw lists."
+        )
 
     if session.subdomains:
         count = len(session.subdomains)

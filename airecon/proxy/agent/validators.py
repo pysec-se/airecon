@@ -457,17 +457,21 @@ class _ValidatorMixin:
             "double_click",
             "hover",
             "press_key",
-            "save_pd",
+            "save_pdf",
             "get_console_logs",
             "get_network_logs",
             "view_source",
             "close",
             "list_tabs",
+            "screenshot",
             "login_form",
             "handle_totp",
             "save_auth_state",
             "inject_cookies",
             "oauth_authorize",
+            "check_auth_status",
+            "wait_for_element",
+            "solve_captcha",
         }
     )
 

@@ -350,10 +350,6 @@ export PATH="$HOME/.local/bin:$PATH" && source ~/.zshrc
 
 ## License
 
-MIT License. See `LICENSE` for details.
+MIT License. See [`LICENSE`](LICENSE) for details.
 
 ---
-
-## Disclaimer
-
-AIRecon is built strictly for **educational purposes, ethical hacking, and authorized security assessments**. Any actions related to the material in this tool are solely your responsibility. Do not use this tool on systems or networks you do not own or have explicit permission to test.

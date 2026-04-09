@@ -8,6 +8,7 @@ import os
 import time
 import uuid
 from pathlib import Path
+from functools import lru_cache
 from typing import Any
 
 import httpx
@@ -170,6 +171,57 @@ class AIReconApp(App):
 
     def action_scroll_chat_down(self) -> None:
         self.query_one("#chat-panel", ChatPanel).scroll_down()
+
+    @staticmethod
+    def _default_ctx_limit() -> int:
+        try:
+            from airecon.proxy.config import get_config
+
+            ctx = int(get_config().ollama_num_ctx)
+            if ctx > 0:
+                return ctx
+        except Exception as e:
+            logger.debug("Expected failure in _default_ctx_limit: %s", e)
+        return 65536
+
+    @staticmethod
+    @lru_cache(maxsize=1)
+    def _load_ui_tool_kinds() -> tuple[dict[str, str], set[str]]:
+        kinds: dict[str, str] = {}
+        fuzz_shells: set[str] = set()
+        try:
+            meta_path = Path(__file__).resolve().parents[1] / "proxy" / "data" / "tools_meta.json"
+            data = json.loads(meta_path.read_text(encoding="utf-8"))
+            raw_kinds = data.get("ui_tool_kinds", {})
+            if isinstance(raw_kinds, dict):
+                kinds = {str(k).lower(): str(v).lower() for k, v in raw_kinds.items()}
+            categories = data.get("categories", {})
+            vuln_scan = categories.get("vulnerability_scanning", {})
+            if isinstance(vuln_scan, dict):
+                for tools in vuln_scan.values():
+                    if isinstance(tools, list):
+                        fuzz_shells.update(str(t).lower() for t in tools)
+        except Exception as e:
+            logger.debug("Expected failure in _load_ui_tool_kinds: %s", e)
+        return kinds, fuzz_shells
+
+    @staticmethod
+    def _classify_tool_kind(tool_name: str, arguments: dict | None = None) -> str | None:
+        name = tool_name.lower()
+        kind_map, fuzz_shells = AIReconApp._load_ui_tool_kinds()
+        if name in kind_map:
+            return kind_map[name]
+        if name == "execute" and arguments:
+            try:
+                from airecon.proxy.agent.command_parse import extract_primary_binary
+
+                cmd = str(arguments.get("command", ""))
+                primary = extract_primary_binary(cmd)
+                if primary and primary.lower() in fuzz_shells:
+                    return "fuzz"
+            except Exception as e:
+                logger.debug("Expected failure in _classify_tool_kind: %s", e)
+        return None
 
     def on_status_bar_skills_clicked(self, event: StatusBar.SkillsClicked) -> None:
         status_bar = self.query_one(StatusBar)
@@ -617,7 +669,10 @@ class AIReconApp(App):
                     tokens_used = token_info.get(
                         "cumulative", token_info.get("used", 0)
                     )
-                    tokens_limit = token_info.get("limit", 65536)
+                    tokens_current = token_info.get("used", tokens_used)
+                    tokens_limit = token_info.get("limit")
+                    if not tokens_limit or tokens_limit <= 0:
+                        tokens_limit = self._default_ctx_limit()
                     skills_info = agent_stats.get("skills_used", [])
                     caido_data = agent_stats.get("caido", {})
 
@@ -735,7 +790,11 @@ class AIReconApp(App):
                     tokens_used = token_info.get(
                         "cumulative", token_info.get("used", 0)
                     )
-                    tokens_limit = token_info.get("limit", 65536)
+                    tokens_current = token_info.get("used", tokens_used)
+                    tokens_limit = token_info.get("limit")
+                    if not tokens_limit or tokens_limit <= 0:
+                        tokens_limit = self._default_ctx_limit()
+                    phase = data.get("agent", {}).get("phase")
                     skills_info = data.get("agent", {}).get("skills_used", [])
                     caido_data = data.get("agent", {}).get("caido", {})
                     caido_active = caido_data.get("active", False)
@@ -754,6 +813,12 @@ class AIReconApp(App):
                         caido_active=caido_active,
                         caido_findings=caido_findings,
                     )
+
+                    chat = self.query_one("#chat-panel", ChatPanel)
+                    token_ratio = None
+                    if tokens_limit and tokens_limit > 0:
+                        token_ratio = float(tokens_current) / float(tokens_limit)
+                    chat.update_buddy_context(phase=phase, token_ratio=token_ratio)
             except Exception as e:
                 error_str = str(e).strip()
                 if error_str:
@@ -782,6 +847,13 @@ class AIReconApp(App):
                 caido = agent.get("caido", {})
                 caido_active = caido.get("active", False)
                 caido_findings = caido.get("findings_count", 0)
+                token_info = agent.get("token_usage", {})
+                tokens_used = token_info.get("cumulative", token_info.get("used", 0))
+                tokens_current = token_info.get("used", tokens_used)
+                tokens_limit = token_info.get("limit")
+                if not tokens_limit or tokens_limit <= 0:
+                    tokens_limit = self._default_ctx_limit()
+                phase = agent.get("phase")
 
                 status_bar.set_status(
                     ollama="online" if ollama_ok else "offline",
@@ -793,6 +865,10 @@ class AIReconApp(App):
                     caido_active=caido_active,
                     caido_findings=caido_findings,
                 )
+                token_ratio = None
+                if tokens_limit and tokens_limit > 0:
+                    token_ratio = float(tokens_current) / float(tokens_limit)
+                chat.update_buddy_context(phase=phase, token_ratio=token_ratio)
 
                 if verbose:
                     status_md = f"""## 🟢 AIRecon Status Report
@@ -1478,7 +1554,12 @@ class AIReconApp(App):
                         arguments = event.get("arguments", {})
                         logger.info(f"Tool Start: {tool_name} args={arguments}")
                         chat.end_streaming()
-                        chat.end_thinking()
+                        tool_kind = self._classify_tool_kind(tool_name, arguments)
+                        chat.set_buddy_state(
+                            "tool",
+                            tool_name=str(tool_name),
+                            tool_kind=tool_kind,
+                        )
                         streaming_started = False
                         chat.add_tool_start(tool_id, tool_name, arguments)
 
@@ -1504,6 +1585,14 @@ class AIReconApp(App):
                         caido_data = event.get("caido", {}) or {}
 
                         logger.info(f"Tool End: success={success} duration={duration}")
+                        _token_ratio = None
+                        try:
+                            _tok_used = token_info.get("used", token_info.get("cumulative", 0))
+                            _tok_limit = token_info.get("limit") or self._default_ctx_limit()
+                            if _tok_limit and _tok_limit > 0:
+                                _token_ratio = float(_tok_used) / float(_tok_limit)
+                        except Exception:
+                            _token_ratio = None
 
                         if not hasattr(chat, "_active_tools"):
                             chat._active_tools = {}
@@ -1519,10 +1608,14 @@ class AIReconApp(App):
                             _ti=token_info,
                             _sk=skills_info,
                             _cd=caido_data,
+                            _tr=_token_ratio,
                         ):
                             if _msg:
                                 _msg.update_result(_s, _d, _r, _o)
                             chat.scroll_end(animate=False)
+                            if _tr is not None:
+                                chat.update_buddy_context(token_ratio=_tr)
+                            chat.set_buddy_state("thinking" if _s else "error")
 
                             try:
                                 status_bar = self.query_one("#status-bar", StatusBar)
@@ -1540,9 +1633,10 @@ class AIReconApp(App):
                                     status_update_kwargs["tokens"] = _ti.get(
                                         "cumulative", _ti.get("used", 0)
                                     )
-                                    status_update_kwargs["token_limit"] = _ti.get(
-                                        "limit", 65536
-                                    )
+                                    _limit = _ti.get("limit")
+                                    if not _limit or _limit <= 0:
+                                        _limit = self._default_ctx_limit()
+                                    status_update_kwargs["token_limit"] = _limit
 
                                 if _sk:
                                     status_update_kwargs["skills"] = _sk
@@ -1642,6 +1736,7 @@ class AIReconApp(App):
                         if self._is_ollama_recovery_marker(str(error_msg)):
                             self._mark_ollama_degraded(str(error_msg)[:120])
                         logger.error(f"Agent Error Event: {error_msg}")
+                        chat.set_buddy_state("error")
 
                         def show_error_safely():
                             chat.add_error_message(error_msg)
@@ -1656,6 +1751,7 @@ class AIReconApp(App):
                         logger.info(
                             "user_input_required: id=%s type=%s", _req_id, _inp_type
                         )
+                        chat.set_buddy_state("wait")
 
                         async def _handle_user_input_modal(
                             req_id: str = _req_id,
@@ -1701,6 +1797,8 @@ class AIReconApp(App):
                                     "user-input submit failed after 3 attempts. "
                                     "The agent may timeout waiting for response."
                                 )
+                            else:
+                                chat.set_buddy_state("thinking")
 
                         self.call_later(_handle_user_input_modal)
 
@@ -1708,6 +1806,7 @@ class AIReconApp(App):
                         logger.debug("Stream done")
                         if streaming_started:
                             chat.end_streaming()
+                        chat.clear_buddy()
                         break
 
             if streaming_started:
@@ -1733,7 +1832,7 @@ class AIReconApp(App):
             self._stop_health_monitor()
             try:
                 chat.end_streaming()
-                chat.end_thinking()
+                chat.clear_buddy()
             except Exception as e:
                 logger.debug(
                     "Expected failure in finally end streaming/thinking: %s", e
@@ -1967,40 +2066,42 @@ class AIReconApp(App):
                     json={"command": shell_cmd},
                     timeout=180.0,
                 )
-                data = resp.json() if resp.content else {}
+                try:
+                    data = resp.json() if resp.content else {}
+                except Exception:
+                    data = {"error": resp.text}
                 if resp.status_code == 200:
                     stdout = str(data.get("stdout", "") or "")
                     stderr = str(data.get("stderr", "") or "")
                     exit_code = data.get("exit_code")
                     success = bool(data.get("success", False))
-                    body_lines: list[str] = ["### AIRecon", ""]
-                    if stdout.strip():
-                        body_lines.extend(["```bash", stdout.rstrip(), "```", ""])
-                    else:
-                        body_lines.extend(["```text", "(no stdout)", "```", ""])
+
+                    def _indent_block(text: str) -> list[str]:
+                        if not text.strip():
+                            return ["  (empty)"]
+                        return [f"  {line}" for line in text.rstrip().splitlines()]
+
+                    body_lines: list[str] = [f"[shell] $ {shell_cmd}"]
+                    if exit_code is not None:
+                        body_lines.append(f"exit_code: {exit_code}")
+                    body_lines.append(f"success: {success}")
+                    body_lines.append("")
+                    body_lines.append("stdout:")
+                    body_lines.extend(_indent_block(stdout))
                     if stderr.strip():
-                        body_lines.extend(
-                            ["#### stderr", "```text", stderr.rstrip(), "```", ""]
-                        )
-                    body_lines.append(f"`exit_code: {exit_code}`")
+                        body_lines.append("")
+                        body_lines.append("stderr:")
+                        body_lines.extend(_indent_block(stderr))
                     body = "\n".join(body_lines)
-                    if success:
-                        chat.add_assistant_message(body, markup=False)
-                    else:
-                        chat.add_assistant_message(body, markup=False)
+                    chat.add_assistant_message(body, markup=False)
                 else:
                     err = str(data.get("error", "Shell command failed"))
-                    body = "\n".join(
-                        [
-                            "### AIRecon",
-                            "",
-                            "#### shell error",
-                            "```text",
-                            err,
-                            "```",
-                        ]
-                    )
-                    chat.add_assistant_message(body, markup=False)
+                    blocked = data.get("blocked")
+                    body_lines = [f"[shell] $ {shell_cmd}", "error:"]
+                    body_lines.append(f"  {err}")
+                    if blocked is not None:
+                        body_lines.append(f"blocked: {blocked}")
+                    chat.add_assistant_message("\n".join(body_lines), markup=False)
             except Exception as e:
                 chat.add_error_message(f"Shell request failed: {e}")
             self._processing = False
@@ -2386,14 +2487,31 @@ class AIReconApp(App):
             logger.debug("Expected failure in _show_copy_toast: %s", e)
 
     def copy_to_clipboard(self, content: str) -> None:
+        copied = False
+
+        try:
+            super().copy_to_clipboard(content)
+            if getattr(self, "_driver", None) is not None:
+                copied = True
+        except Exception as e:
+            logger.debug("Expected failure in OSC52 clipboard: %s", e)
+
         try:
             import pyperclip
 
             pyperclip.copy(content)
-            self._show_copy_toast("Copied to clipboard")
+            copied = True
         except ImportError:
-            self.notify(
-                "pyperclip not installed. Clipboard disabled.", severity="warning"
-            )
+            if not copied:
+                self.notify(
+                    "Clipboard unavailable: install pyperclip or use an OSC52-capable terminal.",
+                    severity="warning",
+                )
         except Exception as e:
-            self.notify(f"Clipboard error: {e}", severity="error")
+            if copied:
+                logger.debug("Expected failure in pyperclip.copy: %s", e)
+            else:
+                self.notify(f"Clipboard error: {e}", severity="error")
+
+        if copied:
+            self._show_copy_toast("Copied to clipboard")

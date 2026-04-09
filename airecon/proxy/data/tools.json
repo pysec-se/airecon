@@ -3,13 +3,13 @@
         "type": "function",
         "function": {
             "name": "execute",
-            "description": "Execute a shell command inside the Kali Linux sandbox. All recon tools are pre-installed (nmap, sqlmap, nuclei, ffuf, subfinder, httpx, etc.). Use this for any external binary. Examples: {\"command\": \"subfinder -d example.com -o output/subdomains.txt\"} or {\"command\": \"nmap -sV -p 1-1000 target\"}. Avoid interactive tools; prefer one-shot commands. Long-running tools may be terminated if they exceed per_tool_timeout_seconds.",
+            "description": "Execute a shell command inside the Kali Linux sandbox. Common recon tools are pre-installed (nmap, sqlmap, nuclei, ffuf, subfinder, httpx, etc.). Use this for any external binary. Examples: {\"command\": \"subfinder -d example.com -o output/subdomains.txt\"} or {\"command\": \"nmap -sV -p 1-1000 target\"}. Avoid interactive tools; prefer one-shot commands. Long-running tools may be terminated if they exceed per_tool_timeout_seconds.",
             "parameters": {
                 "type": "object",
                 "properties": {
                     "command": {
                         "type": "string",
-                        "description": "Shell command to run inside sandbox. Must be a single command or piped sequence."
+                        "description": "Shell command to run inside sandbox (executed via bash -c). Pipes are allowed; avoid interactive prompts."
                     },
                     "timeout": {
                         "type": "number",
@@ -26,7 +26,7 @@
         "type": "function",
         "function": {
             "name": "advanced_fuzz",
-            "description": "Intelligent parameter fuzzing for web vulnerabilities. Tests for SQL injection, XSS, SSRF, IDOR, SSTI, mass assignment, and more. Automatically runs Phase 2 advanced tests (SSRF to cloud metadata, GraphQL introspection, race conditions) if enabled. Requires a specific target URL and a list of parameter names. Example: target=\"https://api.example.com/v1/users\", parameters=[\"id\",\"user_id\"], vuln_types=[\"sql_injection\",\"xss\"], method=\"GET\". Uses AI-powered payload generation and confidence scoring. Returns findings with severity, confidence, and evidence.",
+            "description": "Parameter fuzzing for web vulnerabilities. Tests for SQL injection, XSS, SSRF, IDOR, SSTI, mass assignment, and more. Can run Phase 2 advanced tests (cloud SSRF probes, GraphQL introspection, race conditions) when enabled. Target URL and parameters should be provided for meaningful results. Example: target=\"https://api.example.com/v1/users\", parameters=[\"id\",\"user_id\"], vuln_types=[\"sql_injection\",\"xss\"], method=\"GET\". Returns findings with severity, confidence, and evidence.",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -55,10 +55,6 @@
                     "phase2": {
                         "type": "boolean",
                         "description": "Enable Phase 2 advanced tests (default true). Includes SSRF to 169.254.169.254, GraphQL introspection, race condition probing."
-                    },
-                    "phase3": {
-                        "type": "boolean",
-                        "description": "Enable Phase 3 (deep fuzzing) - experimental."
                     },
                     "ssrf_params": {
                         "type": "array",
@@ -114,7 +110,7 @@
         "type": "function",
         "function": {
             "name": "browser_action",
-            "description": "Control a Playwright-powered headless Chromium browser for recon, auth, and exploitation. 29 actions: navigate/goto, click, type, execute_js (with parallel mode across ALL tabs), double_click, hover, scroll, press_key, back/forward, multi-tab management (new_tab/switch_tab/close_tab/list_tabs), save_pdf for evidence, screenshot, view_source, get_console_logs, get_network_logs (XHR/Fetch API discovery), wait, wait_for_element. Auth: login_form (multi-step SSO support), handle_totp (RFC 6238 TOTP auto-generation), save_auth_state, inject_cookies, oauth_authorize, check_auth_status, solve_captcha (reCAPTCHA/hCaptcha/Cloudflare). ALWAYS use browser for SPA/modern apps — execute_js can extract localStorage tokens, dump JS config objects, enumerate SPA routes, bypass client-side auth. view_source → find form selectors, hidden inputs, inline JS. get_console_logs → find JS errors, leaked API keys. get_network_logs → discover hidden API endpoints, auth tokens in headers.",
+            "description": "Control a Playwright-powered headless Chromium browser for navigation, DOM interaction, auth flows, logs, and evidence capture. Actions: launch, goto, click, type, scroll_down/up, back/forward, new_tab/switch_tab/close_tab/list_tabs, wait, execute_js (optional parallel across open tabs), double_click, hover, press_key, save_pdf, screenshot, view_source, get_console_logs, get_network_logs, login_form, handle_totp, save_auth_state, inject_cookies, oauth_authorize, check_auth_status, wait_for_element, solve_captcha. Notes: screenshot saves a PNG under workspace_root/screenshots and returns screenshot_path; save_pdf returns pdf_saved; execute_js returns js_result (truncated to ~5000 chars) with page state.",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -153,7 +149,7 @@
                             "wait_for_element",
                             "solve_captcha"
                         ],
-                        "description": "The action to perform. Key actions: execute_js — run JS in page; use js_code; returns result + state; parallel=true runs across all tabs. save_pdf — export page as PDF to file_path (workspace-relative). screenshot — capture PNG to screenshots/ subdirectory; returns screenshot_path. login_form — authenticate; handle_totp — TOTP; solve_captcha — auto-solve (captcha_type + sitekey). wait_for_element — dynamic wait. get_console_logs / get_network_logs — fetch logs. Full list: launch, goto, click, type, scroll_*, navigation, tab management (new_tab/switch_tab/close_tab/list_tabs), execute_js, save_pdf, screenshot, view_source, console/network logs, auth actions, wait_for_element, solve_captcha."
+                        "description": "The action to perform. Key actions: execute_js — run JS in page; use js_code; returns js_result + state; parallel=true runs across open tabs. save_pdf — export page as PDF to file_path (workspace-relative). screenshot — capture PNG to workspace_root/screenshots; returns screenshot_path. login_form — authenticate; handle_totp — TOTP; solve_captcha — auto-solve (captcha_type + sitekey). wait_for_element — dynamic wait. get_console_logs / get_network_logs — fetch logs. Full list: launch, goto, click, type, scroll_*, navigation, tab management (new_tab/switch_tab/close_tab/list_tabs), execute_js, save_pdf, screenshot, view_source, console/network logs, auth actions, wait_for_element, solve_captcha."
                     },
                     "url": {
                         "type": "string",
@@ -173,7 +169,7 @@
                     },
                     "js_code": {
                         "type": "string",
-                        "description": "JavaScript code to execute (REQUIRED for execute_js action). Returns result as string (truncated if >1MB). Use for: extract data from page (localStorage, sessionStorage, cookies, DOM), analyze structure, read JS variables/config, scrape dynamic content. Examples: 'document.querySelectorAll(\"a\").length', 'localStorage.getItem(\"token\")', 'JSON.stringify(performance.getEntries())'. For complex scripts, use multi-line template literals. Result includes page state (url, title) and js_result field."
+                        "description": "JavaScript code to execute (REQUIRED for execute_js action). Result is truncated to ~5000 chars. Examples: 'document.querySelectorAll(\"a\").length', 'localStorage.getItem(\"token\")', 'JSON.stringify(performance.getEntries())'. Result includes page state (url, title) and js_result field."
                     },
                     "parallel": {
                         "type": "boolean",
@@ -183,13 +179,17 @@
                         "type": "number",
                         "description": "Duration to wait in seconds."
                     },
+                    "wait": {
+                        "type": "number",
+                        "description": "Alias for duration (seconds)."
+                    },
                     "key": {
                         "type": "string",
                         "description": "Key to press."
                     },
                     "file_path": {
                         "type": "string",
-                        "description": "Path to save PDF (REQUIRED for save_pdf action, must end with .pdf). Path is relative to workspace root. Saves complete rendered page including CSS and embedded images. Use for: preserving evidence, capturing sensitive data exposures, documenting login screens, saving reports. Returns pdf_saved path in response state."
+                        "description": "Path to save PDF (REQUIRED for save_pdf action, should end with .pdf). Path is relative to workspace root. Saves rendered page to PDF. Returns pdf_saved path in response state."
                     },
                     "clear": {
                         "type": "boolean",
@@ -272,7 +272,7 @@
                     },
                     "oauth_url": {
                         "type": "string",
-                        "description": "OAuth authorization URL for oauth_authorize action."
+                        "description": "Alias for url (legacy). If provided, treated as url for oauth_authorize."
                     },
                     "callback_prefix": {
                         "type": "string",
@@ -518,7 +518,7 @@
         "type": "function",
         "function": {
             "name": "quick_fuzz",
-            "description": "Run a fast fuzz scan on a URL using common payloads (SQLi, XSS, traversal, SSTI) with automatic parameter targeting.",
+            "description": "Run a fast fuzz scan on a URL using common payloads (SQLi, XSS, traversal, SSTI). If params are omitted, it uses a small default list (q, search, id, page).",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -1035,7 +1035,7 @@
         "type": "function",
         "function": {
             "name": "python_session",
-            "description": "Start or continue an interactive Python session with state persistence. Uses IPython kernel under the hood. Variables, functions, and imports persist across calls. Perfect for iterative exploit development, data analysis, and script prototyping. Pre-imported modules: os, sys, json, re, base64, hashlib, random, datetime, pathlib, urllib.parse. Use `pip` to install packages on the fly (limited). Session auto-terminates after 300s of inactivity. Parameters: session_id (optional, defaults to 'default'), code (required) - Python code to execute. Returns: output (stdout/stderr), result (last expression if any), session_state (variables dict), error (if any). Example: {\"code\": \"import requests; r = requests.get('https://example.com')\", \"session_id\": \"exploit_dev\"}",
+            "description": "Start or continue a lightweight Python exec/eval session with state persistence. Variables, functions, and imports persist across calls. Pre-imports: os, sys, json, re, base64, hashlib, random, datetime, pathlib.Path, urllib.parse helpers; requests is available only if installed. Session auto-terminates after 300s of inactivity. Parameters: session_id (optional, defaults to 'default'), code (required). Returns: output (stdout/stderr), result (last expression if any), session_state (variables dict), error (if any).",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -1058,7 +1058,7 @@
         "type": "function",
         "function": {
             "name": "edit_file",
-            "description": "Perform a surgical text replacement in a file using exact string matching. More precise than create_file for code modifications. Specify old_str to replace exactly that content with new_str. The match must be exact (including whitespace). If multiple matches exist, only the first is replaced. Returns: success, lines_modified, new_content (snippet). Use read_file first to get exact content. Parameters: path (required, workspace-relative), old_str (required), new_str (required). Example: {\"path\": \"output/exploit.py\", \"old_str\": \"def exploit():\\n    return 0\", \"new_str\": \"def exploit():\\n    # Fixed\\n    return 1\"}",
+            "description": "Perform a surgical text replacement in a file using exact string matching. More precise than create_file for code modifications. Specify old_str to replace exactly that content with new_str. The match must be exact (including whitespace). If multiple matches exist, only the first is replaced. Returns: success, lines_modified, total_occurrences, preview. Use read_file first to get exact content. Parameters: path (required, workspace-relative), old_str (required), new_str (required). Example: {\"path\": \"output/exploit.py\", \"old_str\": \"def exploit():\\n    return 0\", \"new_str\": \"def exploit():\\n    # Fixed\\n    return 1\"}",
             "parameters": {
                 "type": "object",
                 "properties": {

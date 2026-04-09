@@ -11,7 +11,7 @@ from textual.message import Message
 from textual.reactive import reactive
 from textual.widgets import LoadingIndicator, RichLog, Static
 
-from ..buddy import AVAILABLE_SPECIES, get_frame
+from ..buddy import AVAILABLE_SPECIES, Species, get_buddy_palette, get_frame, get_species_pool_for_phase
 
 logger = logging.getLogger(__name__)
 
@@ -410,12 +410,10 @@ class ThinkingSpinner(Vertical):
     }
 
     .buddy-part {
-        color: #8b949e;
         text-style: dim;
     }
 
     .thinking-label {
-        color: #00d4aa;
         text-style: italic;
     }
     """
@@ -424,10 +422,20 @@ class ThinkingSpinner(Vertical):
         super().__init__()
         self._current_frame = 0
         self._species_index = 0
+        self._palette_index = 0
+        self._state: str = "thinking"
+        self._phase: str | None = None
+        self._token_ratio: float | None = None
+        self._tool_kind: str | None = None
+        self._tool_name: str | None = None
+        self._species_pool: list[Species] | None = None
+        self._current_species: Species | None = None
         self._buddy_row_count = 5
         self._buddy_rows: list[Horizontal] = []
         self._buddy_parts: list[Static] = []
         self._anim_timer = None
+        self._anim_interval = 0.3
+        self._label: Static | None = None
 
     def compose(self) -> ComposeResult:
         for i in range(self._buddy_row_count):
@@ -437,25 +445,61 @@ class ThinkingSpinner(Vertical):
             self._buddy_parts.append(part)
             yield row
 
-        yield Static("Thinking…", classes="thinking-label")
+        self._label = Static("Thinking…", classes="thinking-label")
+        yield self._label
 
     def on_mount(self) -> None:
         for row, part in zip(self._buddy_rows, self._buddy_parts, strict=False):
             if not row.children:
                 row.mount(part)
+        self._apply_palette()
+        self._update_label()
         self._update_buddy()
-        self._anim_timer = self.set_interval(0.3, self._update_buddy)
+        self._anim_timer = self.set_interval(self._anim_interval, self._update_buddy)
 
     def on_unmount(self) -> None:
         if self._anim_timer is not None:
             self._anim_timer.stop()
             self._anim_timer = None
 
+    def set_context(
+        self,
+        *,
+        state: str | None = None,
+        phase: str | None = None,
+        token_ratio: float | None = None,
+        tool_kind: str | None = None,
+        tool_name: str | None = None,
+    ) -> None:
+        prev_state = self._state
+        if state is not None:
+            self._state = state
+        if phase is not None:
+            self._phase = phase
+            self._species_pool = get_species_pool_for_phase(phase)
+            self._current_species = None
+            self._current_frame = 0
+        if token_ratio is not None:
+            self._token_ratio = token_ratio
+        if tool_kind is not None:
+            self._tool_kind = tool_kind
+        if tool_name is not None:
+            self._tool_name = tool_name
+        if prev_state != self._state:
+            self._reset_timer()
+        self._apply_palette()
+        self._update_label()
+
     def _update_buddy(self) -> None:
         if not self.is_attached or not self._buddy_parts:
             return
 
-        species = AVAILABLE_SPECIES[self._species_index % len(AVAILABLE_SPECIES)]
+        if self._species_pool:
+            pool = self._species_pool
+            species = pool[(self._current_frame // 6) % len(pool)]
+        else:
+            species = AVAILABLE_SPECIES[self._species_index % len(AVAILABLE_SPECIES)]
+        self._current_species = species
         frame = get_frame(species, self._current_frame)
 
         if len(frame) < self._buddy_row_count:
@@ -469,9 +513,97 @@ class ThinkingSpinner(Vertical):
             escaped = padded.replace("[", "\\[").replace("]", "\\]")
             self._buddy_parts[i].update(f" {escaped}")
 
+        self._apply_palette()
+
         self._current_frame += 1
         if self._current_frame % 12 == 0:
             self._species_index += 1
+            self._palette_index += 1
+            self._apply_palette()
+        elif self._current_frame % 6 == 0:
+            self._palette_index += 1
+            self._apply_palette()
+
+    def _apply_palette(self) -> None:
+        colors = get_buddy_palette(
+            species=self._current_species,
+            state=self._state,
+            phase=self._phase,
+            pressure=self._token_ratio,
+            tool_kind=self._tool_kind,
+            index=self._palette_index,
+            rows=self._buddy_row_count,
+        )
+        for idx, part in enumerate(self._buddy_parts):
+            try:
+                part.styles.color = colors[idx]
+                part.styles.text_style = "dim"
+            except Exception as e:
+                logger.debug(
+                    "Expected failure in ThinkingSpinner._apply_palette: %s", e
+                )
+
+    def _reset_timer(self) -> None:
+        interval = 0.3
+        if self._state == "tool":
+            interval = 0.35
+        elif self._state == "wait":
+            interval = 0.8
+        elif self._state == "error":
+            interval = 0.5
+        elif self._state == "idle":
+            interval = 1.0
+        if self._anim_interval == interval:
+            return
+        self._anim_interval = interval
+        if self._anim_timer is not None:
+            self._anim_timer.stop()
+        if self.is_attached:
+            self._anim_timer = self.set_interval(
+                self._anim_interval, self._update_buddy
+            )
+
+    def _update_label(self) -> None:
+        if not self._label:
+            return
+        phase = self._phase.upper() if self._phase else ""
+        if self._state == "tool":
+            base = f"Running {self._tool_name or 'tool'}…"
+        elif self._state == "wait":
+            base = "Waiting for input…"
+        elif self._state == "error":
+            base = "Error / timeout"
+        elif self._state == "idle":
+            base = "Idle"
+        else:
+            base = "Thinking…"
+
+        label = f"{base}  ·  {phase}" if phase else base
+        try:
+            self._label.update(label)
+        except Exception:
+            return
+
+        color = "#00d4aa"
+        if self._token_ratio is not None:
+            if self._token_ratio >= 0.85:
+                color = "#ef4444"
+            elif self._token_ratio >= 0.65:
+                color = "#f59e0b"
+        if self._state == "error":
+            color = "#ef4444"
+        elif self._state == "wait":
+            color = "#f59e0b"
+        elif self._state == "tool":
+            color = "#60a5fa"
+        elif self._state == "idle":
+            color = "#8b949e"
+
+        try:
+            self._label.styles.color = color
+            self._label.styles.text_style = "italic"
+        except Exception:
+            return
 
 
 class SubAgentBlock(Vertical):
@@ -680,6 +812,11 @@ class ChatPanel(VerticalScroll):
         self.styles.scrollbar_size_horizontal = 0
         self._streaming_msg: StreamingMessage | None = None
         self._thinking_msg: ThinkingSpinner | None = None
+        self._buddy_state: str | None = None
+        self._buddy_phase: str | None = None
+        self._buddy_token_ratio: float | None = None
+        self._buddy_tool_kind: str | None = None
+        self._buddy_tool_name: str | None = None
 
         self._active_tools: dict[str, ToolMessage] = {}
         self._active_subagents: dict[str, SubAgentBlock] = {}
@@ -788,23 +925,14 @@ class ChatPanel(VerticalScroll):
 
     def start_thinking(self) -> None:
         self.end_streaming()
-        if not self._thinking_msg:
-            self._thinking_msg = ThinkingSpinner()
-            self._safe_mount(self._thinking_msg)
-            self.scroll_end(animate=False)
+        self.set_buddy_state("thinking")
 
     def append_to_thinking(self, text: str) -> None:
         if not self._thinking_msg:
             self.start_thinking()
 
     def end_thinking(self) -> None:
-        if self._thinking_msg:
-            try:
-                if self._thinking_msg.is_attached:
-                    self._thinking_msg.remove()
-            except Exception as e:
-                logger.debug("Expected failure in ChatPanel.end_thinking remove: %s", e)
-            self._thinking_msg = None
+        self.clear_buddy()
 
     def clear_messages(self) -> None:
         self.query(
@@ -812,8 +940,71 @@ class ChatPanel(VerticalScroll):
         ).remove()
         self._streaming_msg = None
         self._thinking_msg = None
+        self._buddy_state = None
+        self._buddy_phase = None
+        self._buddy_token_ratio = None
+        self._buddy_tool_kind = None
+        self._buddy_tool_name = None
         self._active_tools.clear()
         self._active_subagents.clear()
+
+    def set_buddy_state(
+        self,
+        state: str | None,
+        *,
+        tool_name: str | None = None,
+        tool_kind: str | None = None,
+    ) -> None:
+        if not state or state == "idle":
+            self.clear_buddy()
+            return
+        self._buddy_state = state
+        self._buddy_tool_name = tool_name
+        self._buddy_tool_kind = tool_kind
+
+        if not self._thinking_msg:
+            self._thinking_msg = ThinkingSpinner()
+            self._safe_mount(self._thinking_msg)
+            self.scroll_end(animate=False)
+
+        self._thinking_msg.set_context(
+            state=self._buddy_state,
+            phase=self._buddy_phase,
+            token_ratio=self._buddy_token_ratio,
+            tool_kind=self._buddy_tool_kind,
+            tool_name=self._buddy_tool_name,
+        )
+
+    def update_buddy_context(
+        self,
+        *,
+        phase: str | None = None,
+        token_ratio: float | None = None,
+    ) -> None:
+        if phase:
+            self._buddy_phase = phase
+        if token_ratio is not None:
+            self._buddy_token_ratio = max(0.0, min(1.5, token_ratio))
+        if self._thinking_msg:
+            self._thinking_msg.set_context(
+                state=self._buddy_state,
+                phase=self._buddy_phase,
+                token_ratio=self._buddy_token_ratio,
+                tool_kind=self._buddy_tool_kind,
+                tool_name=self._buddy_tool_name,
+            )
+
+    def clear_buddy(self) -> None:
+        if self._thinking_msg:
+            try:
+                if self._thinking_msg.is_attached:
+                    self._thinking_msg.remove()
+            except Exception as e:
+                logger.debug("Expected failure in ChatPanel.clear_buddy remove: %s", e)
+            self._thinking_msg = None
+        self._buddy_state = None
+        self._buddy_tool_name = None
+        self._buddy_tool_kind = None
 
     def add_subagent_block(self, agent_id: str, task_label: str) -> None:
         self.end_streaming()
