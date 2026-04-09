@@ -92,6 +92,18 @@ class _ToolCycleMixin(_CyclePreludeMixin, _CycleLlmMixin, _CyclePostMixin):
             return 0.0
         return (sum(self._tool_response_times) / len(self._tool_response_times)) * 1000
 
+    def _calc_keep_recent(
+        self,
+        ctx_size: int,
+        *,
+        minimum: int = 32,
+        maximum: int = 60,
+    ) -> int:
+        if ctx_size <= 0:
+            return minimum
+        keep = int(round(30 + (ctx_size / 32768.0) * 10))
+        return max(minimum, min(maximum, keep))
+
     async def _execute_tool_with_timeout(
         self,
         tool_name: str,
@@ -391,12 +403,10 @@ class _ToolCycleMixin(_CyclePreludeMixin, _CycleLlmMixin, _CyclePostMixin):
                             {"role": "system", "content": pinned}
                         )
 
-                    _model_name = str(getattr(getattr(self, "ollama", None), "model", "") or "").lower()
-                    _is_large_qwen = "qwen" in _model_name and any(
-                        marker in _model_name for marker in ("122b", "120b", "72b")
-                    )
                     _compress_ctx = min(8192, adaptive_num_ctx // 4)
-                    _keep_recent = 50 if _is_large_qwen else 35
+                    _keep_recent = self._calc_keep_recent(
+                        adaptive_num_ctx, minimum=35, maximum=55
+                    )
                     await self.state.compress_with_llm(
                         self.ollama,
                         keep_recent=_keep_recent,
@@ -484,14 +494,10 @@ class _ToolCycleMixin(_CyclePreludeMixin, _CycleLlmMixin, _CyclePostMixin):
                                 {"role": "system", "content": pinned}
                             )
 
-                        _model_name = str(
-                            getattr(getattr(self, "ollama", None), "model", "") or ""
-                        ).lower()
-                        _is_large_qwen = "qwen" in _model_name and any(
-                            marker in _model_name for marker in ("122b", "120b", "72b")
-                        )
                         _compress_ctx = min(8192, adaptive_num_ctx // 4)
-                        _keep_recent = 45 if _is_large_qwen else 32
+                        _keep_recent = self._calc_keep_recent(
+                            adaptive_num_ctx, minimum=32, maximum=50
+                        )
                         await self.state.compress_with_llm(
                             self.ollama,
                             keep_recent=_keep_recent,
