@@ -298,6 +298,11 @@ class _LifecycleMixin:
                 logger.error(
                     "Fatal Ollama runner failure detected during context reset"
                 )
+            if "internal server error" in err_text or "500" in err_text:
+                self._disable_context_reset_until = time.time() + 900.0
+                logger.warning(
+                    "Disabling context reset for 15 minutes due to server 500 errors"
+                )
         else:
             logger.warning(
                 "Ollama context reset failed after retries (no exception details)"
@@ -460,6 +465,13 @@ Current workflow: Follow phase transitions (RECON→ANALYSIS→EXPLOIT→REPORT)
         import time
 
         now = time.time()
+        disable_until = float(getattr(self, "_disable_context_reset_until", 0.0) or 0.0)
+        if now < disable_until:
+            logger.warning(
+                "Context reset temporarily disabled (%.0fs remaining)",
+                max(0.0, disable_until - now),
+            )
+            return
 
         if not hasattr(self, "_last_context_check"):
             self._last_context_check = 0.0

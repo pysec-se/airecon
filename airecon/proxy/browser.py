@@ -6,6 +6,7 @@ import base64
 import contextlib
 import hashlib
 import hmac
+import json
 import logging
 import re
 import struct
@@ -13,6 +14,7 @@ import threading
 import time
 from datetime import datetime
 from pathlib import Path
+from urllib.parse import urlparse
 from typing import Any, Literal, cast
 
 from playwright.async_api import (
@@ -60,6 +62,18 @@ _BROWSER_ERROR_PAGE_MARKERS: tuple[str, ...] = (
     "chromewebdata",
 )
 
+_STATIC_EXTS_PATH = Path(__file__).parent / "data" / "file_extensions.json"
+try:
+    _ext_data = json.loads(_STATIC_EXTS_PATH.read_text(encoding="utf-8"))
+    _STATIC_ASSET_EXTS = {
+        str(ext).lower()
+        for ext in _ext_data.get("static", [])
+        if isinstance(ext, str)
+    }
+except Exception as _ext_err:
+    logger.debug("Failed to load file_extensions.json: %s", _ext_err)
+    _STATIC_ASSET_EXTS = set()
+
 _RETRYABLE_NAV_MARKERS: tuple[str, ...] = (
     "timeout",
     "timed out",
@@ -102,6 +116,15 @@ def _is_auth_error(err_lower: str) -> bool:
 
 def _is_browser_error_page(err_lower: str) -> bool:
     return any(m in err_lower for m in _BROWSER_ERROR_PAGE_MARKERS)
+
+
+def _is_static_asset_url(url: str) -> bool:
+    try:
+        path = urlparse(url).path
+        ext = Path(path).suffix.lstrip(".").lower()
+        return bool(ext) and ext in _STATIC_ASSET_EXTS
+    except Exception:
+        return False
 
 
 def _is_retryable_navigation_error(err_lower: str) -> bool:
@@ -490,6 +513,15 @@ class BrowserInstance:
                         )
                     seen_urls.add(current_url)
 
+                    if _is_static_asset_url(current_url) and current_url != url:
+                        logger.warning(
+                            "Redirected to static asset during navigation: %s",
+                            current_url[:200],
+                        )
+                        raise RuntimeError(
+                            f"Redirected to static asset — final URL: {current_url[:120]}"
+                        )
+
                     if redirect_count > max_redirects:
                         logger.warning(
                             f"Exceeded redirect limit ({redirect_count} > {max_redirects}) for {url!r}"
@@ -800,6 +832,18 @@ class BrowserInstance:
                 "url": url,
                 "message": "Skipped tracking/analytics URL (would cause redirect loop)",
                 "next_action": "Skip this URL — it is a third-party analytics/tracking pixel, not a target endpoint.",
+            }
+        if _is_static_asset_url(url):
+            logger.info("Browser: skipping static asset URL: %s", url[:120])
+            return {
+                "success": False,
+                "static_asset": True,
+                "url": url,
+                "message": "Skipped static asset URL (use httpx/curl instead of browser).",
+                "next_action": (
+                    "Skip static assets in browser automation. Use httpx or read_file "
+                    "if you need the content."
+                ),
             }
 
         tab_id = self._resolve_tab_id(tab_id)
@@ -2180,6 +2224,7 @@ class BrowserTabManager:
             is_redirect_loop = (
                 "too many redirects" in error_lower
                 or "redirect loop" in error_lower
+                or "redirected to static asset" in error_lower
             )
             if is_redirect_loop:
                 # Extract the final URL from the error if present
@@ -2227,6 +2272,39 @@ class BrowserTabManager:
                         "setting valid credentials."
                     ),
                 }
+
+            if action_name == "goto" and "timeout" in error_lower:
+                try:
+                    inst = self._ensure_launched()
+                    tab_id = inst.current_page_id
+                    if tab_id:
+                        try:
+                            inst._run_async(
+                                inst._execute_js("window.stop()", tab_id)  # type: ignore[arg-type]
+                            )
+                        except Exception as stop_err:
+                            logger.debug("window.stop() failed after timeout: %s", stop_err)
+                        state = inst._run_async(inst._get_page_state(tab_id))
+                        state.update(
+                            {
+                                "success": False,
+                                "timed_out": True,
+                                "warning": "Navigation timed out; partial page state returned.",
+                                "next_action": (
+                                    "If this is an auth/SSO endpoint, use browser_action login_form "
+                                    "or switch to http_observe for headers/cookies."
+                                ),
+                            }
+                        )
+                        logger.warning(
+                            "Browser goto timed out; returning partial state (%s)",
+                            error_str[:200],
+                        )
+                        return state
+                except Exception as salvage_err:
+                    logger.debug(
+                        "Failed to salvage page state after timeout: %s", salvage_err
+                    )
 
             is_crash = any(
                 k in error_lower

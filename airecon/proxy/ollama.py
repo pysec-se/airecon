@@ -485,6 +485,9 @@ class OllamaClient:
 
                             if _next_fut is None:
                                 _next_fut = asyncio.ensure_future(_aiter.__anext__())
+                                _next_fut.add_done_callback(
+                                    lambda fut: fut.exception()
+                                )
 
                             remaining = _chunk_timeout - elapsed
                             wait = (
