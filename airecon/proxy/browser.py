@@ -2305,6 +2305,26 @@ class BrowserTabManager:
                     logger.debug(
                         "Failed to salvage page state after timeout: %s", salvage_err
                     )
+                logger.warning(
+                    "Browser goto timed out; returning fallback response (%s)",
+                    error_str[:200],
+                )
+                url = ""
+                if args:
+                    url = str(args[0])
+                elif "url" in kwargs:
+                    url = str(kwargs.get("url", ""))
+                return {
+                    "success": False,
+                    "timed_out": True,
+                    "url": url[:200] if url else "",
+                    "error": error_str[:500],
+                    "message": "Navigation timed out; target may be slow or blocked.",
+                    "next_action": (
+                        "Switch to http_observe/httpx for headers or retry later with a shorter timeout. "
+                        "Avoid repeated browser goto on the same host."
+                    ),
+                }
 
             is_crash = any(
                 k in error_lower

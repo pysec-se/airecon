@@ -302,9 +302,10 @@ use Caido to fuzz the username parameter in request #45 with §FUZZ§ markers
 
 ```
 workspace/<target>/
-├── output/          # Raw tool outputs (nmap, httpx, nuclei, subfinder, ...)
-├── tools/           # AI-generated exploit scripts (.py, .sh)
-└── vulnerabilities/ # Verified vulnerability reports (.md)
+      ├── command/         # system-managed logs
+      ├── output/          # Raw tool outputs (nmap, httpx, nuclei, subfinder, ...)
+      ├── tools/           # AI-generated exploit scripts (.py, .sh)
+      └── vulnerabilities/ # Verified vulnerability reports (.md)
 ```
 
 Sessions persist at `~/.airecon/sessions/<session_id>.json` — subdomains, ports, technologies, URLs, vulnerabilities (Jaccard dedup), auth tokens, and completed phases.
