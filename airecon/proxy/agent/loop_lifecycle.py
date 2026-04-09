@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
+import time
 
 from ..config import get_config
 from ..memory import get_memory_manager
@@ -284,6 +285,15 @@ class _LifecycleMixin:
                     )
                     self._context_reset_failures = 0
                     return True
+                status = getattr(self.ollama, "_last_reset_status", None)
+                err_text = str(getattr(self.ollama, "_last_reset_error", "") or "").lower()
+                if status == 500 or "internal server error" in err_text:
+                    last_error = RuntimeError(err_text or "internal server error")
+                    self._disable_context_reset_until = time.time() + 900.0
+                    logger.warning(
+                        "Disabling context reset for 15 minutes due to server 500 errors"
+                    )
+                    break
             except Exception as e:
                 last_error = e
 

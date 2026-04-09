@@ -247,6 +247,20 @@ class _ObserveExecutorMixin:
                 or exec_result.get("output")
                 or ""
             )
+            raw_output_file: str | None = None
+            if raw_output:
+                try:
+                    active_target = self.state.active_target or "unknown"
+                    output_dir = get_workspace_root() / active_target / "output"
+                    output_dir.mkdir(parents=True, exist_ok=True)
+                    timestamp = time.strftime("%Y%m%d_%H%M%S")
+                    filename = f"http_observe_raw_{timestamp}.txt"
+                    raw_path = output_dir / filename
+                    raw_path.write_text(raw_output, encoding="utf-8", errors="replace")
+                    raw_output_file = f"output/{filename}"
+                    self._last_output_file = raw_output_file
+                except Exception as _e:
+                    logger.debug("Failed to save http_observe raw output: %s", _e)
             exec_error = exec_result.get("error") or exec_result.get("stderr") or ""
             exec_success = bool(exec_result.get("success", True))
             exit_code = exec_result.get("exit_code")
@@ -285,6 +299,9 @@ class _ObserveExecutorMixin:
             "body_size_bytes": body_size,
             "response_time_ms": int((time.time() - start_time) * 1000),
         }
+        if raw_output_file:
+            result["raw_output_file"] = raw_output_file
+            result["raw_output_preview"] = raw_output[:2000]
         if exec_error and not exec_success:
             result["error"] = exec_error[:500]
 

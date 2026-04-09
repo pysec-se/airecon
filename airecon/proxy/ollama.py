@@ -178,6 +178,8 @@ class OllamaClient:
     async def reset_context(self, system_prompt: str | None = None) -> bool:
         cfg = get_config()
         timeout = cfg.ollama_timeout
+        self._last_reset_error = ""
+        self._last_reset_status = None
 
         try:
             messages = []
@@ -202,8 +204,12 @@ class OllamaClient:
                 "Ollama context reset timeout after %.0fs",
                 timeout,
             )
+            self._last_reset_error = "timeout"
             return False
         except httpx.HTTPError as e:
+            self._last_reset_error = str(e)
+            if getattr(e, "response", None) is not None:
+                self._last_reset_status = e.response.status_code
             logger.error("Ollama context reset failed: %s", e)
             return False
 
