@@ -2558,6 +2558,7 @@ def browser_action(
     js_code: str | None = None,
     parallel: bool = False,
     duration: float | None = None,
+    wait: float | None = None,
     key: str | None = None,
     file_path: str | None = None,
     clear: bool = False,
@@ -2569,6 +2570,7 @@ def browser_action(
     totp_secret: str | None = None,
     field_selector: str | None = None,
     cookies: list[dict[str, Any]] | None = None,
+    oauth_url: str | None = None,
     callback_prefix: str = "",
     multi_step: bool = False,
     totp_digits: int = 6,
@@ -2580,6 +2582,13 @@ def browser_action(
     sitekey: str | None = None,
 ) -> dict[str, Any]:
     try:
+        if wait is not None:
+            if duration is None:
+                duration = wait
+            if wait_timeout == 10.0:
+                wait_timeout = wait
+        if url is None and oauth_url:
+            url = oauth_url
         if action == "launch":
             return _manager.launch_browser(url)
         elif action == "goto":

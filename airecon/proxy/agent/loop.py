@@ -860,11 +860,18 @@ class AgentLoop(
         _caido_autos = self.state.tool_counts.get("caido_automate", 0)
         _caido_findings = _caido_sends + _caido_autos
         _caido_available = bool(getattr(self, "_caido_available", False))
+        current_phase = None
+        try:
+            if self._session:
+                current_phase = self._session.current_phase
+        except Exception:
+            current_phase = None
         return {
             "message_count": len(self.state.conversation),
             "tool_counts": dict(self.state.tool_counts),
             "token_usage": dict(self.state.token_usage),
             "skills_used": list(self.state.skills_used),
+            "phase": current_phase,
             "caido": {
                 "active": _caido_available or _caido_findings > 0,
                 "findings_count": _caido_findings,

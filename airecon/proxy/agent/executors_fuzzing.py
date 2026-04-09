@@ -6,7 +6,7 @@ import time
 from pathlib import Path
 from typing import Any
 
-from ..config import get_workspace_root
+from ..config import get_config, get_workspace_root
 from ..fuzzer import FUZZ_PAYLOADS as _FUZZ_PAYLOAD_KEYS
 from .models import ToolExecution
 from .utils import (
@@ -232,6 +232,7 @@ class _FuzzingExecutorMixin:
         start_time = time.time()
         target = arguments.get("target", "")
         params = arguments.get("params") or None
+        cfg = get_config()
 
         if not self._is_target_in_scope(target):
             return _handle_oos(self, tool_name, arguments, target, start_time)
@@ -241,7 +242,7 @@ class _FuzzingExecutorMixin:
                 quick_fuzz_url(
                     url=target, params=params, headers=self._build_fuzz_headers()
                 ),
-                timeout=300.0,
+                timeout=float(getattr(cfg, "fuzzer_quick_timeout_seconds", 300.0)),
             )
 
             if not results:
@@ -267,8 +268,28 @@ class _FuzzingExecutorMixin:
             _record_tool_completion(
                 self, tool_name, arguments, res_dict, start_time, success=True
             )
+        except asyncio.TimeoutError:
+            res_dict = {
+                "success": False,
+                "error": "quick_fuzz timed out",
+                "timed_out": True,
+            }
+            _record_tool_completion(
+                self, tool_name, arguments, res_dict, start_time, success=False
+            )
+            return False, time.time() - start_time, res_dict, None
+        except asyncio.CancelledError:
+            res_dict = {
+                "success": False,
+                "error": "quick_fuzz cancelled",
+                "cancelled": True,
+            }
+            _record_tool_completion(
+                self, tool_name, arguments, res_dict, start_time, success=False
+            )
+            return False, time.time() - start_time, res_dict, None
         except Exception as e:
-            logger.error("quick_fuzz error: %s", e)
+            logger.error("quick_fuzz error: %r", e)
             res_dict = {"success": False, "error": str(e)}
             _record_tool_completion(
                 self, tool_name, arguments, res_dict, start_time, success=False

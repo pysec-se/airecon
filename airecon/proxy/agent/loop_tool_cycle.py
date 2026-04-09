@@ -101,6 +101,16 @@ class _ToolCycleMixin(_CyclePreludeMixin, _CycleLlmMixin, _CyclePostMixin):
     ) -> tuple:
         self._ensure_timing_tracker()
         timeout = float(getattr(cfg, "per_tool_timeout_seconds", 600.0))
+        if tool_name in {"quick_fuzz", "advanced_fuzz", "deep_fuzz"}:
+            if tool_name == "quick_fuzz":
+                fuzz_timeout = float(
+                    getattr(cfg, "fuzzer_quick_timeout_seconds", timeout)
+                )
+            else:
+                fuzz_timeout = float(
+                    getattr(cfg, "fuzzer_deep_timeout_seconds", timeout)
+                )
+            timeout = max(timeout, fuzz_timeout)
 
         try:
             if exec_mode == "browser_action":
@@ -388,16 +398,35 @@ class _ToolCycleMixin(_CyclePreludeMixin, _CycleLlmMixin, _CyclePostMixin):
                 )
                 continue
 
+            _num_predict_cap: int | None = None
             if _ctx_used > 0 and adaptive_num_ctx > 0:
                 _iter_num_predict = self._get_iteration_num_predict(
                     cfg, current_phase, adaptive_num_ctx
                 )
+                _usage_ratio_ctx = _ctx_used / adaptive_num_ctx
+                if _usage_ratio_ctx >= 0.75:
+                    _predict_cap = max(1024, int(adaptive_num_ctx * 0.03))
+                elif _usage_ratio_ctx >= 0.65:
+                    _predict_cap = max(2048, int(adaptive_num_ctx * 0.05))
+                else:
+                    _predict_cap = _iter_num_predict
+                _num_predict_cap = _predict_cap
+
+                if _iter_num_predict > _predict_cap:
+                    logger.info(
+                        "High context usage (%.0f%%) — clamping num_predict %d → %d",
+                        _usage_ratio_ctx * 100,
+                        _iter_num_predict,
+                        _predict_cap,
+                    )
+                    _iter_num_predict = _predict_cap
+
                 _effective_input_ctx = max(1024, adaptive_num_ctx - _iter_num_predict)
                 _usage_ratio = _ctx_used / _effective_input_ctx
 
-                _trim_threshold = 0.45 if self._ctf_mode else 0.50
+                _trim_threshold = 0.50 if self._ctf_mode else 0.55
 
-                _hard_cap_ratio = 0.65
+                _hard_cap_ratio = 0.70 if self._ctf_mode else 0.80
 
                 if _usage_ratio >= _hard_cap_ratio:
                     logger.error(
@@ -504,6 +533,13 @@ class _ToolCycleMixin(_CyclePreludeMixin, _CycleLlmMixin, _CyclePostMixin):
             adaptive_num_predict = self._get_iteration_num_predict(
                 cfg, current_phase, adaptive_num_ctx
             )
+            if _num_predict_cap is not None and adaptive_num_predict > _num_predict_cap:
+                logger.info(
+                    "Applying num_predict cap %d → %d before inference",
+                    adaptive_num_predict,
+                    _num_predict_cap,
+                )
+                adaptive_num_predict = _num_predict_cap
 
             # Inject full vulnerability evidence when entering REPORT phase
             # BEFORE char budget so enforced budget accounts for injected data.
