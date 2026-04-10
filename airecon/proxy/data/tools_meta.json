@@ -719,6 +719,7 @@
       "caido_list_requests"
     ],
     "ANALYSIS": [
+      "code_analysis",
       "caido_list_requests",
       "caido_send_request",
       "caido_sitemap"
@@ -727,6 +728,7 @@
       "quick_fuzz",
       "advanced_fuzz",
       "deep_fuzz",
+      "generate_wordlist",
       "spawn_agent",
       "schemathesis_fuzz",
       "caido_send_request",
@@ -741,6 +743,27 @@
     "create_file",
     "read_file",
     "list_files"
+  ],
+  "callable_core_tools": [
+    "execute",
+    "browser_action",
+    "request_user_input",
+    "create_file",
+    "read_file",
+    "list_files",
+    "web_search",
+    "caido_intercept",
+    "http_observe",
+    "record_hypothesis",
+    "load_skill",
+    "python_session",
+    "edit_file",
+    "think",
+    "create_note",
+    "list_notes",
+    "export_notes_wiki",
+    "search_notes",
+    "read_note"
   ],
   "tool_descriptions": {
     "nmap": "Network scanner — ports, services, OS, vulnerabilities (-sV, -O, --script vuln)",
@@ -962,11 +985,12 @@
       "dalfox": "dalfox — XSS Scanner Usage Guide for AIRecon",
       "hashcat_john": "Password cracking with hashcat and John the Ripper — hash identification, attack modes, rules, wordlists, specific hash types for Windows NTLM, Linux shadow, web hashes, and Kerberos tickets",
       "impacket": "Impacket toolkit — secretsdump, psexec, wmiexec, smbexec, GetUserSPNs, GetNPUsers, ntlmrelayx, ticketer, and other Windows protocol attack tools in Kali Linux",
-      "install": "install.md",
+      "install": "Environment bootstrap and tool installation workflow for AIRecon.",
       "metasploit": "Metasploit Framework — module selection, msfconsole workflow, msfvenom payload generation, handlers, meterpreter post-exploitation, and common exploit modules for pentest/CTF",
       "nmap": "nmap & naabu — Usage Guide for AIRecon",
       "nuclei": "Nuclei — Usage Guide for AIRecon",
-      "scripting": "scripting.md",
+      "reporting": "Reporting workflow for working notes, evidence curation, and final create_vulnerability_report usage.",
+      "scripting": "Custom scripting and raw HTTP automation patterns for AIRecon tools such as execute, python_session, edit_file, and http_observe.",
       "semgrep": "semgrep — Usage Guide for AIRecon",
       "source_audit": "source_audit — Source Code Security Analysis Guide",
       "sqlmap": "sqlmap & ghauri — Usage Guide for AIRecon",

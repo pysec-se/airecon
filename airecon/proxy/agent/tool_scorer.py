@@ -7,7 +7,7 @@ from pathlib import Path
 from typing import Any
 
 from ..data_loader import load_vuln_hypothesis_legacy
-from ..system import _discover_all_skills, _phase_preferred_skill_dirs
+from ..system import _SKILL_KEYWORDS, _discover_all_skills, _phase_preferred_skill_dirs
 from .vuln_classifier import get_classifier
 
 logger = logging.getLogger("airecon.agent.tool_scorer")
@@ -22,42 +22,40 @@ except Exception as _e:
     _TOOLS_META = {}
 
 
-# ── Derive core tools from tools.json (agent-level tools always available) ──
-def _derive_core_tools() -> frozenset[str]:
-    """Core tools = tools that are NOT categorized in tools_meta.json subcategories.
-    These are agent-level tools (execute, browser_action, create_file, etc.)
-    loaded dynamically from tools.json."""
-    core: set[str] = set()
+def _load_callable_tool_registry() -> tuple[frozenset[str], dict[str, str]]:
+    names: set[str] = set()
+    descriptions: dict[str, str] = {}
     try:
-        tools_path = _TOOLS_JSON_PATH
-        if tools_path.exists():
-            tools_list = json.loads(tools_path.read_text(encoding="utf-8"))
+        if _TOOLS_JSON_PATH.exists():
+            tools_list = json.loads(_TOOLS_JSON_PATH.read_text(encoding="utf-8"))
             for tool_def in tools_list:
-                name = tool_def.get("function", {}).get("name", "")
-                if name:
-                    core.add(name)
+                function_def = tool_def.get("function", {})
+                name = str(function_def.get("name", "") or "").strip()
+                if not name:
+                    continue
+                names.add(name)
+                description = str(function_def.get("description", "") or "").strip()
+                if description:
+                    descriptions[name.lower()] = description
     except Exception as exc:
-        logger.warning("Operation failed: %s", exc)
-    # Remove tools that belong to specific categories in tools_meta.json
-    categories = _TOOLS_META.get("categories", {})
-    categorized: set[str] = set()
-    for group in categories.values():
-        if isinstance(group, dict):
-            for tool_list in group.values():
-                if isinstance(tool_list, list):
-                    categorized.update(tool_list)
-    # Core = tools.json tools MINUS categorized tools from tools_meta.json
-    core_tools = core - categorized
-    # Always include these agent-level tools
-    core_tools |= {
-        "execute",
-        "browser_action",
-        "web_search",
-        "create_file",
-        "read_file",
-        "list_files",
-    }
-    return frozenset(core_tools)
+        logger.warning("Failed to load callable tool registry: %s", exc)
+    return frozenset(names), descriptions
+
+
+_CALLABLE_TOOL_NAMES, _CALLABLE_TOOL_DESCRIPTIONS = _load_callable_tool_registry()
+
+
+def _derive_core_tools() -> frozenset[str]:
+    configured = _TOOLS_META.get("callable_core_tools", [])
+    if not isinstance(configured, list):
+        return frozenset()
+
+    callable_lookup = {name.lower() for name in _CALLABLE_TOOL_NAMES}
+    return frozenset(
+        str(name).strip()
+        for name in configured
+        if str(name).strip() and str(name).strip().lower() in callable_lookup
+    )
 
 
 _CORE_TOOLS = _derive_core_tools()
@@ -85,17 +83,21 @@ def _lookup_category(categories: dict, name: str) -> set[str]:
     return tools
 
 
-def _collect_all_known_tools() -> set[str]:
-    """Collect ALL tool names from tools_meta.json categories."""
-    all_tools: set[str] = set()
+def _collect_shell_binary_names() -> set[str]:
+    """Collect shell-executed tool names from tools_meta.json categories."""
+    shell_tools: set[str] = set()
     categories = _TOOLS_META.get("categories", {})
     if isinstance(categories, dict):
         for group in categories.values():
             if isinstance(group, dict):
                 for tool_list in group.values():
                     if isinstance(tool_list, list):
-                        all_tools.update(t for t in tool_list if isinstance(t, str))
-    return all_tools
+                        shell_tools.update(t for t in tool_list if isinstance(t, str))
+    return shell_tools
+
+
+def _collect_all_known_tools() -> set[str]:
+    return set(_CALLABLE_TOOL_NAMES) | _collect_shell_binary_names()
 
 
 def _normalize_signal_term(text: str) -> str:
@@ -149,7 +151,7 @@ def _build_tool_vuln_label_map() -> dict[str, set[str]]:
                     parts.append(str(subcat_name))
         return " ".join(parts)
 
-    for tool_name in _collect_all_known_tools() | set(_CORE_TOOLS):
+    for tool_name in _collect_all_known_tools():
         searchable = _searchable_text(tool_name)
         if not searchable:
             continue
@@ -233,49 +235,13 @@ def _build_phase_blocked() -> dict[str, set[str]]:
 
 _PHASE_APPROPRIATE_TOOLS: dict[str, set[str]] = _build_phase_appropriate()
 _PHASE_BLOCKED_TOOLS: dict[str, set[str]] = _build_phase_blocked()
-_KNOWN_TOOL_BINARIES: set[str] = _collect_all_known_tools()
+_KNOWN_TOOL_BINARIES: set[str] = _collect_shell_binary_names()
 _TOOL_VULN_LABEL_MAP: dict[str, set[str]] = _build_tool_vuln_label_map()
 _ALL_SKILLS: dict[str, str] = _load_all_skills()
 
 
 # Shell binary descriptions sourced from tools_meta.json["tool_descriptions"]
 # No hardcoded descriptions in Python code — all maintained in JSON.
-
-# Map phases to relevant shell binary subcategory names from tools_meta.json
-_PHASE_SHELL_CATEGORIES = {
-    "RECON": {
-        "subdomain_enum",
-        "port_scan",
-        "web_probing",
-        "fingerprinting",
-        "crawling",
-        "live_host_probe",
-        "directory_bruteforce",
-        "parameter_discovery",
-        "extraction",
-    },
-    "ANALYSIS": {
-        "generic_scanners",
-        "cms_scanners",
-        "fuzzing",
-        "specific_vulnerabilities",
-        "evasion_and_waf",
-        "analysis",
-        "code_analysis",
-    },
-    "EXPLOIT": {
-        "specific_vulnerabilities",
-        "advanced_injection",
-        "evasion_and_waf",
-        "network_pivoting",
-        "networking",
-        "bruteforce",
-        "priv_esc",
-        "cloud_exploitation",
-    },
-    "REPORT": set(),
-}
-
 
 def _collect_shell_binary_descriptions() -> dict[str, str]:
     """Return mapping of shell binary name → description from tools_meta.json."""
@@ -287,13 +253,13 @@ def _collect_shell_binary_descriptions() -> dict[str, str]:
 
 def _match_shells_for_phase(phase: str) -> set[str]:
     """Return shell binaries relevant for the given phase."""
-    cats = _PHASE_SHELL_CATEGORIES.get(phase, set())
-    if not cats:
+    category_names = _CATEGORY_PHASE_MAP.get(phase, [])
+    if not category_names:
         return set()
 
     result: set[str] = set()
     categories = _TOOLS_META.get("categories", {})
-    for cat_name in cats:
+    for cat_name in category_names:
         for group in categories.values():
             if isinstance(group, dict) and cat_name in group:
                 tlist = group[cat_name]
@@ -317,6 +283,30 @@ def _resolve_skill_labels(skill_stem: str, description: str = "") -> set[str]:
     return {label for label in labels if label and label != "UNKNOWN"}
 
 
+def _lookup_skill_description(skills_catalog: dict[str, Any], rel_path: str) -> str:
+    category = rel_path.split("/", 1)[0] if "/" in rel_path else rel_path
+    stem = Path(rel_path).stem.lower()
+    category_catalog = skills_catalog.get(category, {})
+    if isinstance(category_catalog, dict):
+        return str(category_catalog.get(stem, ""))
+    return ""
+
+
+def _resolve_explicit_skill_paths(terms: list[str]) -> list[str]:
+    paths: list[str] = []
+    seen: set[str] = set()
+    for term in terms:
+        key = str(term or "").strip().lower()
+        if not key:
+            continue
+        rel_path = str(_SKILL_KEYWORDS.get(key, "") or "").strip()
+        if not rel_path or rel_path in seen or rel_path not in _ALL_SKILLS:
+            continue
+        seen.add(rel_path)
+        paths.append(rel_path)
+    return paths
+
+
 def _build_skill_catalog_entries(
     phase: str,
     context_tools: list[str] | None = None,
@@ -325,8 +315,7 @@ def _build_skill_catalog_entries(
     max_entries: int = 10,
 ) -> list[str]:
     skills_catalog = _TOOLS_META.get("skills_catalog", {})
-    preferred_dirs = _phase_preferred_skill_dirs(phase)
-    if not isinstance(skills_catalog, dict) or not _ALL_SKILLS or not preferred_dirs:
+    if not isinstance(skills_catalog, dict) or not _ALL_SKILLS:
         return []
 
     context_terms = [
@@ -334,7 +323,9 @@ def _build_skill_catalog_entries(
         for term in [*(context_tools or []), chain_step_hint, wrong_tool_picked]
         if str(term).strip()
     ]
+    preferred_dirs = _phase_preferred_skill_dirs(phase)
     normalized_terms = {_normalize_signal_term(term) for term in context_terms if term}
+    explicit_paths = _resolve_explicit_skill_paths(context_terms)
 
     classifier = get_classifier()
     context_labels: set[str] = set()
@@ -348,19 +339,33 @@ def _build_skill_catalog_entries(
             context_labels.add(result.subcategory)
 
     scored: list[tuple[int, str, str]] = []
+    explicit_set = set(explicit_paths)
+    for index, rel_path in enumerate(explicit_paths):
+        description = _lookup_skill_description(skills_catalog, rel_path)
+        scored.append((1000 - index, rel_path, description))
+
+    if not preferred_dirs:
+        entries: list[str] = []
+        for _, rel_path, description in scored[:max_entries]:
+            if description:
+                desc = description[:177] + "..." if len(description) > 180 else description
+                entries.append(f"    - skills/{rel_path}: {desc}")
+            else:
+                entries.append(f"    - skills/{rel_path}")
+        return entries
+
     for rel_path, stem in _ALL_SKILLS.items():
+        if rel_path in explicit_set:
+            continue
         category = rel_path.split("/", 1)[0] if "/" in rel_path else rel_path
         if category not in preferred_dirs:
             continue
 
-        description = ""
-        category_catalog = skills_catalog.get(category, {})
-        if isinstance(category_catalog, dict):
-            description = str(category_catalog.get(stem, ""))
+        description = _lookup_skill_description(skills_catalog, rel_path)
 
         rel_norm = _normalize_signal_term(rel_path)
         stem_norm = _normalize_signal_term(stem)
-        score = 2
+        score = 0 if normalized_terms or context_labels or explicit_paths else 1
 
         for term_norm in normalized_terms:
             if not term_norm:
@@ -373,9 +378,6 @@ def _build_skill_catalog_entries(
         overlap = _resolve_skill_labels(stem, description) & context_labels
         if overlap:
             score += 4 + len(overlap)
-
-        if not normalized_terms and category in preferred_dirs:
-            score += 1
 
         if score > 0:
             scored.append((score, rel_path, description))
@@ -738,6 +740,15 @@ def build_tool_recommendation_context(
     appropriate = _PHASE_APPROPRIATE_TOOLS.get(phase_upper, set())
     top_tools: list[str] = []
     if appropriate:
+        callable_registry_names = {
+            str(tdef.get("function", {}).get("name", "") or "").strip()
+            for tdef in (tool_registry or [])
+            if isinstance(tdef, dict)
+        }
+        callable_registry_lookup = {
+            tool_name.lower() for tool_name in callable_registry_names if tool_name
+        }
+
         def _tool_priority(name: str) -> tuple[float, str]:
             if not tool_scores:
                 return (0.0, name)
@@ -751,10 +762,21 @@ def build_tool_recommendation_context(
                 score = 0.0
             return (-score, name)
 
-        top_tools = sorted(appropriate, key=_tool_priority)[:15]
+        callable_lookup = {name.lower() for name in _CALLABLE_TOOL_NAMES}
+        callable_candidates = [
+            name
+            for name in appropriate
+            if name.lower() in callable_lookup
+            and (
+                not callable_registry_names
+                or name in callable_registry_names
+                or name.lower() in callable_registry_lookup
+            )
+        ]
+        top_tools = sorted(callable_candidates, key=_tool_priority)[:15]
 
         # Build a named→description lookup from the tool registry
-        desc_map: dict[str, str] = {}
+        desc_map: dict[str, str] = dict(_CALLABLE_TOOL_DESCRIPTIONS)
         if tool_registry:
             for tdef in tool_registry:
                 fn = tdef.get("function", {}) if isinstance(tdef, dict) else {}
@@ -763,7 +785,7 @@ def build_tool_recommendation_context(
                 if tname and tdesc:
                     desc_map[tname.lower()] = tdesc
 
-        tool_lines: list[str] = []
+        callable_lines: list[str] = []
         for tname in top_tools:
             tl = tname.lower()
             desc = desc_map.get(tl, "")
@@ -771,11 +793,16 @@ def build_tool_recommendation_context(
                 # Truncate long descriptions
                 if len(desc) > 200:
                     desc = desc[:197] + "..."
-                tool_lines.append(f"    - {tname}: {desc}")
+                callable_lines.append(f"    - {tname}: {desc}")
             else:
-                tool_lines.append(f"    - {tname}")
+                callable_lines.append(f"    - {tname}")
 
-        # Add known shell binaries accessible via execute()
+        guidance_lines: list[str] = []
+        if callable_lines:
+            guidance_lines.append("  Recommended callable tools for this phase:")
+            guidance_lines.extend(callable_lines)
+
+        # Add known shell binaries accessible via execute(command='...')
         shell_binaries = _collect_shell_binary_descriptions()
         relevant_shells = _match_shells_for_phase(phase_upper)
         if relevant_shells:
@@ -791,14 +818,15 @@ def build_tool_recommendation_context(
                     shell_lines.append(f"    - {shell_name}")
                 if len(shell_lines) >= 25:
                     break
-            tool_lines.append("")
-            tool_lines.append("  You can ALSO run these via execute(command='...'):")
-            tool_lines.extend(shell_lines)
+
+            if guidance_lines:
+                guidance_lines.append("")
+            guidance_lines.append("  Useful execute(command='...') binaries for this phase:")
+            guidance_lines.extend(shell_lines)
 
         parts.append(
             '<tool_guidance phase="' + phase_upper + '">\n'
-            "  Recommended tools for this phase (with descriptions):\n"
-            + "\n".join(tool_lines)
+            + "\n".join(guidance_lines)
             + "\n  Prioritize tools that advance your current objective.\n"
             "</tool_guidance>"
         )
