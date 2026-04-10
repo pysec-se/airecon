@@ -5,6 +5,7 @@ import logging
 import time
 from typing import Any
 
+from .constants import MINI_AGENT_BLOCKED_TOOLS
 from .executors_catalog import (
     _SPECIALIST_PREFIXES,
     _safe_non_negative_int,
@@ -200,7 +201,7 @@ class _InteractiveExecutorMixin:
 
             agent._override_max_iterations = 100
 
-            agent._blocked_tools = {"spawn_agent", "run_parallel_agents"}
+            agent._blocked_tools = set(MINI_AGENT_BLOCKED_TOOLS)
 
             _sub_iters = 0
             async for _ in agent.process_message(prompt):

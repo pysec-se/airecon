@@ -265,7 +265,7 @@ class Fuzzer:
     async def __aenter__(self) -> "Fuzzer":
         return self
 
-    async def __aexit__(self, exc_type, exc, tb) -> None:
+    async def __aexit__(self, *_: object) -> None:
         await self.close()
 
     @staticmethod

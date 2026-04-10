@@ -386,27 +386,6 @@ def _run_status(args) -> None:
 
     asyncio.run(check())
 
-
-def _set_config_value(key: str, value: str) -> None:
-    import json
-    from pathlib import Path
-
-    config_file = Path.home() / ".airecon" / "config.json"
-    try:
-        current: dict = {}
-        if config_file.exists():
-            with open(config_file) as f:
-                current = json.load(f)
-        current[key] = value
-        with open(config_file, "w") as f:
-            json.dump(current, f, indent=4)
-        from airecon.proxy.config import reload_config
-
-        reload_config()
-    except Exception as e:
-        print(f"[!] Could not update config {key}: {e}")
-
-
 def _unload_model_safely():
     import json
     import shutil
@@ -696,32 +675,6 @@ def _run_clean(args) -> None:
             stderr=subprocess.DEVNULL,
             timeout=120,
         )
-
-    def get_docker_df() -> dict:
-        r = run(["docker", "system", "df", "--format", "{{json .}}"], capture=True)
-        totals = {"images": "?", "containers": "?", "volumes": "?", "cache": "?"}
-        if r.returncode == 0:
-            import json
-
-            for line in r.stdout.decode(errors="replace").splitlines():
-                line = line.strip()
-                if not line:
-                    continue
-                try:
-                    obj = json.loads(line)
-                    t = obj.get("Type", "")
-                    reclaimable = obj.get("Reclaimable", "?")
-                    if "Image" in t:
-                        totals["images"] = reclaimable
-                    elif "Container" in t:
-                        totals["containers"] = reclaimable
-                    elif "Volume" in t:
-                        totals["volumes"] = reclaimable
-                    elif "Cache" in t or "Build" in t:
-                        totals["cache"] = reclaimable
-                except Exception as e:
-                    logger.debug("Failed to parse docker df line: %s", e)
-        return totals
 
     print(f"\n{BOLD}{BROOM} AIRecon Docker Cleanup{RESET}")
     print("─" * 48)

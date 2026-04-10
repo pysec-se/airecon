@@ -4,10 +4,10 @@ import logging
 from dataclasses import dataclass, field
 from typing import Any, AsyncIterator
 
+from .constants import AgentRole, MINI_AGENT_BLOCKED_TOOLS
 from .models import AgentEvent
 from .pipeline import PipelineEngine
 from .session import session_to_context
-from .constants import AgentRole
 
 logger = logging.getLogger("airecon.agent.graph")
 
@@ -109,7 +109,7 @@ class AgentGraph:
             agent = AgentLoop(ollama=self.ollama, engine=self.engine)
             await agent.initialize(target=self.target)
             agent._override_max_iterations = node.max_iterations
-            agent._blocked_tools = {"spawn_agent", "run_parallel_agents"}
+            agent._blocked_tools = set(MINI_AGENT_BLOCKED_TOOLS)
             agent._session = shared_session
             agent.pipeline = PipelineEngine(shared_session)
 
