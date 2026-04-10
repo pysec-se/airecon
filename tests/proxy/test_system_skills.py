@@ -44,6 +44,15 @@ def test_auto_load_code_review_prefers_code_review_skill():
     assert "tools/code_review.md" in loaded
 
 
+def test_auto_load_exact_tool_skill_does_not_add_phase_noise():
+    ctx, loaded = auto_load_skills_for_message(
+        "use browser_action on the login flow",
+        phase="EXPLOIT",
+    )
+    assert "tools/browser_automation.md" in loaded
+    assert not any(skill.startswith("ctf/") for skill in loaded)
+
+
 def test_auto_load_mobile_pentest_skill_keywords():
     ctx, loaded = auto_load_skills_for_message(
         "need android apk pentest with frida and objection"

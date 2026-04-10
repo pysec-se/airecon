@@ -5,6 +5,7 @@ from __future__ import annotations
 from airecon.proxy.agent.tool_scorer import (
     _PHASE_BLOCKED_TOOLS,
     _PHASE_APPROPRIATE_TOOLS,
+    _build_skill_catalog_entries,
     build_tool_recommendation_context,
     extract_binary_from_command,
     rank_tools_for_phase,
@@ -175,6 +176,20 @@ class TestBuildToolRecommendationContext:
         ctx = build_tool_recommendation_context(current_phase="RECON")
         assert "<system_tool_intelligence>" in ctx
 
+    def test_recon_guidance_separates_callable_tools_from_shell_binaries(self):
+        ctx = build_tool_recommendation_context(current_phase="RECON")
+        assert "Recommended callable tools for this phase" in ctx
+        assert "Useful execute(command='...') binaries for this phase" in ctx
+
+        callable_section, shell_section = ctx.split(
+            "  Useful execute(command='...') binaries for this phase:",
+            maxsplit=1,
+        )
+        assert "browser_action" in callable_section
+        assert "amass" not in callable_section
+        assert "advanced_fuzz" not in callable_section
+        assert "amass" in shell_section
+
     def test_dynamic_skill_entries_follow_chain_hint(self):
         ctx = build_tool_recommendation_context(
             current_phase="EXPLOIT",
@@ -192,8 +207,28 @@ class TestBuildToolRecommendationContext:
 
     def test_analysis_skill_entries_stay_in_analysis_domains(self):
         ctx = build_tool_recommendation_context(current_phase="ANALYSIS")
-        assert "skills/vulnerabilities/" in ctx or "skills/frameworks/" in ctx
+        assert (
+            "skills/vulnerabilities/" in ctx
+            or "skills/frameworks/" in ctx
+            or "skills/tools/source_audit.md" in ctx
+            or "skills/tools/semgrep.md" in ctx
+            or "skills/tools/code_review.md" in ctx
+        )
         assert "skills/payloads/" not in ctx
+
+    def test_exact_browser_skill_match_avoids_protocol_noise(self):
+        entries = _build_skill_catalog_entries("RECON", context_tools=["browser_action"])
+        assert entries
+        assert entries[0].startswith("    - skills/tools/browser_automation.md")
+        assert not any("skills/protocols/" in entry for entry in entries)
+
+    def test_reporting_tool_exact_skill_match_available(self):
+        entries = _build_skill_catalog_entries(
+            "REPORT",
+            context_tools=["create_vulnerability_report"],
+        )
+        assert entries
+        assert entries[0].startswith("    - skills/tools/reporting.md")
 
     def test_wrong_tool_correction(self):
         ctx = build_tool_recommendation_context(
@@ -219,13 +254,15 @@ class TestPhaseConstraints:
 
     def test_report_phase_blocked(self):
         blocked = _PHASE_BLOCKED_TOOLS.get("REPORT", set())
-        # REPORT blocks are derived dynamically; recon tools are NOT blocked at scorer level
-        # (they're filtered by phase appropriateness instead)
-        # Verify the blocked set exists and is a set
         assert isinstance(blocked, set)
+        assert "quick_fuzz" in blocked
 
     def test_recon_appropriate_tools(self):
         appropriate = _PHASE_APPROPRIATE_TOOLS.get("RECON", set())
         assert "execute" in appropriate
         assert "nmap" in appropriate  # From port_scan category
         assert "subfinder" in appropriate  # From subdomain_enum category
+
+    def test_phase_extras_include_callable_metadata(self):
+        assert "code_analysis" in _PHASE_APPROPRIATE_TOOLS.get("ANALYSIS", set())
+        assert "generate_wordlist" in _PHASE_APPROPRIATE_TOOLS.get("EXPLOIT", set())

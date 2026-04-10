@@ -400,12 +400,17 @@ def auto_load_skills_for_message(
         except Exception as e:
             logger.debug("Skill recommendation lookup failed: %s", e)
 
-    # Dynamic phase-based skill selection — no hardcoded guaranteed skills.
-    # Skills are selected based on the current phase + keyword relevance from
-    # the conversation, preventing repetitive context injection.
     all_skills = _discover_all_skills(skills_dir)
-    phase_fallback = _select_phase_skills(
-        phase, all_skills, session_loaded_skills, max_skills=2,
+    # Only use phase fallback when the message did not already resolve to
+    # concrete skills. This keeps context focused and avoids polluting the
+    # prompt with generic phase skills when an exact tool or vuln skill match
+    # is already available from the request itself.
+    phase_fallback = (
+        _select_phase_skills(
+            phase, all_skills, session_loaded_skills, max_skills=2,
+        )
+        if not sorted_skills
+        else []
     )
 
     parts: list[str] = []
