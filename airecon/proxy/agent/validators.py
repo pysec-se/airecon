@@ -526,16 +526,24 @@ class _ValidatorMixin:
         anchor = str(getattr(self, "_scope_anchor_target", "") or "").strip()
         if anchor:
             return anchor
-        active = str(getattr(self.state, "active_target", "") or "").strip()
+        state_obj = getattr(self, "state", None)
+        active = (
+            str(getattr(state_obj, "active_target", "") or "").strip()
+            if state_obj is not None
+            else ""
+        )
         if active:
             return active
-        session_target = str(getattr(getattr(self, "_session", None), "target", "") or "").strip()
+        session_target = str(
+            getattr(getattr(self, "_session", None), "target", "") or ""
+        ).strip()
         return session_target
 
-    def _scope_lock_active(self) -> bool:
+    def _scope_guard_active(self) -> bool:
         try:
             phase = str(self._get_current_phase().value).upper()
-        except Exception:
+        except Exception as e:
+            logger.debug("Scope guard phase lookup failed: %s", e)
             phase = ""
         if phase == "RECON":
             return False
@@ -981,7 +989,7 @@ class _ValidatorMixin:
     def _validate_tool_args(
         self, tool_name: str, arguments: dict[str, Any]
     ) -> tuple[bool, str | None]:
-        if self._scope_lock_active():
+        if self._scope_guard_active():
             scope_target = self._resolve_scope_target()
             if scope_target:
                 for candidate in _collect_scope_candidates(tool_name, arguments):
