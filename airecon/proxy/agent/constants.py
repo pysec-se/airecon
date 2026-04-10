@@ -74,11 +74,11 @@ SEVERITY_ORDER: dict[str, int] = {
     "INFO": 4,
 }
 SEVERITY_LABELS: dict[int, str] = {
-    5: "Critical",
-    4: "High",
-    3: "Medium",
-    2: "Low",
-    1: "Info",
+    5: "CRITICAL",
+    4: "HIGH",
+    3: "MEDIUM",
+    2: "LOW",
+    1: "INFO",
 }
 SEVERITY_VALUES: frozenset[str] = frozenset(SEVERITY_ORDER.keys())
 CVSS_THRESHOLDS: list[tuple[float, str]] = [
