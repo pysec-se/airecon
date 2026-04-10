@@ -8,6 +8,7 @@ import json
 import logging
 import shlex
 
+from .constants import VALID_BROWSER_ACTIONS
 from .tuning import get_tuning
 from .utils import is_host_in_scope
 
@@ -626,41 +627,7 @@ class _ValidatorMixin:
             return min(0.95, max(0.25, base + offset))
         return _REPLAY_THRESHOLDS["non_strict"]
 
-    _VALID_BROWSER_ACTIONS = frozenset(
-        {
-            "launch",
-            "goto",
-            "click",
-            "type",
-            "scroll_down",
-            "scroll_up",
-            "back",
-            "forward",
-            "new_tab",
-            "switch_tab",
-            "close_tab",
-            "wait",
-            "execute_js",
-            "double_click",
-            "hover",
-            "press_key",
-            "save_pdf",
-            "get_console_logs",
-            "get_network_logs",
-            "view_source",
-            "close",
-            "list_tabs",
-            "screenshot",
-            "login_form",
-            "handle_totp",
-            "save_auth_state",
-            "inject_cookies",
-            "oauth_authorize",
-            "check_auth_status",
-            "wait_for_element",
-            "solve_captcha",
-        }
-    )
+    _VALID_BROWSER_ACTIONS = VALID_BROWSER_ACTIONS
 
     def _collect_runtime_verification_texts(self, max_entries: int = 24) -> list[str]:
         chunks: list[str] = []

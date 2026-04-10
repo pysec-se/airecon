@@ -824,9 +824,7 @@ class PipelineEngine:
         iterations_in_phase = self._current_iteration - self._phase_entry_iteration
 
         # Dynamic minimum: based on evidence collected, not just iteration count
-        min_iterations = self._calculate_dynamic_min_iterations(
-            current, iterations_in_phase
-        )
+        min_iterations = self._calculate_dynamic_min_iterations(current)
         if iterations_in_phase < min_iterations:
             logger.debug(
                 "[Pipeline] Phase %s: %d iterations < dynamic min %d (based on evidence collected) — continue",
@@ -951,9 +949,7 @@ class PipelineEngine:
         )
         return decision
 
-    def _calculate_dynamic_min_iterations(
-        self, phase: PipelinePhase, current_iterations: int
-    ) -> int:
+    def _calculate_dynamic_min_iterations(self, phase: PipelinePhase) -> int:
         """Calculate minimum iterations based on evidence collected, not just time."""
         if phase == PipelinePhase.RECON:
             # If we have some data, min 10 iter (cooldown); if nothing, min 20 iter

@@ -239,6 +239,8 @@ class _SupervisionMixin:
         progress_parts = [f"{phase_ev} evidence item(s) in {phase_str} phase"]
         if high_sev:
             progress_parts.append(f"{high_sev} HIGH/CRITICAL finding(s) confirmed")
+        if evidence_added:
+            progress_parts.append("latest tool run produced new evidence")
         progress = ", ".join(progress_parts) + "."
 
         latest_summary = ""

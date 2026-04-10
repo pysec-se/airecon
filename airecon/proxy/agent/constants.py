@@ -43,24 +43,49 @@ EPHEMERAL_PREFIXES: tuple[str, ...] = (
 )
 
 # ---------------------------------------------------------------------------
-# TOOL CLASSIFICATION — loaded from tools_meta.json (was duplicated)
+# TOOL CLASSIFICATION — loaded from tools_meta.json with stable fallbacks
 # ---------------------------------------------------------------------------
-def _load_tool_classifications(field: str) -> frozenset[str]:
+def _load_tool_classifications(
+    field: str, fallback: frozenset[str] | None = None
+) -> frozenset[str]:
     """Load tool classification set from tools_meta.json."""
     try:
         path = Path(__file__).parent.parent / "data" / "tools_meta.json"
         data = json.loads(path.read_text(encoding="utf-8"))
         tools = data.get("tool_classifications", {}).get(field, [])
-        return frozenset(str(t).strip().lower() for t in tools if str(t).strip())
+        loaded = frozenset(str(t).strip().lower() for t in tools if str(t).strip())
+        if loaded:
+            return loaded
     except Exception as e:
         logger.warning("Failed to load tool classifications (%s) from JSON: %s", field, e)
-        return frozenset()
+    return fallback or frozenset()
 
 
 SHALLOW_TOOLS: frozenset[str] = _load_tool_classifications("shallow_tools")
 DEEP_TOOLS: frozenset[str] = _load_tool_classifications("deep_tools")
-CAIDO_BLOCKED_TOOLS: frozenset[str] = _load_tool_classifications("caido_blocked_tools")
-MINI_AGENT_BLOCKED_TOOLS: frozenset[str] = _load_tool_classifications("mini_agent_blocked_tools")
+CAIDO_BLOCKED_TOOLS: frozenset[str] = _load_tool_classifications(
+    "caido_blocked_tools",
+    frozenset(
+        {
+            "spawn_agent",
+            "quick_fuzz",
+            "advanced_fuzz",
+            "deep_fuzz",
+            "schemathesis_fuzz",
+            "caido_automate",
+            "caido_send_request",
+        }
+    ),
+)
+MINI_AGENT_BLOCKED_TOOLS: frozenset[str] = _load_tool_classifications(
+    "mini_agent_blocked_tools",
+    frozenset(
+        {
+            "spawn_agent",
+            "run_parallel_agents",
+        }
+    ),
+)
 
 # ---------------------------------------------------------------------------
 # SEVERITY TAXONOMY — was duplicated in owasp.py, chain_planner.py (2x),
@@ -74,11 +99,11 @@ SEVERITY_ORDER: dict[str, int] = {
     "INFO": 4,
 }
 SEVERITY_LABELS: dict[int, str] = {
-    5: "Critical",
-    4: "High",
-    3: "Medium",
-    2: "Low",
-    1: "Info",
+    5: "CRITICAL",
+    4: "HIGH",
+    3: "MEDIUM",
+    2: "LOW",
+    1: "INFO",
 }
 SEVERITY_VALUES: frozenset[str] = frozenset(SEVERITY_ORDER.keys())
 CVSS_THRESHOLDS: list[tuple[float, str]] = [
@@ -130,6 +155,7 @@ MAX_EMPTY_RETRIES: int = 4
 # ---------------------------------------------------------------------------
 VALID_BROWSER_ACTIONS: frozenset[str] = frozenset(
     {
+        "launch",
         "goto",
         "click",
         "double_click",
@@ -143,6 +169,18 @@ VALID_BROWSER_ACTIONS: frozenset[str] = frozenset(
         "scroll_to",
         "scroll_down",
         "scroll_up",
+        "back",
+        "forward",
+        "new_tab",
+        "switch_tab",
+        "close_tab",
+        "close",
+        "wait",
+        "wait_for",
+        "wait_for_element",
+        "execute_js",
+        "press_key",
+        "save_pdf",
         "screenshot",
         "get_text",
         "view_source",
@@ -150,32 +188,18 @@ VALID_BROWSER_ACTIONS: frozenset[str] = frozenset(
         "get_network_logs",
         "get_url",
         "get_title",
-        "wait_for",
-        "back",
-        "forward",
-        "close",
-        "new_tab",
-        "switch_tab",
+        "list_tabs",
+        "login_form",
+        "handle_totp",
+        "save_auth_state",
+        "inject_cookies",
+        "oauth_authorize",
+        "check_auth_status",
+        "solve_captcha",
         "get_cookies",
         "set_cookie",
-        "execute_js",
         "download",
         "upload",
-    }
-)
-
-# ---------------------------------------------------------------------------
-# CAIDO BLOCKED TOOLS — was in server.py:1536-1544
-# ---------------------------------------------------------------------------
-CAIDO_BLOCKED_TOOLS: frozenset[str] = frozenset(
-    {
-        "spawn_agent",
-        "quick_fuzz",
-        "advanced_fuzz",
-        "deep_fuzz",
-        "schemathesis_fuzz",
-        "caido_automate",
-        "caido_send_request",
     }
 )
 
@@ -369,17 +393,6 @@ class AgentRole(str, Enum):
     EXPLOIT = "exploit"
 
 
-# ---------------------------------------------------------------------------
-# BLOCKED TOOLS FOR MINI-AGENT — was in agent_graph.py:102, subagent.py:203
-# ---------------------------------------------------------------------------
-MINI_AGENT_BLOCKED_TOOLS: frozenset[str] = frozenset(
-    {
-        "spawn_agent",
-        "run_parallel_agents",
-    }
-)
-
-# ---------------------------------------------------------------------------
 # SUBAGENT EVENT TYPE MAP — was in loop_tool_cycle.py:40-46
 # ---------------------------------------------------------------------------
 SUBAGENT_EVENT_TYPE_MAP: dict[str, str] = {

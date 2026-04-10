@@ -738,7 +738,20 @@ def build_tool_recommendation_context(
     appropriate = _PHASE_APPROPRIATE_TOOLS.get(phase_upper, set())
     top_tools: list[str] = []
     if appropriate:
-        top_tools = sorted(appropriate)[:15]
+        def _tool_priority(name: str) -> tuple[float, str]:
+            if not tool_scores:
+                return (0.0, name)
+            score_entry = tool_scores.get(name) or tool_scores.get(name.lower()) or {}
+            raw_score = (
+                score_entry.get("score", 0.0) if isinstance(score_entry, dict) else 0.0
+            )
+            try:
+                score = float(raw_score or 0.0)
+            except (TypeError, ValueError):
+                score = 0.0
+            return (-score, name)
+
+        top_tools = sorted(appropriate, key=_tool_priority)[:15]
 
         # Build a named→description lookup from the tool registry
         desc_map: dict[str, str] = {}
@@ -749,15 +762,6 @@ def build_tool_recommendation_context(
                 tdesc = fn.get("description", "")
                 if tname and tdesc:
                     desc_map[tname.lower()] = tdesc
-
-        # Also pull shell binary descriptions from tools_meta.json
-        categories = _TOOLS_META.get("categories", {})
-        for cat in categories.values():
-            if isinstance(cat, dict):
-                for subcat, tlist in cat.items():
-                    if isinstance(tlist, list):
-                        # subcategory name acts as a keyword for the binary
-                        pass
 
         tool_lines: list[str] = []
         for tname in top_tools:
@@ -799,7 +803,15 @@ def build_tool_recommendation_context(
             "</tool_guidance>"
         )
 
-    blocked = _PHASE_BLOCKED_TOOLS.get(phase_upper, set())
+    blocked = {
+        str(name).strip().lower()
+        for name in _PHASE_BLOCKED_TOOLS.get(phase_upper, set())
+        if str(name).strip()
+    }
+    if blocked_tools:
+        blocked.update(
+            str(name).strip().lower() for name in blocked_tools if str(name).strip()
+        )
     if blocked:
         top_blocked = sorted(blocked)[:10]
         parts.append(

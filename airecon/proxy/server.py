@@ -27,6 +27,7 @@ import threading
 from airecon._version import __version__ as _version
 from .agent import AgentLoop
 from .agent.command_parse import extract_primary_binary
+from .agent.constants import CAIDO_BLOCKED_TOOLS
 from .config import get_config
 from .docker import DockerEngine
 from .mcp import add_mcp_sse_server, list_mcp_servers, mcp_list_tools, set_mcp_enabled
@@ -1533,15 +1534,7 @@ async def _stream_file_agent_events(
     mini_agent._is_subagent = True
     mini_agent._override_max_iterations = request.max_iterations
 
-    mini_agent._blocked_tools = {
-        "spawn_agent",
-        "quick_fuzz",
-        "advanced_fuzz",
-        "deep_fuzz",
-        "schemathesis_fuzz",
-        "caido_automate",
-        "caido_send_request",
-    }
+    mini_agent._blocked_tools = set(CAIDO_BLOCKED_TOOLS)
 
     _fp_parts = Path(request.file_path.lstrip("/")).parts
     _target: str | None = None

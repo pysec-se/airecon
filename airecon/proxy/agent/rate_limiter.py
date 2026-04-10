@@ -83,7 +83,7 @@ class AdaptiveRateLimiter:
     async def __aenter__(self) -> "AdaptiveRateLimiter":
         return self
 
-    async def __aexit__(self, exc_type: Any, exc: Any, tb: Any) -> None:
+    async def __aexit__(self, *_: Any) -> None:
         await self.close()
 
     async def request(
