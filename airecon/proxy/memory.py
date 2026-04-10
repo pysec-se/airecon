@@ -376,6 +376,17 @@ class MemoryManager:
             return
 
         cursor = self.conn.cursor()
+        session_id = str(finding.get("session_id") or "").strip()
+        target = str(finding.get("target") or "").strip()
+        if not session_id or not target:
+            return
+        cursor.execute(
+            """
+            INSERT OR IGNORE INTO sessions (session_id, target)
+            VALUES (?, ?)
+            """,
+            (session_id, target),
+        )
         cursor.execute(
             """
             INSERT INTO findings
@@ -384,8 +395,8 @@ class MemoryManager:
             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
             (
-                finding.get("session_id"),
-                finding.get("target"),
+                session_id,
+                target,
                 finding.get("type", "vulnerability"),
                 finding.get("severity", "Medium"),
                 finding.get("url"),
