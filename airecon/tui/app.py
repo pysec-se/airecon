@@ -2513,5 +2513,46 @@ class AIReconApp(App):
             else:
                 self.notify(f"Clipboard error: {e}", severity="error")
 
+        if not copied:
+            try:
+                import shutil
+                import subprocess  # nosec B404
+
+                clipboard_cmds: list[list[str]] = []
+                if shutil.which("wl-copy"):
+                    clipboard_cmds.append(["wl-copy"])
+                if shutil.which("xclip"):
+                    clipboard_cmds.append(["xclip", "-selection", "clipboard"])
+                if shutil.which("xsel"):
+                    clipboard_cmds.append(["xsel", "--clipboard", "--input"])
+                if shutil.which("pbcopy"):
+                    clipboard_cmds.append(["pbcopy"])
+                if shutil.which("clip"):
+                    clipboard_cmds.append(["clip"])
+
+                for cmd in clipboard_cmds:
+                    try:
+                        subprocess.run(  # nosec B603
+                            cmd,
+                            input=content.encode(),
+                            stdout=subprocess.DEVNULL,
+                            stderr=subprocess.DEVNULL,
+                            check=False,
+                            timeout=2,
+                        )
+                        copied = True
+                        break
+                    except Exception as cmd_err:
+                        logger.debug(
+                            "Clipboard helper failed (%s): %s", " ".join(cmd), cmd_err
+                        )
+            except Exception as e:
+                logger.debug("Clipboard helper init failed: %s", e)
+
         if copied:
             self._show_copy_toast("Copied to clipboard")
+        else:
+            self.notify(
+                "Clipboard unavailable: enable OSC52 or install wl-copy/xclip/xsel/pyperclip.",
+                severity="warning",
+            )

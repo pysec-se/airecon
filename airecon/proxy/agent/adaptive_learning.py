@@ -10,6 +10,8 @@ from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any
 
+from ..memory import configure_sqlite_connection, get_sqlite_timeout_seconds
+
 logger = logging.getLogger("airecon.agent.adaptive_learning")
 
 _LEARNING_DIR = Path.home() / ".airecon" / "learning"
@@ -24,6 +26,21 @@ def _load_tools_meta() -> dict[str, Any]:
     except Exception as exc:
         logger.warning("tools_meta.json unavailable (%s)", exc)
         return {}
+
+
+def _open_memory_db(read_only: bool) -> sqlite3.Connection:
+    timeout = get_sqlite_timeout_seconds()
+    if read_only:
+        conn = sqlite3.connect(
+            f"file:{_MEMORY_DB}?mode=ro",
+            uri=True,
+            timeout=timeout,
+        )
+    else:
+        conn = sqlite3.connect(str(_MEMORY_DB), timeout=timeout)
+    configure_sqlite_connection(conn)
+    conn.row_factory = sqlite3.Row
+    return conn
 
 
 @dataclass
@@ -186,8 +203,7 @@ class AdaptiveLearningEngine:
             return
 
         try:
-            conn = sqlite3.connect(str(_MEMORY_DB))
-            conn.row_factory = sqlite3.Row
+            conn = _open_memory_db(read_only=True)
             cur = conn.cursor()
 
             cur.execute("SELECT * FROM tool_usage")
@@ -299,7 +315,7 @@ class AdaptiveLearningEngine:
         if not _MEMORY_DB.exists():
             return
         try:
-            conn = sqlite3.connect(str(_MEMORY_DB))
+            conn = _open_memory_db(read_only=False)
             cur = conn.cursor()
             now = time.strftime("%Y-%m-%d %H:%M:%S")
             for name, perf in self.tool_performances.items():

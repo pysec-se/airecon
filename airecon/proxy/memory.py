@@ -1,5 +1,6 @@
 import json
 import logging
+import os
 import sqlite3
 import threading
 from pathlib import Path
@@ -11,9 +12,65 @@ logger = logging.getLogger("airecon.memory")
 MEMORY_DIR = Path.home() / ".airecon" / "memory"
 MEMORY_DB = MEMORY_DIR / "airecon.db"
 
+_VALID_JOURNAL_MODES = {"WAL", "DELETE", "TRUNCATE", "PERSIST", "MEMORY", "OFF"}
+_VALID_SYNCHRONOUS = {"OFF", "NORMAL", "FULL", "EXTRA"}
+
+
+def _coerce_float_env(name: str, default: float) -> float:
+    raw = os.getenv(name)
+    if not raw:
+        return default
+    try:
+        return float(raw)
+    except ValueError:
+        return default
+
+
+def _coerce_int_env(name: str, default: int) -> int:
+    raw = os.getenv(name)
+    if not raw:
+        return default
+    try:
+        return int(raw)
+    except ValueError:
+        return default
+
+
+_DB_TIMEOUT_SECONDS = _coerce_float_env("AIRECON_DB_TIMEOUT_SECONDS", 10.0)
+_DB_BUSY_TIMEOUT_MS = _coerce_int_env("AIRECON_DB_BUSY_TIMEOUT_MS", 5000)
+_DB_JOURNAL_MODE = os.getenv("AIRECON_DB_JOURNAL_MODE", "WAL").upper()
+_DB_SYNCHRONOUS = os.getenv("AIRECON_DB_SYNCHRONOUS", "NORMAL").upper()
+
 
 _MEMORY_CONN: sqlite3.Connection | None = None
 _MEMORY_CONN_LOCK = threading.Lock()
+
+
+def get_sqlite_timeout_seconds() -> float:
+    return _DB_TIMEOUT_SECONDS
+
+
+def configure_sqlite_connection(conn: sqlite3.Connection) -> None:
+    journal = _DB_JOURNAL_MODE if _DB_JOURNAL_MODE in _VALID_JOURNAL_MODES else "WAL"
+    synchronous = (
+        _DB_SYNCHRONOUS if _DB_SYNCHRONOUS in _VALID_SYNCHRONOUS else "NORMAL"
+    )
+    try:
+        conn.execute(f"PRAGMA journal_mode={journal}")
+    except sqlite3.Error as exc:
+        logger.debug("SQLite journal_mode pragma failed: %s", exc)
+    try:
+        conn.execute(f"PRAGMA synchronous={synchronous}")
+    except sqlite3.Error as exc:
+        logger.debug("SQLite synchronous pragma failed: %s", exc)
+    try:
+        conn.execute(f"PRAGMA busy_timeout={_DB_BUSY_TIMEOUT_MS}")
+    except sqlite3.Error as exc:
+        logger.debug("SQLite busy_timeout pragma failed: %s", exc)
+    try:
+        conn.execute("PRAGMA foreign_keys=ON")
+    except sqlite3.Error as exc:
+        logger.debug("SQLite foreign_keys pragma failed: %s", exc)
 
 
 def get_memory_db() -> sqlite3.Connection:
@@ -35,8 +92,13 @@ def get_memory_db() -> sqlite3.Connection:
 
         db_exists = MEMORY_DB.exists()
 
-        conn = sqlite3.connect(str(MEMORY_DB), check_same_thread=False)
+        conn = sqlite3.connect(
+            str(MEMORY_DB),
+            check_same_thread=False,
+            timeout=_DB_TIMEOUT_SECONDS,
+        )
         conn.row_factory = sqlite3.Row
+        configure_sqlite_connection(conn)
 
         if not db_exists:
             logger.info("Created new memory database: %s", MEMORY_DB)
@@ -314,6 +376,17 @@ class MemoryManager:
             return
 
         cursor = self.conn.cursor()
+        session_id = str(finding.get("session_id") or "").strip()
+        target = str(finding.get("target") or "").strip()
+        if not session_id or not target:
+            return
+        cursor.execute(
+            """
+            INSERT OR IGNORE INTO sessions (session_id, target)
+            VALUES (?, ?)
+            """,
+            (session_id, target),
+        )
         cursor.execute(
             """
             INSERT INTO findings
@@ -322,8 +395,8 @@ class MemoryManager:
             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
             (
-                finding.get("session_id"),
-                finding.get("target"),
+                session_id,
+                target,
                 finding.get("type", "vulnerability"),
                 finding.get("severity", "Medium"),
                 finding.get("url"),

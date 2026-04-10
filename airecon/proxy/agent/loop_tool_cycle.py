@@ -448,9 +448,13 @@ class _ToolCycleMixin(_CyclePreludeMixin, _CycleLlmMixin, _CyclePostMixin):
                 )
                 _usage_ratio_ctx = _ctx_used / adaptive_num_ctx
                 if _usage_ratio_ctx >= 0.75:
-                    _predict_cap = max(1024, int(adaptive_num_ctx * 0.03))
+                    _predict_cap = max(1024, int(adaptive_num_ctx * 0.012))
+                elif _usage_ratio_ctx >= 0.70:
+                    _predict_cap = max(1024, int(adaptive_num_ctx * 0.015))
                 elif _usage_ratio_ctx >= 0.65:
-                    _predict_cap = max(2048, int(adaptive_num_ctx * 0.05))
+                    _predict_cap = max(1024, int(adaptive_num_ctx * 0.02))
+                elif _usage_ratio_ctx >= 0.60:
+                    _predict_cap = max(2048, int(adaptive_num_ctx * 0.03))
                 else:
                     _predict_cap = _iter_num_predict
                 _num_predict_cap = _predict_cap

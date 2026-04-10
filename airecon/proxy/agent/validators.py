@@ -9,6 +9,7 @@ import logging
 import shlex
 
 from .tuning import get_tuning
+from .utils import is_host_in_scope
 
 logger = logging.getLogger("airecon.validation")
 
@@ -124,6 +125,152 @@ _REPLAY_GAP_MESSAGES = {
         )
     ),
 }
+
+_URL_REGEX = re.compile(r"https?://[^\s\"'<>]+", re.IGNORECASE)
+_HOST_HEADER_REGEX = re.compile(r"(?im)^host:\s*([^\s/:]+)")
+_HOST_TOKEN_REGEX = re.compile(r"\b([a-zA-Z0-9-]+(?:\.[a-zA-Z0-9-]+)+)\b")
+_IP_REGEX = re.compile(r"\b(?:\d{1,3}\.){3}\d{1,3}\b")
+
+_EXTS_PATH = Path(__file__).parent.parent / "data" / "file_extensions.json"
+try:
+    _ext_data = json.loads(_EXTS_PATH.read_text(encoding="utf-8"))
+    _KNOWN_FILE_EXTS = {
+        str(ext).lower()
+        for bucket in _ext_data.values()
+        if isinstance(bucket, list)
+        for ext in bucket
+        if isinstance(ext, str)
+    }
+except Exception as _ext_err:
+    logger.debug("Failed to load file_extensions.json for scope guard: %s", _ext_err)
+    _KNOWN_FILE_EXTS = set()
+
+_SCOPE_HINT_TOKENS = ("url", "host", "domain", "target", "endpoint", "base", "site")
+
+
+def _load_tool_param_schema() -> dict[str, dict[str, Any]]:
+    try:
+        tools_path = Path(__file__).parent.parent / "data" / "tools.json"
+        if not tools_path.exists():
+            return {}
+        data = json.loads(tools_path.read_text(encoding="utf-8"))
+        schema: dict[str, dict[str, Any]] = {}
+        for entry in data if isinstance(data, list) else []:
+            fn = entry.get("function", {}) if isinstance(entry, dict) else {}
+            name = fn.get("name")
+            params = fn.get("parameters", {}) if isinstance(fn, dict) else {}
+            props = params.get("properties", {}) if isinstance(params, dict) else {}
+            if isinstance(name, str) and name:
+                schema[name.lower()] = props if isinstance(props, dict) else {}
+        return schema
+    except Exception as e:
+        logger.debug("Failed to load tool param schema for scope guard: %s", e)
+        return {}
+
+
+_TOOL_PARAM_SCHEMA = _load_tool_param_schema()
+
+
+def _looks_like_path(text: str) -> bool:
+    stripped = text.strip()
+    if not stripped:
+        return True
+    if stripped.startswith(("/", "./", "../", "~")):
+        return True
+    if re.match(r"^[a-zA-Z]:[\\/]", stripped):
+        return True
+    if "/" in stripped or "\\" in stripped:
+        return True
+    return False
+
+
+def _looks_like_file_name(text: str) -> bool:
+    stripped = text.strip().lower()
+    if "." not in stripped or "/" in stripped or "\\" in stripped:
+        return False
+    ext = stripped.rsplit(".", 1)[-1]
+    return ext in _KNOWN_FILE_EXTS
+
+
+def _looks_like_token(text: str) -> bool:
+    parts = text.split(".")
+    if len(parts) == 3 and all(len(p) >= 8 for p in parts):
+        if all(re.fullmatch(r"[A-Za-z0-9_-]+", p or "") for p in parts):
+            return True
+    if len(parts) >= 3 and all(len(p) >= 10 for p in parts):
+        if all(re.fullmatch(r"[A-Za-z0-9-]+", p or "") for p in parts):
+            return True
+    return False
+
+
+def _iter_text_values(data: Any) -> list[str]:
+    values: list[str] = []
+    if isinstance(data, dict):
+        for v in data.values():
+            values.extend(_iter_text_values(v))
+    elif isinstance(data, list):
+        for item in data:
+            values.extend(_iter_text_values(item))
+    elif isinstance(data, str):
+        values.append(data)
+    return values
+
+
+def _extract_scope_candidates_from_text(text: str) -> set[str]:
+    candidates: set[str] = set()
+    if not text:
+        return candidates
+    stripped = text.strip()
+    if not stripped:
+        return candidates
+
+    for url in _URL_REGEX.findall(stripped):
+        candidates.add(url)
+
+    for ip in _IP_REGEX.findall(stripped):
+        candidates.add(f"http://{ip}")
+
+    host_match = _HOST_HEADER_REGEX.search(stripped)
+    if host_match:
+        host = host_match.group(1).strip()
+        if host:
+            candidates.add(f"http://{host}")
+
+    if "://" not in stripped and not _looks_like_path(stripped) and not _looks_like_file_name(stripped):
+        if re.match(r"^[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$", stripped):
+            candidates.add(f"http://{stripped}")
+
+    for host in _HOST_TOKEN_REGEX.findall(stripped):
+        host = host.strip().lower()
+        if not host or _looks_like_file_name(host) or _looks_like_token(host):
+            continue
+        if host.startswith(("http://", "https://")):
+            continue
+        tld = host.rsplit(".", 1)[-1]
+        if tld.isalpha() and len(tld) >= 2:
+            candidates.add(f"http://{host}")
+
+    return candidates
+
+
+def _collect_scope_candidates(tool_name: str, arguments: dict[str, Any]) -> set[str]:
+    candidates: set[str] = set()
+    for text in _iter_text_values(arguments):
+        candidates |= _extract_scope_candidates_from_text(text)
+
+    props = _TOOL_PARAM_SCHEMA.get(tool_name.lower(), {})
+    if props:
+        for key, meta in props.items():
+            key_lower = str(key).lower()
+            desc = str(meta.get("description", "") if isinstance(meta, dict) else "").lower()
+            if any(token in key_lower for token in _SCOPE_HINT_TOKENS) or any(
+                token in desc for token in _SCOPE_HINT_TOKENS
+            ):
+                value = arguments.get(key)
+                for text in _iter_text_values(value):
+                    candidates |= _extract_scope_candidates_from_text(text)
+
+    return candidates
 _REPLAY_SCORE_WEIGHTS = {
     "request_logged": float(
         get_tuning("validator.replay.score_weights.request_logged", 0.16)
@@ -374,6 +521,46 @@ class _ValidatorMixin:
     def _str_arg(arguments: dict[str, Any], key: str) -> str:
         val = arguments.get(key)
         return val if isinstance(val, str) else ""
+
+    def _resolve_scope_target(self) -> str:
+        anchor = str(getattr(self, "_scope_anchor_target", "") or "").strip()
+        if anchor:
+            return anchor
+        state_obj = getattr(self, "state", None)
+        active = (
+            str(getattr(state_obj, "active_target", "") or "").strip()
+            if state_obj is not None
+            else ""
+        )
+        if active:
+            return active
+        session_target = str(
+            getattr(getattr(self, "_session", None), "target", "") or ""
+        ).strip()
+        return session_target
+
+    def _scope_guard_active(self) -> bool:
+        try:
+            phase = str(self._get_current_phase().value).upper()
+        except Exception as e:
+            logger.debug("Scope guard phase lookup failed: %s", e)
+            phase = ""
+        if phase == "RECON":
+            return False
+        if bool(getattr(self, "_scope_lock_active", False)):
+            return True
+        return bool(self._resolve_scope_target())
+
+    def _check_scope_url(self, url: str) -> tuple[bool, str | None]:
+        scope_target = self._resolve_scope_target()
+        if not scope_target or not url:
+            return True, None
+        if is_host_in_scope(url, scope_target):
+            return True, None
+        return (
+            False,
+            f"OUT-OF-SCOPE: {url!r} is outside the current scope {scope_target!r}.",
+        )
 
     @staticmethod
     def _normalize_severity_label(value: str) -> str:
@@ -802,6 +989,14 @@ class _ValidatorMixin:
     def _validate_tool_args(
         self, tool_name: str, arguments: dict[str, Any]
     ) -> tuple[bool, str | None]:
+        if self._scope_guard_active():
+            scope_target = self._resolve_scope_target()
+            if scope_target:
+                for candidate in _collect_scope_candidates(tool_name, arguments):
+                    ok, err = self._check_scope_url(candidate)
+                    if not ok:
+                        return False, err
+
         if tool_name == "execute":
             cmd = self._str_arg(arguments, "command")
             if not cmd.strip():

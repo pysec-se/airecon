@@ -267,6 +267,20 @@ class _WorkspaceMixin:
                 self._last_output_file = json_filepath
                 return json_filepath
 
+            if isinstance(result, dict):
+                preferred = result.get("raw_output_file") or result.get("output_file")
+                if isinstance(preferred, str) and preferred.strip():
+                    normalized = preferred.strip().strip("'\"")
+                    if normalized.startswith("/workspace/"):
+                        rel = normalized.removeprefix("/workspace/")
+                        if self.state.active_target and rel.startswith(
+                            f"{self.state.active_target}/"
+                        ):
+                            rel = rel.removeprefix(f"{self.state.active_target}/")
+                        normalized = rel
+                    self._last_output_file = normalized
+                    return normalized
+
             txt_content = ""
             if isinstance(result, dict):
                 res_data = result.get("result")

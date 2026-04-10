@@ -197,7 +197,13 @@ class _ExplorationMixin:
         self._last_evidence_count = meaningful_now
 
     def _build_exploration_directive(self, phase: PipelinePhase) -> str:
-        if getattr(self, "_scope_lock_active", False):
+        lock_attr = getattr(self, "_scope_lock_active", False)
+        lock_active = (
+            lock_attr
+            if isinstance(lock_attr, bool)
+            else bool(getattr(getattr(self, "_scope", None), "scope_lock_active", False))
+        )
+        if lock_active:
             return (
                 "[SYSTEM: AGGRESSIVE EXPLORATION DISABLED — STRICT_SCOPE_MODE]\n"
                 "User requested a focused scope. Do not broaden coverage beyond the explicit request."
