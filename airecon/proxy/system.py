@@ -12,165 +12,29 @@ logger = logging.getLogger("airecon.system")
 with open(Path(__file__).parent / "prompts" / "system.txt", "r") as f:
     SYSTEM_PROMPT = f.read()
 
-_CTF_PROMPT_PATH = Path(__file__).parent / "prompts" / "system_ctf.txt"
-with open(_CTF_PROMPT_PATH, "r") as f:
-    CTF_SYSTEM_PROMPT = f.read()
-
-_BUGBOUNTY_PROMPT_PATH = Path(__file__).parent / "prompts" / "bugbounty.txt"
-with open(_BUGBOUNTY_PROMPT_PATH, "r") as f:
-    BUGBOUNTY_SYSTEM_PROMPT = f.read()
-
-_PENTEST_PROMPT_PATH = Path(__file__).parent / "prompts" / "penetration_test.txt"
-with open(_PENTEST_PROMPT_PATH, "r") as f:
-    PENTEST_SYSTEM_PROMPT = f.read()
-
-_CTF_INDICATORS_TARGET = (
-    "localhost",
-    "127.0.0.1",
-    "::1",
-)
-_PRIVATE_IP_RE = re.compile(
-    r"\b(10\.\d+\.\d+\.\d+|172\.(1[6-9]|2\d|3[01])\.\d+\.\d+|192\.168\.\d+\.\d+):\d+\b"
-)
-
-_CTF_MSG_RE = re.compile(
-    r"(?:"
-    r"\bctf\b"
-    r"|flag\{"
-    r"|\bcapture the flag\b"
-    r"|\bxbow\b"
-    r"|\bhacksim\b"
-    r"|\bhtb\b"
-    r"|\bpicoctf\b"
-    r"|\broot\.txt\b"
-    r"|\buser\.txt\b"
-    r")",
-    re.IGNORECASE,
-)
-
-
 def _is_ctf_target(target: str | None = None, user_message: str | None = None) -> bool:
-    if target:
-        t_lower = target.lower()
-        if any(ind in t_lower for ind in _CTF_INDICATORS_TARGET):
-            return True
+    """Automatic CTF classification is intentionally disabled.
 
-        if _PRIVATE_IP_RE.search(target):
-            return True
-    if user_message and _CTF_MSG_RE.search(user_message):
-        return True
+    Engagement mode should not be inferred from heuristics or sidecar hint files.
+    The model receives the user's request directly and must reason from that
+    request instead of hidden mode classifiers.
+    """
+    _ = (target, user_message)
     return False
-
-
-_BUGBOUNTY_INDICATORS_MSG = (
-    "bug bounty",
-    "bugbounty",
-    "bounty",
-    "hackerone",
-    "bugcrowd",
-    "intigriti",
-    "public domain",
-    "external assessment",
-)
-_BUGBOUNTY_TARGET_HINTS = (
-    "hackerone",
-    "bugcrowd",
-    "intigriti",
-    "/security",
-    "/security.txt",
-    "/responsible-disclosure",
-    "/vulnerability-disclosure",
-    "/bug-bounty",
-    "/bounty",
-)
-_PUBLIC_DOMAIN_RE = re.compile(
-    r"\b([a-z0-9]([a-z0-9\-]{0,61}[a-z0-9])?\.)+"
-    r"(com|net|org|io|co|app|dev|ai|xyz|tech|gov|edu)\b",
-    re.IGNORECASE,
-)
 
 
 def _is_bugbounty_target(
     target: str | None = None, user_message: str | None = None
 ) -> bool:
-    msg_has_indicator = False
-    target_has_indicator = False
-    target_is_public_domain = False
-
-    if user_message:
-        m_lower = user_message.lower()
-        msg_has_indicator = any(ind in m_lower for ind in _BUGBOUNTY_INDICATORS_MSG)
-
-    if target:
-        t_lower = target.lower()
-        target_is_public_domain = bool(
-            _PUBLIC_DOMAIN_RE.search(t_lower) and ":" not in t_lower
-        )
-        target_has_indicator = any(ind in t_lower for ind in _BUGBOUNTY_INDICATORS_MSG)
-        if not target_has_indicator:
-            target_has_indicator = any(
-                hint in t_lower for hint in _BUGBOUNTY_TARGET_HINTS
-            )
-
-    if msg_has_indicator:
-        return True
-
-    if target_is_public_domain and target_has_indicator:
-        return True
-
-    if target_has_indicator:
-        return True
-
+    _ = (target, user_message)
     return False
-
-
-_PENTEST_INDICATORS_MSG = (
-    "pentest",
-    "penetration test",
-    "internal",
-    "local pentest",
-    "network pentest",
-    "cloud pentest",
-    "aws",
-    "gcp",
-    "azure",
-    "cloud",
-    "s3 bucket",
-    "ec2",
-    "lambda",
-    "iam",
-    "smb",
-    "lateral movement",
-)
-_PENTEST_TARGET_RE = re.compile(
-    r"\b(10\.\d+\.\d+\.\d+|172\.(1[6-9]|2\d|3[01])\.\d+\.\d+|192\.168\.\d+\.\d+)\b"
-)
 
 
 def _is_pentest_target(
     target: str | None = None, user_message: str | None = None
 ) -> bool:
-    if target:
-        t_lower = target.lower()
-
-        if _PENTEST_TARGET_RE.search(t_lower) and not _PRIVATE_IP_RE.search(t_lower):
-            return True
-        if any(ind in t_lower for ind in ("aws", "gcp", "azure", "cloud")):
-            return True
-    if user_message:
-        m_lower = user_message.lower()
-        if any(ind in m_lower for ind in _PENTEST_INDICATORS_MSG):
-            return True
+    _ = (target, user_message)
     return False
-
-
-_FULL_EMBED_SKILLS = {
-    "tools/install.md",
-}
-
-_CTF_EMBED_SKILLS = {
-    "tools/install.md",
-}
 
 
 def _load_local_skills(ctf_mode: bool = False) -> str:
@@ -178,7 +42,8 @@ def _load_local_skills(ctf_mode: bool = False) -> str:
     if not skills_dir.exists():
         return ""
 
-    embed_set = _CTF_EMBED_SKILLS if ctf_mode else _FULL_EMBED_SKILLS
+    _ = ctf_mode
+    embed_set: set[str] = set()
 
     embedded_parts: list[str] = []
     category_counts: dict[str, int] = {}
@@ -253,12 +118,6 @@ def _keyword_matches_message(keyword: str, msg_lower: str) -> bool:
 
 
 _SKILL_KEYWORDS: dict[str, str] = _load_skill_keywords()
-
-
-# ── Dynamic phase→skill-category mapping (derived, not hardcoded) ────────────
-# Phase names map to sets of skill category directory names that are relevant.
-# These are derived from the pipeline's operational goals, but kept as a simple
-# reference since skill categories are stable domain knowledge.
 _PHASE_SKILL_CATEGORIES: dict[str, set[str]] = {
     "RECON": {"reconnaissance", "tools", "protocols"},
     "ANALYSIS": {"vulnerabilities", "frameworks", "technologies", "protocols"},
@@ -328,7 +187,6 @@ def _select_phase_skills(
     # Score skills by category match + stem diversity
     scored: list[tuple[int, str]] = []
     for rel_path, stem in all_skills.items():
-        # Skip already loaded
         if rel_path in session_set or stem in session_set:
             continue
 
@@ -336,7 +194,6 @@ def _select_phase_skills(
         if cat in preferred_dirs:
             scored.append((1, rel_path))
 
-    # Sort deterministic, pick top N
     scored.sort(key=lambda x: x[1])
     return [rel for _, rel in scored[:max_skills]]
 
@@ -401,10 +258,6 @@ def auto_load_skills_for_message(
             logger.debug("Skill recommendation lookup failed: %s", e)
 
     all_skills = _discover_all_skills(skills_dir)
-    # Only use phase fallback when the message did not already resolve to
-    # concrete skills. This keeps context focused and avoids polluting the
-    # prompt with generic phase skills when an exact tool or vuln skill match
-    # is already available from the request itself.
     phase_fallback = (
         _select_phase_skills(
             phase, all_skills, session_loaded_skills, max_skills=2,
@@ -468,7 +321,6 @@ def auto_load_skills_for_message(
         except Exception:
             return False
 
-    # Priority 1: keyword-matched skills (from conversation content)
     keyword_count = 0
     max_keyword_skills = 3
     for skill_rel in sorted_skills:
@@ -477,7 +329,6 @@ def auto_load_skills_for_message(
         if _load_skill(skill_rel, priority=2):
             keyword_count += 1
 
-    # Priority 2: phase-relevant skills that haven't been loaded yet
     phase_count = 0
     max_phase_skills = 2
     for skill_rel in phase_fallback:
@@ -632,9 +483,6 @@ def get_system_prompt(
     target: str | None = None,
     user_message: str | None = None,
 ) -> str:
-    if _is_ctf_target(target, user_message):
-        return CTF_SYSTEM_PROMPT + _load_local_skills(ctf_mode=True)
-
     cfg = get_config()
     base_prompt = SYSTEM_PROMPT
 
@@ -682,11 +530,5 @@ unless you reproduce it, understand WHY, and can demonstrate real impact.
         )
 
     skills_block = _load_local_skills(ctf_mode=False)
-
-    if _is_bugbounty_target(target, user_message):
-        return BUGBOUNTY_SYSTEM_PROMPT + "\n\n" + base_prompt + skills_block
-
-    if _is_pentest_target(target, user_message):
-        return PENTEST_SYSTEM_PROMPT + "\n\n" + base_prompt + skills_block
-
+    _ = (target, user_message)
     return base_prompt + skills_block

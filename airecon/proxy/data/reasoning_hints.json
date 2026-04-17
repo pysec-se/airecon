@@ -1,0 +1,107 @@
+{
+  "adaptive_learning": {
+    "bootstrap_noise_tools": [
+      "sh",
+      "for",
+      "which",
+      "echo",
+      "head",
+      "cat",
+      "xargs"
+    ]
+  },
+  "workflow_evidence": {
+    "line_terms": [
+      "workflow",
+      "state",
+      "transition",
+      "step",
+      "checkout",
+      "payment",
+      "refund",
+      "coupon",
+      "promo",
+      "approval",
+      "invite",
+      "register",
+      "signup",
+      "tenant",
+      "organization",
+      "workspace",
+      "project",
+      "role",
+      "admin",
+      "owner",
+      "member",
+      "impersonat",
+      "verify",
+      "totp",
+      "otp",
+      "mfa"
+    ],
+    "tenant_terms": [
+      "tenant",
+      "org",
+      "workspace",
+      "project"
+    ],
+    "principal_terms": [
+      "role",
+      "admin",
+      "owner",
+      "member",
+      "impersonat"
+    ],
+    "commerce_terms": [
+      "checkout",
+      "payment",
+      "refund",
+      "coupon",
+      "promo",
+      "balance"
+    ]
+  },
+  "code_analysis_profile": {
+    "secret_name_terms": [
+      "secret",
+      "token",
+      "credential",
+      "key"
+    ],
+    "auth_path_terms": [
+      "auth",
+      "login",
+      "session",
+      "token",
+      "jwt",
+      "oauth"
+    ],
+    "workflow_path_terms": [
+      "checkout",
+      "payment",
+      "coupon",
+      "refund",
+      "order"
+    ],
+    "scope_path_terms": [
+      "admin",
+      "tenant",
+      "org",
+      "workspace",
+      "project"
+    ]
+  },
+  "reporting": {
+    "markdown_report_name_terms": [
+      "final_report",
+      "report",
+      "vuln",
+      "vulnerability",
+      "finding",
+      "assessment",
+      "security_report",
+      "pentest_report",
+      "summary_report"
+    ]
+  }
+}

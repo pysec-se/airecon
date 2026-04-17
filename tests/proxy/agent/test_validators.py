@@ -1,5 +1,8 @@
 import pytest
 from types import SimpleNamespace
+import json
+from pathlib import Path
+
 from airecon.proxy.agent.validators import (
     _ValidatorMixin,
     _extract_scope_candidates_from_text,
@@ -46,6 +49,23 @@ def test_validator_browser_actions(validator):
         "browser_action", {"action": "goto", "url": "http://1.com"}
     )
     assert valid
+
+
+def test_browser_actions_match_tool_schema():
+    from airecon.proxy.agent import constants as constants_mod
+
+    tools_path = Path(constants_mod.__file__).resolve().parents[1] / "data" / "tools.json"
+    raw = json.loads(tools_path.read_text(encoding="utf-8"))
+    browser_entry = next(
+        item
+        for item in raw
+        if item.get("function", {}).get("name") == "browser_action"
+    )
+    expected = set(
+        browser_entry["function"]["parameters"]["properties"]["action"]["enum"]
+    )
+
+    assert set(constants_mod.VALID_BROWSER_ACTIONS) == expected
 
 
 def test_validator_browser_action_nonstring_args(validator):

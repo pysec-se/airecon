@@ -12,6 +12,7 @@ from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any
 
+from ..data_loader import load_reasoning_hints
 from ..memory import (
     configure_sqlite_connection,
     get_sqlite_timeout_seconds,
@@ -23,6 +24,16 @@ logger = logging.getLogger("airecon.agent.adaptive_learning")
 _LEARNING_DIR = Path.home() / ".airecon" / "learning"
 _MEMORY_DB = Path.home() / ".airecon" / "memory" / "airecon.db"
 _TOOLS_META = Path(__file__).resolve().parents[1] / "data" / "tools_meta.json"
+_TOOLS_JSON = Path(__file__).resolve().parents[1] / "data" / "tools.json"
+_REASONING_HINTS = load_reasoning_hints()
+_BOOTSTRAP_NOISE_TOOLS: frozenset[str] = frozenset(
+    str(value).strip().lower()
+    for value in _REASONING_HINTS.get("adaptive_learning", {}).get(
+        "bootstrap_noise_tools",
+        [],
+    )
+    if str(value).strip()
+)
 
 
 def _load_tools_meta() -> dict[str, Any]:
@@ -32,6 +43,16 @@ def _load_tools_meta() -> dict[str, Any]:
     except Exception as exc:
         logger.warning("tools_meta.json unavailable (%s)", exc)
         return {}
+
+
+def _load_tool_definitions() -> list[dict[str, Any]]:
+    """Load callable tool definitions from data/tools.json."""
+    try:
+        data = json.loads(_TOOLS_JSON.read_text(encoding="utf-8"))
+    except Exception as exc:
+        logger.warning("tools.json unavailable (%s)", exc)
+        return []
+    return data if isinstance(data, list) else []
 
 
 def _open_memory_db(read_only: bool) -> sqlite3.Connection:
@@ -506,7 +527,7 @@ class AdaptiveLearningEngine:
             # Extract clean tool name from raw command
             raw_cmd = pat.tool_sequence[0] if pat.tool_sequence else ""
             tool_name = _extract_tool_name(raw_cmd)
-            if not tool_name or tool_name in ("sh", "for", "which", "echo", "head", "cat", "xargs"):
+            if not tool_name or tool_name in _BOOTSTRAP_NOISE_TOOLS:
                 # Skip noise commands — they're intermediate steps, not strategies
                 continue
 
@@ -1325,38 +1346,67 @@ def _extract_tool_name(raw_cmd: str) -> str:
 _TOOL_NAME_CACHE: list[str] = []
 
 
+def _normalize_tool_names(values: list[Any]) -> set[str]:
+    return {str(value).strip().lower() for value in values if str(value).strip()}
+
+
+def _iter_phase_category_tools(meta: dict[str, Any], phase_name: str) -> set[str]:
+    wanted = _normalize_tool_names(
+        meta.get("phase_category_map", {}).get(phase_name.upper(), [])
+        if isinstance(meta.get("phase_category_map", {}), dict)
+        else []
+    )
+    if not wanted:
+        return set()
+
+    resolved: set[str] = set()
+    for cat_data in meta.get("categories", {}).values():
+        if not isinstance(cat_data, dict):
+            continue
+        for category_name, tool_list in cat_data.items():
+            if str(category_name).strip().lower() not in wanted:
+                continue
+            if isinstance(tool_list, list):
+                resolved.update(_normalize_tool_names(tool_list))
+    return resolved
+
+
 def _cache_known_tool_names() -> list[str]:
-    """Build a deduplicated list of all known tool names from tools_meta.json."""
+    """Build a deduplicated list of all known tool names from repo metadata."""
     global _TOOL_NAME_CACHE
     if _TOOL_NAME_CACHE:
         return _TOOL_NAME_CACHE
 
     meta = _load_tools_meta()
     names: set[str] = set()
-    # From categories (nested dicts → lists of tool names)
+
     for cat_data in meta.get("categories", {}).values():
         if isinstance(cat_data, dict):
             for tool_list in cat_data.values():
                 if isinstance(tool_list, list):
-                    names.update(str(t).lower() for t in tool_list)
-    # From tool_descriptions keys
-    names.update(str(k).lower() for k in meta.get("tool_descriptions", {}))
-    # From analysis_phase_vuln_tools
-    for t in meta.get("analysis_phase_vuln_tools", []):
-        names.add(str(t).lower())
-    # From watchdog_safe_command_prefixes
-    for t in meta.get("watchdog_safe_command_prefixes", []):
-        names.add(str(t).lower())
+                    names.update(_normalize_tool_names(tool_list))
 
-    # Include airecon native tools
-    names.update([
-        "http_observe", "advanced_fuzz", "deep_fuzz", "quick_fuzz",
-        "record_hypothesis", "browser_action", "web_search", "spawn_agent",
-        "caido_send_request", "caido_list_requests", "caido_automate",
-        "schemathesis_fuzz", "code_analysis", "generate_wordlist",
-    ])
+    names.update(_normalize_tool_names(list(meta.get("tool_descriptions", {}).keys())))
+    names.update(_normalize_tool_names(meta.get("analysis_phase_vuln_tools", [])))
+    names.update(_normalize_tool_names(meta.get("watchdog_safe_command_prefixes", [])))
 
-    # Sort by length descending so longer names match first (e.g. "python3" before "python")
+    for tools in meta.get("phase_extras", {}).values():
+        if isinstance(tools, list):
+            names.update(_normalize_tool_names(tools))
+
+    names.update(_normalize_tool_names(meta.get("callable_core_tools", [])))
+    names.update(_normalize_tool_names(meta.get("report_tools", [])))
+
+    for entry in _load_tool_definitions():
+        if not isinstance(entry, dict):
+            continue
+        function = entry.get("function", {})
+        if not isinstance(function, dict):
+            continue
+        tool_name = str(function.get("name", "")).strip().lower()
+        if tool_name:
+            names.add(tool_name)
+
     _TOOL_NAME_CACHE = sorted(names, key=len, reverse=True)
     return _TOOL_NAME_CACHE
 
@@ -1371,33 +1421,21 @@ def _cache_phase_tools() -> dict[str, set[str]]:
         return _PHASE_TOOL_CACHE
 
     meta = _load_tools_meta()
-    result: dict[str, set[str]] = {}
+    result: dict[str, set[str]] = {
+        "recon": set(),
+        "analysis": set(),
+        "exploit": set(),
+        "report": set(),
+    }
 
-    # RECON: reconnaissance categories
-    recon_tools: set[str] = set()
-    recon_cat = meta.get("categories", {}).get("reconnaissance", {})
-    if isinstance(recon_cat, dict):
-        for tool_list in recon_cat.values():
-            if isinstance(tool_list, list):
-                recon_tools.update(str(t).lower() for t in tool_list)
-    recon_tools.update(str(t).lower() for t in meta.get("analysis_phase_vuln_tools", []))
-    # Add airecon native recon
-    for t in ("http_observe", "browser_action", "web_search", "record_hypothesis"):
-        recon_tools.add(t)
-    result["recon"] = recon_tools
+    for phase_name in tuple(result.keys()):
+        result[phase_name].update(_iter_phase_category_tools(meta, phase_name))
+        extras = meta.get("phase_extras", {}).get(phase_name.upper(), [])
+        if isinstance(extras, list):
+            result[phase_name].update(_normalize_tool_names(extras))
 
-    # EXPLOIT: exploitation + vulnerability_scanning categories
-    exploit_tools: set[str] = set()
-    for cat_key in ("exploitation", "vulnerability_scanning"):
-        cat_data = meta.get("categories", {}).get(cat_key, {})
-        if isinstance(cat_data, dict):
-            for tool_list in cat_data.values():
-                if isinstance(tool_list, list):
-                    exploit_tools.update(str(t).lower() for t in tool_list)
-    # Add airecon native fuzz
-    for t in ("advanced_fuzz", "deep_fuzz", "quick_fuzz", "spawn_agent", "schemathesis_fuzz"):
-        exploit_tools.add(t)
-    result["exploit"] = exploit_tools
+    result["analysis"].update(_normalize_tool_names(meta.get("analysis_phase_vuln_tools", [])))
+    result["report"].update(_normalize_tool_names(meta.get("report_tools", [])))
 
     _PHASE_TOOL_CACHE = result
     return _PHASE_TOOL_CACHE
@@ -1441,11 +1479,9 @@ def _infer_phase_from_tool(tool_name: str) -> str:
     phase_tools = _cache_phase_tools()
     tool_lower = tool_name.lower()
 
-    if tool_lower in phase_tools.get("exploit", set()):
-        return "exploit"
-
-    if tool_lower in phase_tools.get("recon", set()):
-        return "recon"
+    for phase_name in ("report", "exploit", "analysis", "recon"):
+        if tool_lower in phase_tools.get(phase_name, set()):
+            return phase_name
 
     return "recon"
 

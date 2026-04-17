@@ -8,7 +8,11 @@ from pathlib import Path
 from typing import Any
 
 from ..config import get_config
-from ..data_loader import load_objective_patterns, load_vuln_hypothesis_legacy
+from ..data_loader import (
+    load_objective_patterns,
+    load_reasoning_hints,
+    load_vuln_hypothesis_legacy,
+)
 from .executors import (
     _RECON_CONTENT_DISCOVERY_BINS,
     _RECON_LIVE_HOST_BINS,
@@ -56,6 +60,28 @@ except (OSError, json.JSONDecodeError) as _e:
 _ANALYSIS_VULN_TOOLS: frozenset[str] = frozenset(
     _TOOLS_META_OBJ.get("analysis_phase_vuln_tools", [])
 )
+_REASONING_HINTS = load_reasoning_hints()
+_WORKFLOW_HINTS = _REASONING_HINTS.get("workflow_evidence", {})
+_WORKFLOW_LINE_TERMS: tuple[str, ...] = tuple(
+    str(value).strip()
+    for value in _WORKFLOW_HINTS.get("line_terms", [])
+    if str(value).strip()
+)
+_WORKFLOW_TENANT_TERMS: tuple[str, ...] = tuple(
+    str(value).strip().lower()
+    for value in _WORKFLOW_HINTS.get("tenant_terms", [])
+    if str(value).strip()
+)
+_WORKFLOW_PRINCIPAL_TERMS: tuple[str, ...] = tuple(
+    str(value).strip().lower()
+    for value in _WORKFLOW_HINTS.get("principal_terms", [])
+    if str(value).strip()
+)
+_WORKFLOW_COMMERCE_TERMS: tuple[str, ...] = tuple(
+    str(value).strip().lower()
+    for value in _WORKFLOW_HINTS.get("commerce_terms", [])
+    if str(value).strip()
+)
 
 
 def _normalize_signal_term(term: str) -> str:
@@ -78,6 +104,9 @@ def _indicator_pattern(indicators: list[str]) -> re.Pattern | None:
         return re.compile(r"(?i)(?:" + "|".join(dict.fromkeys(terms)) + r")")
     except re.error:
         return None
+
+
+_WORKFLOW_SIGNAL_RE = _indicator_pattern(list(_WORKFLOW_LINE_TERMS))
 
 
 def _resolve_vuln_labels(name: str, indicators: list[str] | None = None) -> list[str]:
@@ -878,17 +907,10 @@ class _ObjectivesMixin:
                 severity=_s,
             )
 
-        workflow_re = re.compile(
-            r"(?i)\b("
-            r"workflow|state|transition|step|checkout|payment|refund|coupon|promo|"
-            r"approval|invite|register|signup|tenant|organization|workspace|project|"
-            r"role|admin|owner|member|impersonat|verify|totp|otp|mfa"
-            r")\b"
-        )
         workflow_lines: list[str] = []
         for line in blob.splitlines():
             line = line.strip()
-            if len(line) < 16 or not workflow_re.search(line):
+            if len(line) < 16 or _WORKFLOW_SIGNAL_RE is None or not _WORKFLOW_SIGNAL_RE.search(line):
                 continue
             if _FALSE_SIGNAL_RE.search(line):
                 continue
@@ -898,11 +920,11 @@ class _ObjectivesMixin:
         for line in workflow_lines:
             base_tags = ["workflow", "business_logic"]
             lower_line = line.lower()
-            if any(token in lower_line for token in ("tenant", "org", "workspace", "project")):
+            if any(token in lower_line for token in _WORKFLOW_TENANT_TERMS):
                 base_tags.extend(["tenant", "trust_boundary"])
-            if any(token in lower_line for token in ("role", "admin", "owner", "member", "impersonat")):
+            if any(token in lower_line for token in _WORKFLOW_PRINCIPAL_TERMS):
                 base_tags.extend(["principal", "authorization"])
-            if any(token in lower_line for token in ("checkout", "payment", "refund", "coupon", "promo", "balance")):
+            if any(token in lower_line for token in _WORKFLOW_COMMERCE_TERMS):
                 base_tags.extend(["commerce", "state_machine"])
             _summary = f"Workflow signal: {line}"
             _t, _s = self._enrich_evidence(_summary, base_tags, 0.68, tool_name)

@@ -9,10 +9,34 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import parse_qs, urlparse
 
+from ..data_loader import load_reasoning_hints
 from .models import ToolExecution
 from ..config import get_workspace_root
 
 logger = logging.getLogger("airecon.agent")
+
+_REASONING_HINTS = load_reasoning_hints()
+_CODE_ANALYSIS_HINTS = _REASONING_HINTS.get("code_analysis_profile", {})
+_SECRET_NAME_TERMS: tuple[str, ...] = tuple(
+    str(value).strip().lower()
+    for value in _CODE_ANALYSIS_HINTS.get("secret_name_terms", [])
+    if str(value).strip()
+)
+_AUTH_PATH_TERMS: tuple[str, ...] = tuple(
+    str(value).strip().lower()
+    for value in _CODE_ANALYSIS_HINTS.get("auth_path_terms", [])
+    if str(value).strip()
+)
+_WORKFLOW_PATH_TERMS: tuple[str, ...] = tuple(
+    str(value).strip().lower()
+    for value in _CODE_ANALYSIS_HINTS.get("workflow_path_terms", [])
+    if str(value).strip()
+)
+_SCOPE_PATH_TERMS: tuple[str, ...] = tuple(
+    str(value).strip().lower()
+    for value in _CODE_ANALYSIS_HINTS.get("scope_path_terms", [])
+    if str(value).strip()
+)
 
 
 def _profile_code_analysis_target(host_path: Path) -> dict[str, Any]:
@@ -62,15 +86,15 @@ def _profile_code_analysis_target(host_path: Path) -> dict[str, Any]:
             rules.add("p/ci")
         if (
             name_lower.startswith(".env")
-            or any(token in name_lower for token in ("secret", "token", "credential", "key"))
+            or any(token in name_lower for token in _SECRET_NAME_TERMS)
             or suffix in {".pem", ".p12", ".kdbx"}
         ):
             rules.add("p/secrets")
-        if any(token in rel_lower for token in ("auth", "login", "session", "token", "jwt", "oauth")):
+        if any(token in rel_lower for token in _AUTH_PATH_TERMS):
             signals.append(f"auth_surface:{rel}")
-        if any(token in rel_lower for token in ("checkout", "payment", "coupon", "refund", "order")):
+        if any(token in rel_lower for token in _WORKFLOW_PATH_TERMS):
             signals.append(f"workflow_surface:{rel}")
-        if any(token in rel_lower for token in ("admin", "tenant", "org", "workspace", "project")):
+        if any(token in rel_lower for token in _SCOPE_PATH_TERMS):
             signals.append(f"scope_surface:{rel}")
 
     profile["languages"] = sorted(languages)

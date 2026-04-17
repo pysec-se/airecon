@@ -199,6 +199,60 @@ class TestAdaptiveLearningEngine:
         assert len(insights) == 1
         assert insights[0].title == "Prefer observe first"
 
+    def test_tool_name_and_phase_caches_are_metadata_driven(self, monkeypatch):
+        import airecon.proxy.agent.adaptive_learning as learning_mod
+
+        fake_meta = {
+            "categories": {
+                "reconnaissance": {"api_probe": ["scanx"]},
+                "vulnerability_scanning": {"web_tests": ["auditx"]},
+            },
+            "tool_descriptions": {"scriptx": "script helper"},
+            "analysis_phase_vuln_tools": ["vulnx"],
+            "watchdog_safe_command_prefixes": ["prefixx"],
+            "phase_category_map": {
+                "RECON": ["api_probe"],
+                "ANALYSIS": ["web_tests"],
+                "EXPLOIT": [],
+                "REPORT": [],
+            },
+            "phase_extras": {
+                "RECON": ["extra_recon"],
+                "ANALYSIS": ["extra_analysis"],
+                "EXPLOIT": ["extra_exploit"],
+                "REPORT": ["extra_report"],
+            },
+            "callable_core_tools": ["corex"],
+            "report_tools": ["reportx"],
+        }
+        fake_tools = [
+            {"function": {"name": "callablex"}},
+            {"function": {"name": "dynamic_runner"}},
+        ]
+
+        monkeypatch.setattr(learning_mod, "_TOOL_NAME_CACHE", [])
+        monkeypatch.setattr(learning_mod, "_PHASE_TOOL_CACHE", {})
+        monkeypatch.setattr(learning_mod, "_load_tools_meta", lambda: fake_meta)
+        monkeypatch.setattr(learning_mod, "_load_tool_definitions", lambda: fake_tools)
+
+        known = learning_mod._cache_known_tool_names()
+        phase_tools = learning_mod._cache_phase_tools()
+
+        assert "scanx" in known
+        assert "callablex" in known
+        assert "dynamic_runner" in known
+        assert "reportx" in known
+        assert "prefixx" in known
+
+        assert phase_tools["recon"] == {"scanx", "extra_recon"}
+        assert phase_tools["analysis"] == {"auditx", "extra_analysis", "vulnx"}
+        assert phase_tools["exploit"] == {"extra_exploit"}
+        assert phase_tools["report"] == {"extra_report", "reportx"}
+
+        assert learning_mod._infer_phase_from_tool("reportx") == "report"
+        assert learning_mod._infer_phase_from_tool("extra_analysis") == "analysis"
+        assert learning_mod._infer_phase_from_tool("callablex") == "recon"
+
 
 class TestTargetMemoryStore:
     def test_revisited_target_increments_session_count_and_prompt_text(self, tmp_path):

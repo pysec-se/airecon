@@ -9,7 +9,8 @@ import logging
 import shlex
 from urllib.parse import urlparse
 
-from .constants import VALID_BROWSER_ACTIONS
+from ..data_loader import load_reasoning_hints
+from .constants import REPORT_FILE_PATTERNS, VALID_BROWSER_ACTIONS
 from .tuning import get_tuning
 from .utils import is_host_in_scope
 
@@ -37,6 +38,16 @@ VALID_USER_INPUT_TYPES: frozenset[str] = frozenset(
     _VALID_INPUT_TYPES_JSON[0]
     if _VALID_INPUT_TYPES_JSON
     else {"text", "captcha", "totp", "password", "otp"}
+)
+
+_REASONING_HINTS = load_reasoning_hints()
+_REPORT_NAME_HINTS: tuple[str, ...] = tuple(
+    str(value).strip().lower()
+    for value in _REASONING_HINTS.get("reporting", {}).get(
+        "markdown_report_name_terms",
+        list(REPORT_FILE_PATTERNS),
+    )
+    if str(value).strip()
 )
 
 
@@ -146,33 +157,9 @@ except Exception as _ext_err:
     logger.debug("Failed to load file_extensions.json for scope guard: %s", _ext_err)
     _KNOWN_FILE_EXTS = set()
 
-_SCOPE_HINT_TOKENS = ("url", "host", "domain", "target", "endpoint", "base", "site")
 _HOSTLIKE_TOKEN_REGEX = re.compile(
     r"^(?:[a-zA-Z0-9-]+(?:\.[a-zA-Z0-9-]+)+|\d{1,3}(?:\.\d{1,3}){3})(?::\d+)?(?:[/?#].*)?$"
 )
-
-
-def _load_tool_param_schema() -> dict[str, dict[str, Any]]:
-    try:
-        tools_path = Path(__file__).parent.parent / "data" / "tools.json"
-        if not tools_path.exists():
-            return {}
-        data = json.loads(tools_path.read_text(encoding="utf-8"))
-        schema: dict[str, dict[str, Any]] = {}
-        for entry in data if isinstance(data, list) else []:
-            fn = entry.get("function", {}) if isinstance(entry, dict) else {}
-            name = fn.get("name")
-            params = fn.get("parameters", {}) if isinstance(fn, dict) else {}
-            props = params.get("properties", {}) if isinstance(params, dict) else {}
-            if isinstance(name, str) and name:
-                schema[name.lower()] = props if isinstance(props, dict) else {}
-        return schema
-    except Exception as e:
-        logger.debug("Failed to load tool param schema for scope guard: %s", e)
-        return {}
-
-
-_TOOL_PARAM_SCHEMA = _load_tool_param_schema()
 
 
 def _looks_like_path(text: str) -> bool:
@@ -285,22 +272,10 @@ def _extract_scope_candidates_from_text(text: str) -> set[str]:
 
 
 def _collect_scope_candidates(tool_name: str, arguments: dict[str, Any]) -> set[str]:
+    _ = tool_name
     candidates: set[str] = set()
     for text in _iter_text_values(arguments):
         candidates |= _extract_scope_candidates_from_text(text)
-
-    props = _TOOL_PARAM_SCHEMA.get(tool_name.lower(), {})
-    if props:
-        for key, meta in props.items():
-            key_lower = str(key).lower()
-            desc = str(meta.get("description", "") if isinstance(meta, dict) else "").lower()
-            if any(token in key_lower for token in _SCOPE_HINT_TOKENS) or any(
-                token in desc for token in _SCOPE_HINT_TOKENS
-            ):
-                value = arguments.get(key)
-                for text in _iter_text_values(value):
-                    candidates |= _extract_scope_candidates_from_text(text)
-
     return candidates
 _REPLAY_SCORE_WEIGHTS = {
     "request_logged": float(
@@ -1062,19 +1037,8 @@ class _ValidatorMixin:
                 return False, "'content' argument is required."
 
             path_lower = path_str.strip().lower()
-            _REPORT_NAMES = (
-                "final_report",
-                "report",
-                "vuln",
-                "vulnerability",
-                "finding",
-                "assessment",
-                "security_report",
-                "pentest_report",
-                "summary_report",
-            )
             if path_lower.endswith(".md") and any(
-                r in path_lower for r in _REPORT_NAMES
+                report_name in path_lower for report_name in _REPORT_NAME_HINTS
             ):
                 return False, (
                     "BLOCKED: Writing vulnerability findings to a markdown file is FORBIDDEN. "
