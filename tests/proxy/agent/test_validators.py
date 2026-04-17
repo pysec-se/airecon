@@ -1,6 +1,9 @@
 import pytest
 from types import SimpleNamespace
-from airecon.proxy.agent.validators import _ValidatorMixin
+from airecon.proxy.agent.validators import (
+    _ValidatorMixin,
+    _extract_scope_candidates_from_text,
+)
 
 
 class DummyTestAgent(_ValidatorMixin):
@@ -221,6 +224,58 @@ def test_validator_create_file(validator):
     args = {"path": "script.py", "content": "print('hello')"}
     valid, msg = validator._validate_tool_args("create_file", args)
     assert valid
+
+
+def test_scope_candidate_extraction_ignores_embedded_query_host_values():
+    candidates = _extract_scope_candidates_from_text(
+        "https://example.com/test/?url=evil.com"
+    )
+    assert "http://example.com" in candidates
+    assert "http://evil.com" not in candidates
+
+    candidates = _extract_scope_candidates_from_text("example.com/test/?url=evil.com")
+    assert "http://example.com" in candidates
+    assert "http://evil.com" not in candidates
+
+
+def test_scope_candidate_extraction_prefers_host_header_over_query_host_values():
+    candidates = _extract_scope_candidates_from_text(
+        "GET /test/?url=evil.com HTTP/1.1\r\nHost: example.com\r\n\r\n"
+    )
+    assert "http://example.com" in candidates
+    assert "http://evil.com" not in candidates
+
+
+def test_scope_guard_allows_embedded_outbound_host_value_on_in_scope_url(validator):
+    validator._scope_lock_active = True
+    validator._scope_anchor_target = "example.com"
+
+    valid, msg = validator._validate_tool_args(
+        "browser_action",
+        {"action": "goto", "url": "https://example.com/test/?url=evil.com"},
+    )
+
+    assert valid, msg
+
+    valid, msg = validator._validate_tool_args(
+        "execute",
+        {"command": "curl 'https://example.com/test/?url=evil.com'"},
+    )
+
+    assert valid, msg
+
+
+def test_scope_guard_still_blocks_true_out_of_scope_destination(validator):
+    validator._scope_lock_active = True
+    validator._scope_anchor_target = "example.com"
+
+    valid, msg = validator._validate_tool_args(
+        "browser_action",
+        {"action": "goto", "url": "https://evil.com/test/?next=example.com"},
+    )
+
+    assert not valid
+    assert msg is not None and "OUT-OF-SCOPE" in msg
 
 
 def test_replay_score_uses_session_waf_profile_to_avoid_false_penalty(validator):
