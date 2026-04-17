@@ -110,6 +110,94 @@ def get_memory_db() -> sqlite3.Connection:
         return conn
 
 
+def _tool_usage_row_get(row: sqlite3.Row | dict[str, Any], key: str, default: Any = None) -> Any:
+    try:
+        return row[key]
+    except (KeyError, IndexError, TypeError):
+        if isinstance(row, dict):
+            return row.get(key, default)
+        return default
+
+
+def _tool_usage_total(row: sqlite3.Row | dict[str, Any]) -> int:
+    return int(_tool_usage_row_get(row, "success_count", 0) or 0) + int(
+        _tool_usage_row_get(row, "failure_count", 0) or 0
+    )
+
+
+def rollup_tool_usage_rows(rows: list[sqlite3.Row | dict[str, Any]]) -> list[dict[str, Any]]:
+    """Collapse per-target tool rows into one cross-session stat row per tool.
+
+    If a global aggregate row exists (`target=''` or NULL), prefer it over
+    summing target-scoped rows. This avoids double-counting when adaptive
+    learning syncs an aggregate snapshot back into SQLite.
+    """
+    grouped: dict[str, list[sqlite3.Row | dict[str, Any]]] = {}
+    for row in rows:
+        tool_name = str(_tool_usage_row_get(row, "tool_name", "") or "").strip()
+        if not tool_name:
+            continue
+        grouped.setdefault(tool_name, []).append(row)
+
+    rolled: list[dict[str, Any]] = []
+    for tool_name, tool_rows in grouped.items():
+        global_rows = [
+            row for row in tool_rows if not str(_tool_usage_row_get(row, "target", "") or "").strip()
+        ]
+        if global_rows:
+            chosen = max(
+                global_rows,
+                key=lambda row: (
+                    _tool_usage_total(row),
+                    str(_tool_usage_row_get(row, "last_used", "") or ""),
+                    int(_tool_usage_row_get(row, "id", 0) or 0),
+                ),
+            )
+            success_count = int(_tool_usage_row_get(chosen, "success_count", 0) or 0)
+            failure_count = int(_tool_usage_row_get(chosen, "failure_count", 0) or 0)
+            avg_duration = float(_tool_usage_row_get(chosen, "avg_duration_sec", 0.0) or 0.0)
+            typical_output_size = int(
+                _tool_usage_row_get(chosen, "typical_output_size", 0) or 0
+            )
+            last_used = str(_tool_usage_row_get(chosen, "last_used", "") or "")
+        else:
+            success_count = sum(
+                int(_tool_usage_row_get(row, "success_count", 0) or 0) for row in tool_rows
+            )
+            failure_count = sum(
+                int(_tool_usage_row_get(row, "failure_count", 0) or 0) for row in tool_rows
+            )
+            total_calls = max(success_count + failure_count, 1)
+            weighted_duration = sum(
+                float(_tool_usage_row_get(row, "avg_duration_sec", 0.0) or 0.0)
+                * max(_tool_usage_total(row), 1)
+                for row in tool_rows
+            )
+            avg_duration = weighted_duration / total_calls
+            typical_output_size = max(
+                int(_tool_usage_row_get(row, "typical_output_size", 0) or 0)
+                for row in tool_rows
+            )
+            last_used = max(str(_tool_usage_row_get(row, "last_used", "") or "") for row in tool_rows)
+
+        total_calls = success_count + failure_count
+        rolled.append(
+            {
+                "tool_name": tool_name,
+                "success_count": success_count,
+                "failure_count": failure_count,
+                "avg_duration_sec": avg_duration,
+                "typical_output_size": typical_output_size,
+                "last_used": last_used,
+                "total_calls": total_calls,
+                "success_rate": round(success_count / max(total_calls, 1), 2),
+            }
+        )
+
+    rolled.sort(key=lambda row: str(row.get("last_used", "")), reverse=True)
+    return rolled
+
+
 def _init_schema(conn: sqlite3.Connection) -> None:
     cursor = conn.cursor()
 
@@ -902,79 +990,69 @@ class MemoryManager:
         if tool_name:
             cursor.execute(
                 """
-                SELECT * FROM tool_usage WHERE tool_name = ?
+                SELECT tool_name, target, success_count, failure_count,
+                       avg_duration_sec, typical_output_size, last_used
+                FROM tool_usage WHERE tool_name = ?
             """,
                 (tool_name,),
             )
-            row = cursor.fetchone()
-            return dict(row) if row else {}
-        else:
-            cursor.execute("""
-                SELECT tool_name, success_count, failure_count, avg_duration_sec, typical_output_size
-                FROM tool_usage ORDER BY last_used DESC LIMIT 20
-            """)
-            results = [dict(row) for row in cursor.fetchall()]
-            total_success = sum(r.get("success_count", 0) for r in results)
-            total_calls = total_success + sum(
-                r.get("failure_count", 0) for r in results
-            )
-            if total_calls > 0:
-                for r in results:
-                    tool_total = r.get("success_count", 0) + r.get("failure_count", 0)
-                    r["total_calls"] = tool_total
-                    r["success_rate"] = round(
-                        r.get("success_count", 0) / max(tool_total, 1), 2
-                    )
-            return results
+            rows = cursor.fetchall()
+            rolled = rollup_tool_usage_rows(rows)
+            return rolled[0] if rolled else {}
+
+        cursor.execute("""
+            SELECT tool_name, target, success_count, failure_count,
+                   avg_duration_sec, typical_output_size, last_used
+            FROM tool_usage
+        """)
+        return rollup_tool_usage_rows(cursor.fetchall())[:20]
 
     def get_tool_insights(self) -> dict[str, Any]:
 
         if not self.conn:
             return {}
 
-        cursor = self.conn.cursor()
-
-        cursor.execute("""
-            SELECT tool_name,
-                   success_count,
-                   failure_count,
-                   avg_duration_sec,
-                   typical_output_size,
-                   (success_count * 100.0 / MAX(success_count + failure_count, 1)) as success_rate
-            FROM tool_usage
-            WHERE success_count + failure_count >= 2
-            ORDER BY success_rate DESC, total_calls DESC
-            LIMIT 15
-        """)
-
+        stats = self.get_tool_statistics()
+        if not isinstance(stats, list):
+            return {}
+        ranked = [row for row in stats if row.get("total_calls", 0) >= 2]
         top_tools = []
-        for row in cursor.fetchall():
-            tool = dict(row)
-            tool["success_rate"] = round(tool.get("success_rate", 0), 1)
+        for tool in sorted(
+            ranked,
+            key=lambda row: (
+                float(row.get("success_rate", 0.0)),
+                int(row.get("total_calls", 0)),
+            ),
+            reverse=True,
+        )[:15]:
+            tool = dict(tool)
+            tool["success_rate"] = round(float(tool.get("success_rate", 0.0)), 1)
             top_tools.append(tool)
 
-        cursor.execute("""
-            SELECT tool_name, avg_duration_sec, typical_output_size
-            FROM tool_usage
-            ORDER BY avg_duration_sec DESC
-            LIMIT 5
-        """)
-        slow_tools = [dict(row) for row in cursor.fetchall()]
+        slow_tools = sorted(
+            (dict(row) for row in stats),
+            key=lambda row: float(row.get("avg_duration_sec", 0.0)),
+            reverse=True,
+        )[:5]
 
-        cursor.execute("""
-            SELECT tool_name, success_count, failure_count
-            FROM tool_usage
-            WHERE success_count + failure_count >= 3
-            ORDER BY (success_count * 1.0 / (success_count + failure_count)) DESC
-            LIMIT 10
-        """)
-        reliable_tools = [dict(row) for row in cursor.fetchall()]
+        reliable_tools = sorted(
+            (
+                dict(row)
+                for row in stats
+                if int(row.get("total_calls", 0)) >= 3
+            ),
+            key=lambda row: (
+                float(row.get("success_rate", 0.0)),
+                int(row.get("total_calls", 0)),
+            ),
+            reverse=True,
+        )[:10]
 
         return {
             "top_performing_tools": top_tools,
             "tools_by_speed": slow_tools,
             "most_reliable_tools": reliable_tools,
-            "total_tools_tracked": len(top_tools),
+            "total_tools_tracked": len(stats),
         }
 
     def get_model_performance_insights(self) -> dict[str, Any]:

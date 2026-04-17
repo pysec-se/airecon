@@ -7,6 +7,7 @@ from typing import Any
 import json
 import logging
 import shlex
+from urllib.parse import urlparse
 
 from .constants import VALID_BROWSER_ACTIONS
 from .tuning import get_tuning
@@ -129,7 +130,6 @@ _REPLAY_GAP_MESSAGES = {
 
 _URL_REGEX = re.compile(r"https?://[^\s\"'<>]+", re.IGNORECASE)
 _HOST_HEADER_REGEX = re.compile(r"(?im)^host:\s*([^\s/:]+)")
-_HOST_TOKEN_REGEX = re.compile(r"\b([a-zA-Z0-9-]+(?:\.[a-zA-Z0-9-]+)+)\b")
 _IP_REGEX = re.compile(r"\b(?:\d{1,3}\.){3}\d{1,3}\b")
 
 _EXTS_PATH = Path(__file__).parent.parent / "data" / "file_extensions.json"
@@ -147,6 +147,9 @@ except Exception as _ext_err:
     _KNOWN_FILE_EXTS = set()
 
 _SCOPE_HINT_TOKENS = ("url", "host", "domain", "target", "endpoint", "base", "site")
+_HOSTLIKE_TOKEN_REGEX = re.compile(
+    r"^(?:[a-zA-Z0-9-]+(?:\.[a-zA-Z0-9-]+)+|\d{1,3}(?:\.\d{1,3}){3})(?::\d+)?(?:[/?#].*)?$"
+)
 
 
 def _load_tool_param_schema() -> dict[str, dict[str, Any]]:
@@ -225,31 +228,58 @@ def _extract_scope_candidates_from_text(text: str) -> set[str]:
     if not stripped:
         return candidates
 
-    for url in _URL_REGEX.findall(stripped):
-        candidates.add(url)
+    def _normalize_candidate(raw: str) -> str | None:
+        token = raw.strip().strip("()[]{}<>,;\"'")
+        if not token:
+            return None
+        if _looks_like_file_name(token) or _looks_like_token(token):
+            return None
+        parsed = urlparse(token if "://" in token else f"http://{token}")
+        host = (parsed.hostname or "").strip().lower().rstrip(".")
+        if not host:
+            return None
+        if _looks_like_file_name(host) or _looks_like_token(host):
+            return None
+        return f"http://{host}"
 
-    for ip in _IP_REGEX.findall(stripped):
-        candidates.add(f"http://{ip}")
+    sanitized = stripped
+    for url in _URL_REGEX.findall(stripped):
+        normalized = _normalize_candidate(url)
+        if normalized:
+            candidates.add(normalized)
+        sanitized = sanitized.replace(url, " ")
+
+    for ip in _IP_REGEX.findall(sanitized):
+        normalized = _normalize_candidate(ip)
+        if normalized:
+            candidates.add(normalized)
 
     host_match = _HOST_HEADER_REGEX.search(stripped)
     if host_match:
-        host = host_match.group(1).strip()
-        if host:
-            candidates.add(f"http://{host}")
+        normalized = _normalize_candidate(host_match.group(1))
+        if normalized:
+            candidates.add(normalized)
 
     if "://" not in stripped and not _looks_like_path(stripped) and not _looks_like_file_name(stripped):
         if re.match(r"^[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$", stripped):
-            candidates.add(f"http://{stripped}")
+            normalized = _normalize_candidate(stripped)
+            if normalized:
+                candidates.add(normalized)
 
-    for host in _HOST_TOKEN_REGEX.findall(stripped):
-        host = host.strip().lower()
-        if not host or _looks_like_file_name(host) or _looks_like_token(host):
+    for raw_token in re.split(r"\s+", sanitized):
+        token = raw_token.strip().strip("()[]{}<>,;\"'")
+        if not token:
             continue
-        if host.startswith(("http://", "https://")):
+        if token.startswith(("/", "./", "../", "~")):
             continue
-        tld = host.rsplit(".", 1)[-1]
-        if tld.isalpha() and len(tld) >= 2:
-            candidates.add(f"http://{host}")
+        is_hostlike = bool(_HOSTLIKE_TOKEN_REGEX.match(token))
+        if "=" in token and not token.startswith(("http://", "https://")) and not is_hostlike:
+            continue
+        if not is_hostlike:
+            continue
+        normalized = _normalize_candidate(token)
+        if normalized:
+            candidates.add(normalized)
 
     return candidates
 

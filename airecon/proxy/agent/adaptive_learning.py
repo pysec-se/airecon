@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 
+import asyncio
+import concurrent.futures
 import hashlib
 import json
 import logging
@@ -10,7 +12,11 @@ from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any
 
-from ..memory import configure_sqlite_connection, get_sqlite_timeout_seconds
+from ..memory import (
+    configure_sqlite_connection,
+    get_sqlite_timeout_seconds,
+    rollup_tool_usage_rows,
+)
 
 logger = logging.getLogger("airecon.agent.adaptive_learning")
 
@@ -206,8 +212,14 @@ class AdaptiveLearningEngine:
             conn = _open_memory_db(read_only=True)
             cur = conn.cursor()
 
-            cur.execute("SELECT * FROM tool_usage")
-            for row in cur.fetchall():
+            cur.execute(
+                """
+                SELECT tool_name, target, success_count, failure_count,
+                       avg_duration_sec, typical_output_size, last_used
+                FROM tool_usage
+                """
+            )
+            for row in rollup_tool_usage_rows(cur.fetchall()):
                 name = row["tool_name"]
                 total = (row["success_count"] or 0) + (row["failure_count"] or 0)
                 if name not in self.tool_performances:
@@ -320,19 +332,120 @@ class AdaptiveLearningEngine:
             now = time.strftime("%Y-%m-%d %H:%M:%S")
             for name, perf in self.tool_performances.items():
                 cur.execute(
-                    "SELECT success_count, failure_count, avg_duration_sec FROM tool_usage WHERE tool_name = ?",
+                    """
+                    SELECT id, tool_name, target, success_count, failure_count,
+                           avg_duration_sec, typical_output_size, last_used
+                    FROM tool_usage WHERE tool_name = ?
+                    """,
                     (name,),
                 )
-                row = cur.fetchone()
-                # Only upsert if in-memory has more data (don't downgrade)
-                if row and perf.total_uses <= row[0] + row[1]:
-                    continue
-                cur.execute(
-                    "INSERT OR REPLACE INTO tool_usage "
-                    "(tool_name, target, success_count, failure_count, avg_duration_sec, last_used, typical_output_size) "
-                    "VALUES (?, ?, ?, ?, ?, ?, ?)",
-                    (name, "", perf.successes, perf.failures, perf.avg_duration, now, 0),
+                existing_rows = cur.fetchall()
+                rolled = rollup_tool_usage_rows(existing_rows)
+                current_total = rolled[0]["total_calls"] if rolled else 0
+
+                global_rows = [
+                    row for row in existing_rows if not str(row["target"] or "").strip()
+                ]
+                primary_global = (
+                    min(global_rows, key=lambda row: int(row["id"]))
+                    if global_rows
+                    else None
                 )
+                best_global = (
+                    max(
+                        global_rows,
+                        key=lambda row: (
+                            int(row["success_count"] or 0) + int(row["failure_count"] or 0),
+                            str(row["last_used"] or ""),
+                            int(row["id"]),
+                        ),
+                    )
+                    if global_rows
+                    else None
+                )
+
+                if primary_global and best_global:
+                    best_total = int(best_global["success_count"] or 0) + int(
+                        best_global["failure_count"] or 0
+                    )
+                    if perf.total_uses > best_total:
+                        success_count = perf.successes
+                        failure_count = perf.failures
+                        avg_duration = perf.avg_duration
+                    else:
+                        success_count = int(best_global["success_count"] or 0)
+                        failure_count = int(best_global["failure_count"] or 0)
+                        avg_duration = float(best_global["avg_duration_sec"] or 0.0)
+
+                    if (
+                        primary_global["id"] != best_global["id"]
+                        or len(global_rows) > 1
+                        or perf.total_uses > best_total
+                    ):
+                        cur.execute(
+                            """
+                            UPDATE tool_usage SET
+                                success_count = ?, failure_count = ?, avg_duration_sec = ?,
+                                typical_output_size = ?, last_used = ?
+                            WHERE id = ?
+                            """,
+                            (
+                                success_count,
+                                failure_count,
+                                avg_duration,
+                                0,
+                                now,
+                                int(primary_global["id"]),
+                            ),
+                        )
+                    extras = [
+                        (int(row["id"]),)
+                        for row in global_rows
+                        if int(row["id"]) != int(primary_global["id"])
+                    ]
+                    if extras:
+                        cur.executemany("DELETE FROM tool_usage WHERE id = ?", extras)
+                    continue
+
+                # Only create or refresh a global aggregate row when in-memory has
+                # strictly more evidence than the rolled-up SQLite view.
+                if perf.total_uses <= current_total:
+                    continue
+
+                if primary_global:
+                    cur.execute(
+                        """
+                        UPDATE tool_usage SET
+                            success_count = ?, failure_count = ?, avg_duration_sec = ?,
+                            typical_output_size = ?, last_used = ?
+                        WHERE id = ?
+                        """,
+                        (
+                            perf.successes,
+                            perf.failures,
+                            perf.avg_duration,
+                            0,
+                            now,
+                            int(primary_global["id"]),
+                        ),
+                    )
+                else:
+                    cur.execute(
+                        """
+                        INSERT INTO tool_usage
+                        (tool_name, target, success_count, failure_count, avg_duration_sec, last_used, typical_output_size)
+                        VALUES (?, ?, ?, ?, ?, ?, ?)
+                        """,
+                        (
+                            name,
+                            "",
+                            perf.successes,
+                            perf.failures,
+                            perf.avg_duration,
+                            now,
+                            0,
+                        ),
+                    )
             conn.commit()
             conn.close()
             logger.debug("[AdaptiveLearning] Synced tool_performances to airencon.db")
@@ -667,7 +780,6 @@ class AdaptiveLearningEngine:
 
         try:
             import aiohttp
-            import asyncio
 
             async def _call():
                 payload = {
@@ -685,12 +797,15 @@ class AdaptiveLearningEngine:
                         data = await resp.json()
                         return data.get("response", "").strip()
 
-            loop = asyncio.get_event_loop()
-            if loop.is_running():
-                future = asyncio.run_coroutine_threadsafe(_call(), loop)
-                raw_answer = future.result(timeout=120)
-            else:
+            try:
+                asyncio.get_running_loop()
+            except RuntimeError:
                 raw_answer = asyncio.run(_call())
+            else:
+                with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
+                    raw_answer = executor.submit(lambda: asyncio.run(_call())).result(
+                        timeout=125
+                    )
 
             new_insights = _parse_insights_json(raw_answer)
             added: list[LearnedInsight] = []
@@ -924,6 +1039,7 @@ class TargetMemoryStore:
         self.base_dir = base_dir or _TARGET_MEMORY_DIR
         self.base_dir.mkdir(parents=True, exist_ok=True)
         self._cache: dict[str, TargetMemory] = {}
+        self._session_touched: set[str] = set()
 
     def _normalize_target(self, target: str) -> str:
         """Strip protocol, port, and path — returns bare domain."""
@@ -960,6 +1076,7 @@ class TargetMemoryStore:
             data = json.loads(fpath.read_text(encoding="utf-8"))
             tm = TargetMemory(**data)
             self._cache[norm] = tm
+            self._touch_target_session(norm, tm, persist=True)
             logger.info(
                 "[TargetMemory] Loaded for %s: %d endpoints, %d vulns, "
                 "%d bypasses, %d params",
@@ -991,6 +1108,26 @@ class TargetMemoryStore:
         except Exception as exc:
             logger.debug("Failed to save target memory for %s: %s", norm, exc)
 
+    def _touch_target_session(
+        self,
+        norm: str,
+        tm: TargetMemory,
+        *,
+        persist: bool,
+        is_new: bool = False,
+    ) -> None:
+        if norm in self._session_touched:
+            return
+        tm.last_seen = time.time()
+        if is_new:
+            tm.session_count = max(1, int(tm.session_count or 0))
+        else:
+            tm.session_count = max(1, int(tm.session_count or 0)) + 1
+        self._session_touched.add(norm)
+        self._cache[norm] = tm
+        if persist:
+            self.save(norm, tm)
+
     # ── Recording ────────────────────────────────────────────────────────────
 
     def ensure(self, target: str) -> TargetMemory:
@@ -1010,6 +1147,7 @@ class TargetMemoryStore:
             session_count=1,
         )
         self._cache[norm] = tm
+        self._touch_target_session(norm, tm, persist=False, is_new=True)
         return tm
 
     def record_endpoint(self, target: str, path: str) -> None:
@@ -1088,7 +1226,7 @@ class TargetMemoryStore:
 
         lines = [
             f"<target_intelligence: {tm.target}>",
-            f"REMEMBERED INTELLIGENCE from {tm.session_count} previous session(s) on {tm.target}:",
+            f"REMEMBERED INTELLIGENCE from {max(tm.session_count - 1, 0)} previous session(s) on {tm.target}:",
             "",
         ]
 
