@@ -349,6 +349,8 @@ class _ObserveExecutorMixin:
             "curl",
             "-s",
             "-i",
+            "-k",                 # pentest: skip TLS verify (self-signed / internal CA)
+            "--globoff",          # treat URL literally — [ ] { } in query strings are not globs
             "--max-time",
             str(req_timeout),
             "-X",
