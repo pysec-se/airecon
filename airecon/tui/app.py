@@ -2465,6 +2465,23 @@ class AIReconApp(App):
 
         self.exit()
 
+    def on_text_selected(self) -> None:
+        """Fires on mouse-up after a drag-selection in the terminal.
+        See textual.screen → `post_message(events.TextSelected())`.
+        Covers chat, tool-output, and any other text panels without
+        per-widget instrumentation."""
+        try:
+            selected = (self.screen.get_selected_text() or "").strip()
+        except Exception as e:
+            logger.debug("on_text_selected: get_selected_text failed: %s", e)
+            return
+        if not selected:
+            return
+        if getattr(self, "_last_autocopied_chat_selection", None) == selected:
+            return
+        self._last_autocopied_chat_selection = selected
+        self.copy_to_clipboard(selected)
+
     async def _hide_copy_toast_after_delay(self, seconds: float = 1.2) -> None:
         await asyncio.sleep(seconds)
         try:

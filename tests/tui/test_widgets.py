@@ -1,7 +1,7 @@
+from types import SimpleNamespace
+
 import pytest
 from textual.app import App, ComposeResult
-from textual.geometry import Offset
-from textual.selection import Selection
 
 from pathlib import Path
 
@@ -92,23 +92,35 @@ def test_buddy_species_synced_with_openclaude_sprite_pack():
     assert "frog" not in AVAILABLE_SPECIES
 
 
-@pytest.mark.asyncio
-async def test_chat_text_selection_auto_copies_to_clipboard():
-    async with ChatWidgetTestApp().run_test() as pilot:
-        chat = pilot.app.query_one("#chat", ChatPanel)
-        chat.add_assistant_message("copy this text")
-        await pilot.pause()
+def test_on_text_selected_copies_selection_and_dedupes(monkeypatch):
+    """App-level `on_text_selected` fires on mouse-up (Textual 8.1+).
+    Verify: copies non-empty selection, skips empty, dedupes repeats."""
+    from airecon.tui.app import AIReconApp
 
-        selected = pilot.app.query_one(".msg-body")
-        copied: list[str] = []
+    copied: list[str] = []
+    current_selection = {"text": "copy this text"}
 
-        pilot.app.copy_to_clipboard = lambda value: copied.append(value)
-        selected.screen.get_selected_text = lambda: "copy this text"
+    app = AIReconApp.__new__(AIReconApp)
+    monkeypatch.setattr(
+        AIReconApp,
+        "screen",
+        property(lambda _self: SimpleNamespace(get_selected_text=lambda: current_selection["text"])),
+    )
+    app.copy_to_clipboard = lambda value: copied.append(value)
 
-        selected.selection_updated(Selection(Offset(0, 0), Offset(0, 4)))
-        await pilot.pause(0.45)
+    app.on_text_selected()
+    assert copied == ["copy this text"]
 
-        assert copied == ["copy this text"]
+    app.on_text_selected()
+    assert copied == ["copy this text"]
+
+    current_selection["text"] = "different text"
+    app.on_text_selected()
+    assert copied == ["copy this text", "different text"]
+
+    current_selection["text"] = ""
+    app.on_text_selected()
+    assert copied == ["copy this text", "different text"]
 
 
 @pytest.mark.asyncio
