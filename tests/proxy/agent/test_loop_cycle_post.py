@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from unittest.mock import MagicMock
+from types import SimpleNamespace
 
 import pytest
 
@@ -217,6 +218,50 @@ class TestFinalizeToolResults:
 
         assert any(e.type == "done" for e in events)
         assert agent._iteration_terminated is True
+
+    @pytest.mark.asyncio
+    async def test_finalize_tracks_loaded_tech_skill_paths(self, agent, monkeypatch):
+        monkeypatch.setattr(
+            "airecon.proxy.agent.loop_cycle_post.parse_tool_output",
+            lambda *_args, **_kwargs: SimpleNamespace(total_count=1),
+        )
+
+        def _fake_update(session, _parsed, _raw):
+            session.technologies["wordpress"] = "6.0"
+
+        monkeypatch.setattr(
+            "airecon.proxy.agent.loop_cycle_post.update_from_parsed_output",
+            _fake_update,
+        )
+        monkeypatch.setattr(
+            "airecon.proxy.agent.loop_cycle_post.auto_load_skills_for_technologies",
+            lambda *_args, **_kwargs: (
+                "[AUTO-LOADED SKILL: technologies/wordpress.md]\ncontent",
+                ["technologies/wordpress.md"],
+            ),
+        )
+
+        all_results = {
+            0: (
+                None,
+                {"id": "tc6"},
+                "execute",
+                {"command": "fingerprint"},
+                True,
+                0.5,
+                {"success": True, "stdout": "wp-json", "result": "wp-json"},
+                None,
+                True,
+            )
+        }
+
+        async for _ in agent._finalize_tool_results(
+            MagicMock(value="RECON"), all_results, False
+        ):
+            pass
+
+        assert "technologies/wordpress.md" in agent._loaded_tech_skill_paths
+        assert "technologies/wordpress.md" in agent._session.loaded_skills
 
     @pytest.mark.asyncio
     async def test_finalize_includes_caido_status(self, agent):

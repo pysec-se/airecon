@@ -167,11 +167,6 @@ def load_tools() -> list[dict[str, Any]]:
         return []
 
 
-def load_reasoning_hints() -> dict[str, Any]:
-    """Load shared reasoning/config hints for agent heuristics."""
-    return _load_json("reasoning_hints.json")
-
-
 # ── Fuzzer data ──────────────────────────────────────────────────────────────
 
 

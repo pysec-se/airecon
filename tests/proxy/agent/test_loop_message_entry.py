@@ -185,7 +185,7 @@ class TestPrepareMessageContext:
 
             await agent._prepare_message_context("scan test.com")
 
-        assert agent._scope_lock_active is True
+        assert agent._scope_lock_active is False
 
 
 class TestContextPressureTruncation:

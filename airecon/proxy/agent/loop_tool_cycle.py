@@ -1416,8 +1416,8 @@ class _ToolCycleMixin(_CyclePreludeMixin, _CycleLlmMixin, _CyclePostMixin):
                 tn = tc["function"]["name"]
 
                 # Hard phase constraint check — block inappropriate tools
-                _phase_blocked = self._check_phase_constraint(tn)
-                if _phase_blocked:
+                _phase_mode, _phase_note = self._check_phase_constraint(tn)
+                if _phase_mode == "block" and _phase_note:
                     logger.info(
                         "Phase constraint blocked tool '%s' in %s phase",
                         tn,
@@ -1430,9 +1430,16 @@ class _ToolCycleMixin(_CyclePreludeMixin, _CycleLlmMixin, _CyclePostMixin):
                         args,
                         True,
                         0.0,
-                        {"success": True, "result": _phase_blocked},
+                        {"success": True, "result": _phase_note},
                         None,
                         True,
+                    )
+                if _phase_mode == "advisory" and _phase_note:
+                    logger.info(
+                        "Phase advisory for tool '%s' in %s phase: %s",
+                        tn,
+                        self._get_current_phase().value if self.pipeline else "unknown",
+                        _phase_note.replace("\n", " "),
                     )
 
                 is_dup, dup_msg = self._is_duplicate_command(tn, args)

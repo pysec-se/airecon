@@ -12,7 +12,6 @@ from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any
 
-from ..data_loader import load_reasoning_hints
 from ..memory import (
     configure_sqlite_connection,
     get_sqlite_timeout_seconds,
@@ -25,15 +24,6 @@ _LEARNING_DIR = Path.home() / ".airecon" / "learning"
 _MEMORY_DB = Path.home() / ".airecon" / "memory" / "airecon.db"
 _TOOLS_META = Path(__file__).resolve().parents[1] / "data" / "tools_meta.json"
 _TOOLS_JSON = Path(__file__).resolve().parents[1] / "data" / "tools.json"
-_REASONING_HINTS = load_reasoning_hints()
-_BOOTSTRAP_NOISE_TOOLS: frozenset[str] = frozenset(
-    str(value).strip().lower()
-    for value in _REASONING_HINTS.get("adaptive_learning", {}).get(
-        "bootstrap_noise_tools",
-        [],
-    )
-    if str(value).strip()
-)
 
 
 def _load_tools_meta() -> dict[str, Any]:
@@ -527,8 +517,7 @@ class AdaptiveLearningEngine:
             # Extract clean tool name from raw command
             raw_cmd = pat.tool_sequence[0] if pat.tool_sequence else ""
             tool_name = _extract_tool_name(raw_cmd)
-            if not tool_name or tool_name in _BOOTSTRAP_NOISE_TOOLS:
-                # Skip noise commands — they're intermediate steps, not strategies
+            if not tool_name:
                 continue
 
             # Build human-readable description of what the tool does

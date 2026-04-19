@@ -77,7 +77,7 @@ class _MessageEntryMixin:
 
         _recon_mode = normalize_recon_mode(getattr(cfg, "agent_recon_mode", "standard"))
         _simple_kickoff = is_simple_target_kickoff(user_message, extracted_target)
-        _requested_scope_lock = bool(_recon_mode == "standard" and not _simple_kickoff)
+        _requested_scope_lock = False
 
         if extracted_target:
             _current = self.state.active_target

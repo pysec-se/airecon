@@ -8,11 +8,22 @@ from pathlib import Path
 from typing import Any
 
 from ..config import get_config
+from ..correlation import PORT_CORRELATIONS
 from ..data_loader import (
     load_objective_patterns,
-    load_reasoning_hints,
     load_vuln_hypothesis_legacy,
 )
+
+# ── Tool-budget thresholds ────────────────────────────────────────────────────
+# These are derived from pentesting reality, not arbitrary policy:
+# - RECON/ANALYSIS: 8 calls before low-yield warning; WAF/rate-limit can skew results
+# - EXPLOIT: 14 calls + 0.05 floor — iterative WAF bypass legitimately needs more probes
+# - Evidence-growth exemption: agent making real progress → suppress pivot pressure
+_BUDGET_DEFAULT_MIN_CALLS: int   = 8
+_BUDGET_DEFAULT_THRESHOLD: float = 0.08
+_BUDGET_EXPLOIT_MIN_CALLS: int   = 14
+_BUDGET_EXPLOIT_THRESHOLD: float = 0.05
+_BUDGET_EVIDENCE_EXEMPTION: int  = 3
 from .executors import (
     _RECON_CONTENT_DISCOVERY_BINS,
     _RECON_LIVE_HOST_BINS,
@@ -60,28 +71,6 @@ except (OSError, json.JSONDecodeError) as _e:
 _ANALYSIS_VULN_TOOLS: frozenset[str] = frozenset(
     _TOOLS_META_OBJ.get("analysis_phase_vuln_tools", [])
 )
-_REASONING_HINTS = load_reasoning_hints()
-_WORKFLOW_HINTS = _REASONING_HINTS.get("workflow_evidence", {})
-_WORKFLOW_LINE_TERMS: tuple[str, ...] = tuple(
-    str(value).strip()
-    for value in _WORKFLOW_HINTS.get("line_terms", [])
-    if str(value).strip()
-)
-_WORKFLOW_TENANT_TERMS: tuple[str, ...] = tuple(
-    str(value).strip().lower()
-    for value in _WORKFLOW_HINTS.get("tenant_terms", [])
-    if str(value).strip()
-)
-_WORKFLOW_PRINCIPAL_TERMS: tuple[str, ...] = tuple(
-    str(value).strip().lower()
-    for value in _WORKFLOW_HINTS.get("principal_terms", [])
-    if str(value).strip()
-)
-_WORKFLOW_COMMERCE_TERMS: tuple[str, ...] = tuple(
-    str(value).strip().lower()
-    for value in _WORKFLOW_HINTS.get("commerce_terms", [])
-    if str(value).strip()
-)
 
 
 def _normalize_signal_term(term: str) -> str:
@@ -104,10 +93,6 @@ def _indicator_pattern(indicators: list[str]) -> re.Pattern | None:
         return re.compile(r"(?i)(?:" + "|".join(dict.fromkeys(terms)) + r")")
     except re.error:
         return None
-
-
-_WORKFLOW_SIGNAL_RE = _indicator_pattern(list(_WORKFLOW_LINE_TERMS))
-
 
 def _resolve_vuln_labels(name: str, indicators: list[str] | None = None) -> list[str]:
     classifier = get_classifier()
@@ -848,25 +833,77 @@ class _ObjectivesMixin:
                 severity=_s,
             )
 
-        port_hits = list(
-            dict.fromkeys(
-                re.findall(
-                    r"\b\d{1,5}/(?:tcp|udp)\b|\b(?:\d{1,3}\.){3}\d{1,3}:\d{1,5}\b",
-                    blob,
-                    re.IGNORECASE,
-                )
-            )
+        # ── Port evidence + service inference ────────────────────────────────
+        # Extract open ports from nmap-style output (e.g. "3306/tcp open mysql")
+        # and enrich each with service/vuln context from port_correlations.json.
+        _port_service_re = re.compile(
+            r"\b(\d{1,5})/(tcp|udp)\s+open(?:\s+(\S+))?", re.IGNORECASE
         )
-        for hit in port_hits[:4]:
-            _summary = f"Service/port evidence: {hit}"
+        _seen_ports: set[int] = set()
+        for m in _port_service_re.finditer(blob):
+            port_num = int(m.group(1))
+            banner_service = (m.group(3) or "").lower().strip("?")
+            if port_num in _seen_ports or len(_seen_ports) >= 6:
+                break
+            _seen_ports.add(port_num)
+
+            corr = PORT_CORRELATIONS.get(port_num, {})
+            service_name = corr.get("service") or banner_service or f"port {port_num}"
+            vuln_list: list[str] = corr.get("vulns", [])
+            top_vulns = "; ".join(vuln_list[:3]) if vuln_list else ""
+
+            _summary = (
+                f"Open port {port_num}/{m.group(2)} ({service_name})"
+                + (f" — known attack surface: {top_vulns}" if top_vulns else "")
+            )
             _t, _s = self._enrich_evidence(
-                _summary, ["network", "recon"], 0.7, tool_name
+                _summary, ["network", "recon", service_name.lower()], 0.75, tool_name
             )
             self.state.add_evidence(
                 phase=phase,
                 source_tool=tool_name,
                 summary=_summary,
-                confidence=0.7,
+                confidence=0.75,
+                tags=_t,
+                severity=_s,
+            )
+
+            # Form a targeted hypothesis when we have correlated vuln data.
+            if corr and vuln_list:
+                suggested_tools = corr.get("tools", [])
+                first_tool = suggested_tools[0] if suggested_tools else f"nmap -sV -p {port_num}"
+                self.state.add_hypothesis(
+                    claim=(
+                        f"Port {port_num} ({service_name}) is open — "
+                        f"test for: {'; '.join(vuln_list[:4])}"
+                    ),
+                    test_plan=(
+                        f"Start with: {first_tool}. "
+                        "Check service version against CVE database. "
+                        f"Test attack surface: {top_vulns}."
+                    ),
+                    phase=phase,
+                    tags=["network", service_name.lower(), "service-inference"],
+                )
+
+        # Fallback: capture raw port/IP:port patterns not matched by the nmap regex
+        _raw_port_re = re.compile(
+            r"\b\d{1,5}/(?:tcp|udp)\b|\b(?:\d{1,3}\.){3}\d{1,3}:\d{1,5}\b",
+            re.IGNORECASE,
+        )
+        for hit in list(dict.fromkeys(_raw_port_re.findall(blob)))[:4]:
+            port_str = re.search(r"\d+", hit)
+            if port_str and int(port_str.group()) in _seen_ports:
+                continue
+            _summary = f"Service/port evidence: {hit}"
+            _t, _s = self._enrich_evidence(
+                _summary, ["network", "recon"], 0.65, tool_name
+            )
+            self.state.add_evidence(
+                phase=phase,
+                source_tool=tool_name,
+                summary=_summary,
+                confidence=0.65,
                 tags=_t,
                 severity=_s,
             )
@@ -903,36 +940,6 @@ class _ObjectivesMixin:
                 source_tool=tool_name,
                 summary=_summary,
                 confidence=0.6,
-                tags=_t,
-                severity=_s,
-            )
-
-        workflow_lines: list[str] = []
-        for line in blob.splitlines():
-            line = line.strip()
-            if len(line) < 16 or _WORKFLOW_SIGNAL_RE is None or not _WORKFLOW_SIGNAL_RE.search(line):
-                continue
-            if _FALSE_SIGNAL_RE.search(line):
-                continue
-            workflow_lines.append(line[:260])
-            if len(workflow_lines) >= 3:
-                break
-        for line in workflow_lines:
-            base_tags = ["workflow", "business_logic"]
-            lower_line = line.lower()
-            if any(token in lower_line for token in _WORKFLOW_TENANT_TERMS):
-                base_tags.extend(["tenant", "trust_boundary"])
-            if any(token in lower_line for token in _WORKFLOW_PRINCIPAL_TERMS):
-                base_tags.extend(["principal", "authorization"])
-            if any(token in lower_line for token in _WORKFLOW_COMMERCE_TERMS):
-                base_tags.extend(["commerce", "state_machine"])
-            _summary = f"Workflow signal: {line}"
-            _t, _s = self._enrich_evidence(_summary, base_tags, 0.68, tool_name)
-            self.state.add_evidence(
-                phase=phase,
-                source_tool=tool_name,
-                summary=_summary,
-                confidence=0.68,
                 tags=_t,
                 severity=_s,
             )
@@ -990,6 +997,163 @@ class _ObjectivesMixin:
 
         if success:
             self._auto_form_hypotheses(phase, tool_name, arguments, blob)
+
+        # ── Evidence cross-reference ────────────────────────────────────────
+        # Track tags across tool calls. If 2+ different tools produce evidence
+        # with the same tags, that signal is independently corroborated.
+        self._check_evidence_corroboration(phase, tool_name)
+
+    def _check_evidence_corroboration(self, phase: str, current_tool: str) -> None:
+        """Detect independently corroborated evidence signals across tool calls.
+
+        When the same tag appears in evidence from 2+ different tool sources,
+        it's much less likely to be a false positive. We record this as a
+        separate high-confidence evidence entry so the LLM sees the pattern.
+        """
+        if not self.state or len(self.state.evidence_log) < 2:
+            return
+
+        # Build: tag → set of tools that produced it
+        tag_tools: dict[str, set[str]] = {}
+        for ev in self.state.evidence_log[-40:]:  # scan recent 40 entries
+            src = str(ev.get("source_tool", "")).strip()
+            for tag in ev.get("tags", []):
+                tag_str = str(tag).strip().lower()
+                if tag_str and len(tag_str) >= 4 and tag_str not in (
+                    "artifact", "file", "error", "recon", "trace", "network",
+                    "signal", "url", "endpoint", "execution",
+                ):
+                    tag_tools.setdefault(tag_str, set()).add(src)
+
+        # Tags corroborated by 2+ different tools
+        _already_noted: set[str] = getattr(self, "_corroborated_tags", set())
+        for tag, tools in tag_tools.items():
+            if len(tools) >= 2 and tag not in _already_noted:
+                _already_noted.add(tag)
+                _tools_str = ", ".join(sorted(tools)[:3])
+                self.state.add_evidence(
+                    phase=phase,
+                    source_tool=current_tool,
+                    summary=(
+                        f"CORROBORATED: '{tag}' signal independently seen from "
+                        f"{len(tools)} different tool(s): {_tools_str}"
+                    ),
+                    confidence=0.88,
+                    tags=[tag, "corroborated", "multi-source"],
+                    severity=3,
+                )
+                logger.info(
+                    "Evidence corroboration: tag=%r across tools=%s",
+                    tag,
+                    _tools_str,
+                )
+
+        self._corroborated_tags = _already_noted  # type: ignore[attr-defined]
+
+    # ── Hypothesis verification (cross-evidence) ───────────────────────
+    # When a hypothesis is marked 'confirmed', this checks whether at least
+    # two independent pieces of evidence (different source tools, shared
+    # endpoint/tag/keyword with the claim) actually back it. If so, the
+    # hypothesis is promoted to 'verified' — a stricter signal than
+    # 'confirmed' which the LLM may set on its own judgement. Generic:
+    # no hardcoded vuln patterns. Python structures the check; LLM still
+    # writes the claim and interprets the verdict.
+
+    def _verify_confirmed_hypotheses(self) -> list[str]:
+        """Promote confirmed hypotheses to 'verified' when independent evidence backs them.
+
+        Returns list of hypothesis IDs newly promoted so the caller can
+        surface a [VERIFICATION] note to the LLM.
+        """
+        if not self.state:
+            return []
+        queue = getattr(self.state, "hypothesis_queue", None) or []
+        evidence_log = getattr(self.state, "evidence_log", None) or []
+        if not queue or not evidence_log:
+            return []
+
+        newly_verified: list[str] = []
+        _already: set[str] = getattr(self, "_verified_hyp_ids", set())
+
+        for hyp in queue:
+            if str(hyp.get("status", "")) != "confirmed":
+                continue
+            hid = str(hyp.get("id", "")).strip()
+            if not hid or hid in _already:
+                continue
+            # Skip if the hypothesis itself already records a verified marker
+            if bool(hyp.get("verified")):
+                _already.add(hid)
+                continue
+
+            claim_lower = str(hyp.get("claim", "")).lower()
+            hyp_tags = {str(t).lower() for t in hyp.get("tags", []) if str(t).strip()}
+            # Derive keywords from the claim (skip short/common tokens)
+            claim_keywords = {
+                w.strip(".,;:!?()[]{}\"'")
+                for w in claim_lower.split()
+                if len(w) >= 5
+                and w not in {"about", "which", "there", "their", "these", "those"}
+            }
+
+            supporting_tools: set[str] = set()
+            for ev in evidence_log[-80:]:
+                if float(ev.get("confidence", 0.0)) < 0.65:
+                    continue
+                ev_summary = str(ev.get("summary", "")).lower()
+                ev_tags = {str(t).lower() for t in ev.get("tags", [])}
+                ev_tool = str(ev.get("source_tool", "")).strip().lower()
+                if not ev_tool or ev_tool == "corroborated":
+                    continue
+
+                tag_overlap = bool(claim_keywords & {t for t in ev_tags if len(t) >= 4})
+                tag_shared = bool(hyp_tags & ev_tags)
+                keyword_overlap = (
+                    len(claim_keywords & set(ev_summary.split())) >= 2
+                )
+                if tag_overlap or tag_shared or keyword_overlap:
+                    supporting_tools.add(ev_tool)
+
+            if len(supporting_tools) >= 2:
+                hyp["verified"] = True
+                hyp["verified_by"] = sorted(supporting_tools)[:5]
+                newly_verified.append(hid)
+                _already.add(hid)
+                logger.info(
+                    "Hypothesis %s verified by %d independent tools: %s",
+                    hid,
+                    len(supporting_tools),
+                    ", ".join(sorted(supporting_tools)),
+                )
+
+        if newly_verified:
+            self._verified_hyp_ids = _already  # type: ignore[attr-defined]
+        return newly_verified
+
+    def _build_verification_note(self, verified_ids: list[str]) -> str:
+        """Build a system note telling the LLM which hypotheses now have
+        independent cross-tool evidence (not just self-declared confirmation).
+        """
+        if not verified_ids:
+            return ""
+        queue = getattr(self.state, "hypothesis_queue", None) or []
+        lookup = {str(h.get("id", "")): h for h in queue}
+        lines = ["[VERIFICATION — cross-tool independent evidence]"]
+        for hid in verified_ids[:3]:
+            h = lookup.get(hid)
+            if not h:
+                continue
+            claim = str(h.get("claim", ""))[:140]
+            tools = ", ".join(h.get("verified_by", [])[:4])
+            lines.append(f"  • {hid}: {claim}")
+            lines.append(f"      backed by: {tools}")
+        lines.append(
+            "These claims are backed by evidence from multiple independent "
+            "tools. Promote them to a full report with reproducible PoC, or "
+            "refute if re-examination shows the overlap is coincidental. Do "
+            "not stop at the verification — produce the artefact."
+        )
+        return "\n".join(lines)
 
     # ── Dynamic hypothesis index loaded from data/patterns.json ──────────
     # Data-driven, NOT hardcoded. Each entry: (indicators_set, key, description, suggested_actions)
@@ -1278,28 +1442,50 @@ class _ObjectivesMixin:
         return ""
 
     def _check_tool_budget(self, tool_name: str, phase: str) -> str:
-        budget = _PHASE_TOOL_BUDGETS.get(phase, {}).get(tool_name)
-        if budget is None:
-            eff = self.state.get_tool_effectiveness(phase, tool_name)
-            calls = int(eff.get("calls", 0.0))
-            hit_rate = float(eff.get("hit_rate", 0.0))
-            if calls >= 6 and hit_rate < 0.15:
-                return (
-                    f"[TOOL BUDGET] '{tool_name}' is low-yield in {phase} "
-                    f"(hit-rate={hit_rate:.0%}, calls={calls}). Pivot tool family."
-                )
-            return ""
-        usage = self.state.get_phase_tool_count(phase, tool_name)
+        """Emit advisory messages when a tool is over-budget or consistently low-yield.
+
+        Thresholds are loaded from data/validation_config.json (tool_budget section)
+        and are phase-aware: EXPLOIT phase gets a higher call allowance and lower
+        hit-rate floor to accommodate WAF bypass and iterative probing scenarios.
+        An evidence-growth exemption prevents false pivots when the agent is actively
+        making progress (evidence_log growing) despite a low per-tool hit-rate.
+        """
+        is_exploit = phase.upper() == "EXPLOIT"
+        _min_calls    = _BUDGET_EXPLOIT_MIN_CALLS  if is_exploit else _BUDGET_DEFAULT_MIN_CALLS
+        _warn_thresh  = _BUDGET_EXPLOIT_THRESHOLD   if is_exploit else _BUDGET_DEFAULT_THRESHOLD
+
         eff = self.state.get_tool_effectiveness(phase, tool_name)
-        calls = int(eff.get("calls", 0.0))
+        calls    = int(eff.get("calls", 0.0))
         hit_rate = float(eff.get("hit_rate", 0.0))
 
+        # Evidence-growth exemption: if the evidence log has grown recently,
+        # the agent is making progress — suppress low-yield warnings regardless
+        # of the per-tool hit-rate so iterative probing is not cut short.
+        recent_evidence = len(self.state.evidence_log)
+        evidence_exemption = recent_evidence >= _BUDGET_EVIDENCE_EXEMPTION
+
+        budget = _PHASE_TOOL_BUDGETS.get(phase, {}).get(tool_name)
+
+        if budget is None:
+            # Unconstrained tool — only warn when clearly unproductive.
+            if calls >= _min_calls and hit_rate < _warn_thresh and not evidence_exemption:
+                return (
+                    f"[TOOL BUDGET] '{tool_name}' is low-yield in {phase} "
+                    f"(hit-rate={hit_rate:.0%}, calls={calls}/{_min_calls} min). "
+                    "Consider pivoting to a different tool or vector."
+                )
+            return ""
+
+        usage = self.state.get_phase_tool_count(phase, tool_name)
+
+        # Adjust effective budget by hit-rate: reward productive tools, warn on waste.
+        # Only apply adjustment after enough calls for a meaningful sample.
         effective_budget = budget
-        if calls >= 3:
-            if hit_rate < 0.20:
-                effective_budget = max(1, int(budget * 0.70))
-            elif hit_rate >= 0.60:
-                effective_budget = int(budget * 1.15)
+        if calls >= 4:
+            if hit_rate < _warn_thresh and not evidence_exemption:
+                effective_budget = max(1, int(budget * 0.80))
+            elif hit_rate >= 0.55:
+                effective_budget = int(budget * 1.20)
 
         if budget == 0 and usage >= 1:
             return (
@@ -1312,7 +1498,7 @@ class _ObjectivesMixin:
                 f"({usage}/{effective_budget}, base={budget}, hit-rate={hit_rate:.0%}). "
                 "Switch approach or tool family."
             )
-        if effective_budget > 0 and usage >= int(effective_budget * 0.75):
+        if effective_budget > 0 and usage >= int(effective_budget * 0.80):
             return (
                 f"[TOOL BUDGET] '{tool_name}' is at {usage}/{effective_budget} of {phase} budget "
                 f"(base={budget}, hit-rate={hit_rate:.0%}). Plan remaining calls carefully."

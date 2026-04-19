@@ -188,7 +188,8 @@ def test_validator_report_rejections(validator):
         "create_vulnerability_report", args.copy()
     )
     assert not valid
-    assert "too short" in msg
+    # Rejected either for being too short OR for not looking like real exploit code.
+    assert "too short" in msg or "does not look like code" in msg
 
     # Needs HTTP Evidence on non-CTF
     args_http = args.copy()
@@ -234,11 +235,10 @@ def test_validator_report_rejections(validator):
 
 
 def test_validator_create_file(validator):
-    # Block writing reports to markdown using create_file
+    # Markdown paths are no longer blocked by heuristic report-name filters.
     args = {"path": "vuln_report.md", "content": "# Finding"}
     valid, msg = validator._validate_tool_args("create_file", args)
-    assert not valid
-    assert "FORBIDDEN" in msg
+    assert valid
 
     # Writing normal tools is fine
     args = {"path": "script.py", "content": "print('hello')"}
@@ -455,3 +455,123 @@ class TestIsTargetInScope:
         agent = DummyScopeAgent("https://example.com/")
         assert agent._is_target_in_scope("https://sub.example.com/api") is True
         assert agent._is_target_in_scope("https://other.com/api") is False
+
+
+class TestSoftScopeAdvisory:
+    """Soft scope guard — when scope_lock is NOT active, out-of-declared-scope
+    URLs must pass validation (True) and enqueue an advisory for the LLM to
+    reason about, instead of hard-blocking.
+    """
+
+    def _agent(self, active_target: str = "example.com"):
+        v = DummyTestAgent()
+        v._scope_lock_active = False
+        v._scope_anchor_target = active_target
+        return v
+
+    def test_soft_scope_allows_s3_bucket_with_target_label(self):
+        v = self._agent()
+        valid, msg = v._validate_tool_args(
+            "execute",
+            {"command": "curl -s https://example-assets.s3.amazonaws.com/config.json"},
+        )
+        assert valid is True
+        assert msg is None
+        advisories = getattr(v, "_pending_scope_advisories", [])
+        assert len(advisories) == 1
+        assert "s3.amazonaws.com" in advisories[0]["url"]
+        assert advisories[0]["declared_scope"] == "example.com"
+
+    def test_soft_scope_allows_cdn_subdomain(self):
+        v = self._agent()
+        valid, msg = v._validate_tool_args(
+            "browser_action",
+            {"action": "goto", "url": "https://example.cloudfront.net/app.js"},
+        )
+        assert valid is True
+        assert msg is None
+        advisories = getattr(v, "_pending_scope_advisories", [])
+        assert len(advisories) == 1
+        assert "cloudfront.net" in advisories[0]["url"]
+
+    def test_soft_scope_allows_third_party_api_validation(self):
+        """When LLM finds a leaked API key it may want to validate it against
+        the issuer (e.g. Stripe, GitHub). That pivot is legitimate under a
+        soft scope — the advisory surfaces for the LLM to justify.
+        """
+        v = self._agent()
+        valid, msg = v._validate_tool_args(
+            "execute",
+            {"command": "curl -s https://api.stripe.com/v1/charges -u sk_test_xxx:"},
+        )
+        assert valid is True
+        assert msg is None
+        advisories = getattr(v, "_pending_scope_advisories", [])
+        assert any("stripe.com" in a["url"] for a in advisories)
+
+    def test_hard_lock_still_blocks_oos(self):
+        v = self._agent()
+        v._scope_lock_active = True
+        valid, msg = v._validate_tool_args(
+            "browser_action",
+            {"action": "goto", "url": "https://unrelated.example.io/x"},
+        )
+        assert valid is False
+        assert msg is not None and "OUT-OF-SCOPE" in msg
+
+    def test_in_scope_urls_never_queue_advisory(self):
+        v = self._agent()
+        valid, _ = v._validate_tool_args(
+            "browser_action",
+            {"action": "goto", "url": "https://api.example.com/v1/users"},
+        )
+        assert valid is True
+        advisories = getattr(v, "_pending_scope_advisories", [])
+        assert advisories == []
+
+
+class TestDrainScopeAdvisories:
+    def _agent(self):
+        from airecon.proxy.agent.loop_cycle_post import _CyclePostMixin
+        from airecon.proxy.agent.models import AgentState
+
+        class _A(_CyclePostMixin):
+            def __init__(self):
+                self.state = AgentState()
+
+        return _A()
+
+    def test_drain_empty_returns_empty_string(self):
+        a = self._agent()
+        assert a._drain_scope_advisories() == ""
+
+    def test_drain_produces_scope_advisory_block(self):
+        a = self._agent()
+        a._pending_scope_advisories = [
+            {
+                "url": "http://example-bucket.s3.amazonaws.com",
+                "declared_scope": "example.com",
+                "tool": "execute",
+            },
+            {
+                "url": "http://api.stripe.com/v1/charges",
+                "declared_scope": "example.com",
+                "tool": "execute",
+            },
+        ]
+        out = a._drain_scope_advisories()
+        assert "[SCOPE ADVISORY]" in out
+        assert "example-bucket.s3.amazonaws.com" in out
+        assert "api.stripe.com" in out
+        assert "example.com" in out
+        # Drained — second call returns empty
+        assert a._drain_scope_advisories() == ""
+
+    def test_drain_deduplicates_urls(self):
+        a = self._agent()
+        a._pending_scope_advisories = [
+            {"url": "http://x.com/a", "declared_scope": "example.com", "tool": "x"},
+            {"url": "http://x.com/a", "declared_scope": "example.com", "tool": "x"},
+        ]
+        out = a._drain_scope_advisories()
+        assert out.count("http://x.com/a") == 1

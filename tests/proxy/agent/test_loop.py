@@ -208,7 +208,7 @@ class TestSimpleTargetKickoffDetection:
 
 
 @pytest.mark.asyncio
-async def test_standard_mode_scoped_request_enables_scope_lock(agent_loop, mocker):
+async def test_standard_mode_scoped_request_keeps_scope_lock_disabled(agent_loop, mocker):
     cfg = MagicMock()
     cfg.agent_recon_mode = "standard"
     cfg.deep_recon_autostart = True
@@ -220,12 +220,8 @@ async def test_standard_mode_scoped_request_enables_scope_lock(agent_loop, mocke
 
     await agent_loop._prepare_message_context("enumerate subdomains for example.com only")
 
-    assert agent_loop._scope_lock_active is True
-    assert any(
-        "STRICT_SCOPE_MODE" in str(m.get("content", ""))
-        for m in agent_loop.state.conversation
-        if m.get("role") == "system"
-    )
+    assert agent_loop._scope_lock_active is False
+
 
 
 @pytest.mark.asyncio

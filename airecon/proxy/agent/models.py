@@ -564,6 +564,16 @@ class AgentState:
 
     http_baselines: dict[str, dict[str, Any]] = field(default_factory=dict)
 
+    # Per-host HTTP session state. Key: registrable host (e.g. "example.com").
+    # Value: {"cookies": {name: value}, "bearer": str|None,
+    #         "updated_at_iter": int, "rate_limit_until_iter": int,
+    #         "csrf": {"token": str, "field": str, "source": str}}.
+    # Used by http_observe to preserve auth across calls in realistic
+    # authenticated bug-bounty flows. LLM controls login explicitly;
+    # Python just carries the cookie jar, flags rate limits, and harvests
+    # CSRF tokens so the LLM can re-inject them on state-changing requests.
+    http_sessions: dict[str, dict[str, Any]] = field(default_factory=dict)
+
     hypothesis_queue: list[dict[str, Any]] = field(default_factory=list)
 
     exploit_chains: list[dict[str, Any]] = field(default_factory=list)

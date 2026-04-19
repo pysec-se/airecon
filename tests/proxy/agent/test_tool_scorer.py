@@ -142,14 +142,14 @@ class TestRankToolsForPhase:
         assert isinstance(ranked, list)
         assert len(ranked) == 2
 
-    def test_blocked_tools_removed(self):
+    def test_blocked_tools_kept_for_advisory_guidance(self):
         tools = [
             {"function": {"name": "execute"}},
-            {"function": {"name": "stratus-red-team"}},  # Blocked in RECON
+            {"function": {"name": "stratus-red-team"}},
         ]
         ranked = rank_tools_for_phase(tools, current_phase="RECON")
         names = [t["function"]["name"] for t in ranked]
-        assert "stratus-red-team" not in names
+        assert "stratus-red-team" in names
 
     def test_top_n_limits_results(self):
         tools = [{"function": {"name": f"tool_{i}"}} for i in range(10)]

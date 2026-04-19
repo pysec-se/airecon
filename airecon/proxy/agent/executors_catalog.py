@@ -5,8 +5,6 @@ import logging
 from pathlib import Path
 from typing import Any
 
-from .constants import REPORT_FILE_PATTERNS
-
 logger = logging.getLogger("airecon.agent")
 
 _TOOLS_META_CACHE: dict[str, dict[str, Any]] = {}
@@ -26,9 +24,6 @@ _SPECIALIST_PREFIXES: dict[str, str] = _load_specialist_prefixes()
 _RESULT_TRUNCATION_THRESHOLD = 10000
 _READ_FILE_CONTENT_TRUNCATION_THRESHOLD = 2000
 _MAX_COMMAND_LENGTH = 20_000
-
-_REPORT_FILE_PATTERNS = REPORT_FILE_PATTERNS
-
 
 def _safe_non_negative_int(value: Any) -> int:
     try:

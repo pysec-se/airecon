@@ -9,12 +9,42 @@ import logging
 import shlex
 from urllib.parse import urlparse
 
-from ..data_loader import load_reasoning_hints
-from .constants import REPORT_FILE_PATTERNS, VALID_BROWSER_ACTIONS
+from .constants import VALID_BROWSER_ACTIONS
 from .tuning import get_tuning
 from .utils import is_host_in_scope
 
 logger = logging.getLogger("airecon.validation")
+
+def _poc_type_min_length(poc_code: str) -> int:
+    """Return the minimum acceptable PoC length for the given code type.
+
+    These numbers reflect the natural size of each format, not arbitrary policy:
+    - curl one-liners are valid at 20+ chars (e.g. `curl https://t.co/admin`)
+    - bash/HTTP raw requests need a bit more structure: 22-28 chars
+    - Python needs at least an import line: 40 chars
+    """
+    lower = poc_code.lstrip().lower()
+    if lower.startswith("curl "):
+        return 20
+    if lower.startswith("#!/bin/bash") or lower.startswith("#!/bin/sh"):
+        return 22
+    if lower.startswith("<?php"):
+        return 28
+    if any(sig in lower[:80] for sig in (
+        "import ", "def ", "requests.", "urllib",
+        "#!/usr/bin/env python", "#!/usr/bin/python",
+    )):
+        return 40
+    if any(sig in lower[:80] for sig in ("fetch(", "xmlhttprequest", "require(", "const ", "let ", "var ")):
+        return 28
+    if lower.startswith(("get ", "post ", "put ", "delete ", "patch ")):
+        return 28
+    return 22
+
+
+_POC_DESC_MIN: int = 30
+_TECHNICAL_MIN: int = 30
+
 
 # Valid input types for request_user_input tool — loaded from tools_meta.json
 _VALID_INPUT_TYPES_JSON = [
@@ -38,16 +68,6 @@ VALID_USER_INPUT_TYPES: frozenset[str] = frozenset(
     _VALID_INPUT_TYPES_JSON[0]
     if _VALID_INPUT_TYPES_JSON
     else {"text", "captcha", "totp", "password", "otp"}
-)
-
-_REASONING_HINTS = load_reasoning_hints()
-_REPORT_NAME_HINTS: tuple[str, ...] = tuple(
-    str(value).strip().lower()
-    for value in _REASONING_HINTS.get("reporting", {}).get(
-        "markdown_report_name_terms",
-        list(REPORT_FILE_PATTERNS),
-    )
-    if str(value).strip()
 )
 
 
@@ -964,10 +984,35 @@ class _ValidatorMixin:
         if self._scope_guard_active():
             scope_target = self._resolve_scope_target()
             if scope_target:
+                lock_strict = bool(getattr(self, "_scope_lock_active", False))
                 for candidate in _collect_scope_candidates(tool_name, arguments):
                     ok, err = self._check_scope_url(candidate)
-                    if not ok:
+                    if ok:
+                        continue
+                    if lock_strict:
+                        # User explicitly opted into strict scope lock.
                         return False, err
+                    # Default: soft advisory. LLM decides if the URL is a
+                    # target-owned asset (bucket, CDN subdomain, subsidiary),
+                    # a 3rd-party that the target legitimately depends on
+                    # (e.g. credential validation endpoint), or genuinely
+                    # unrelated. Don't block — record for downstream notice.
+                    advisories = getattr(self, "_pending_scope_advisories", None)
+                    if advisories is None:
+                        advisories = []
+                        self._pending_scope_advisories = advisories  # type: ignore[attr-defined]
+                    advisories.append(
+                        {
+                            "url": candidate,
+                            "declared_scope": scope_target,
+                            "tool": tool_name,
+                        }
+                    )
+                    logger.debug(
+                        "Scope advisory (soft): %s outside %s — allowed, LLM reasons",
+                        candidate,
+                        scope_target,
+                    )
 
         if tool_name == "execute":
             cmd = self._str_arg(arguments, "command")
@@ -1035,17 +1080,6 @@ class _ValidatorMixin:
                 return False, "'path' must be a non-empty string."
             if "content" not in arguments:
                 return False, "'content' argument is required."
-
-            path_lower = path_str.strip().lower()
-            if path_lower.endswith(".md") and any(
-                report_name in path_lower for report_name in _REPORT_NAME_HINTS
-            ):
-                return False, (
-                    "BLOCKED: Writing vulnerability findings to a markdown file is FORBIDDEN. "
-                    "Use create_vulnerability_report for each confirmed finding. "
-                    "create_file is for scripts, wordlists, config, and tool output only — "
-                    "never for security reports."
-                )
 
         elif tool_name == "read_file":
             if not self._str_arg(arguments, "path").strip():
@@ -1150,9 +1184,11 @@ class _ValidatorMixin:
                     "REPORT REJECTED: 'poc_script_code' is empty. "
                     "Provide actual exploit code or a curl command demonstrating the vulnerability."
                 )
-            if len(poc_code) < 50:
+            _poc_min = _poc_type_min_length(poc_code)
+            if len(poc_code) < _poc_min:
                 return False, (
-                    f"REPORT REJECTED: 'poc_script_code' is too short ({len(poc_code)} chars). "
+                    f"REPORT REJECTED: 'poc_script_code' is too short ({len(poc_code)} chars, "
+                    f"minimum {_poc_min} for this PoC type). "
                     "Provide a real exploit: Python script, curl command, or HTTP request."
                 )
 
@@ -1204,15 +1240,17 @@ class _ValidatorMixin:
                         "It must be a Python script (with valid syntax), a curl command, "
                         "PHP/JS snippet, or an HTTP request."
                     )
-            if not poc_desc or len(poc_desc) < 40:
+            if not poc_desc or len(poc_desc) < _POC_DESC_MIN:
                 return False, (
-                    f"REPORT REJECTED: 'poc_description' is too short ({len(poc_desc)} chars). "
+                    f"REPORT REJECTED: 'poc_description' is too short ({len(poc_desc)} chars, "
+                    f"minimum {_POC_DESC_MIN}). "
                     "Provide step-by-step reproduction with specific URLs, parameters, and observed behavior."
                 )
 
-            if not is_ctf and (not technical or len(technical) < 40):
+            if not is_ctf and (not technical or len(technical) < _TECHNICAL_MIN):
                 return False, (
-                    f"REPORT REJECTED: 'technical_analysis' is too short ({len(technical)} chars). "
+                    f"REPORT REJECTED: 'technical_analysis' is too short ({len(technical)} chars, "
+                    f"minimum {_TECHNICAL_MIN}). "
                     "Explain the root cause with specific technical details."
                 )
             GENERIC_TITLES = (

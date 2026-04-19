@@ -97,25 +97,6 @@ def _load_tool_schema_enum(tool_name: str, property_name: str) -> frozenset[str]
     return frozenset()
 
 
-def _load_reasoning_hint_strings(section: str, field: str) -> tuple[str, ...]:
-    """Load a string list from reasoning_hints.json."""
-    try:
-        path = Path(__file__).parent.parent / "data" / "reasoning_hints.json"
-        data = json.loads(path.read_text(encoding="utf-8"))
-        values = data.get(section, {}).get(field, [])
-        if not isinstance(values, list):
-            return ()
-        return tuple(str(value).strip().lower() for value in values if str(value).strip())
-    except Exception as e:
-        logger.warning(
-            "Failed to load reasoning hints %s.%s from JSON: %s",
-            section,
-            field,
-            e,
-        )
-        return ()
-
-
 SHALLOW_TOOLS: frozenset[str] = _load_tool_classifications("shallow_tools")
 DEEP_TOOLS: frozenset[str] = _load_tool_classifications("deep_tools")
 CAIDO_BLOCKED_TOOLS: frozenset[str] = _load_tool_classifications(
@@ -248,16 +229,6 @@ BODY_TRUNCATION_LIMIT: int = 5000
 # ---------------------------------------------------------------------------
 ALPHA_EWMA: float = 0.3
 
-# ---------------------------------------------------------------------------
-# REPORT FILE PATTERNS — was in executors_catalog.py:28-31 AND
-# validators.py:870-880 as _REPORT_NAMES (duplicate)
-# ---------------------------------------------------------------------------
-REPORT_FILE_PATTERNS: tuple[str, ...] = _load_reasoning_hint_strings(
-    "reporting",
-    "markdown_report_name_terms",
-)
-
-# ---------------------------------------------------------------------------
 # DEAD HOST MARKERS — was in browser.py:38-51
 # ---------------------------------------------------------------------------
 DEAD_HOST_MARKERS: tuple[str, ...] = (

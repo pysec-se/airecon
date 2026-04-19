@@ -9,34 +9,10 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import parse_qs, urlparse
 
-from ..data_loader import load_reasoning_hints
 from .models import ToolExecution
 from ..config import get_workspace_root
 
 logger = logging.getLogger("airecon.agent")
-
-_REASONING_HINTS = load_reasoning_hints()
-_CODE_ANALYSIS_HINTS = _REASONING_HINTS.get("code_analysis_profile", {})
-_SECRET_NAME_TERMS: tuple[str, ...] = tuple(
-    str(value).strip().lower()
-    for value in _CODE_ANALYSIS_HINTS.get("secret_name_terms", [])
-    if str(value).strip()
-)
-_AUTH_PATH_TERMS: tuple[str, ...] = tuple(
-    str(value).strip().lower()
-    for value in _CODE_ANALYSIS_HINTS.get("auth_path_terms", [])
-    if str(value).strip()
-)
-_WORKFLOW_PATH_TERMS: tuple[str, ...] = tuple(
-    str(value).strip().lower()
-    for value in _CODE_ANALYSIS_HINTS.get("workflow_path_terms", [])
-    if str(value).strip()
-)
-_SCOPE_PATH_TERMS: tuple[str, ...] = tuple(
-    str(value).strip().lower()
-    for value in _CODE_ANALYSIS_HINTS.get("scope_path_terms", [])
-    if str(value).strip()
-)
 
 
 def _profile_code_analysis_target(host_path: Path) -> dict[str, Any]:
@@ -84,23 +60,151 @@ def _profile_code_analysis_target(host_path: Path) -> dict[str, Any]:
             rules.add("p/docker")
         if ".github/workflows/" in rel_lower or name_lower == ".gitlab-ci.yml":
             rules.add("p/ci")
-        if (
-            name_lower.startswith(".env")
-            or any(token in name_lower for token in _SECRET_NAME_TERMS)
-            or suffix in {".pem", ".p12", ".kdbx"}
-        ):
+        if name_lower.startswith(".env") or suffix in {".pem", ".p12", ".kdbx"}:
             rules.add("p/secrets")
-        if any(token in rel_lower for token in _AUTH_PATH_TERMS):
-            signals.append(f"auth_surface:{rel}")
-        if any(token in rel_lower for token in _WORKFLOW_PATH_TERMS):
-            signals.append(f"workflow_surface:{rel}")
-        if any(token in rel_lower for token in _SCOPE_PATH_TERMS):
-            signals.append(f"scope_surface:{rel}")
 
     profile["languages"] = sorted(languages)
     profile["rules"] = sorted(rules)
     profile["signals"] = signals[:8]
     return profile
+
+
+_SET_COOKIE_RE = re.compile(r"(?mi)^set-cookie:\s*([^;\r\n]+)", re.MULTILINE)
+_COOKIE_NAME_BLACKLIST = {"", "expires", "path", "domain", "max-age", "secure", "httponly", "samesite"}
+
+
+def _registrable_host(url: str) -> str:
+    """Return the normalized hostname used as the session key.
+
+    Keeps full hostname (subdomains included) so cookies for
+    ``api.example.com`` do not leak to ``auth.example.com``. Caller is
+    responsible for scope checks — this is just a stable key.
+    """
+    try:
+        host = urlparse(url).hostname or ""
+    except Exception as _e:
+        logger.debug("registrable_host parse error: %s", _e)
+        return ""
+    return host.strip().lower().rstrip(".")
+
+
+def _parse_set_cookie_headers(raw_http: str) -> dict[str, str]:
+    """Extract cookies from raw HTTP response text.
+
+    Handles multiple Set-Cookie lines. Only returns ``name=value`` pairs;
+    all cookie attributes (path, secure, etc.) are stripped.
+    """
+    cookies: dict[str, str] = {}
+    if not raw_http:
+        return cookies
+    for match in _SET_COOKIE_RE.finditer(raw_http):
+        pair = match.group(1).strip()
+        if "=" not in pair:
+            continue
+        name, value = pair.split("=", 1)
+        name = name.strip()
+        if name.lower() in _COOKIE_NAME_BLACKLIST:
+            continue
+        cookies[name] = value.strip()
+    return cookies
+
+
+# Common CSRF/authenticity token patterns found across frameworks. The LLM
+# is responsible for deciding *whether* to use a captured token on its next
+# request — Python only observes and surfaces the signal.
+_CSRF_META_RE = re.compile(
+    r"""<meta[^>]+name\s*=\s*['"](?P<name>csrf[_-]?token|csrf-param|authenticity[_-]?token)['"][^>]*content\s*=\s*['"](?P<val>[^'"\s]{8,200})['"]""",
+    re.IGNORECASE,
+)
+_CSRF_INPUT_RE = re.compile(
+    r"""<input[^>]+name\s*=\s*['"](?P<name>_?csrf[_-]?token|_csrf|csrfmiddlewaretoken|authenticity_token|__RequestVerificationToken)['"][^>]*value\s*=\s*['"](?P<val>[^'"\s]{8,400})['"]""",
+    re.IGNORECASE,
+)
+_CSRF_COOKIE_NAMES = frozenset(
+    n.lower()
+    for n in (
+        "xsrf-token",
+        "csrftoken",
+        "csrf-token",
+        "_csrf",
+        "x-csrf-token",
+    )
+)
+
+
+def _extract_csrf_token(
+    body_excerpt: str, harvested_cookies: dict[str, str]
+) -> dict[str, str]:
+    """Return {token, field, source} if a CSRF/authenticity token is found.
+
+    Looks at three common shapes: meta-tag, hidden form input, and common
+    CSRF cookie names. Returns an empty dict when nothing matches so the
+    caller can no-op.
+    """
+    if harvested_cookies:
+        for name, value in harvested_cookies.items():
+            if not name:
+                continue
+            if name.lower() in _CSRF_COOKIE_NAMES and value:
+                return {
+                    "token": value.strip()[:400],
+                    "field": name,
+                    "source": "cookie",
+                }
+    if body_excerpt:
+        m_meta = _CSRF_META_RE.search(body_excerpt)
+        if m_meta:
+            return {
+                "token": m_meta.group("val").strip()[:400],
+                "field": m_meta.group("name"),
+                "source": "meta",
+            }
+        m_input = _CSRF_INPUT_RE.search(body_excerpt)
+        if m_input:
+            return {
+                "token": m_input.group("val").strip()[:400],
+                "field": m_input.group("name"),
+                "source": "form",
+            }
+    return {}
+
+
+def _detect_rate_limit(status_code: int, headers: dict[str, str] | None) -> dict[str, Any] | None:
+    """Return rate-limit signal if present, else None.
+
+    Uses HTTP status (429, 503 with retry-after) and common headers
+    (``retry-after``, ``x-ratelimit-remaining``). Generic — no target-specific
+    hardcoding.
+    """
+    if headers is None:
+        headers = {}
+    lower = {k.lower(): str(v) for k, v in headers.items()}
+    signal: dict[str, Any] = {}
+
+    if status_code == 429:
+        signal["kind"] = "rate_limited"
+    elif status_code == 503 and ("retry-after" in lower or "rate" in lower.get("server", "").lower()):
+        signal["kind"] = "service_unavailable_throttle"
+    else:
+        remaining = lower.get("x-ratelimit-remaining") or lower.get("ratelimit-remaining")
+        if remaining and remaining.strip().isdigit() and int(remaining.strip()) == 0:
+            signal["kind"] = "quota_exhausted"
+
+    if not signal:
+        return None
+
+    retry_after = lower.get("retry-after", "").strip()
+    if retry_after:
+        signal["retry_after_raw"] = retry_after[:40]
+        try:
+            signal["retry_after_seconds"] = int(retry_after)
+        except ValueError:
+            # HTTP-date form — LLM can parse if needed
+            pass
+    reset = lower.get("x-ratelimit-reset") or lower.get("ratelimit-reset")
+    if reset:
+        signal["reset_at"] = reset[:40]
+    return signal
 
 
 class _ObserveExecutorMixin:
@@ -252,6 +356,20 @@ class _ObserveExecutorMixin:
         ]
         if not follow_redirects:
             cmd_parts.append("--no-location")
+
+        # Auto-attach per-host session cookies when the LLM hasn't already
+        # set a Cookie header. Realistic bug-bounty flows need authenticated
+        # state to persist across tool calls.
+        _existing_cookie_hdr = any(str(k).lower() == "cookie" for k in headers)
+        _host_key = _registrable_host(url)
+        _session_snapshot = self.state.http_sessions.get(_host_key, {}) if _host_key else {}
+        _session_cookies: dict[str, str] = dict(_session_snapshot.get("cookies", {}))
+        _injected_cookies = False
+        if _session_cookies and not _existing_cookie_hdr:
+            cookie_header = "; ".join(f"{n}={v}" for n, v in _session_cookies.items())
+            headers = {**headers, "Cookie": cookie_header}
+            _injected_cookies = True
+
         for h_name, h_val in headers.items():
             cmd_parts.extend(["-H", f"{h_name}: {h_val}"])
         if body:
@@ -328,6 +446,41 @@ class _ObserveExecutorMixin:
             result["raw_output_preview"] = raw_output[:2000]
         if exec_error and not exec_success:
             result["error"] = exec_error[:500]
+        if _injected_cookies:
+            result["session_cookies_used"] = sorted(_session_cookies.keys())[:8]
+
+        # Harvest Set-Cookie headers from the response and merge into the
+        # per-host session jar so subsequent calls stay authenticated.
+        harvested: dict[str, str] = {}
+        if _host_key and exec_success:
+            harvested = _parse_set_cookie_headers(raw_output)
+            if harvested:
+                jar = self.state.http_sessions.setdefault(_host_key, {"cookies": {}})
+                jar.setdefault("cookies", {}).update(harvested)
+                jar["updated_at_iter"] = getattr(self.state, "iteration", 0)
+                result["session_cookies_harvested"] = sorted(harvested.keys())[:8]
+
+        # CSRF / authenticity token harvest. We only observe what we see
+        # (meta tag, hidden form input, or common CSRF cookie) — the LLM
+        # decides whether to re-inject on its next state-changing request.
+        if _host_key and exec_success:
+            csrf_info = _extract_csrf_token(body_out[:6000], harvested)
+            if csrf_info:
+                jar = self.state.http_sessions.setdefault(_host_key, {"cookies": {}})
+                jar["csrf"] = {**csrf_info, "captured_at_iter": getattr(self.state, "iteration", 0)}
+                result["csrf_token"] = {
+                    "field": csrf_info.get("field", ""),
+                    "source": csrf_info.get("source", ""),
+                }
+
+        # Rate-limit signal — Python flags, LLM decides backoff strategy.
+        _rl_signal = _detect_rate_limit(status_code, headers_out)
+        if _rl_signal:
+            result["rate_limit"] = _rl_signal
+            if _host_key:
+                jar = self.state.http_sessions.setdefault(_host_key, {"cookies": {}})
+                jar["rate_limited_at_iter"] = getattr(self.state, "iteration", 0)
+                jar["rate_limit_signal"] = _rl_signal
 
         if save_as and save_as.strip():
             baseline_entry: dict[str, Any] = {

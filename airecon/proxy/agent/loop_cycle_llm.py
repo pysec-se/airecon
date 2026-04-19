@@ -7,7 +7,6 @@ import warnings
 from pathlib import Path
 from typing import Any
 
-from ..system import auto_load_skills_for_message
 from .pipeline import PipelinePhase
 from .tool_scorer import (
     build_tool_recommendation_context,
@@ -199,22 +198,36 @@ class _CycleLlmMixin:
         )
         return result
 
-    def _check_phase_constraint(self, tool_name: str) -> str:
+    def _check_phase_constraint(self, tool_name: str) -> tuple[str, str]:
+        """Return (mode, advisory_message) for a tool call.
 
+        Mode is always 'advisory' — phase guidance never blocks execution.
+        The advisory message is empty when the tool is phase-appropriate or
+        when accumulated evidence justifies a cross-phase pivot (≥3 evidence
+        items in the log). Callers may log the message but must not abort.
+        """
         from .tool_scorer import _PHASE_BLOCKED_TOOLS
 
         if not self.pipeline:
-            return ""
+            return "off", ""
 
         current_phase = self.pipeline.get_current_phase().value
         blocked_tools = _PHASE_BLOCKED_TOOLS.get(current_phase, set())
 
-        if tool_name.lower() in {t.lower() for t in blocked_tools}:
-            return (
-                f"[PHASE CONSTRAINT] Tool '{tool_name}' is NOT allowed in {current_phase} phase.\n"
-                f"Use phase-appropriate tools instead. Check recommended tools for this phase."
-            )
-        return ""
+        if tool_name.lower() not in {t.lower() for t in blocked_tools}:
+            return "advisory", ""
+
+        # Evidence-driven cross-phase pivot: if the session already has
+        # meaningful findings, the agent may freely pivot across phases.
+        evidence_count = len(self.state.evidence_log) if self.state else 0
+        if evidence_count >= 3:
+            return "advisory", ""
+
+        return (
+            "advisory",
+            f"[PHASE ADVISORY] Tool '{tool_name}' is outside the usual {current_phase} tool set.\n"
+            f"Use it only if current evidence clearly justifies a cross-phase pivot.",
+        )
 
     def _inject_tool_intelligence(self, wrong_tool_picked: str = "") -> None:
 
@@ -845,46 +858,6 @@ class _CycleLlmMixin:
                                         f"(3) provide the tool output that confirms this finding."
                                     ),
                                 })
-
-            _llm_output_for_skills = (
-                content_acc + " " + thinking_acc).strip()
-            if _llm_output_for_skills:
-
-                _session_skills_2 = None
-                if self._session:
-                    _session_skills_2 = set(self._session.loaded_skills)
-                _current_target = self.state.active_target if self.state.active_target else (self._session.target if self._session else "")
-                _new_skill_ctx, _new_loaded_skills = auto_load_skills_for_message(
-                    _llm_output_for_skills,
-                    phase=self._get_current_phase().value,
-                    session_loaded_skills=_session_skills_2,
-                    memory_manager=getattr(self, '_memory_manager', None),
-                    current_target=_current_target,
-                )
-
-                if _new_loaded_skills:
-                    for s in _new_loaded_skills:
-                        _skill_name = Path(str(s)).stem
-                        if _skill_name not in self.state.skills_used:
-                            self.state.skills_used.append(_skill_name)
-
-                    if self._session:
-                        for skill_rel in _new_loaded_skills:
-                            if skill_rel not in self._session.loaded_skills:
-                                self._session.loaded_skills.append(skill_rel)
-
-                if _new_skill_ctx:
-
-                    _skill_key = hash(_new_skill_ctx[:200])
-                    if _skill_key not in self._loaded_skill_hashes:
-                        self._loaded_skill_hashes.add(_skill_key)
-
-                        self.state.conversation.append(
-                            {"role": "system", "content": _new_skill_ctx, "iteration": self.state.iteration}
-                        )
-                        logger.debug(
-                            "Auto-loaded skill from LLM output keywords"
-                        )
 
             if content_acc:
                 known_tools = []
