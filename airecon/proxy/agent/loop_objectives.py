@@ -13,6 +13,15 @@ from ..data_loader import (
     load_objective_patterns,
     load_vuln_hypothesis_legacy,
 )
+from .executors import (
+    _RECON_CONTENT_DISCOVERY_BINS,
+    _RECON_LIVE_HOST_BINS,
+    _RECON_PORT_SCAN_BINS,
+    _RECON_SUBDOMAIN_BINS,
+)
+from .owasp import classify_owasp, severity_for_evidence
+from .pipeline import _PHASE_TOOL_BUDGETS, PipelinePhase
+from .vuln_classifier import get_classifier
 
 # ── Tool-budget thresholds ────────────────────────────────────────────────────
 # These are derived from pentesting reality, not arbitrary policy:
@@ -24,15 +33,6 @@ _BUDGET_DEFAULT_THRESHOLD: float = 0.08
 _BUDGET_EXPLOIT_MIN_CALLS: int   = 14
 _BUDGET_EXPLOIT_THRESHOLD: float = 0.05
 _BUDGET_EVIDENCE_EXEMPTION: int  = 3
-from .executors import (
-    _RECON_CONTENT_DISCOVERY_BINS,
-    _RECON_LIVE_HOST_BINS,
-    _RECON_PORT_SCAN_BINS,
-    _RECON_SUBDOMAIN_BINS,
-)
-from .owasp import classify_owasp, severity_for_evidence
-from .pipeline import _PHASE_TOOL_BUDGETS, PipelinePhase
-from .vuln_classifier import get_classifier
 
 logger = logging.getLogger("airecon.agent.loop_objectives")
 

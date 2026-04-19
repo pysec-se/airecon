@@ -15,8 +15,6 @@ from __future__ import annotations
 
 from types import SimpleNamespace
 
-import pytest
-
 from airecon.proxy.agent.executors_observe import _ObserveExecutorMixin
 from airecon.proxy.agent.loop_cycle_post import _CyclePostMixin
 from airecon.proxy.agent.loop_objectives import _ObjectivesMixin
@@ -484,7 +482,7 @@ class TestVerifyConfirmedHypotheses:
 
     def test_verification_ignores_low_confidence_evidence(self):
         agent = self._agent()
-        hid = self._add_confirmed_hyp(
+        self._add_confirmed_hyp(
             agent, "ssrf on import url parameter", ["ssrf"]
         )
         agent.state.evidence_log = [
