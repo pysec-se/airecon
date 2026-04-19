@@ -247,6 +247,58 @@ The agent resumes automatically once the user submits. Timeout default: 300s.
 Use input_type correctly: "captcha" | "totp" | "password" | "otp" | "text"
 </interactive_auth>
 
+<browser_js_inspection>
+execute_js — HIGH-LEVERAGE for recon AND exploit. Use it to see what the
+page actually exposes at runtime (post-JS-render), not just the static HTML
+curl returns. Prefer this over scraping raw HTML for SPAs, React/Vue/Angular
+apps, and anything that hydrates client-side.
+
+RECON use cases (one-call, cheap evidence):
+  • API/endpoint discovery:
+      js_code="JSON.stringify(performance.getEntriesByType('resource').map(r=>r.name))"
+      → reveals every URL the page actually fetched (XHR, fetch, ws, static).
+  • Framework / library fingerprint:
+      js_code="({react:!!window.React, vue:!!window.Vue, ng:!!window.angular, jq:window.jQuery&&jQuery.fn.jquery, next:!!window.__NEXT_DATA__})"
+  • Hidden form fields & CSRF tokens (post-render):
+      js_code="Array.from(document.querySelectorAll('input[type=hidden]')).map(i=>({name:i.name,value:i.value}))"
+  • Event handlers on clickable elements (reveals client-side routes/actions):
+      js_code="Array.from(document.querySelectorAll('[onclick],[data-action],a[href]')).slice(0,50).map(e=>({tag:e.tagName,href:e.href||null,on:e.getAttribute('onclick')||e.dataset.action||null}))"
+  • Storage extraction (session tokens, feature flags, user IDs):
+      js_code="({local:{...localStorage}, session:{...sessionStorage}, cookies:document.cookie})"
+  • Embedded config / SPA state (Next.js, Nuxt, Remix often leak here):
+      js_code="JSON.stringify(window.__NEXT_DATA__||window.__NUXT__||window.__INITIAL_STATE__||null).slice(0,4000)"
+
+EXPLOIT use cases:
+  • DOM XSS sink verification:
+      js_code="({sinks:[document.URL,location.hash,location.search], innerHtmlCount:document.querySelectorAll('[innerHTML]').length})"
+  • postMessage / origin checks for cross-origin exploits:
+      js_code="window.addEventListener('message',e=>console.log('PM',e.origin,e.data));'listening'"
+      Then trigger the source frame and call get_console_logs.
+  • Authenticated fetch (session cookie auto-attached by browser) for
+    IDOR/auth-bypass proof when curl can't replay the auth state:
+      js_code="fetch('/api/users/2',{credentials:'include'}).then(r=>r.text()).then(t=>t.slice(0,2000))"
+      (execute_js awaits returned Promises — result lands in js_result.)
+  • CSP/SRI/header introspection at runtime:
+      js_code="({csp:document.querySelector('meta[http-equiv=Content-Security-Policy]')?.content, scripts:Array.from(document.scripts).map(s=>({src:s.src,integrity:s.integrity||null}))})"
+
+RULES:
+  • js_result is truncated ~5000 chars. Slice/filter in JS, don't dump whole DOM.
+  • Return JSON-serializable values. Wrap objects in JSON.stringify if needed.
+  • parallel=true runs the SAME js_code across all open tabs — useful for
+    fingerprinting a whole OAuth/SSO chain after oauth_authorize.
+  • Combine with get_console_logs / get_network_logs for richer evidence
+    when JS emits events asynchronously.
+
+wait_for_element vs wait:
+  • wait_for_element(selectors=["#result","[data-loaded]"], wait_state="visible")
+    — use when the target is a SPECIFIC DOM node you know will appear.
+    Returns as soon as element is present. Prefer this over blind waits.
+  • wait(duration=N) — blind sleep. Only use as last resort (e.g., waiting
+    for a rate-limit window, unknown async timing). Avoid duration > 5s.
+  • After navigation + auth flows, chain: goto → wait_for_element → execute_js
+    (rather than goto → wait(5) → screenshot).
+</browser_js_inspection>
+
 <session_state_awareness>
 HTTP SESSION STATE — the proxy keeps a per-host cookie jar, captures CSRF
 tokens, and flags rate limits for you. Read the advisories that appear in

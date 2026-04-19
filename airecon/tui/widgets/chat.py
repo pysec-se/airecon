@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import asyncio
 import logging
 import re
 
@@ -96,72 +95,9 @@ def _colorize_line(line: str) -> Text:
 
 
 class AutoCopyStatic(Static):
-    def __init__(self, *args, **kwargs) -> None:
-        super().__init__(*args, **kwargs)
-        self._copy_debounce_task: asyncio.Task | None = None
-
-    def _extract_selected_text(self, selection) -> str:
-        if selection is not None:
-            for attr in ("text", "value", "plain"):
-                value = getattr(selection, attr, None)
-                if isinstance(value, str) and value.strip():
-                    return value.strip()
-            getter = getattr(selection, "get_text", None)
-            if callable(getter):
-                try:
-                    value = getter()
-                    if isinstance(value, str) and value.strip():
-                        return value.strip()
-                except Exception as e:
-                    logger.debug("Selection get_text failed: %s", e)
-
-        if self.screen:
-            try:
-                value = self.screen.get_selected_text()
-                if isinstance(value, str) and value.strip():
-                    return value.strip()
-            except Exception as e:
-                logger.debug("Screen selection lookup failed: %s", e)
-        return ""
-
-    async def _debounced_copy(self, selected_text: str) -> None:
-        await asyncio.sleep(0.35)
-        if not self.screen:
-            return
-        current = ""
-        try:
-            current = (self.screen.get_selected_text() or "").strip()
-        except Exception as e:
-            logger.debug("Selection re-check failed: %s", e)
-        if current and current != selected_text:
-            return
-        if getattr(self.app, "_last_autocopied_chat_selection", None) == selected_text:
-            return
-        self.app.copy_to_clipboard(selected_text)
-        setattr(self.app, "_last_autocopied_chat_selection", selected_text)
-
-    def selection_updated(self, selection) -> None:
-        super().selection_updated(selection)
-        if self._copy_debounce_task and not self._copy_debounce_task.done():
-            self._copy_debounce_task.cancel()
-
-        if not selection:
-            return
-
-        try:
-            selected_text = self._extract_selected_text(selection)
-            if not selected_text:
-                return
-            self._copy_debounce_task = asyncio.create_task(
-                self._debounced_copy(selected_text)
-            )
-        except Exception as e:
-            logger.debug("Selection handling failed: %s", e)
-            return
-
-    def on_unmount(self) -> None:
-        if self._copy_debounce_task and not self._copy_debounce_task.done():
-            self._copy_debounce_task.cancel()
+    """Chat-body Static. Auto-copy is handled app-wide via the App's
+    `on_text_selected` handler, which fires reliably on mouse-up in
+    Textual 8.1+ (see textual.screen → TextSelected event)."""
 
 
 class ChatMessage(Static):

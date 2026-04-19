@@ -545,6 +545,30 @@ class BrowserInstance:
                     raise RuntimeError(
                         "Authentication required or invalid credentials for this URL"
                     ) from e
+                if "interrupted by another navigation" in err_lower:
+                    # Page itself triggered a redirect (SSO/OAuth) mid-goto.
+                    # The page is actually navigating somewhere — wait for it
+                    # to settle and report the final URL rather than failing.
+                    try:
+                        await page.wait_for_load_state(
+                            "domcontentloaded", timeout=min(timeout_ms, 15000)
+                        )
+                    except Exception as wait_err:
+                        logger.debug(
+                            "wait_for_load_state after navigation-interrupt failed: %s",
+                            wait_err,
+                        )
+                    final_url = ""
+                    try:
+                        final_url = page.url or ""
+                    except Exception as url_err:
+                        logger.debug("page.url lookup failed: %s", url_err)
+                    logger.info(
+                        "Navigation to %s was superseded by redirect to %s — treating as soft-redirect",
+                        url[:120],
+                        final_url[:200] or "<unknown>",
+                    )
+                    return
                 if "timeout" in err_lower:
                     logger.warning(
                         "domcontentloaded timed out for %r, retrying with wait_until='commit'",
@@ -1236,7 +1260,10 @@ class BrowserInstance:
         ts = datetime.now().strftime("%Y%m%d_%H%M%S")
         filename = f"screenshot_{ts}.png"
         filepath = screenshots_dir / filename
-        await page.screenshot(path=str(filepath), full_page=False)
+        screenshot_timeout_ms = get_config().browser_screenshot_timeout_ms
+        await page.screenshot(
+            path=str(filepath), full_page=False, timeout=screenshot_timeout_ms
+        )
         state = await self._get_page_state(tab_id)
         state["screenshot_path"] = str(filepath)
         state["message"] = f"Screenshot saved to {filepath}"
