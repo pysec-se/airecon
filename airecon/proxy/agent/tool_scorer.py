@@ -666,7 +666,8 @@ def rank_tools_for_phase(
 ) -> list[dict[str, Any]]:
     """Score and rank all available tools for the current phase.
 
-    Phase-blocked tools are removed entirely.
+    Phase-blocked tools receive a low score but remain in the ranking so
+    the agent can make evidence-driven cross-phase pivots when warranted.
     Auto-loads cross-session memory if enabled.
     """
     if use_memory and tool_success_counts is None and tool_failure_counts is None:
@@ -702,14 +703,6 @@ def rank_tools_for_phase(
             adaptive_tool_scores=adaptive_tool_scores,
             strategy_tool_sequence=strategy_tool_sequence,
         )
-
-        if result["phase_blocked"]:
-            logger.debug(
-                "Tool '%s' phase-blocked for %s — removing from tool list",
-                tool_name,
-                current_phase,
-            )
-            continue
 
         scored_tools.append((result["score"], tool_def))
 
@@ -843,10 +836,10 @@ def build_tool_recommendation_context(
     if blocked:
         top_blocked = sorted(blocked)[:10]
         parts.append(
-            f"<blocked_tools>\n"
-            f"  DO NOT use these tools in {phase_upper} phase: {', '.join(top_blocked)}\n"
-            f"  Using them will be rejected.\n"
-            f"</blocked_tools>"
+            f"<phase_advisory_tools>\n"
+            f"  These tools are outside the usual {phase_upper} set: {', '.join(top_blocked)}\n"
+            f"  Prefer phase-aligned tools first, but cross-phase pivots are allowed when evidence justifies them.\n"
+            f"</phase_advisory_tools>"
         )
 
     if chain_step_hint:

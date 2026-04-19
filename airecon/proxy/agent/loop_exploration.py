@@ -1139,6 +1139,62 @@ class _ExplorationMixin:
                 if path:
                     store.record_auth_endpoint(target, str(path))
 
+        # ── Persist high-confidence evidence to TargetMemory ───────────────
+        # Evidence with confidence >= 0.85 is saved as a session note so the
+        # next session inherits findings without needing to redo discovery.
+        if self.state:
+            _high_conf = [
+                e for e in self.state.evidence_log
+                if float(e.get("confidence", 0.0)) >= 0.85
+                and str(e.get("summary", "")).strip()
+            ]
+            _already_noted: set[str] = set(
+                getattr(self, "_persisted_evidence_ids", set())
+            )
+            _new_notes: list[str] = []
+            for _ev in _high_conf[-10:]:
+                _ev_key = str(_ev.get("summary", ""))[:80]
+                if _ev_key not in _already_noted:
+                    _new_notes.append(_ev_key)
+                    _already_noted.add(_ev_key)
+            if _new_notes:
+                self._persisted_evidence_ids = _already_noted  # type: ignore[attr-defined]
+                for note in _new_notes:
+                    store.add_session_note(target, f"[evidence] {note}")
+
+        # ── Persist confirmed hypotheses to TargetMemory ───────────────────
+        # Confirmed hypotheses are saved as unverified vulnerabilities so the
+        # next session starts with a lead rather than from scratch.
+        if self.state:
+            _confirmed = [
+                h for h in self.state.hypothesis_queue
+                if str(h.get("status", "")) == "confirmed"
+            ]
+            _persisted_hyps: set[str] = set(
+                getattr(self, "_persisted_hyp_ids", set())
+            )
+            for _hyp in _confirmed:
+                _hid = str(_hyp.get("id", ""))
+                if _hid and _hid not in _persisted_hyps:
+                    _claim = str(_hyp.get("claim", ""))[:120]
+                    _tags = _hyp.get("tags", [])
+                    _vuln_type = str(_tags[0]) if _tags else "unknown"
+                    # Verified = independent cross-tool evidence already
+                    # backs this claim. Persist as confirmed so next session
+                    # inherits a real signal, not just a self-declared claim.
+                    _is_verified = bool(_hyp.get("verified"))
+                    store.record_vulnerability(target, {
+                        "type": _vuln_type,
+                        "path": "",
+                        "param": "",
+                        "payload": "",
+                        "severity": "medium",
+                        "confirmed": "true" if _is_verified else "false",
+                        "note": _claim,
+                    })
+                    _persisted_hyps.add(_hid)
+            self._persisted_hyp_ids = _persisted_hyps  # type: ignore[attr-defined]
+
         if getattr(self, "_target_mem_save_counter", 0) % 15 == 0:
             for norm, tm in store._cache.items():
                 store.save(norm, tm)

@@ -335,6 +335,53 @@ class TestToolStatistics:
         mm = MemoryManager()
         assert mm.get_tool_statistics() == {}
 
+    def test_tool_statistics_prefer_global_rollup_snapshot(self, memory_manager):
+        cursor = memory_manager.conn.cursor()
+        cursor.executemany(
+            """
+            INSERT INTO tool_usage
+            (tool_name, target, success_count, failure_count, avg_duration_sec, typical_output_size)
+            VALUES (?, ?, ?, ?, ?, ?)
+            """,
+            [
+                ("ffuf", "a.example.com", 1, 0, 1.0, 100),
+                ("ffuf", "b.example.com", 2, 1, 2.0, 200),
+                ("ffuf", "", 5, 1, 1.5, 300),
+            ],
+        )
+        memory_manager.conn.commit()
+
+        stats = memory_manager.get_tool_statistics(tool_name="ffuf")
+
+        assert isinstance(stats, dict)
+        assert stats["success_count"] == 5
+        assert stats["failure_count"] == 1
+        assert stats["total_calls"] == 6
+
+
+class TestToolInsights:
+    def test_get_tool_insights_uses_rolled_up_statistics(self, memory_manager):
+        cursor = memory_manager.conn.cursor()
+        cursor.executemany(
+            """
+            INSERT INTO tool_usage
+            (tool_name, target, success_count, failure_count, avg_duration_sec, typical_output_size)
+            VALUES (?, ?, ?, ?, ?, ?)
+            """,
+            [
+                ("ffuf", "a.example.com", 1, 0, 1.0, 100),
+                ("ffuf", "", 4, 1, 1.4, 250),
+                ("nmap", "example.com", 2, 1, 10.0, 500),
+            ],
+        )
+        memory_manager.conn.commit()
+
+        insights = memory_manager.get_tool_insights()
+
+        assert insights["total_tools_tracked"] == 2
+        assert insights["top_performing_tools"][0]["tool_name"] == "ffuf"
+        assert insights["top_performing_tools"][0]["success_rate"] == 0.8
+
 
 class TestHealthSnapshot:
     def test_health_snapshot_with_data(self, memory_manager):

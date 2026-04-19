@@ -7,12 +7,44 @@ from typing import Any
 import json
 import logging
 import shlex
+from urllib.parse import urlparse
 
 from .constants import VALID_BROWSER_ACTIONS
 from .tuning import get_tuning
 from .utils import is_host_in_scope
 
 logger = logging.getLogger("airecon.validation")
+
+def _poc_type_min_length(poc_code: str) -> int:
+    """Return the minimum acceptable PoC length for the given code type.
+
+    These numbers reflect the natural size of each format, not arbitrary policy:
+    - curl one-liners are valid at 20+ chars (e.g. `curl https://t.co/admin`)
+    - bash/HTTP raw requests need a bit more structure: 22-28 chars
+    - Python needs at least an import line: 40 chars
+    """
+    lower = poc_code.lstrip().lower()
+    if lower.startswith("curl "):
+        return 20
+    if lower.startswith("#!/bin/bash") or lower.startswith("#!/bin/sh"):
+        return 22
+    if lower.startswith("<?php"):
+        return 28
+    if any(sig in lower[:80] for sig in (
+        "import ", "def ", "requests.", "urllib",
+        "#!/usr/bin/env python", "#!/usr/bin/python",
+    )):
+        return 40
+    if any(sig in lower[:80] for sig in ("fetch(", "xmlhttprequest", "require(", "const ", "let ", "var ")):
+        return 28
+    if lower.startswith(("get ", "post ", "put ", "delete ", "patch ")):
+        return 28
+    return 22
+
+
+_POC_DESC_MIN: int = 30
+_TECHNICAL_MIN: int = 30
+
 
 # Valid input types for request_user_input tool — loaded from tools_meta.json
 _VALID_INPUT_TYPES_JSON = [
@@ -129,7 +161,6 @@ _REPLAY_GAP_MESSAGES = {
 
 _URL_REGEX = re.compile(r"https?://[^\s\"'<>]+", re.IGNORECASE)
 _HOST_HEADER_REGEX = re.compile(r"(?im)^host:\s*([^\s/:]+)")
-_HOST_TOKEN_REGEX = re.compile(r"\b([a-zA-Z0-9-]+(?:\.[a-zA-Z0-9-]+)+)\b")
 _IP_REGEX = re.compile(r"\b(?:\d{1,3}\.){3}\d{1,3}\b")
 
 _EXTS_PATH = Path(__file__).parent.parent / "data" / "file_extensions.json"
@@ -146,30 +177,9 @@ except Exception as _ext_err:
     logger.debug("Failed to load file_extensions.json for scope guard: %s", _ext_err)
     _KNOWN_FILE_EXTS = set()
 
-_SCOPE_HINT_TOKENS = ("url", "host", "domain", "target", "endpoint", "base", "site")
-
-
-def _load_tool_param_schema() -> dict[str, dict[str, Any]]:
-    try:
-        tools_path = Path(__file__).parent.parent / "data" / "tools.json"
-        if not tools_path.exists():
-            return {}
-        data = json.loads(tools_path.read_text(encoding="utf-8"))
-        schema: dict[str, dict[str, Any]] = {}
-        for entry in data if isinstance(data, list) else []:
-            fn = entry.get("function", {}) if isinstance(entry, dict) else {}
-            name = fn.get("name")
-            params = fn.get("parameters", {}) if isinstance(fn, dict) else {}
-            props = params.get("properties", {}) if isinstance(params, dict) else {}
-            if isinstance(name, str) and name:
-                schema[name.lower()] = props if isinstance(props, dict) else {}
-        return schema
-    except Exception as e:
-        logger.debug("Failed to load tool param schema for scope guard: %s", e)
-        return {}
-
-
-_TOOL_PARAM_SCHEMA = _load_tool_param_schema()
+_HOSTLIKE_TOKEN_REGEX = re.compile(
+    r"^(?:[a-zA-Z0-9-]+(?:\.[a-zA-Z0-9-]+)+|\d{1,3}(?:\.\d{1,3}){3})(?::\d+)?(?:[/?#].*)?$"
+)
 
 
 def _looks_like_path(text: str) -> bool:
@@ -225,52 +235,67 @@ def _extract_scope_candidates_from_text(text: str) -> set[str]:
     if not stripped:
         return candidates
 
-    for url in _URL_REGEX.findall(stripped):
-        candidates.add(url)
+    def _normalize_candidate(raw: str) -> str | None:
+        token = raw.strip().strip("()[]{}<>,;\"'")
+        if not token:
+            return None
+        if _looks_like_file_name(token) or _looks_like_token(token):
+            return None
+        parsed = urlparse(token if "://" in token else f"http://{token}")
+        host = (parsed.hostname or "").strip().lower().rstrip(".")
+        if not host:
+            return None
+        if _looks_like_file_name(host) or _looks_like_token(host):
+            return None
+        return f"http://{host}"
 
-    for ip in _IP_REGEX.findall(stripped):
-        candidates.add(f"http://{ip}")
+    sanitized = stripped
+    for url in _URL_REGEX.findall(stripped):
+        normalized = _normalize_candidate(url)
+        if normalized:
+            candidates.add(normalized)
+        sanitized = sanitized.replace(url, " ")
+
+    for ip in _IP_REGEX.findall(sanitized):
+        normalized = _normalize_candidate(ip)
+        if normalized:
+            candidates.add(normalized)
 
     host_match = _HOST_HEADER_REGEX.search(stripped)
     if host_match:
-        host = host_match.group(1).strip()
-        if host:
-            candidates.add(f"http://{host}")
+        normalized = _normalize_candidate(host_match.group(1))
+        if normalized:
+            candidates.add(normalized)
 
     if "://" not in stripped and not _looks_like_path(stripped) and not _looks_like_file_name(stripped):
         if re.match(r"^[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$", stripped):
-            candidates.add(f"http://{stripped}")
+            normalized = _normalize_candidate(stripped)
+            if normalized:
+                candidates.add(normalized)
 
-    for host in _HOST_TOKEN_REGEX.findall(stripped):
-        host = host.strip().lower()
-        if not host or _looks_like_file_name(host) or _looks_like_token(host):
+    for raw_token in re.split(r"\s+", sanitized):
+        token = raw_token.strip().strip("()[]{}<>,;\"'")
+        if not token:
             continue
-        if host.startswith(("http://", "https://")):
+        if token.startswith(("/", "./", "../", "~")):
             continue
-        tld = host.rsplit(".", 1)[-1]
-        if tld.isalpha() and len(tld) >= 2:
-            candidates.add(f"http://{host}")
+        is_hostlike = bool(_HOSTLIKE_TOKEN_REGEX.match(token))
+        if "=" in token and not token.startswith(("http://", "https://")) and not is_hostlike:
+            continue
+        if not is_hostlike:
+            continue
+        normalized = _normalize_candidate(token)
+        if normalized:
+            candidates.add(normalized)
 
     return candidates
 
 
 def _collect_scope_candidates(tool_name: str, arguments: dict[str, Any]) -> set[str]:
+    _ = tool_name
     candidates: set[str] = set()
     for text in _iter_text_values(arguments):
         candidates |= _extract_scope_candidates_from_text(text)
-
-    props = _TOOL_PARAM_SCHEMA.get(tool_name.lower(), {})
-    if props:
-        for key, meta in props.items():
-            key_lower = str(key).lower()
-            desc = str(meta.get("description", "") if isinstance(meta, dict) else "").lower()
-            if any(token in key_lower for token in _SCOPE_HINT_TOKENS) or any(
-                token in desc for token in _SCOPE_HINT_TOKENS
-            ):
-                value = arguments.get(key)
-                for text in _iter_text_values(value):
-                    candidates |= _extract_scope_candidates_from_text(text)
-
     return candidates
 _REPLAY_SCORE_WEIGHTS = {
     "request_logged": float(
@@ -959,10 +984,35 @@ class _ValidatorMixin:
         if self._scope_guard_active():
             scope_target = self._resolve_scope_target()
             if scope_target:
+                lock_strict = bool(getattr(self, "_scope_lock_active", False))
                 for candidate in _collect_scope_candidates(tool_name, arguments):
                     ok, err = self._check_scope_url(candidate)
-                    if not ok:
+                    if ok:
+                        continue
+                    if lock_strict:
+                        # User explicitly opted into strict scope lock.
                         return False, err
+                    # Default: soft advisory. LLM decides if the URL is a
+                    # target-owned asset (bucket, CDN subdomain, subsidiary),
+                    # a 3rd-party that the target legitimately depends on
+                    # (e.g. credential validation endpoint), or genuinely
+                    # unrelated. Don't block — record for downstream notice.
+                    advisories = getattr(self, "_pending_scope_advisories", None)
+                    if advisories is None:
+                        advisories = []
+                        self._pending_scope_advisories = advisories  # type: ignore[attr-defined]
+                    advisories.append(
+                        {
+                            "url": candidate,
+                            "declared_scope": scope_target,
+                            "tool": tool_name,
+                        }
+                    )
+                    logger.debug(
+                        "Scope advisory (soft): %s outside %s — allowed, LLM reasons",
+                        candidate,
+                        scope_target,
+                    )
 
         if tool_name == "execute":
             cmd = self._str_arg(arguments, "command")
@@ -1030,28 +1080,6 @@ class _ValidatorMixin:
                 return False, "'path' must be a non-empty string."
             if "content" not in arguments:
                 return False, "'content' argument is required."
-
-            path_lower = path_str.strip().lower()
-            _REPORT_NAMES = (
-                "final_report",
-                "report",
-                "vuln",
-                "vulnerability",
-                "finding",
-                "assessment",
-                "security_report",
-                "pentest_report",
-                "summary_report",
-            )
-            if path_lower.endswith(".md") and any(
-                r in path_lower for r in _REPORT_NAMES
-            ):
-                return False, (
-                    "BLOCKED: Writing vulnerability findings to a markdown file is FORBIDDEN. "
-                    "Use create_vulnerability_report for each confirmed finding. "
-                    "create_file is for scripts, wordlists, config, and tool output only — "
-                    "never for security reports."
-                )
 
         elif tool_name == "read_file":
             if not self._str_arg(arguments, "path").strip():
@@ -1156,9 +1184,11 @@ class _ValidatorMixin:
                     "REPORT REJECTED: 'poc_script_code' is empty. "
                     "Provide actual exploit code or a curl command demonstrating the vulnerability."
                 )
-            if len(poc_code) < 50:
+            _poc_min = _poc_type_min_length(poc_code)
+            if len(poc_code) < _poc_min:
                 return False, (
-                    f"REPORT REJECTED: 'poc_script_code' is too short ({len(poc_code)} chars). "
+                    f"REPORT REJECTED: 'poc_script_code' is too short ({len(poc_code)} chars, "
+                    f"minimum {_poc_min} for this PoC type). "
                     "Provide a real exploit: Python script, curl command, or HTTP request."
                 )
 
@@ -1210,15 +1240,17 @@ class _ValidatorMixin:
                         "It must be a Python script (with valid syntax), a curl command, "
                         "PHP/JS snippet, or an HTTP request."
                     )
-            if not poc_desc or len(poc_desc) < 40:
+            if not poc_desc or len(poc_desc) < _POC_DESC_MIN:
                 return False, (
-                    f"REPORT REJECTED: 'poc_description' is too short ({len(poc_desc)} chars). "
+                    f"REPORT REJECTED: 'poc_description' is too short ({len(poc_desc)} chars, "
+                    f"minimum {_POC_DESC_MIN}). "
                     "Provide step-by-step reproduction with specific URLs, parameters, and observed behavior."
                 )
 
-            if not is_ctf and (not technical or len(technical) < 40):
+            if not is_ctf and (not technical or len(technical) < _TECHNICAL_MIN):
                 return False, (
-                    f"REPORT REJECTED: 'technical_analysis' is too short ({len(technical)} chars). "
+                    f"REPORT REJECTED: 'technical_analysis' is too short ({len(technical)} chars, "
+                    f"minimum {_TECHNICAL_MIN}). "
                     "Explain the root cause with specific technical details."
                 )
             GENERIC_TITLES = (

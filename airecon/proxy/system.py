@@ -12,221 +12,72 @@ logger = logging.getLogger("airecon.system")
 with open(Path(__file__).parent / "prompts" / "system.txt", "r") as f:
     SYSTEM_PROMPT = f.read()
 
-_CTF_PROMPT_PATH = Path(__file__).parent / "prompts" / "system_ctf.txt"
-with open(_CTF_PROMPT_PATH, "r") as f:
-    CTF_SYSTEM_PROMPT = f.read()
-
-_BUGBOUNTY_PROMPT_PATH = Path(__file__).parent / "prompts" / "bugbounty.txt"
-with open(_BUGBOUNTY_PROMPT_PATH, "r") as f:
-    BUGBOUNTY_SYSTEM_PROMPT = f.read()
-
-_PENTEST_PROMPT_PATH = Path(__file__).parent / "prompts" / "penetration_test.txt"
-with open(_PENTEST_PROMPT_PATH, "r") as f:
-    PENTEST_SYSTEM_PROMPT = f.read()
-
-_CTF_INDICATORS_TARGET = (
-    "localhost",
-    "127.0.0.1",
-    "::1",
-)
-_PRIVATE_IP_RE = re.compile(
-    r"\b(10\.\d+\.\d+\.\d+|172\.(1[6-9]|2\d|3[01])\.\d+\.\d+|192\.168\.\d+\.\d+):\d+\b"
-)
-
-_CTF_MSG_RE = re.compile(
-    r"(?:"
-    r"\bctf\b"
-    r"|flag\{"
-    r"|\bcapture the flag\b"
-    r"|\bxbow\b"
-    r"|\bhacksim\b"
-    r"|\bhtb\b"
-    r"|\bpicoctf\b"
-    r"|\broot\.txt\b"
-    r"|\buser\.txt\b"
-    r")",
-    re.IGNORECASE,
-)
-
-
 def _is_ctf_target(target: str | None = None, user_message: str | None = None) -> bool:
-    if target:
-        t_lower = target.lower()
-        if any(ind in t_lower for ind in _CTF_INDICATORS_TARGET):
-            return True
+    """Automatic CTF classification is intentionally disabled.
 
-        if _PRIVATE_IP_RE.search(target):
-            return True
-    if user_message and _CTF_MSG_RE.search(user_message):
-        return True
+    Engagement mode should not be inferred from heuristics or sidecar hint files.
+    The model receives the user's request directly and must reason from that
+    request instead of hidden mode classifiers.
+    """
+    _ = (target, user_message)
     return False
-
-
-_BUGBOUNTY_INDICATORS_MSG = (
-    "bug bounty",
-    "bugbounty",
-    "bounty",
-    "hackerone",
-    "bugcrowd",
-    "intigriti",
-    "public domain",
-    "external assessment",
-)
-_BUGBOUNTY_TARGET_HINTS = (
-    "hackerone",
-    "bugcrowd",
-    "intigriti",
-    "/security",
-    "/security.txt",
-    "/responsible-disclosure",
-    "/vulnerability-disclosure",
-    "/bug-bounty",
-    "/bounty",
-)
-_PUBLIC_DOMAIN_RE = re.compile(
-    r"\b([a-z0-9]([a-z0-9\-]{0,61}[a-z0-9])?\.)+"
-    r"(com|net|org|io|co|app|dev|ai|xyz|tech|gov|edu)\b",
-    re.IGNORECASE,
-)
 
 
 def _is_bugbounty_target(
     target: str | None = None, user_message: str | None = None
 ) -> bool:
-    msg_has_indicator = False
-    target_has_indicator = False
-    target_is_public_domain = False
-
-    if user_message:
-        m_lower = user_message.lower()
-        msg_has_indicator = any(ind in m_lower for ind in _BUGBOUNTY_INDICATORS_MSG)
-
-    if target:
-        t_lower = target.lower()
-        target_is_public_domain = bool(
-            _PUBLIC_DOMAIN_RE.search(t_lower) and ":" not in t_lower
-        )
-        target_has_indicator = any(ind in t_lower for ind in _BUGBOUNTY_INDICATORS_MSG)
-        if not target_has_indicator:
-            target_has_indicator = any(
-                hint in t_lower for hint in _BUGBOUNTY_TARGET_HINTS
-            )
-
-    if msg_has_indicator:
-        return True
-
-    if target_is_public_domain and target_has_indicator:
-        return True
-
-    if target_has_indicator:
-        return True
-
+    _ = (target, user_message)
     return False
-
-
-_PENTEST_INDICATORS_MSG = (
-    "pentest",
-    "penetration test",
-    "internal",
-    "local pentest",
-    "network pentest",
-    "cloud pentest",
-    "aws",
-    "gcp",
-    "azure",
-    "cloud",
-    "s3 bucket",
-    "ec2",
-    "lambda",
-    "iam",
-    "smb",
-    "lateral movement",
-)
-_PENTEST_TARGET_RE = re.compile(
-    r"\b(10\.\d+\.\d+\.\d+|172\.(1[6-9]|2\d|3[01])\.\d+\.\d+|192\.168\.\d+\.\d+)\b"
-)
 
 
 def _is_pentest_target(
     target: str | None = None, user_message: str | None = None
 ) -> bool:
-    if target:
-        t_lower = target.lower()
-
-        if _PENTEST_TARGET_RE.search(t_lower) and not _PRIVATE_IP_RE.search(t_lower):
-            return True
-        if any(ind in t_lower for ind in ("aws", "gcp", "azure", "cloud")):
-            return True
-    if user_message:
-        m_lower = user_message.lower()
-        if any(ind in m_lower for ind in _PENTEST_INDICATORS_MSG):
-            return True
+    _ = (target, user_message)
     return False
 
 
-_FULL_EMBED_SKILLS = {
-    "tools/install.md",
-}
-
-_CTF_EMBED_SKILLS = {
-    "tools/install.md",
-}
-
-
 def _load_local_skills(ctf_mode: bool = False) -> str:
+    """Build the <available_skills> block for the system prompt.
+
+    Lists every skill by its exact stem name so the LLM can call
+    read_file with a precise path instead of guessing filenames.
+    """
     skills_dir = Path(__file__).resolve().parent / "skills"
     if not skills_dir.exists():
         return ""
 
-    embed_set = _CTF_EMBED_SKILLS if ctf_mode else _FULL_EMBED_SKILLS
+    _ = ctf_mode
 
-    embedded_parts: list[str] = []
-    category_counts: dict[str, int] = {}
-
+    # Collect stems grouped by top-level category directory.
+    category_files: dict[str, list[str]] = {}
     for path in sorted(skills_dir.rglob("*.md")):
-        rel = path.relative_to(skills_dir).as_posix()
-        if rel in embed_set:
-            try:
-                content = path.read_text(encoding="utf-8", errors="replace")
-                embedded_parts.append(
-                    f'\n<embedded_skill name="{path.name}">\n{content}\n</embedded_skill>\n'
-                )
-            except Exception:
-                top = rel.split("/", 1)[0]
-                category_counts[top] = category_counts.get(top, 0) + 1
-        else:
-            top = rel.split("/", 1)[0]
-            category_counts[top] = category_counts.get(top, 0) + 1
+        if path.name.startswith("_"):
+            continue
+        rel = path.relative_to(skills_dir)
+        cat = rel.parts[0] if len(rel.parts) > 1 else ""
+        if cat:
+            category_files.setdefault(cat, []).append(path.stem)
 
-    result = ""
+    if not category_files:
+        return ""
 
-    if embedded_parts:
-        result += (
-            "\n\n<core_skills>\n"
-            "The following skill documents are pre-loaded for you. "
-            "You do NOT need to read_file these — they are already available:\n"
-            + "".join(embedded_parts)
-            + "</core_skills>\n"
-        )
+    base_path = skills_dir.as_posix()
+    total = sum(len(v) for v in category_files.values())
 
-    if category_counts:
-        total = sum(category_counts.values())
-        cat_list = ", ".join(
-            f"{k}({category_counts[k]})" for k in sorted(category_counts)
-        )
-        base_path = skills_dir.as_posix()
-        result += (
-            "\n\n<available_skills>\n"
-            "Additional skills are available via read_file (not pre-loaded).\n"
-            f"Skills base path: {base_path}\n"
-            f"Categories ({total} total): {cat_list}\n"
-            "Auto-load will inject relevant skills based on keywords in the request.\n"
-            "If you need a specific one, call read_file with the full path.\n"
-            f"Example: {base_path}/tools/<skill_name>.md\n"
-            "</available_skills>\n"
-        )
+    lines: list[str] = [
+        "\n\n<available_skills>",
+        f"Skills base path: {base_path}",
+        f"{total} skill documents — auto-injected when relevant, or load explicitly with read_file.\n",
+    ]
+    for cat in sorted(category_files):
+        stems = sorted(category_files[cat])
+        lines.append(f"  {cat}/  →  {', '.join(stems)}")
 
-    return result
+    lines.append(f"\nUsage: read_file {base_path}/<category>/<skill_name>.md")
+    lines.append("</available_skills>\n")
+
+    return "\n".join(lines)
 
 
 def _load_skill_keywords() -> dict[str, str]:
@@ -255,10 +106,19 @@ def _keyword_matches_message(keyword: str, msg_lower: str) -> bool:
 _SKILL_KEYWORDS: dict[str, str] = _load_skill_keywords()
 
 
-# ── Dynamic phase→skill-category mapping (derived, not hardcoded) ────────────
-# Phase names map to sets of skill category directory names that are relevant.
-# These are derived from the pipeline's operational goals, but kept as a simple
-# reference since skill categories are stable domain knowledge.
+def _build_skill_keyword_density(keywords: dict[str, str]) -> dict[str, int]:
+    """Count keyword entries per skill path — higher = more broadly referenced."""
+    density: dict[str, int] = {}
+    for skill_path in keywords.values():
+        density[skill_path] = density.get(skill_path, 0) + 1
+    return density
+
+
+# Precomputed once at import time from the full keyword vocabulary.
+# Per-test _SKILL_KEYWORDS mocks do not affect this — phase-fallback
+# ranking always reflects the real keyword distribution.
+_SKILL_KEYWORD_DENSITY: dict[str, int] = _build_skill_keyword_density(_SKILL_KEYWORDS)
+
 _PHASE_SKILL_CATEGORIES: dict[str, set[str]] = {
     "RECON": {"reconnaissance", "tools", "protocols"},
     "ANALYSIS": {"vulnerabilities", "frameworks", "technologies", "protocols"},
@@ -312,9 +172,11 @@ def _select_phase_skills(
 ) -> list[str]:
     """Select skills relevant to the phase, excluding already-loaded ones.
 
-    Uses keyword-based scoring within the preferred categories so that different
-    conversation contexts produce different skill selections — breaking the
-    repetitive cycle where the same skills are always loaded.
+    Skills are ranked by keyword density (how many keyword entries map to them
+    in the full vocabulary) so that broadly-referenced skills are preferred
+    over niche ones. Uses the precomputed _SKILL_KEYWORD_DENSITY so that
+    per-test _SKILL_KEYWORDS mocks do not distort phase-fallback ranking.
+    Within the same density, alphabetical order provides a stable tiebreaker.
     """
     if not phase or not all_skills:
         return []
@@ -325,20 +187,29 @@ def _select_phase_skills(
 
     session_set = session_loaded or set()
 
-    # Score skills by category match + stem diversity
     scored: list[tuple[int, str]] = []
     for rel_path, stem in all_skills.items():
-        # Skip already loaded
         if rel_path in session_set or stem in session_set:
             continue
-
         cat = rel_path.split("/")[0] if "/" in rel_path else rel_path
         if cat in preferred_dirs:
-            scored.append((1, rel_path))
+            scored.append((_SKILL_KEYWORD_DENSITY.get(rel_path, 0), rel_path))
 
-    # Sort deterministic, pick top N
-    scored.sort(key=lambda x: x[1])
+    # Higher density first; alphabetical tiebreaker for determinism.
+    scored.sort(key=lambda x: (-x[0], x[1]))
     return [rel for _, rel in scored[:max_skills]]
+
+
+def _message_skill_char_budget(ctx_tokens: int) -> tuple[int, int]:
+    """Return (tools/recon char limit, other skill char limit) scaled to context size."""
+    ctx = max(4096, int(ctx_tokens or 0))
+    if ctx >= 65536:
+        return 6000, 2500
+    if ctx >= 32768:
+        return 5000, 1800
+    if ctx >= 16384:
+        return 3500, 1200
+    return 2500, 900
 
 
 def auto_load_skills_for_message(
@@ -351,6 +222,14 @@ def auto_load_skills_for_message(
     skills_dir = Path(__file__).resolve().parent / "skills"
     if not skills_dir.exists():
         return "", []
+
+    try:
+        cfg = get_config()
+        _tools_limit, _other_limit = _message_skill_char_budget(
+            int(getattr(cfg, "ollama_num_ctx", 32768) or 32768)
+        )
+    except Exception:
+        _tools_limit, _other_limit = 5000, 1800
 
     msg_lower = user_message.lower()
 
@@ -401,10 +280,6 @@ def auto_load_skills_for_message(
             logger.debug("Skill recommendation lookup failed: %s", e)
 
     all_skills = _discover_all_skills(skills_dir)
-    # Only use phase fallback when the message did not already resolve to
-    # concrete skills. This keeps context focused and avoids polluting the
-    # prompt with generic phase skills when an exact tool or vuln skill match
-    # is already available from the request itself.
     phase_fallback = (
         _select_phase_skills(
             phase, all_skills, session_loaded_skills, max_skills=2,
@@ -436,12 +311,12 @@ def auto_load_skills_for_message(
             content = skill_file.read_text(encoding="utf-8", errors="replace")
 
             limit = (
-                5000
+                _tools_limit
                 if (
                     skill_rel.startswith("tools/")
                     or skill_rel.startswith("reconnaissance/")
                 )
-                else 1500
+                else _other_limit
             )
             if len(content) > limit:
                 content = (
@@ -468,7 +343,6 @@ def auto_load_skills_for_message(
         except Exception:
             return False
 
-    # Priority 1: keyword-matched skills (from conversation content)
     keyword_count = 0
     max_keyword_skills = 3
     for skill_rel in sorted_skills:
@@ -477,7 +351,6 @@ def auto_load_skills_for_message(
         if _load_skill(skill_rel, priority=2):
             keyword_count += 1
 
-    # Priority 2: phase-relevant skills that haven't been loaded yet
     phase_count = 0
     max_phase_skills = 2
     for skill_rel in phase_fallback:
@@ -632,9 +505,6 @@ def get_system_prompt(
     target: str | None = None,
     user_message: str | None = None,
 ) -> str:
-    if _is_ctf_target(target, user_message):
-        return CTF_SYSTEM_PROMPT + _load_local_skills(ctf_mode=True)
-
     cfg = get_config()
     base_prompt = SYSTEM_PROMPT
 
@@ -646,8 +516,8 @@ def get_system_prompt(
 <recon_mode_policy>
 RECON_MODE={recon_mode.upper()}
 
-- In STANDARD mode, strictly follow user-requested scope. Do not widen focused tasks
-  into broad full recon unless the user explicitly asks for comprehensive/deep/full coverage.
+- In STANDARD mode, do not auto-expand focused tasks into broad full recon unless the user
+  explicitly asks for comprehensive/deep/full coverage.
 - In FULL mode, if the user gives only a simple target-only kickoff, you may auto-expand
   into comprehensive recon when deep_recon_autostart is enabled.
 - If user intent conflicts with auto-expansion, user intent wins.
@@ -682,11 +552,57 @@ unless you reproduce it, understand WHY, and can demonstrate real impact.
         )
 
     skills_block = _load_local_skills(ctf_mode=False)
+    mcp_block = _build_mcp_server_hint()
+    _ = (target, user_message)
+    return base_prompt + skills_block + mcp_block
 
-    if _is_bugbounty_target(target, user_message):
-        return BUGBOUNTY_SYSTEM_PROMPT + "\n\n" + base_prompt + skills_block
 
-    if _is_pentest_target(target, user_message):
-        return PENTEST_SYSTEM_PROMPT + "\n\n" + base_prompt + skills_block
+def _build_mcp_server_hint() -> str:
+    """List currently enabled MCP servers by name in the system prompt.
 
-    return base_prompt + skills_block
+    The LLM sees ``mcp_<server>`` entries in its tool list, but without a name
+    roster it has no way to know WHICH servers exist and what they are.
+    This block is intentionally shallow: it reports names + short description
+    from config (if present). Tool discovery still happens via
+    ``action="list_tools"`` / ``action="search_tools"`` at call time.
+    """
+    try:
+        from .mcp import list_mcp_servers
+    except Exception as e:
+        logger.debug("MCP hint disabled (import failure): %s", e)
+        return ""
+
+    try:
+        servers = list_mcp_servers()
+    except Exception as e:
+        logger.debug("MCP hint disabled (list failure): %s", e)
+        return ""
+
+    enabled = [
+        (name, cfg)
+        for name, cfg in servers.items()
+        if isinstance(cfg, dict) and bool(cfg.get("enabled", True))
+    ]
+    if not enabled:
+        return ""
+
+    lines: list[str] = ["\n\n<available_mcp_servers>"]
+    lines.append(
+        f"{len(enabled)} MCP server(s) enabled. Each exposes tools under "
+        f"`mcp_<name>`. Call with `action=\"search_tools\"` + `query` to find "
+        f"specific tools, then `action=\"call_tool\"` to execute."
+    )
+    for name, cfg in sorted(enabled, key=lambda x: x[0]):
+        desc = str(cfg.get("description") or "").strip()
+        transport = "stdio" if cfg.get("command") else "http/sse" if cfg.get("url") else "unknown"
+        if desc:
+            lines.append(f"  • mcp_{name} ({transport}): {desc[:200]}")
+        else:
+            lines.append(f"  • mcp_{name} ({transport})")
+    lines.append(
+        "Use MCP tools when no built-in tool fits — e.g., specialized scanners, "
+        "threat intel sources, or custom workflows. The LLM decides based on "
+        "the actual task, not a fixed mapping."
+    )
+    lines.append("</available_mcp_servers>\n")
+    return "\n".join(lines)

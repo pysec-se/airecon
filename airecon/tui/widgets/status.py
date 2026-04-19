@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+from pathlib import Path
 
 from rich.markup import escape as markup_escape
 from textual import events
@@ -121,7 +122,8 @@ class StatusBar(Horizontal):
             skills_text = ""
             if self.skills_used:
                 latest_skill = self.skills_used[-1]
-                skills_text = f"│ [#8b949e]Skills:[/] [#818cf8]{markup_escape(latest_skill)}[/] [#8b949e](view)[/]"
+                latest_skill_name = Path(latest_skill).stem
+                skills_text = f"│ [#8b949e]Skills:[/] [#818cf8]{markup_escape(latest_skill_name)}[/] [#8b949e](view)[/]"
             self.query_one("#status-skills", Label).update(skills_text)
 
             caido_state = "ON" if self.caido_active else "OFF"

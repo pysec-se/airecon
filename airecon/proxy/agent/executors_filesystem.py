@@ -13,9 +13,6 @@ from .executors_catalog import _READ_FILE_CONTENT_TRUNCATION_THRESHOLD
 from ..config import get_workspace_root
 from ..filesystem import create_file, list_files, read_file
 from ..web_search import web_search
-from .executors_catalog import (
-    _REPORT_FILE_PATTERNS,
-)
 
 logger = logging.getLogger("airecon.agent")
 
@@ -104,22 +101,6 @@ class _FilesystemExecutorMixin:
             call_arguments["path"] = runtime_path
 
             if tool_name == "create_file":
-
-                _raw_path = str(history_arguments.get("path", "")).strip()
-                _is_skill_file = "skills/" in _raw_path.replace("\\", "/")
-                basename_lower = Path(_raw_path).name.lower()
-                if (
-                    not _is_skill_file
-                    and basename_lower.endswith(".md")
-                    and any(token in basename_lower for token in _REPORT_FILE_PATTERNS)
-                ):
-                    return False, 0.0, {
-                        "success": False,
-                        "error": (
-                            "BLOCKED: Writing vulnerability findings to markdown is forbidden. "
-                            "Use create_vulnerability_report for confirmed findings."
-                        ),
-                    }, None
                 result = await asyncio.to_thread(create_file, **call_arguments)
             elif tool_name == "read_file":
                 path_arg_clean = history_arguments.get("path", "")

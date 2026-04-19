@@ -25,12 +25,6 @@ _RESULT_TRUNCATION_THRESHOLD = 10000
 _READ_FILE_CONTENT_TRUNCATION_THRESHOLD = 2000
 _MAX_COMMAND_LENGTH = 20_000
 
-_REPORT_FILE_PATTERNS = (
-    "final_report", "report", "vuln", "vulnerability", "finding",
-    "assessment", "security_report", "pentest_report", "summary_report",
-)
-
-
 def _safe_non_negative_int(value: Any) -> int:
     try:
         parsed = int(value)

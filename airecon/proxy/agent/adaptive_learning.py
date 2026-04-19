@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 
+import asyncio
+import concurrent.futures
 import hashlib
 import json
 import logging
@@ -10,13 +12,18 @@ from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any
 
-from ..memory import configure_sqlite_connection, get_sqlite_timeout_seconds
+from ..memory import (
+    configure_sqlite_connection,
+    get_sqlite_timeout_seconds,
+    rollup_tool_usage_rows,
+)
 
 logger = logging.getLogger("airecon.agent.adaptive_learning")
 
 _LEARNING_DIR = Path.home() / ".airecon" / "learning"
 _MEMORY_DB = Path.home() / ".airecon" / "memory" / "airecon.db"
 _TOOLS_META = Path(__file__).resolve().parents[1] / "data" / "tools_meta.json"
+_TOOLS_JSON = Path(__file__).resolve().parents[1] / "data" / "tools.json"
 
 
 def _load_tools_meta() -> dict[str, Any]:
@@ -26,6 +33,16 @@ def _load_tools_meta() -> dict[str, Any]:
     except Exception as exc:
         logger.warning("tools_meta.json unavailable (%s)", exc)
         return {}
+
+
+def _load_tool_definitions() -> list[dict[str, Any]]:
+    """Load callable tool definitions from data/tools.json."""
+    try:
+        data = json.loads(_TOOLS_JSON.read_text(encoding="utf-8"))
+    except Exception as exc:
+        logger.warning("tools.json unavailable (%s)", exc)
+        return []
+    return data if isinstance(data, list) else []
 
 
 def _open_memory_db(read_only: bool) -> sqlite3.Connection:
@@ -206,8 +223,14 @@ class AdaptiveLearningEngine:
             conn = _open_memory_db(read_only=True)
             cur = conn.cursor()
 
-            cur.execute("SELECT * FROM tool_usage")
-            for row in cur.fetchall():
+            cur.execute(
+                """
+                SELECT tool_name, target, success_count, failure_count,
+                       avg_duration_sec, typical_output_size, last_used
+                FROM tool_usage
+                """
+            )
+            for row in rollup_tool_usage_rows(cur.fetchall()):
                 name = row["tool_name"]
                 total = (row["success_count"] or 0) + (row["failure_count"] or 0)
                 if name not in self.tool_performances:
@@ -320,19 +343,120 @@ class AdaptiveLearningEngine:
             now = time.strftime("%Y-%m-%d %H:%M:%S")
             for name, perf in self.tool_performances.items():
                 cur.execute(
-                    "SELECT success_count, failure_count, avg_duration_sec FROM tool_usage WHERE tool_name = ?",
+                    """
+                    SELECT id, tool_name, target, success_count, failure_count,
+                           avg_duration_sec, typical_output_size, last_used
+                    FROM tool_usage WHERE tool_name = ?
+                    """,
                     (name,),
                 )
-                row = cur.fetchone()
-                # Only upsert if in-memory has more data (don't downgrade)
-                if row and perf.total_uses <= row[0] + row[1]:
-                    continue
-                cur.execute(
-                    "INSERT OR REPLACE INTO tool_usage "
-                    "(tool_name, target, success_count, failure_count, avg_duration_sec, last_used, typical_output_size) "
-                    "VALUES (?, ?, ?, ?, ?, ?, ?)",
-                    (name, "", perf.successes, perf.failures, perf.avg_duration, now, 0),
+                existing_rows = cur.fetchall()
+                rolled = rollup_tool_usage_rows(existing_rows)
+                current_total = rolled[0]["total_calls"] if rolled else 0
+
+                global_rows = [
+                    row for row in existing_rows if not str(row["target"] or "").strip()
+                ]
+                primary_global = (
+                    min(global_rows, key=lambda row: int(row["id"]))
+                    if global_rows
+                    else None
                 )
+                best_global = (
+                    max(
+                        global_rows,
+                        key=lambda row: (
+                            int(row["success_count"] or 0) + int(row["failure_count"] or 0),
+                            str(row["last_used"] or ""),
+                            int(row["id"]),
+                        ),
+                    )
+                    if global_rows
+                    else None
+                )
+
+                if primary_global and best_global:
+                    best_total = int(best_global["success_count"] or 0) + int(
+                        best_global["failure_count"] or 0
+                    )
+                    if perf.total_uses > best_total:
+                        success_count = perf.successes
+                        failure_count = perf.failures
+                        avg_duration = perf.avg_duration
+                    else:
+                        success_count = int(best_global["success_count"] or 0)
+                        failure_count = int(best_global["failure_count"] or 0)
+                        avg_duration = float(best_global["avg_duration_sec"] or 0.0)
+
+                    if (
+                        primary_global["id"] != best_global["id"]
+                        or len(global_rows) > 1
+                        or perf.total_uses > best_total
+                    ):
+                        cur.execute(
+                            """
+                            UPDATE tool_usage SET
+                                success_count = ?, failure_count = ?, avg_duration_sec = ?,
+                                typical_output_size = ?, last_used = ?
+                            WHERE id = ?
+                            """,
+                            (
+                                success_count,
+                                failure_count,
+                                avg_duration,
+                                0,
+                                now,
+                                int(primary_global["id"]),
+                            ),
+                        )
+                    extras = [
+                        (int(row["id"]),)
+                        for row in global_rows
+                        if int(row["id"]) != int(primary_global["id"])
+                    ]
+                    if extras:
+                        cur.executemany("DELETE FROM tool_usage WHERE id = ?", extras)
+                    continue
+
+                # Only create or refresh a global aggregate row when in-memory has
+                # strictly more evidence than the rolled-up SQLite view.
+                if perf.total_uses <= current_total:
+                    continue
+
+                if primary_global:
+                    cur.execute(
+                        """
+                        UPDATE tool_usage SET
+                            success_count = ?, failure_count = ?, avg_duration_sec = ?,
+                            typical_output_size = ?, last_used = ?
+                        WHERE id = ?
+                        """,
+                        (
+                            perf.successes,
+                            perf.failures,
+                            perf.avg_duration,
+                            0,
+                            now,
+                            int(primary_global["id"]),
+                        ),
+                    )
+                else:
+                    cur.execute(
+                        """
+                        INSERT INTO tool_usage
+                        (tool_name, target, success_count, failure_count, avg_duration_sec, last_used, typical_output_size)
+                        VALUES (?, ?, ?, ?, ?, ?, ?)
+                        """,
+                        (
+                            name,
+                            "",
+                            perf.successes,
+                            perf.failures,
+                            perf.avg_duration,
+                            now,
+                            0,
+                        ),
+                    )
             conn.commit()
             conn.close()
             logger.debug("[AdaptiveLearning] Synced tool_performances to airencon.db")
@@ -393,8 +517,7 @@ class AdaptiveLearningEngine:
             # Extract clean tool name from raw command
             raw_cmd = pat.tool_sequence[0] if pat.tool_sequence else ""
             tool_name = _extract_tool_name(raw_cmd)
-            if not tool_name or tool_name in ("sh", "for", "which", "echo", "head", "cat", "xargs"):
-                # Skip noise commands — they're intermediate steps, not strategies
+            if not tool_name:
                 continue
 
             # Build human-readable description of what the tool does
@@ -667,7 +790,6 @@ class AdaptiveLearningEngine:
 
         try:
             import aiohttp
-            import asyncio
 
             async def _call():
                 payload = {
@@ -685,12 +807,15 @@ class AdaptiveLearningEngine:
                         data = await resp.json()
                         return data.get("response", "").strip()
 
-            loop = asyncio.get_event_loop()
-            if loop.is_running():
-                future = asyncio.run_coroutine_threadsafe(_call(), loop)
-                raw_answer = future.result(timeout=120)
-            else:
+            try:
+                asyncio.get_running_loop()
+            except RuntimeError:
                 raw_answer = asyncio.run(_call())
+            else:
+                with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
+                    raw_answer = executor.submit(lambda: asyncio.run(_call())).result(
+                        timeout=125
+                    )
 
             new_insights = _parse_insights_json(raw_answer)
             added: list[LearnedInsight] = []
@@ -924,6 +1049,7 @@ class TargetMemoryStore:
         self.base_dir = base_dir or _TARGET_MEMORY_DIR
         self.base_dir.mkdir(parents=True, exist_ok=True)
         self._cache: dict[str, TargetMemory] = {}
+        self._session_touched: set[str] = set()
 
     def _normalize_target(self, target: str) -> str:
         """Strip protocol, port, and path — returns bare domain."""
@@ -960,6 +1086,7 @@ class TargetMemoryStore:
             data = json.loads(fpath.read_text(encoding="utf-8"))
             tm = TargetMemory(**data)
             self._cache[norm] = tm
+            self._touch_target_session(norm, tm, persist=True)
             logger.info(
                 "[TargetMemory] Loaded for %s: %d endpoints, %d vulns, "
                 "%d bypasses, %d params",
@@ -991,6 +1118,26 @@ class TargetMemoryStore:
         except Exception as exc:
             logger.debug("Failed to save target memory for %s: %s", norm, exc)
 
+    def _touch_target_session(
+        self,
+        norm: str,
+        tm: TargetMemory,
+        *,
+        persist: bool,
+        is_new: bool = False,
+    ) -> None:
+        if norm in self._session_touched:
+            return
+        tm.last_seen = time.time()
+        if is_new:
+            tm.session_count = max(1, int(tm.session_count or 0))
+        else:
+            tm.session_count = max(1, int(tm.session_count or 0)) + 1
+        self._session_touched.add(norm)
+        self._cache[norm] = tm
+        if persist:
+            self.save(norm, tm)
+
     # ── Recording ────────────────────────────────────────────────────────────
 
     def ensure(self, target: str) -> TargetMemory:
@@ -1010,6 +1157,7 @@ class TargetMemoryStore:
             session_count=1,
         )
         self._cache[norm] = tm
+        self._touch_target_session(norm, tm, persist=False, is_new=True)
         return tm
 
     def record_endpoint(self, target: str, path: str) -> None:
@@ -1088,7 +1236,7 @@ class TargetMemoryStore:
 
         lines = [
             f"<target_intelligence: {tm.target}>",
-            f"REMEMBERED INTELLIGENCE from {tm.session_count} previous session(s) on {tm.target}:",
+            f"REMEMBERED INTELLIGENCE from {max(tm.session_count - 1, 0)} previous session(s) on {tm.target}:",
             "",
         ]
 
@@ -1187,38 +1335,67 @@ def _extract_tool_name(raw_cmd: str) -> str:
 _TOOL_NAME_CACHE: list[str] = []
 
 
+def _normalize_tool_names(values: list[Any]) -> set[str]:
+    return {str(value).strip().lower() for value in values if str(value).strip()}
+
+
+def _iter_phase_category_tools(meta: dict[str, Any], phase_name: str) -> set[str]:
+    wanted = _normalize_tool_names(
+        meta.get("phase_category_map", {}).get(phase_name.upper(), [])
+        if isinstance(meta.get("phase_category_map", {}), dict)
+        else []
+    )
+    if not wanted:
+        return set()
+
+    resolved: set[str] = set()
+    for cat_data in meta.get("categories", {}).values():
+        if not isinstance(cat_data, dict):
+            continue
+        for category_name, tool_list in cat_data.items():
+            if str(category_name).strip().lower() not in wanted:
+                continue
+            if isinstance(tool_list, list):
+                resolved.update(_normalize_tool_names(tool_list))
+    return resolved
+
+
 def _cache_known_tool_names() -> list[str]:
-    """Build a deduplicated list of all known tool names from tools_meta.json."""
+    """Build a deduplicated list of all known tool names from repo metadata."""
     global _TOOL_NAME_CACHE
     if _TOOL_NAME_CACHE:
         return _TOOL_NAME_CACHE
 
     meta = _load_tools_meta()
     names: set[str] = set()
-    # From categories (nested dicts → lists of tool names)
+
     for cat_data in meta.get("categories", {}).values():
         if isinstance(cat_data, dict):
             for tool_list in cat_data.values():
                 if isinstance(tool_list, list):
-                    names.update(str(t).lower() for t in tool_list)
-    # From tool_descriptions keys
-    names.update(str(k).lower() for k in meta.get("tool_descriptions", {}))
-    # From analysis_phase_vuln_tools
-    for t in meta.get("analysis_phase_vuln_tools", []):
-        names.add(str(t).lower())
-    # From watchdog_safe_command_prefixes
-    for t in meta.get("watchdog_safe_command_prefixes", []):
-        names.add(str(t).lower())
+                    names.update(_normalize_tool_names(tool_list))
 
-    # Include airecon native tools
-    names.update([
-        "http_observe", "advanced_fuzz", "deep_fuzz", "quick_fuzz",
-        "record_hypothesis", "browser_action", "web_search", "spawn_agent",
-        "caido_send_request", "caido_list_requests", "caido_automate",
-        "schemathesis_fuzz", "code_analysis", "generate_wordlist",
-    ])
+    names.update(_normalize_tool_names(list(meta.get("tool_descriptions", {}).keys())))
+    names.update(_normalize_tool_names(meta.get("analysis_phase_vuln_tools", [])))
+    names.update(_normalize_tool_names(meta.get("watchdog_safe_command_prefixes", [])))
 
-    # Sort by length descending so longer names match first (e.g. "python3" before "python")
+    for tools in meta.get("phase_extras", {}).values():
+        if isinstance(tools, list):
+            names.update(_normalize_tool_names(tools))
+
+    names.update(_normalize_tool_names(meta.get("callable_core_tools", [])))
+    names.update(_normalize_tool_names(meta.get("report_tools", [])))
+
+    for entry in _load_tool_definitions():
+        if not isinstance(entry, dict):
+            continue
+        function = entry.get("function", {})
+        if not isinstance(function, dict):
+            continue
+        tool_name = str(function.get("name", "")).strip().lower()
+        if tool_name:
+            names.add(tool_name)
+
     _TOOL_NAME_CACHE = sorted(names, key=len, reverse=True)
     return _TOOL_NAME_CACHE
 
@@ -1233,33 +1410,21 @@ def _cache_phase_tools() -> dict[str, set[str]]:
         return _PHASE_TOOL_CACHE
 
     meta = _load_tools_meta()
-    result: dict[str, set[str]] = {}
+    result: dict[str, set[str]] = {
+        "recon": set(),
+        "analysis": set(),
+        "exploit": set(),
+        "report": set(),
+    }
 
-    # RECON: reconnaissance categories
-    recon_tools: set[str] = set()
-    recon_cat = meta.get("categories", {}).get("reconnaissance", {})
-    if isinstance(recon_cat, dict):
-        for tool_list in recon_cat.values():
-            if isinstance(tool_list, list):
-                recon_tools.update(str(t).lower() for t in tool_list)
-    recon_tools.update(str(t).lower() for t in meta.get("analysis_phase_vuln_tools", []))
-    # Add airecon native recon
-    for t in ("http_observe", "browser_action", "web_search", "record_hypothesis"):
-        recon_tools.add(t)
-    result["recon"] = recon_tools
+    for phase_name in tuple(result.keys()):
+        result[phase_name].update(_iter_phase_category_tools(meta, phase_name))
+        extras = meta.get("phase_extras", {}).get(phase_name.upper(), [])
+        if isinstance(extras, list):
+            result[phase_name].update(_normalize_tool_names(extras))
 
-    # EXPLOIT: exploitation + vulnerability_scanning categories
-    exploit_tools: set[str] = set()
-    for cat_key in ("exploitation", "vulnerability_scanning"):
-        cat_data = meta.get("categories", {}).get(cat_key, {})
-        if isinstance(cat_data, dict):
-            for tool_list in cat_data.values():
-                if isinstance(tool_list, list):
-                    exploit_tools.update(str(t).lower() for t in tool_list)
-    # Add airecon native fuzz
-    for t in ("advanced_fuzz", "deep_fuzz", "quick_fuzz", "spawn_agent", "schemathesis_fuzz"):
-        exploit_tools.add(t)
-    result["exploit"] = exploit_tools
+    result["analysis"].update(_normalize_tool_names(meta.get("analysis_phase_vuln_tools", [])))
+    result["report"].update(_normalize_tool_names(meta.get("report_tools", [])))
 
     _PHASE_TOOL_CACHE = result
     return _PHASE_TOOL_CACHE
@@ -1303,11 +1468,9 @@ def _infer_phase_from_tool(tool_name: str) -> str:
     phase_tools = _cache_phase_tools()
     tool_lower = tool_name.lower()
 
-    if tool_lower in phase_tools.get("exploit", set()):
-        return "exploit"
-
-    if tool_lower in phase_tools.get("recon", set()):
-        return "recon"
+    for phase_name in ("report", "exploit", "analysis", "recon"):
+        if tool_lower in phase_tools.get(phase_name, set()):
+            return phase_name
 
     return "recon"
 

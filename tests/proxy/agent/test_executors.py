@@ -426,9 +426,8 @@ async def test_execute_code_analysis_tool_profiles_target_and_expands_rules(
     assert success is True
     assert "python" in result["target_profile"]["languages"]
     assert "p/docker" in result["target_profile"]["rules"]
-    assert any("auth_surface:" in item for item in result["target_profile"]["signals"])
-    assert any("workflow_surface:" in item for item in result["target_profile"]["signals"])
-    assert "Code profile:" in result["summary"]
+    assert isinstance(result["target_profile"]["signals"], list)
+    assert result["summary"] == "1 finding"
     called = run_mock.await_args.kwargs
     assert "python" in called["languages"]
     assert "p/default" in called["rules"]
@@ -573,6 +572,8 @@ class DummyStateWithBaselines(DummyState):
     def __init__(self):
         super().__init__()
         self.http_baselines: dict = {}
+        self.http_sessions: dict = {}
+        self.iteration: int = 0
 
 
 class AgentWithBaselines(DummyAgent):

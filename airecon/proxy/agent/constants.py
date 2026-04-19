@@ -61,6 +61,42 @@ def _load_tool_classifications(
     return fallback or frozenset()
 
 
+def _load_tool_schema_enum(tool_name: str, property_name: str) -> frozenset[str]:
+    """Load an enum property from tools.json for a specific callable tool."""
+    try:
+        path = Path(__file__).parent.parent / "data" / "tools.json"
+        raw = json.loads(path.read_text(encoding="utf-8"))
+        if not isinstance(raw, list):
+            return frozenset()
+        for entry in raw:
+            if not isinstance(entry, dict):
+                continue
+            function = entry.get("function", {})
+            if not isinstance(function, dict) or function.get("name") != tool_name:
+                continue
+            parameters = function.get("parameters", {})
+            if not isinstance(parameters, dict):
+                break
+            properties = parameters.get("properties", {})
+            if not isinstance(properties, dict):
+                break
+            prop_data = properties.get(property_name, {})
+            if not isinstance(prop_data, dict):
+                break
+            enum_values = prop_data.get("enum", [])
+            if not isinstance(enum_values, list):
+                break
+            return frozenset(str(value).strip() for value in enum_values if str(value).strip())
+    except Exception as e:
+        logger.warning(
+            "Failed to load %s.%s enum from tools.json: %s",
+            tool_name,
+            property_name,
+            e,
+        )
+    return frozenset()
+
+
 SHALLOW_TOOLS: frozenset[str] = _load_tool_classifications("shallow_tools")
 DEEP_TOOLS: frozenset[str] = _load_tool_classifications("deep_tools")
 CAIDO_BLOCKED_TOOLS: frozenset[str] = _load_tool_classifications(
@@ -153,55 +189,7 @@ MAX_EMPTY_RETRIES: int = 4
 # ---------------------------------------------------------------------------
 # BROWSER — was in validators.py:443-473 as _VALID_BROWSER_ACTIONS
 # ---------------------------------------------------------------------------
-VALID_BROWSER_ACTIONS: frozenset[str] = frozenset(
-    {
-        "launch",
-        "goto",
-        "click",
-        "double_click",
-        "right_click",
-        "hover",
-        "type",
-        "clear",
-        "select",
-        "fill",
-        "fill_form",
-        "scroll_to",
-        "scroll_down",
-        "scroll_up",
-        "back",
-        "forward",
-        "new_tab",
-        "switch_tab",
-        "close_tab",
-        "close",
-        "wait",
-        "wait_for",
-        "wait_for_element",
-        "execute_js",
-        "press_key",
-        "save_pdf",
-        "screenshot",
-        "get_text",
-        "view_source",
-        "get_console_logs",
-        "get_network_logs",
-        "get_url",
-        "get_title",
-        "list_tabs",
-        "login_form",
-        "handle_totp",
-        "save_auth_state",
-        "inject_cookies",
-        "oauth_authorize",
-        "check_auth_status",
-        "solve_captcha",
-        "get_cookies",
-        "set_cookie",
-        "download",
-        "upload",
-    }
-)
+VALID_BROWSER_ACTIONS: frozenset[str] = _load_tool_schema_enum("browser_action", "action")
 
 # ---------------------------------------------------------------------------
 # User-Agent — was in browser.py:577 (Chrome/91 outdated)
@@ -241,22 +229,6 @@ BODY_TRUNCATION_LIMIT: int = 5000
 # ---------------------------------------------------------------------------
 ALPHA_EWMA: float = 0.3
 
-# ---------------------------------------------------------------------------
-# REPORT FILE PATTERNS — was in executors_catalog.py:28-31 AND
-# validators.py:870-880 as _REPORT_NAMES (duplicate)
-# ---------------------------------------------------------------------------
-REPORT_FILE_PATTERNS: tuple[str, ...] = (
-    "_report.md",
-    "_vulnerability.md",
-    "_findings.md",
-    "_critical_findings.md",
-    "_summary.md",
-    "_critical.md",
-    "_security.md",
-    "_pentest.md",
-)
-
-# ---------------------------------------------------------------------------
 # DEAD HOST MARKERS — was in browser.py:38-51
 # ---------------------------------------------------------------------------
 DEAD_HOST_MARKERS: tuple[str, ...] = (

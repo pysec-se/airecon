@@ -21,7 +21,6 @@ from .executors_catalog import (
     _RECON_LIVE_HOST_BINS,
     _RECON_PORT_SCAN_BINS,
     _RECON_SUBDOMAIN_BINS,
-    _REPORT_FILE_PATTERNS,
 )
 from .executors_dispatch import _DispatchExecutorMixin
 from .executors_filesystem import _FilesystemExecutorMixin
@@ -100,7 +99,6 @@ class _ExecutorMixin(
                     "list_files": list_files,
                     "get_workspace_root": get_workspace_root,
                     "ToolExecution": ToolExecution,
-                    "_REPORT_FILE_PATTERNS": _REPORT_FILE_PATTERNS,
                     "_READ_FILE_CONTENT_TRUNCATION_THRESHOLD": (
                         _READ_FILE_CONTENT_TRUNCATION_THRESHOLD
                     ),
@@ -191,7 +189,6 @@ class _ExecutorMixin(
         _fs_mod.list_files = list_files
         _fs_mod.get_workspace_root = get_workspace_root
         _fs_mod.ToolExecution = ToolExecution
-        _fs_mod._REPORT_FILE_PATTERNS = _REPORT_FILE_PATTERNS
         _fs_mod._READ_FILE_CONTENT_TRUNCATION_THRESHOLD = (
             _READ_FILE_CONTENT_TRUNCATION_THRESHOLD
         )
